@@ -64,7 +64,9 @@ describe("PluginHost", () => {
       ["shared", "project"], ["zeta", "global"],
     ]);
     expect(r.active).toEqual(["shared", "zeta"]);
-    expect(host.diagnostics).toEqual([]);
+    expect(host.diagnostics).toEqual([
+      expect.objectContaining({ plugin: "shared", message: expect.stringMatching(/global.*overridden.*project/i) }),
+    ]);
   });
 
   it("rejects unsupported APIs and isolates activation failures", async () => {
@@ -129,7 +131,7 @@ describe("PluginHost", () => {
     const readable = join(f.root, "readable.txt");
     await writeFile(readable, "safe");
     await plugin(f.project, "context", `export async function activate(ctx) {
-      if (Object.keys(ctx).sort().join(',') !== 'config,logger,registerCommand,registerHook,registerModelAdapter,registerSkillRoot,registerTool,services') throw new Error('context leaked');
+      if (Object.keys(ctx).sort().join(',') !== 'config,logger,registerCommand,registerHook,registerModelAdapter,registerSkillRoot,registerTool,services,signal') throw new Error('context leaked');
       ctx.logger.info('loaded');
       if (ctx.config.providers.openai.apiKey !== '[redacted]') throw new Error('secret leaked');
       await ctx.services.filesystem.readFile(${JSON.stringify(readable)}, 'utf8');
@@ -158,6 +160,126 @@ describe("PluginHost", () => {
     expect(lifecycle).toEqual(["PluginLoad", "PluginUnload"]);
     expect(log).toHaveBeenCalledWith("[plugin:context] loaded");
     expect(log).toHaveBeenCalledWith("[plugin:context] deactivated");
+  });
+
+  it("rejects duplicate names within a tier, reports cross-tier overrides, and uses project over npm over global", async () => {
+    const f = await fixture();
+    const secondGlobal = join(f.root, "global-two");
+    await mkdir(secondGlobal);
+    await plugin(f.global, "duplicate-a", "export function activate() {}", { name: "duplicate" });
+    await plugin(secondGlobal, "duplicate-b", "export function activate() {}", { name: "duplicate" });
+    await plugin(f.global, "shared", "export function activate() {}");
+    const npmRoot = await plugin(f.root, "npm-shared", "export function activate() {}", { name: "shared" });
+    await plugin(f.project, "shared", "export function activate() {}", { name: "shared" });
+    const host = new PluginHost({
+      globalPluginDirs: [secondGlobal, f.global], projectPluginDirs: [f.project], npmPackages: ["pkg"],
+      resolveNpmPackage: async () => npmRoot, registrations: registrations().callbacks,
+    });
+
+    await host.loadAll();
+
+    expect(host.loadedPlugins).toMatchObject([{ name: "shared", source: "project" }]);
+    expect(host.diagnostics.filter(({ plugin }) => plugin === "duplicate")).toHaveLength(2);
+    expect(host.diagnostics.filter(({ plugin, message }) => plugin === "shared" && /overrid/i.test(message))).toHaveLength(2);
+  });
+
+  it("rejects duplicate manifest arrays and unknown hook contribution names", async () => {
+    const f = await fixture();
+    await plugin(f.project, "duplicate", "export function activate() {}", {
+      permissions: ["filesystem:read", "filesystem:read"],
+      contributes: { ...baseManifest.contributes, commands: [{ name: "same" }, { name: "same" }] },
+    });
+    await plugin(f.project, "hook", "export function activate() {}", {
+      contributes: { ...baseManifest.contributes, hooks: [{ name: "NotARealHook" }] },
+    });
+    const host = new PluginHost({ projectPluginDirs: [f.project], registrations: registrations().callbacks });
+
+    await host.loadAll();
+
+    expect(host.loadedPlugins).toEqual([]);
+    expect(host.diagnostics).toHaveLength(2);
+  });
+
+  it("rejects oversized and non-UTF8 manifests", async () => {
+    const f = await fixture();
+    const oversized = await plugin(f.project, "oversized", "export function activate() {}");
+    await writeFile(join(oversized, "flavor-plugin.json"), Buffer.alloc(64 * 1024 + 1, 0x20));
+    const invalid = await plugin(f.project, "invalid-utf8", "export function activate() {}");
+    await writeFile(join(invalid, "flavor-plugin.json"), Buffer.from([0xff, 0xfe]));
+    const host = new PluginHost({ projectPluginDirs: [f.project], registrations: registrations().callbacks });
+
+    await host.loadAll();
+
+    expect(host.loadedPlugins).toEqual([]);
+    expect(host.diagnostics).toHaveLength(2);
+    expect(host.diagnostics.map(({ message }) => message).join(" ")).toMatch(/exceeds|encoded|utf-?8/i);
+  });
+
+  it("times out activation, aborts and deactivates its context, and continues loading", async () => {
+    const f = await fixture();
+    await plugin(f.project, "import-hanging", "await new Promise(() => {}); export function activate() {}");
+    await plugin(f.project, "hanging", `export async function activate(ctx) {
+      globalThis.hangingSignal = ctx.signal;
+      ctx.registerCommand('early', {});
+      setTimeout(() => { try { ctx.registerCommand('late', {}); } catch { globalThis.lateRejected = true; } }, 30);
+      return new Promise(() => {});
+    }`, { contributes: { ...baseManifest.contributes, commands: [{ name: "early" }, { name: "late" }] } });
+    await plugin(f.project, "healthy", "export function activate(ctx) { ctx.registerCommand('healthy', {}); }", {
+      contributes: { ...baseManifest.contributes, commands: [{ name: "healthy" }] },
+    });
+    const r = registrations();
+    const host = new PluginHost({ projectPluginDirs: [f.project], registrations: r.callbacks, activationTimeoutMs: 10 });
+
+    await host.loadAll();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(host.loadedPlugins.map(({ name }) => name)).toEqual(["healthy"]);
+    expect(r.active).toEqual(["healthy"]);
+    expect(host.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ plugin: "hanging", message: expect.stringMatching(/timeout/i) })]));
+    expect(host.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ plugin: "import-hanging", message: expect.stringMatching(/timeout/i) })]));
+    expect((globalThis as Record<string, unknown>).lateRejected).toBe(true);
+    expect(((globalThis as unknown as Record<string, AbortSignal | undefined>).hangingSignal)?.aborted).toBe(true);
+    delete (globalThis as Record<string, unknown>).lateRejected;
+    delete (globalThis as Record<string, unknown>).hangingSignal;
+  });
+
+  it("detects entry replacement during import and rolls registrations back", async () => {
+    const f = await fixture();
+    await plugin(f.project, "replaced", `import { writeFile } from 'node:fs/promises'; import { fileURLToPath } from 'node:url';
+      await writeFile(fileURLToPath(import.meta.url), 'export function activate() {}\\n');
+      export function activate(ctx) { ctx.registerCommand('replaced', {}); }`, {
+      contributes: { ...baseManifest.contributes, commands: [{ name: "replaced" }] },
+    });
+    const r = registrations();
+    const host = new PluginHost({ projectPluginDirs: [f.project], registrations: r.callbacks });
+
+    await host.loadAll();
+
+    expect(host.loadedPlugins).toEqual([]);
+    expect(r.active).toEqual([]);
+    expect(host.diagnostics[0]?.message).toMatch(/changed|identity/i);
+  });
+
+  it("bounds hanging unload disposers and lifecycle callbacks while continuing unloadAll", async () => {
+    const f = await fixture();
+    await plugin(f.project, "alpha", "export function activate(ctx) { ctx.registerCommand('alpha', {}); return () => new Promise(() => {}); }", {
+      contributes: { ...baseManifest.contributes, commands: [{ name: "alpha" }] },
+    });
+    await plugin(f.project, "beta", "export function activate(ctx) { ctx.registerCommand('beta', {}); }", {
+      contributes: { ...baseManifest.contributes, commands: [{ name: "beta" }] },
+    });
+    const r = registrations();
+    const host = new PluginHost({
+      projectPluginDirs: [f.project], registrations: r.callbacks, unloadTimeoutMs: 10,
+      emitLifecycle: (type, loaded) => type === "PluginUnload" && loaded.name === "beta" ? new Promise(() => {}) : undefined,
+    });
+    await host.loadAll();
+
+    await host.unloadAll();
+
+    expect(host.loadedPlugins).toEqual([]);
+    expect(r.active).toEqual([]);
+    expect(host.diagnostics.filter(({ message }) => /timeout/i.test(message))).toHaveLength(2);
   });
 
   it("rejects malformed manifests and entry paths that escape through traversal or symlinks", async () => {
