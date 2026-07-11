@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { describe, expect, it } from "vitest";
 
 import { HookBus } from "../../src/hooks/bus.js";
@@ -30,5 +31,28 @@ describe("TaskPlanner", () => {
 
     await expect(new TaskPlanner({ hooks }).plan({ nodes: [node("a", ["nope"])] })).rejects.toThrow();
     expect(events).toEqual(["BeforePlan", "AfterPlan"]);
+  });
+
+  it("preserves the primary validation error when AfterPlan also fails", async () => {
+    const hooks = new HookBus();
+    hooks.on("AfterPlan", () => { throw new Error("after hook failed"); });
+
+    const error = await new TaskPlanner({ hooks }).plan({ nodes: [node("a", ["missing"])] }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(z.ZodError);
+    expect((error as { afterPlanError?: unknown }).afterPlanError).toEqual(expect.objectContaining({ message: "after hook failed" }));
+    expect((error as Error).cause).toEqual(expect.objectContaining({ message: "after hook failed" }));
+  });
+
+  it("preserves the primary error when secondary metadata cannot be attached", async () => {
+    const hooks = new HookBus();
+    const primary = new Error("primary failure");
+    Object.defineProperty(primary, "afterPlanError", { value: "reserved", configurable: false });
+    hooks.on("BeforePlan", () => { throw primary; });
+    hooks.on("AfterPlan", () => { throw new Error("after hook failed"); });
+
+    const error = await new TaskPlanner({ hooks }).plan({ nodes: [] }).catch((caught: unknown) => caught);
+
+    expect(error).toBe(primary);
   });
 });

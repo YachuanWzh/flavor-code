@@ -53,6 +53,9 @@ export class TaskPlanner {
 
   async plan(input: unknown, signal?: AbortSignal): Promise<TaskGraph> {
     let outcome: "completed" | "failed" | "cancelled" = "failed";
+    let graph: TaskGraph | undefined;
+    let primaryError: unknown;
+    let hasPrimaryError = false;
     try {
       const before = await this.#hooks.emit({
         version: 1,
@@ -61,19 +64,43 @@ export class TaskPlanner {
       }, signal);
       if (before.decision === "deny") throw new Error(before.reason ?? "Planning denied by hook");
       signal?.throwIfAborted();
-      const graph = TaskGraphSchema.parse(before.updatedInput === undefined ? input : updatedGraph(before.updatedInput));
+      graph = TaskGraphSchema.parse(before.updatedInput === undefined ? input : updatedGraph(before.updatedInput));
       outcome = "completed";
-      return graph;
     } catch (error) {
       outcome = signal?.aborted ? "cancelled" : "failed";
-      throw error;
-    } finally {
+      primaryError = error;
+      hasPrimaryError = true;
+    }
+    try {
       await this.#hooks.emit({
         version: 1,
         type: "AfterPlan",
         payload: { outcome },
       });
+    } catch (afterPlanError) {
+      if (!hasPrimaryError) throw afterPlanError;
+      attachAfterPlanError(primaryError, afterPlanError);
     }
+    if (hasPrimaryError) throw primaryError;
+    return graph!;
+  }
+}
+
+function attachAfterPlanError(primary: unknown, afterPlanError: unknown): void {
+  try {
+    if ((typeof primary !== "object" && typeof primary !== "function") || primary === null || !Object.isExtensible(primary)) return;
+    Object.defineProperty(primary, "afterPlanError", {
+      value: afterPlanError,
+      configurable: true,
+    });
+    if (!("cause" in primary)) {
+      Object.defineProperty(primary, "cause", {
+        value: afterPlanError,
+        configurable: true,
+      });
+    }
+  } catch {
+    // Secondary diagnostic metadata must never replace the primary error.
   }
 }
 

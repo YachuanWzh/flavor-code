@@ -32,7 +32,7 @@ export interface SubagentExecution {
 }
 
 export interface SubagentSchedulerOptions {
-  maxSubagents: number;
+  maxSubagents?: number;
   hooks: HookBus;
   execute(task: TaskNode, execution: SubagentExecution): Promise<unknown>;
   onResult?(result: SubagentResult): void | Promise<void>;
@@ -49,13 +49,14 @@ interface Completion {
 }
 
 export class SubagentScheduler {
-  readonly #options: SubagentSchedulerOptions;
+  readonly #options: Omit<SubagentSchedulerOptions, "maxSubagents"> & { maxSubagents: number };
 
   constructor(options: SubagentSchedulerOptions) {
-    if (!Number.isInteger(options.maxSubagents) || options.maxSubagents <= 0) {
-      throw new Error("maxSubagents must be a positive integer");
+    const maxSubagents = options.maxSubagents ?? 3;
+    if (!Number.isInteger(maxSubagents) || maxSubagents < 1 || maxSubagents > 16) {
+      throw new Error("maxSubagents must be an integer from 1 to 16");
     }
-    this.#options = options;
+    this.#options = { ...options, maxSubagents };
   }
 
   async run(input: TaskGraph, externalSignal?: AbortSignal): Promise<SubagentRunResult> {
@@ -67,6 +68,7 @@ export class SubagentScheduler {
     const states = new Map<string, SubagentState>(graph.nodes.map((task) => [task.id, "pending"]));
     const results = new Map<string, SubagentResult>();
     const running = new Map<string, Promise<Completion>>();
+    const started = new Set<Promise<Completion>>();
 
     try {
       while (statesHaveWork(states)) {
@@ -76,7 +78,9 @@ export class SubagentScheduler {
           if (running.size >= this.#options.maxSubagents) break;
           if (states.get(task.id) !== "pending" || !isReady(task, states)) continue;
           states.set(task.id, "running");
-          running.set(task.id, this.#runTask(task, signal));
+          const execution = this.#runTask(task, signal);
+          running.set(task.id, execution);
+          started.add(execution);
         }
 
         if (running.size === 0) {
@@ -95,6 +99,7 @@ export class SubagentScheduler {
       return orderedOutcome(graph, states, results);
     } finally {
       controller.abort(new Error("Subagent scheduler stopped"));
+      await Promise.allSettled(started);
     }
   }
 

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { ContextManager } from "../../src/context/manager.js";
 import { HookBus } from "../../src/hooks/bus.js";
@@ -8,6 +8,7 @@ import type { ModelAdapter } from "../../src/models/types.js";
 import { LocalHarness } from "../../src/harness/local.js";
 import { SubagentResultSchema, SubagentScheduler } from "../../src/agent/subagents.js";
 import { TaskGraphSchema } from "../../src/agent/planner.js";
+import { ToolRuntime } from "../../src/tools/runtime.js";
 
 const node = (id: string, dependencies: string[] = []) => ({
   id,
@@ -38,6 +39,27 @@ describe("SubagentResultSchema", () => {
 });
 
 describe("SubagentScheduler", () => {
+  it("defaults to exactly three concurrent subagents and validates the configured range", async () => {
+    let running = 0;
+    let peak = 0;
+    const scheduler = new SubagentScheduler({
+      hooks: new HookBus(),
+      execute: async (task) => {
+        running += 1;
+        peak = Math.max(peak, running);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        running -= 1;
+        return result(task.id);
+      },
+    });
+
+    await scheduler.run(TaskGraphSchema.parse({ nodes: ["a", "b", "c", "d", "e"].map((id) => node(id)) }));
+
+    expect(peak).toBe(3);
+    expect(() => new SubagentScheduler({ maxSubagents: 0, hooks: new HookBus(), execute: async () => null })).toThrow();
+    expect(() => new SubagentScheduler({ maxSubagents: 17, hooks: new HookBus(), execute: async () => null })).toThrow();
+  });
+
   it("caps concurrency and starts nodes only after dependencies complete", async () => {
     const graph = TaskGraphSchema.parse({ nodes: [node("a"), node("b"), node("c", ["a"]), node("d", ["b"])] });
     let running = 0;
@@ -68,7 +90,9 @@ describe("SubagentScheduler", () => {
   });
 
   it("blocks only failure descendants and preserves unrelated results", async () => {
-    const graph = TaskGraphSchema.parse({ nodes: [node("root"), node("child", ["root"]), node("sibling")] });
+    const graph = TaskGraphSchema.parse({ nodes: [
+      node("root"), node("child", ["root"]), node("grandchild", ["child"]), node("sibling"),
+    ] });
     const scheduler = new SubagentScheduler({
       maxSubagents: 2,
       hooks: new HookBus(),
@@ -77,7 +101,7 @@ describe("SubagentScheduler", () => {
 
     const outcome = await scheduler.run(graph);
 
-    expect(outcome.states).toEqual({ root: "failed", child: "blocked", sibling: "completed" });
+    expect(outcome.states).toEqual({ root: "failed", child: "blocked", grandchild: "blocked", sibling: "completed" });
     expect(outcome.results.sibling).toEqual(result("sibling"));
     expect(outcome.results.child?.status).toBe("blocked");
   });
@@ -141,6 +165,46 @@ describe("SubagentScheduler", () => {
     expect(events).toEqual(["SubagentStart:a", "SubagentStop:a"]);
   });
 
+  it("drains every started child through delayed stop hooks before rejecting cancellation", async () => {
+    const hooks = new HookBus();
+    const events: string[] = [];
+    const unhandled: unknown[] = [];
+    const onUnhandled = (error: unknown) => { unhandled.push(error); };
+    process.on("unhandledRejection", onUnhandled);
+    let started = 0;
+    let releaseStarts!: () => void;
+    const allStarted = new Promise<void>((resolve) => { releaseStarts = resolve; });
+    hooks.on("SubagentStart", (event) => {
+      events.push(`start:${String(event.payload.taskId)}`);
+      started += 1;
+      if (started === 3) releaseStarts();
+      return { decision: "allow" };
+    });
+    hooks.on("SubagentStop", async (event) => {
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      events.push(`stop:${String(event.payload.taskId)}`);
+      return { decision: "allow" };
+    });
+    const scheduler = new SubagentScheduler({
+      hooks,
+      execute: async () => new Promise(() => undefined),
+    });
+    const controller = new AbortController();
+    try {
+      const run = scheduler.run(TaskGraphSchema.parse({ nodes: [node("a"), node("b"), node("c")] }), controller.signal);
+      await allStarted;
+      controller.abort(new Error("cancel all"));
+
+      await expect(run).rejects.toThrow("cancel all");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(events.filter((event) => event.startsWith("start:"))).toHaveLength(3);
+      expect(events.filter((event) => event.startsWith("stop:"))).toHaveLength(3);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
   it("turns a stop-hook error into a node failure while unrelated work continues", async () => {
     const hooks = new HookBus();
     hooks.on("SubagentStop", (event) => {
@@ -192,6 +256,7 @@ describe("LocalHarness", () => {
     const first = harness.createSubagent(node("one"));
     const second = harness.createSubagent(node("two"));
 
+    expect(harness.main.modelId).toBe("fake:expensive");
     expect(first.modelId).toBe("fake:cheap");
     expect(first.tools.map((tool) => tool.name)).toEqual(["Read"]);
     expect(first.tools[0]?.inputSchema).toEqual(expect.objectContaining({
@@ -207,4 +272,112 @@ describe("LocalHarness", () => {
       expect.objectContaining({ ok: false, error: expect.objectContaining({ code: "permission_denied" }) }),
     );
   });
+
+  it("rejects context factories that reuse the main or a previous child context", () => {
+    const main = contextFixture();
+    const reusedChild = contextFixture();
+    const mainReuse = harnessFixture(() => main);
+    expect(() => mainReuse.createSubagent(node("main-reuse"))).toThrow("fresh ContextManager");
+
+    const contexts = [contextFixture(), reusedChild, reusedChild];
+    const childReuse = harnessFixture(() => contexts.shift()!);
+    childReuse.createSubagent(node("first"));
+    expect(() => childReuse.createSubagent(node("second"))).toThrow("fresh ContextManager");
+  });
+
+  it("disposes child runtimes idempotently and automatically on success or failure", async () => {
+    const harness = harnessFixture(() => contextFixture());
+    const child = harness.createSubagent(node("manual"));
+    const manualDispose = vi.spyOn(child.runtime, "dispose");
+
+    child.dispose();
+    child.dispose();
+    await child[Symbol.asyncDispose]();
+    expect(manualDispose).toHaveBeenCalledTimes(1);
+
+    let automaticDispose: ReturnType<typeof vi.spyOn> | undefined;
+    await expect(harness.runSubagent(node("automatic"), async (running) => {
+      automaticDispose = vi.spyOn(running.runtime, "dispose");
+      throw new Error("child failed");
+    })).rejects.toThrow("child failed");
+    expect(automaticDispose).toHaveBeenCalledTimes(1);
+
+    let successDispose: ReturnType<typeof vi.spyOn> | undefined;
+    await expect(harness.runSubagent(node("success"), async (running) => {
+      successDispose = vi.spyOn(running.runtime, "dispose");
+      return "ok";
+    })).resolves.toBe("ok");
+    expect(successDispose).toHaveBeenCalledTimes(1);
+
+    const cancellationDispose = vi.spyOn(ToolRuntime.prototype, "dispose");
+    const controller = new AbortController();
+    controller.abort(new Error("cancel child"));
+    await expect(harness.runSubagent(node("cancel"), async () => undefined, controller.signal)).rejects.toThrow("cancel child");
+    expect(cancellationDispose).toHaveBeenCalledTimes(1);
+    cancellationDispose.mockRestore();
+  });
+
+  it("runs child loops with the cheap model, subagent identity, no Task tool, and no approval callback", async () => {
+    const requests: Array<{ model: string; tools: string[]; messages: string[] }> = [];
+    let cheapCalls = 0;
+    const adapter: ModelAdapter = {
+      async *stream(request) {
+        requests.push({ model: request.model, tools: request.tools.map((tool) => tool.name), messages: request.messages.map((message) => message.content) });
+        if (request.model === "cheap" && cheapCalls++ === 0) {
+          yield { type: "tool-call", id: "network", name: "Network", input: {} };
+        }
+        yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
+      },
+    };
+    let approvals = 0;
+    const hooks = new HookBus();
+    const harness = new LocalHarness({
+      registry: new ModelRegistry().register("fake", adapter),
+      hooks,
+      workspace: process.cwd(),
+      mainModelId: "fake:expensive",
+      subagentModelId: "fake:cheap",
+      tools: [
+        { name: "Task", description: "delegate", inputSchema: z.object({}), paths: () => [], execute: async () => null },
+        { name: "Network", description: "network", inputSchema: z.object({}), paths: () => [], execute: async () => null },
+      ],
+      approve: () => { approvals += 1; return true; },
+      createContext: () => new ContextManager({
+        system: "system", compactAtChars: 10_000, toolOutputChars: 1_000, summarize: async () => "summary", hooks,
+      }),
+    });
+
+    await harness.runSubagent(node("identity"), async (child) => {
+      for await (const _event of child.loop.run({ prompt: "run" })) { /* consume */ }
+    });
+
+    expect(requests.map((request) => request.model)).toEqual(["cheap", "cheap"]);
+    expect(requests.every((request) => !request.tools.includes("Task"))).toBe(true);
+    expect(requests[1]?.messages.join("\n")).toContain("approval_required");
+    expect(approvals).toBe(0);
+  });
 });
+
+function contextFixture(hooks = new HookBus()): ContextManager {
+  return new ContextManager({
+    system: "system",
+    compactAtChars: 10_000,
+    toolOutputChars: 1_000,
+    summarize: async () => "summary",
+    hooks,
+  });
+}
+
+function harnessFixture(createContext: () => ContextManager): LocalHarness {
+  const hooks = new HookBus();
+  const adapter: ModelAdapter = { async *stream() { yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } }; } };
+  return new LocalHarness({
+    registry: new ModelRegistry().register("fake", adapter),
+    hooks,
+    workspace: process.cwd(),
+    mainModelId: "fake:main",
+    subagentModelId: "fake:child",
+    tools: [],
+    createContext,
+  });
+}

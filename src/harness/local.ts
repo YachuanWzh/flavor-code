@@ -32,23 +32,65 @@ export interface HarnessProfile {
 
 export interface SubagentHarness extends HarnessProfile {
   task: TaskNode;
+  dispose(): void;
+  [Symbol.asyncDispose](): Promise<void>;
 }
 
 export class LocalHarness {
   readonly #options: LocalHarnessOptions;
+  readonly #contexts = new WeakSet<ContextManager>();
+  readonly #children = new Set<SubagentHarness>();
   readonly main: HarnessProfile;
 
   constructor(options: LocalHarnessOptions) {
     this.#options = options;
-    this.main = this.#createProfile(options.mainModelId, options.tools, "main", options.createContext(), options.approve);
+    const context = options.createContext();
+    this.#claimContext(context);
+    this.main = this.#createProfile(options.mainModelId, options.tools, "main", context, options.approve);
   }
 
   createSubagent(task: TaskNode): SubagentHarness {
     const tools = this.#options.tools.filter((tool) => tool.name !== "Task");
-    return {
-      ...this.#createProfile(this.#options.subagentModelId, tools, "subagent", this.#options.createContext()),
+    const context = this.#options.createContext();
+    this.#claimContext(context);
+    const profile = this.#createProfile(this.#options.subagentModelId, tools, "subagent", context);
+    let disposed = false;
+    const child: SubagentHarness = {
+      ...profile,
       task,
+      dispose: () => {
+        if (disposed) return;
+        disposed = true;
+        profile.runtime.dispose();
+        this.#children.delete(child);
+      },
+      async [Symbol.asyncDispose]() {
+        child.dispose();
+      },
     };
+    this.#children.add(child);
+    return child;
+  }
+
+  async runSubagent<T>(
+    task: TaskNode,
+    execute: (harness: SubagentHarness, signal: AbortSignal) => Promise<T>,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<T> {
+    const child = this.createSubagent(task);
+    try {
+      signal.throwIfAborted();
+      return await execute(child, signal);
+    } finally {
+      await child[Symbol.asyncDispose]();
+    }
+  }
+
+  #claimContext(context: ContextManager): void {
+    if (this.#contexts.has(context)) {
+      throw new Error("createContext must return a fresh ContextManager for main and every subagent");
+    }
+    this.#contexts.add(context);
   }
 
   #createProfile(
