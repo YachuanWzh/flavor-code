@@ -2,6 +2,13 @@ export interface ModelMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
   toolCallId?: string;
+  toolCalls?: ModelToolCall[];
+}
+
+export interface ModelToolCall {
+  id: string;
+  name: string;
+  input: unknown;
 }
 
 export interface ModelTool {

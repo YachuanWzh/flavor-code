@@ -41,6 +41,10 @@ describe("AgentLoop", () => {
     ]);
     expect(events.at(-1)).toEqual({ type: "done", usage: { inputTokens: 22, outputTokens: 5 } });
     expect(executions).toBe(1);
+    expect(requests[1]?.messages).toContainEqual(expect.objectContaining({
+      role: "assistant",
+      toolCalls: [{ id: "call-1", name: "echo", input: { value: "hi" } }],
+    }));
     expect(requests[1]?.messages).toContainEqual(expect.objectContaining({ role: "tool", toolCallId: "call-1" }));
     expect(requests[1]?.messages.find((message) => message.role === "tool")?.content).toContain("\"value\":\"hi\"");
   });
@@ -63,6 +67,26 @@ describe("AgentLoop", () => {
     const fixture = createLoop({ adapter: fakeAdapter([[{ type: "text", text: "partial" }]]) });
     const events = await collect(fixture.loop.run({ prompt: "go" }));
     expect(events.at(-1)).toEqual(expect.objectContaining({ type: "error", error: { code: "incomplete_stream", message: expect.any(String) } }));
+  });
+
+  it("stops consuming provider events after done", async () => {
+    const fixture = createLoop({ adapter: fakeAdapter([[
+      { type: "text", text: "complete" },
+      { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      { type: "text", text: "too late" },
+    ]]) });
+    const events = await collect(fixture.loop.run({ prompt: "go" }));
+    expect(events.filter((event) => event.type === "text").map((event) => event.text)).toEqual(["complete"]);
+  });
+
+  it("records usage emitted before a provider error", async () => {
+    const fixture = createLoop({ adapter: fakeAdapter([[
+      { type: "usage", inputTokens: 4, outputTokens: 2 },
+      { type: "error", error: { code: "context_overflow", message: "incomplete" } },
+    ]]) });
+    const events = await collect(fixture.loop.run({ prompt: "go" }));
+    expect(events).toContainEqual({ type: "usage", inputTokens: 4, outputTokens: 2, totalInputTokens: 4, totalOutputTokens: 2 });
+    expect(events.at(-1)).toEqual({ type: "error", error: { code: "context_overflow", message: "incomplete" } });
   });
 });
 

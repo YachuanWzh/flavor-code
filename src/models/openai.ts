@@ -29,16 +29,24 @@ export interface OpenAIModelAdapterOptions {
   client?: OpenAIClient;
 }
 
-function toInput(message: ModelMessage): ResponseInputItem {
+function toInput(message: ModelMessage): ResponseInputItem[] {
   if (message.role === "tool") {
     if (!message.toolCallId) throw new Error("Tool messages require toolCallId");
-    return {
+    return [{
       type: "function_call_output",
       call_id: message.toolCallId,
       output: message.content,
-    };
+    }];
   }
-  return { role: message.role, content: message.content };
+  return [
+    ...(message.content ? [{ role: message.role, content: message.content } as ResponseInputItem] : []),
+    ...(message.toolCalls ?? []).map((call): ResponseInputItem => ({
+      type: "function_call",
+      call_id: call.id,
+      name: call.name,
+      arguments: JSON.stringify(call.input) ?? "null",
+    })),
+  ];
 }
 
 function parseJson(input: string): unknown {
@@ -67,7 +75,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
     try {
       const body: OpenAIStreamRequest = {
         model: request.model,
-        input: request.messages.map(toInput),
+        input: request.messages.flatMap(toInput),
         tools: request.tools.map((tool) => ({
           type: "function",
           name: tool.name,

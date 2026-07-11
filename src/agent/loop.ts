@@ -35,20 +35,37 @@ export class AgentLoop {
         yield { type: "error", error: { code: "cancelled", message: abortMessage(request.signal) } };
         return;
       }
-      if (await this.#options.context.compact()) yield { type: "compacted" };
+      try {
+        if (await this.#options.context.compact()) yield { type: "compacted" };
+      } catch (error) {
+        yield { type: "error", error: normalizeProviderError(error) };
+        return;
+      }
 
-      const { adapter, model } = this.#options.registry.get(this.#options.modelId);
+      let resolved: ReturnType<ModelRegistry["get"]>;
+      try { resolved = this.#options.registry.get(this.#options.modelId); }
+      catch (error) {
+        yield { type: "error", error: normalizeProviderError(error) };
+        return;
+      }
+      const { adapter, model } = resolved;
       const modelRequest = {
         model,
         messages: this.#options.context.messagesForModel(),
         tools: [...this.#options.tools],
         ...(request.signal === undefined ? {} : { signal: request.signal }),
       };
-      const before = await this.#options.hooks.emit({
-        version: 1,
-        type: "BeforeModelCall",
-        payload: { modelId: this.#options.modelId, iteration, messageCount: modelRequest.messages.length },
-      });
+      let before;
+      try {
+        before = await this.#options.hooks.emit({
+          version: 1,
+          type: "BeforeModelCall",
+          payload: { modelId: this.#options.modelId, iteration, messageCount: modelRequest.messages.length },
+        });
+      } catch (error) {
+        yield { type: "error", error: normalizeProviderError(error) };
+        return;
+      }
       if (before.decision === "deny") {
         yield { type: "error", error: { code: "cancelled", message: before.reason ?? "Model call denied by hook" } };
         return;
@@ -57,7 +74,7 @@ export class AgentLoop {
       let assistantText = "";
       const toolCalls: Array<{ id: string; name: string; input: unknown }> = [];
       let completed = false;
-      let providerError = false;
+      let terminalError: ReturnType<typeof normalizeProviderError> | undefined;
       let usage: { inputTokens: number; outputTokens: number } | undefined;
       try {
         for await (const event of adapter.stream(modelRequest)) {
@@ -69,38 +86,50 @@ export class AgentLoop {
           } else if (event.type === "usage") {
             usage = { inputTokens: event.inputTokens, outputTokens: event.outputTokens };
           } else if (event.type === "error") {
-            providerError = true;
-            yield { type: "error", error: event.error };
-            return;
+            terminalError = event.error;
+            break;
           } else {
             completed = true;
             usage = event.usage;
+            break;
           }
         }
       } catch (error) {
-        providerError = true;
-        yield { type: "error", error: normalizeProviderError(error) };
-        return;
+        terminalError = normalizeProviderError(error);
       } finally {
-        await this.#options.hooks.emit({
-          version: 1,
-          type: "AfterModelCall",
-          payload: { modelId: this.#options.modelId, iteration, completed, providerError },
-        });
+        try {
+          await this.#options.hooks.emit({
+            version: 1,
+            type: "AfterModelCall",
+            payload: { modelId: this.#options.modelId, iteration, completed, providerError: terminalError !== undefined },
+          });
+        } catch (error) {
+          terminalError ??= normalizeProviderError(error);
+        }
       }
 
-      if (!completed) {
-        yield { type: "error", error: { code: "incomplete_stream", message: "Provider stream ended without a done or error event" } };
-        return;
-      }
       if (usage !== undefined) {
         totalInputTokens += usage.inputTokens;
         totalOutputTokens += usage.outputTokens;
         yield { type: "usage", ...usage, totalInputTokens, totalOutputTokens };
       }
+      if (terminalError !== undefined) {
+        yield { type: "error", error: terminalError };
+        return;
+      }
+      if (!completed) {
+        yield { type: "error", error: { code: "incomplete_stream", message: "Provider stream ended without a done or error event" } };
+        return;
+      }
 
       if (assistantText || toolCalls.length > 0) {
-        this.#options.context.append({ role: "assistant", content: assistantText });
+        this.#options.context.append({
+          role: "assistant",
+          content: assistantText,
+          ...(toolCalls.length === 0 ? {} : {
+            toolCalls: toolCalls.map(({ id, name, input }) => ({ id, name, input })),
+          }),
+        });
       }
       if (toolCalls.length === 0) {
         yield { type: "done", usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens } };

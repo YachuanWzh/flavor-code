@@ -7,6 +7,8 @@ export interface ContextManagerOptions {
   taskState?: string;
   compactAtChars: number;
   toolOutputChars: number;
+  recentTurns?: number;
+  /** @deprecated Prefer recentTurns. */
   recentMessages?: number;
   summarize(messages: readonly ModelMessage[]): Promise<string>;
   hooks: HookBus;
@@ -21,7 +23,7 @@ export class ContextManager {
   readonly #flavor: string | undefined;
   readonly #compactAtChars: number;
   readonly #toolOutputChars: number;
-  readonly #recentMessages: number;
+  readonly #recentTurns: number;
   readonly #summarize: ContextManagerOptions["summarize"];
   readonly #hooks: HookBus;
   #taskState: string | undefined;
@@ -31,13 +33,14 @@ export class ContextManager {
   constructor(options: ContextManagerOptions) {
     if (options.compactAtChars <= 0) throw new Error("compactAtChars must be positive");
     if (options.toolOutputChars <= 0) throw new Error("toolOutputChars must be positive");
-    if ((options.recentMessages ?? 6) < 0) throw new Error("recentMessages must not be negative");
+    const recentTurns = options.recentTurns ?? options.recentMessages ?? 3;
+    if (recentTurns < 0) throw new Error("recentTurns must not be negative");
     this.#system = options.system;
     this.#flavor = options.flavor;
     this.#taskState = options.taskState;
     this.#compactAtChars = options.compactAtChars;
     this.#toolOutputChars = options.toolOutputChars;
-    this.#recentMessages = options.recentMessages ?? 6;
+    this.#recentTurns = recentTurns;
     this.#summarize = options.summarize;
     this.#hooks = options.hooks;
   }
@@ -64,7 +67,7 @@ export class ContextManager {
 
   async compact(): Promise<boolean> {
     if (!this.needsCompaction()) return false;
-    const splitAt = Math.max(0, this.#messages.length - this.#recentMessages);
+    const splitAt = recentTurnStart(this.#messages, this.#recentTurns);
     const older = this.#messages.slice(0, splitAt);
     if (older.length === 0) return false;
     const inputs = [...(this.#summary ? [this.#summary] : []), ...older];
@@ -94,6 +97,17 @@ export class ContextManager {
       ...(this.#taskState === undefined ? [] : [{ role: "system" as const, content: `Task state\n${this.#taskState}` }]),
     ];
   }
+}
+
+function recentTurnStart(messages: readonly ModelMessage[], recentTurns: number): number {
+  if (recentTurns === 0) return messages.length;
+  let turns = 0;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role !== "user") continue;
+    turns += 1;
+    if (turns === recentTurns) return index;
+  }
+  return 0;
 }
 
 function truncateToolOutput(content: string, limit: number): string {

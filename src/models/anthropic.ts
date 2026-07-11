@@ -107,6 +107,20 @@ export class AnthropicModelAdapter implements ModelAdapter {
               ],
             };
           }
+          if (message.role === "assistant" && message.toolCalls?.length) {
+            return {
+              role: "assistant",
+              content: [
+                ...(message.content ? [{ type: "text" as const, text: message.content }] : []),
+                ...message.toolCalls.map((call) => ({
+                  type: "tool_use" as const,
+                  id: call.id,
+                  name: call.name,
+                  input: call.input,
+                })),
+              ],
+            };
+          }
           return { role: message.role, content: message.content };
         });
 

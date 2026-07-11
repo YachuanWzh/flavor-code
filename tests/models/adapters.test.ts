@@ -132,7 +132,7 @@ describe("OpenAIModelAdapter", () => {
       ...request,
       messages: [
         { role: "system", content: "rules" },
-        { role: "assistant", content: "checking" },
+        { role: "assistant", content: "checking", toolCalls: [{ id: "call_7", name: "weather", input: { city: "Paris" } }] },
         { role: "tool", toolCallId: "call_7", content: "sunny" },
       ],
     };
@@ -147,6 +147,7 @@ describe("OpenAIModelAdapter", () => {
         input: [
           { role: "system", content: "rules" },
           { role: "assistant", content: "checking" },
+          { type: "function_call", call_id: "call_7", name: "weather", arguments: "{\"city\":\"Paris\"}" },
           { type: "function_call_output", call_id: "call_7", output: "sunny" },
         ],
         tools: [
@@ -294,7 +295,7 @@ describe("AnthropicModelAdapter", () => {
       messages: [
         { role: "system", content: "first" },
         { role: "system", content: "second" },
-        { role: "assistant", content: "checking" },
+        { role: "assistant", content: "checking", toolCalls: [{ id: "tool_7", name: "weather", input: { city: "Paris" } }] },
         { role: "tool", toolCallId: "tool_7", content: "sunny" },
       ],
     };
@@ -307,7 +308,13 @@ describe("AnthropicModelAdapter", () => {
       expect.objectContaining({
         system: "first\n\nsecond",
         messages: [
-          { role: "assistant", content: "checking" },
+          {
+            role: "assistant",
+            content: [
+              { type: "text", text: "checking" },
+              { type: "tool_use", id: "tool_7", name: "weather", input: { city: "Paris" } },
+            ],
+          },
           {
             role: "user",
             content: [{ type: "tool_result", tool_use_id: "tool_7", content: "sunny" }],

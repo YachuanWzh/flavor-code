@@ -25,7 +25,7 @@ describe("ContextManager", () => {
     const context = createContext({
       hooks,
       compactAtChars: 1,
-      recentMessages: 2,
+      recentTurns: 1,
       summarize: async (messages) => {
         summarized.push(messages.map((message) => message.content));
         return "structured summary";
@@ -50,6 +50,20 @@ describe("ContextManager", () => {
     ]);
   });
 
+  it("keeps the latest tool exchange as one recent turn", async () => {
+    const context = createContext({ compactAtChars: 1, recentTurns: 1 });
+    context.append({ role: "user", content: "old" });
+    context.append({ role: "assistant", content: "old reply" });
+    context.append({ role: "user", content: "use a tool" });
+    context.append({ role: "assistant", content: "", toolCalls: [{ id: "c", name: "echo", input: {} }] });
+    context.append({ role: "tool", content: "result", toolCallId: "c" });
+    context.append({ role: "assistant", content: "tool reply" });
+
+    await context.compact();
+
+    expect(context.messagesForModel().slice(-4).map((message) => message.role)).toEqual(["user", "assistant", "tool", "assistant"]);
+  });
+
   it("uses the documented character token estimate", () => {
     expect(estimateTokens("12345")).toBe(2);
   });
@@ -62,7 +76,7 @@ function createContext(overrides: Partial<ConstructorParameters<typeof ContextMa
     taskState: "in progress",
     compactAtChars: 1_000,
     toolOutputChars: 100,
-    recentMessages: 4,
+    recentTurns: 2,
     summarize: async () => "summary",
     hooks: new HookBus(),
     ...overrides,
