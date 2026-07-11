@@ -5,7 +5,9 @@ import { z } from "zod";
 import type { ToolDefinition } from "./types.js";
 
 export const DEFAULT_MAX_OUTPUT_BYTES = 1_048_576;
-const ELLIPSIS = Buffer.from("…");
+const ELLIPSIS = Buffer.from("\u2026");
+const TERMINATION_GRACE_MS = 250;
+const TERMINATION_FAILURE_MS = 5_000;
 
 const ShellInput = z.object({
   command: z.string().min(1),
@@ -22,6 +24,8 @@ export interface ShellResult {
   stdout: string;
   stderr: string;
   truncated: boolean;
+  truncation: { stdout: TruncationMetadata; stderr: TruncationMetadata };
+  terminationReason: "timeout" | "cancelled" | null;
 }
 
 type ShellTool = Omit<ToolDefinition<z.infer<typeof ShellInput>>, "execute"> & {
@@ -40,6 +44,12 @@ export function createShellTool(
     description: "Run a command with an argument array inside the workspace",
     inputSchema: ShellInput,
     paths: (input) => [workingDirectory(root, input.cwd)],
+    permissions: (input) => ({
+      paths: [workingDirectory(root, input.cwd)],
+      command: input.command,
+      args: input.args,
+      cwd: workingDirectory(root, input.cwd),
+    }),
     execute: (input, signal) => executeShell(root, input, signal, maxBytes),
   };
 }
@@ -61,34 +71,53 @@ async function executeShell(
       windowsHide: true,
       detached: process.platform !== "win32",
     });
-    let terminationRequested = false;
-    const terminate = () => {
-      if (terminationRequested) return;
-      terminationRequested = true;
-      killTree(child.pid);
+    let closed = false;
+    let settled = false;
+    let terminationReason: ShellResult["terminationReason"] = null;
+    let termination: Promise<void> | undefined;
+    let terminalTimer: NodeJS.Timeout | undefined;
+    const terminate = (reason: Exclude<ShellResult["terminationReason"], null>) => {
+      if (termination !== undefined) return;
+      terminationReason = reason;
+      termination = terminateTree(child.pid, () => closed);
+      terminalTimer = setTimeout(() => finishReject(new Error(`Process did not close after ${reason} termination`)), TERMINATION_FAILURE_MS);
+      terminalTimer.unref();
     };
-    const timer = input.timeoutMs === undefined ? undefined : setTimeout(terminate, input.timeoutMs);
+    const timer = input.timeoutMs === undefined ? undefined : setTimeout(() => terminate("timeout"), input.timeoutMs);
     timer?.unref();
-    cancellation.addEventListener("abort", terminate, { once: true });
+    const onCancel = () => terminate("cancelled");
+    cancellation.addEventListener("abort", onCancel, { once: true });
     child.stdout.on("data", (chunk: Buffer) => stdout.add(chunk));
     child.stderr.on("data", (chunk: Buffer) => stderr.add(chunk));
     child.once("error", (error) => {
-      cleanup();
-      reject(error);
+      finishReject(error);
     });
-    child.once("close", (exitCode, signal) => {
+    child.once("close", async (exitCode, signal) => {
+      closed = true;
+      if (termination !== undefined) await termination;
+      if (settled) return;
+      settled = true;
       cleanup();
       resolvePromise({
-        exitCode: terminationRequested ? null : exitCode,
-        signal: signal ?? (terminationRequested ? "SIGTERM" : null),
+        exitCode,
+        signal,
         stdout: stdout.text(),
         stderr: stderr.text(),
         truncated: stdout.truncated || stderr.truncated,
+        truncation: { stdout: stdout.metadata(), stderr: stderr.metadata() },
+        terminationReason,
       });
     });
+    function finishReject(error: Error): void {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    }
     function cleanup(): void {
       if (timer !== undefined) clearTimeout(timer);
-      cancellation.removeEventListener("abort", terminate);
+      if (terminalTimer !== undefined) clearTimeout(terminalTimer);
+      cancellation.removeEventListener("abort", onCancel);
     }
   });
 }
@@ -128,7 +157,7 @@ class BoundedOutput {
 
   text(): string {
     if (!this.truncated) return this.#complete.toString("utf8");
-    return Buffer.concat([this.#head, ELLIPSIS, this.#tail]).toString("utf8");
+    return Buffer.concat([utf8Prefix(this.#head), ELLIPSIS, utf8Suffix(this.#tail)]).toString("utf8");
   }
 }
 
@@ -139,13 +168,45 @@ function workingDirectory(root: string, cwd = "."): string {
   return candidate;
 }
 
-function killTree(pid: number | undefined): void {
+async function terminateTree(pid: number | undefined, closed: () => boolean): Promise<void> {
   if (pid === undefined) return;
   if (process.platform === "win32") {
-    const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { shell: false, windowsHide: true });
-    killer.on("error", () => { /* The child may already have exited. */ });
+    await waitForProcess(spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { shell: false, windowsHide: true }));
+    try { process.kill(pid); } catch { /* The direct child may already have exited. */ }
   } else {
     try { process.kill(-pid, "SIGTERM"); }
     catch { try { process.kill(pid, "SIGTERM"); } catch { /* Already exited. */ } }
+    await delay(TERMINATION_GRACE_MS);
+    if (!closed()) {
+      try { process.kill(-pid, "SIGKILL"); }
+      catch { try { process.kill(pid, "SIGKILL"); } catch { /* Already exited. */ } }
+    }
   }
+}
+
+function waitForProcess(child: ReturnType<typeof spawn>): Promise<void> {
+  return new Promise((resolvePromise) => {
+    child.once("error", () => resolvePromise());
+    child.once("close", () => resolvePromise());
+  });
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
+}
+
+function utf8Prefix(buffer: Buffer): Buffer {
+  for (let end = buffer.length; end >= Math.max(0, buffer.length - 3); end -= 1) {
+    const candidate = buffer.subarray(0, end);
+    try { new TextDecoder("utf-8", { fatal: true }).decode(candidate); return candidate; } catch { /* trim */ }
+  }
+  return Buffer.from(buffer.toString("utf8"));
+}
+
+function utf8Suffix(buffer: Buffer): Buffer {
+  for (let start = 0; start <= Math.min(3, buffer.length); start += 1) {
+    const candidate = buffer.subarray(start);
+    try { new TextDecoder("utf-8", { fatal: true }).decode(candidate); return candidate; } catch { /* trim */ }
+  }
+  return Buffer.from(buffer.toString("utf8"));
 }

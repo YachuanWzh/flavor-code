@@ -78,7 +78,11 @@ export class ToolRuntime {
         return this.#fail(tool.name, input, context.agent, "hook_denied", pre.reason ?? "Tool use denied by hook");
       }
 
-      const request: PermissionRequest = { agent: context.agent, tool: tool.name, paths: tool.paths(input) };
+      const request: PermissionRequest = {
+        agent: context.agent,
+        tool: tool.name,
+        ...(tool.permissions?.(input) ?? { paths: tool.paths(input) }),
+      };
       const permission = this.#permissions.decide(request);
       if (permission.decision === "deny") {
         return this.#fail(tool.name, input, context.agent, "permission_denied", permission.reason ?? "Tool use denied");

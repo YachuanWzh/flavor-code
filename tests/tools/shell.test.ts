@@ -34,8 +34,8 @@ describe("Shell", () => {
       command: node, args: ["-e", "setInterval(() => {}, 1000)"], timeoutMs: 40,
     }, signal);
 
-    expect(result.exitCode).toBeNull();
-    expect(result.signal).not.toBeNull();
+    expect(result.terminationReason).toBe("timeout");
+    expect(result.exitCode !== null || result.signal !== null).toBe(true);
   });
 
   it("terminates commands on cancellation", async () => {
@@ -45,8 +45,8 @@ describe("Shell", () => {
       command: node, args: ["-e", "setInterval(() => {}, 1000)"],
     }, controller.signal);
 
-    expect(result.exitCode).toBeNull();
-    expect(result.signal).not.toBeNull();
+    expect(result.terminationReason).toBe("cancelled");
+    expect(result.exitCode !== null || result.signal !== null).toBe(true);
   });
 
   it("retains the head and tail of bounded stdout and stderr", async () => {
@@ -64,5 +64,30 @@ describe("Shell", () => {
     }, signal);
 
     expect(result).toMatchObject({ stdout: "abcdefgh", truncated: false });
+  });
+
+  it("reports per-stream truncation without splitting UTF-8 code points", async () => {
+    const result = await createShellTool(process.cwd(), { maxOutputBytes: 5 }).execute({
+      command: node, args: ["-e", "process.stdout.write('A😀BC😀D');process.stderr.write('small')"],
+    }, signal);
+
+    expect(result.truncation.stdout.truncated).toBe(true);
+    expect(result.truncation.stderr.truncated).toBe(false);
+    expect(result.stdout).not.toContain("�");
+    expect(result.stderr).toBe("small");
+  });
+
+  it("distinguishes timeout and cancellation termination reasons", async () => {
+    const timed = await createShellTool(process.cwd()).execute({
+      command: node, args: ["-e", "setInterval(() => {}, 1000)"], timeoutMs: 20,
+    }, signal);
+    expect(timed.terminationReason).toBe("timeout");
+
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 20);
+    const cancelled = await createShellTool(process.cwd()).execute({
+      command: node, args: ["-e", "setInterval(() => {}, 1000)"],
+    }, controller.signal);
+    expect(cancelled.terminationReason).toBe("cancelled");
   });
 });

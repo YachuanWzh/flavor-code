@@ -17,6 +17,12 @@ function fixture(): string {
   return root;
 }
 
+function fakeRipgrep(root: string, stdout: string): { rgPath: string; rgArgsPrefix: string[] } {
+  const script = join(root, "fake-rg.js");
+  writeFileSync(script, `process.stdout.write(${JSON.stringify(stdout)});`);
+  return { rgPath: process.execPath, rgArgsPrefix: [script] };
+}
+
 describe("search tools", () => {
   it("returns identical normalized glob matches from ripgrep and Node", async () => {
     const root = fixture();
@@ -85,5 +91,77 @@ describe("search tools", () => {
     const grepInput = { pattern: "needle", type: "rust" };
     expect(await createGrepTool(root, { forceNode: true }).execute(grepInput, signal))
       .toEqual(await createGrepTool(root).execute(grepInput, signal));
+  });
+
+  it("keeps hidden, .ignore, nested rules, and sibling negation in backend parity", async () => {
+    const root = mkdtempSync(join(tmpdir(), "flavor-search-ignore-"));
+    mkdirSync(join(root, ".hidden"), { recursive: true });
+    mkdirSync(join(root, "a"), { recursive: true });
+    mkdirSync(join(root, "b"), { recursive: true });
+    writeFileSync(join(root, ".ignore"), "*.tmp\n");
+    writeFileSync(join(root, ".hidden", "kept.ts"), "hit\n");
+    writeFileSync(join(root, "a", ".gitignore"), "*.ts\n!keep.ts\n");
+    writeFileSync(join(root, "a", "keep.ts"), "hit\n");
+    writeFileSync(join(root, "a", "drop.ts"), "hit\n");
+    writeFileSync(join(root, "b", "sibling.ts"), "hit\n");
+    writeFileSync(join(root, "ignored.tmp"), "hit\n");
+    const input = { pattern: "**/*.ts" };
+    const signal = new AbortController().signal;
+
+    expect(await createGlobTool(root, { forceNode: true }).execute(input, signal))
+      .toEqual(await createGlobTool(root).execute(input, signal));
+  });
+
+  it("rejects unsupported Node file types instead of silently disabling the filter", async () => {
+    const root = fixture();
+    await expect(createGrepTool(root, { forceNode: true }).execute(
+      { pattern: "needle", type: "definitely-unknown" }, new AbortController().signal,
+    )).rejects.toThrow(/unsupported file type/i);
+  });
+
+  it("skips binary and oversized files and stops once the Node limit is known", async () => {
+    const root = mkdtempSync(join(tmpdir(), "flavor-search-bounds-"));
+    writeFileSync(join(root, "a.txt"), "hit one\n");
+    writeFileSync(join(root, "b.bin"), Buffer.from([0x68, 0x69, 0x74, 0, 0xff]));
+    writeFileSync(join(root, "c.txt"), `hit ${"x".repeat(100)}`);
+    writeFileSync(join(root, "d.txt"), "hit two\n");
+    const result = await createGrepTool(root, { forceNode: true, maxFileBytes: 32 }).execute(
+      { pattern: "hit", limit: 1 }, new AbortController().signal,
+    );
+    expect(result).toEqual({
+      matches: [{ path: "a.txt", line: 1, column: 1, text: "hit one", before: [], after: [] }],
+      truncated: true,
+    });
+  });
+
+  it("decodes ripgrep JSON base64 fields without corrupting UTF-8", async () => {
+    const root = mkdtempSync(join(tmpdir(), "flavor-search-rg-bytes-"));
+    const event = JSON.stringify({
+      type: "match",
+      data: {
+        path: { bytes: Buffer.from("a.txt").toString("base64") },
+        lines: { bytes: Buffer.from("hit 😀\n").toString("base64") },
+        line_number: 1,
+        submatches: [{ start: 0 }],
+      },
+    });
+    const result = await createGrepTool(root, fakeRipgrep(root, `${event}\n`)).execute(
+      { pattern: "hit" }, new AbortController().signal,
+    );
+    expect(result).toEqual({
+      matches: [{ path: "a.txt", line: 1, column: 1, text: "hit 😀", before: [], after: [] }],
+      truncated: false,
+    });
+  });
+
+  it("does not silently fall back after partial ripgrep JSON", async () => {
+    const root = fixture();
+    const valid = JSON.stringify({
+      type: "match",
+      data: { path: { text: "src/a.ts" }, lines: { text: "needle one\n" }, line_number: 2, submatches: [{ start: 0 }] },
+    });
+    await expect(createGrepTool(root, fakeRipgrep(root, `${valid}\n{broken`)).execute(
+      { pattern: "needle" }, new AbortController().signal,
+    )).rejects.toThrow();
   });
 });

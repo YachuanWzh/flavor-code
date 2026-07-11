@@ -8,6 +8,7 @@ import { HookBus } from "../../src/hooks/bus.js";
 import { PermissionEngine } from "../../src/permissions/engine.js";
 import { ToolRuntime } from "../../src/tools/runtime.js";
 import type { ToolDefinition } from "../../src/tools/types.js";
+import { createShellTool } from "../../src/tools/shell.js";
 
 class RecordingPermissions extends PermissionEngine {
   constructor(workspace: string, readonly calls: string[], private readonly result: "allow" | "deny" | "ask" = "allow") {
@@ -38,6 +39,45 @@ function fixture(decision: "allow" | "deny" | "ask" = "allow") {
 }
 
 describe("ToolRuntime", () => {
+  it("denies a destructive shell call using command and argument metadata", async () => {
+    const f = fixture();
+    const runtime = new ToolRuntime({
+      tools: [createShellTool(f.workspace)], hooks: f.hooks,
+      permissions: new PermissionEngine({ workspace: f.workspace, mode: "full" }),
+    });
+
+    const result = await runtime.execute(
+      { name: "Shell", input: { command: "rm", args: ["-rf", "/"], cwd: "." } },
+      { agent: "main" },
+    );
+
+    expect(result).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+  });
+
+  it("allows a routine subagent shell call with an explicit normalized cwd", async () => {
+    const f = fixture();
+    const routineShell: ToolDefinition<{ command: string; args: string[]; cwd: string }> = {
+      name: "Shell",
+      description: "test shell metadata",
+      inputSchema: z.object({ command: z.string(), args: z.array(z.string()), cwd: z.string() }),
+      paths: (input) => [join(f.workspace, input.cwd)],
+      permissions: (input) => ({
+        paths: [join(f.workspace, input.cwd)], command: input.command, args: input.args, cwd: join(f.workspace, input.cwd),
+      }),
+      execute: async () => "assessed",
+    };
+    const runtime = new ToolRuntime({
+      tools: [routineShell], hooks: f.hooks,
+      permissions: new PermissionEngine({ workspace: f.workspace, mode: "workspace" }),
+    });
+
+    const result = await runtime.execute(
+      { name: "Shell", input: { command: "npm", args: ["test"], cwd: "." } },
+      { agent: "subagent" },
+    );
+
+    expect(result).toEqual({ ok: true, output: "assessed" });
+  });
   it("runs pre-hook, permission, tool, and post-hook in order", async () => {
     const f = fixture();
     const runtime = new ToolRuntime({ tools: [f.tool], hooks: f.hooks, permissions: f.permissions });

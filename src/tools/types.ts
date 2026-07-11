@@ -1,10 +1,14 @@
 import type { z } from "zod";
+import type { PermissionRequest } from "../permissions/engine.js";
+
+export type ToolPermissionMetadata = Omit<PermissionRequest, "agent" | "tool">;
 
 export interface ToolDefinition<T> {
   name: string;
   description: string;
   inputSchema: z.ZodType<T>;
   paths(input: T): string[];
+  permissions?(input: T): ToolPermissionMetadata;
   execute(input: T, signal: AbortSignal): Promise<unknown>;
 }
 

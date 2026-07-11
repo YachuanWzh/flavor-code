@@ -11,6 +11,7 @@ export interface PermissionRequest {
   tool: string;
   paths?: readonly string[];
   command?: string;
+  args?: readonly string[];
   cwd?: string;
 }
 
@@ -72,7 +73,9 @@ export class PermissionEngine {
   }
 
   #shellDecision(request: PermissionRequest): PermissionDecision {
-    const analysis = analyzeCommand(request.command ?? "");
+    const analysis = request.args === undefined
+      ? analyzeCommand(request.command ?? "")
+      : analyzeArgumentCommand(request.command ?? "", request.args);
     if (request.agent === "subagent") {
       if (request.cwd === undefined) return { decision: "ask", reason: "Subagent shell commands require an explicit workspace cwd" };
       const cwd = classifyPath(this.#workspace, request.cwd);
@@ -97,6 +100,27 @@ export class PermissionEngine {
     if (this.#mode === "workspace" && isRoutineCommand(analysis.command)) return { decision: "allow" };
     return { decision: "ask", reason: "Shell command requires approval" };
   }
+}
+
+function analyzeArgumentCommand(executable: string, args: readonly string[]): CommandAnalysis {
+  const name = parse(executable.replace(/\.exe$/i, "")).name.toLowerCase();
+  const command: ParsedCommand = { executable: name, args: [...args], raw: [executable, ...args].join(" ").toLowerCase() };
+  if (["sh", "bash", "zsh"].includes(name)) {
+    const flag = args.findIndex((arg) => arg.toLowerCase() === "-c");
+    if (flag < 0 || args[flag + 1] === undefined) return { command, destructive: false, opaque: true, wrapped: true };
+    return { ...analyzeCommand(args[flag + 1]!), wrapped: true };
+  }
+  if (name === "cmd") {
+    const flag = args.findIndex((arg) => arg.toLowerCase() === "/c");
+    if (flag < 0 || args[flag + 1] === undefined) return { command, destructive: false, opaque: true, wrapped: true };
+    return { ...analyzeCommand(args.slice(flag + 1).join(" ")), wrapped: true };
+  }
+  if (["powershell", "pwsh"].includes(name)) {
+    const flag = args.findIndex((arg) => ["-command", "-c"].includes(arg.toLowerCase()));
+    if (flag < 0 || args[flag + 1] === undefined) return { command, destructive: false, opaque: true, wrapped: true };
+    return { ...analyzeCommand(args.slice(flag + 1).join(" ")), wrapped: true };
+  }
+  return { command, destructive: isForbiddenCommand(command), opaque: false, wrapped: false };
 }
 
 interface ClassifiedPath { inside: boolean; escape: boolean; reason?: string }
