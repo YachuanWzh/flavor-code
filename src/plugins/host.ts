@@ -151,6 +151,7 @@ export class PluginHost {
     const disposers: PluginDisposer[] = [];
     const claimed: string[] = [];
     const state: ContextState = { active: true, controller: new AbortController() };
+    let activation: Promise<unknown> | undefined;
     try {
       await verifyEntry(candidate.root, candidate.entry, candidate.entrySnapshot);
       const imported = import(`${pathToFileURL(candidate.entrySnapshot.physicalPath).href}?flavor=${encodeURIComponent(plugin)}`);
@@ -160,7 +161,8 @@ export class PluginHost {
       await verifyEntry(candidate.root, candidate.entry, candidate.entrySnapshot);
       if (typeof module.activate !== "function") throw new Error("Plugin entry must export activate(context)");
       const context = this.#context(candidate, disposers, claimed, state);
-      const deactivate = await bounded(Promise.resolve(module.activate(context)), this.#activationTimeoutMs, "Plugin activation");
+      activation = Promise.resolve().then(() => module.activate!(context));
+      const deactivate = await bounded(activation, this.#activationTimeoutMs, "Plugin activation");
       if (deactivate !== undefined) {
         if (typeof deactivate !== "function") throw new Error("Plugin activate result must be a disposer or undefined");
         disposers.push(deactivate as PluginDisposer);
@@ -173,6 +175,18 @@ export class PluginHost {
     } catch (error) {
       state.active = false;
       state.controller.abort(error);
+      if (error instanceof TimeoutError && activation !== undefined) {
+        void activation.then(async (lateResult) => {
+          if (lateResult === undefined) return;
+          if (typeof lateResult !== "function") {
+            this.#diagnose(plugin, new Error("Late plugin activation returned an invalid disposer"), candidate.root);
+            return;
+          }
+          await bounded(Promise.resolve().then(lateResult as PluginDisposer), this.#unloadTimeoutMs, "Late plugin activation cleanup");
+        }, (lateError: unknown) => {
+          this.#diagnose(plugin, new Error(`Late plugin activation rejected: ${message(lateError)}`), candidate.root);
+        }).catch((lateCleanupError: unknown) => this.#diagnose(plugin, lateCleanupError, candidate.root));
+      }
       this.#releaseClaims(plugin);
       await disposeAll(disposers, this.#unloadTimeoutMs, (disposeError) => this.#diagnose(plugin, disposeError, candidate.root));
       this.#diagnose(plugin, error, candidate.root);
@@ -181,8 +195,11 @@ export class PluginHost {
 
   #context(candidate: Candidate, disposers: PluginDisposer[], claimed: string[], state: ContextState): PluginContext {
     const { manifest } = candidate;
-    const register = (kind: ContributionKind, name: string, args: readonly unknown[]): PluginDisposer => {
+    const assertActive = () => {
       if (!state.active) throw new Error(`Plugin context for ${manifest.name} is no longer active`);
+    };
+    const register = (kind: ContributionKind, name: string, args: readonly unknown[]): PluginDisposer => {
+      assertActive();
       if (!contributionNames(manifest, kind).has(name)) throw new Error(`${kind} contribution "${name}" was not declared by ${manifest.name}`);
       const key = `${kind}:${name}`;
       const owner = this.#claimed.get(key);
@@ -204,11 +221,13 @@ export class PluginHost {
       return disposer;
     };
     const authorize = async (operation: "read" | "write", rawPath: string): Promise<string> => {
-      if (!state.active) throw new Error(`Plugin context for ${manifest.name} is no longer active`);
+      assertActive();
       const permission = `filesystem:${operation}` as const;
       if (!manifest.permissions.includes(permission)) throw new Error(`Plugin ${manifest.name} lacks ${permission} permission`);
       const path = resolve(rawPath);
-      if (await this.#options.authorizeFilesystem?.({ plugin: manifest.name, operation, path }) !== true) throw new Error(`Filesystem ${operation} denied for plugin ${manifest.name}`);
+      const authorized = await this.#options.authorizeFilesystem?.({ plugin: manifest.name, operation, path });
+      assertActive();
+      if (authorized !== true) throw new Error(`Filesystem ${operation} denied for plugin ${manifest.name}`);
       return path;
     };
     return Object.freeze({
@@ -217,11 +236,20 @@ export class PluginHost {
       logger: scopedLogger(this.#options.logger ?? silentLogger, manifest.name),
       services: Object.freeze({ filesystem: Object.freeze({
         readFile: async (path: string, encoding?: BufferEncoding) => {
-          const handle = await open(await authorize("read", path), "r");
-          try { return encoding === undefined ? handle.readFile() : handle.readFile({ encoding }); }
+          const allowed = await authorize("read", path);
+          assertActive();
+          const handle = await open(allowed, "r");
+          try {
+            assertActive();
+            return encoding === undefined ? handle.readFile() : handle.readFile({ encoding });
+          }
           finally { await handle.close(); }
         },
-        writeFile: async (path: string, data: string | Uint8Array) => writeFile(await authorize("write", path), data),
+        writeFile: async (path: string, data: string | Uint8Array) => {
+          const allowed = await authorize("write", path);
+          assertActive();
+          return writeFile(allowed, data);
+        },
       }) }),
       registerCommand: (name: string, value: unknown) => register("command", name, [value]),
       registerTool: (name: string, value: unknown) => register("tool", name, [value]),
@@ -350,9 +378,10 @@ async function disposeAll(disposers: readonly PluginDisposer[], timeoutMs: numbe
     catch (error) { onError(error); }
   }
 }
+class TimeoutError extends Error {}
 async function bounded<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(`${label} timeout after ${timeoutMs}ms`)), timeoutMs); });
+  const timeout = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new TimeoutError(`${label} timeout after ${timeoutMs}ms`)), timeoutMs); });
   try { return await Promise.race([promise, timeout]); }
   finally { if (timer !== undefined) clearTimeout(timer); }
 }

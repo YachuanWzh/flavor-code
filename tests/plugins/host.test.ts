@@ -231,7 +231,7 @@ describe("PluginHost", () => {
     const host = new PluginHost({ projectPluginDirs: [f.project], registrations: r.callbacks, activationTimeoutMs: 10 });
 
     await host.loadAll();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await vi.waitFor(() => expect((globalThis as Record<string, unknown>).lateRejected).toBe(true));
 
     expect(host.loadedPlugins.map(({ name }) => name)).toEqual(["healthy"]);
     expect(r.active).toEqual(["healthy"]);
@@ -241,6 +241,84 @@ describe("PluginHost", () => {
     expect(((globalThis as unknown as Record<string, AbortSignal | undefined>).hangingSignal)?.aborted).toBe(true);
     delete (globalThis as Record<string, unknown>).lateRejected;
     delete (globalThis as Record<string, unknown>).hangingSignal;
+  });
+
+  it("runs a disposer returned by activation after its timeout exactly once", async () => {
+    const f = await fixture();
+    await plugin(f.project, "late-cleanup", `export async function activate() {
+      globalThis.lateEffect = true;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return () => {
+        globalThis.lateEffect = false;
+        globalThis.lateCleanupCount = (globalThis.lateCleanupCount ?? 0) + 1;
+        return new Promise(() => {});
+      };
+    }`);
+    await plugin(f.project, "healthy-late", "export function activate(ctx) { ctx.registerCommand('healthy-late', {}); }", {
+      contributes: { ...baseManifest.contributes, commands: [{ name: "healthy-late" }] },
+    });
+    const r = registrations();
+    const host = new PluginHost({ projectPluginDirs: [f.project], registrations: r.callbacks, activationTimeoutMs: 10, unloadTimeoutMs: 10 });
+
+    await host.loadAll();
+    await vi.waitFor(() => {
+      expect((globalThis as Record<string, unknown>).lateCleanupCount).toBe(1);
+      expect(host.diagnostics).toEqual(expect.arrayContaining([
+        expect.objectContaining({ plugin: "late-cleanup", message: expect.stringMatching(/late plugin activation cleanup timeout/i) }),
+      ]));
+    });
+
+    expect(host.loadedPlugins.map(({ name }) => name)).toEqual(["healthy-late"]);
+    expect(r.active).toEqual(["healthy-late"]);
+    expect((globalThis as Record<string, unknown>).lateEffect).toBe(false);
+    delete (globalThis as Record<string, unknown>).lateEffect;
+    delete (globalThis as Record<string, unknown>).lateCleanupCount;
+  });
+
+  it("diagnoses invalid results and rejections from activation after its timeout", async () => {
+    const f = await fixture();
+    await plugin(f.project, "late-invalid", `export async function activate() {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return "not-a-disposer";
+    }`);
+    await plugin(f.project, "late-rejection", `export async function activate() {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      throw new Error("late boom");
+    }`);
+    const host = new PluginHost({
+      projectPluginDirs: [f.project], registrations: registrations().callbacks,
+      activationTimeoutMs: 10, unloadTimeoutMs: 10,
+    });
+
+    await host.loadAll();
+    await vi.waitFor(() => {
+      expect(host.diagnostics).toEqual(expect.arrayContaining([
+        expect.objectContaining({ plugin: "late-invalid", message: expect.stringMatching(/late.*invalid disposer/i) }),
+        expect.objectContaining({ plugin: "late-rejection", message: expect.stringMatching(/late.*rejected.*late boom/i) }),
+      ]));
+    });
+  });
+
+  it("prevents filesystem I/O when unload occurs during awaited authorization", async () => {
+    const f = await fixture();
+    const readable = join(f.root, "deferred-readable.txt");
+    await writeFile(readable, "must-not-read");
+    await plugin(f.project, "deferred-fs", `export function activate(ctx) {
+      globalThis.deferredRead = ctx.services.filesystem.readFile(${JSON.stringify(readable)}, 'utf8');
+    }`, { permissions: ["filesystem:read"] });
+    let allow!: (value: boolean) => void;
+    const authorization = new Promise<boolean>((resolve) => { allow = resolve; });
+    const host = new PluginHost({
+      projectPluginDirs: [f.project], registrations: registrations().callbacks,
+      authorizeFilesystem: async () => authorization,
+    });
+
+    await host.loadAll();
+    await host.unload("deferred-fs");
+    allow(true);
+
+    await expect((globalThis as unknown as Record<string, Promise<unknown>>).deferredRead).rejects.toThrow(/no longer active/i);
+    delete (globalThis as Record<string, unknown>).deferredRead;
   });
 
   it("detects entry replacement during import and rolls registrations back", async () => {
