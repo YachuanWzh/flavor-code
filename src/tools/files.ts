@@ -28,6 +28,7 @@ export function createReadTool(workspace: string): ToolDefinition<z.infer<typeof
       if (info.size > maxBytes) throw new Error(`File exceeds the ${maxBytes} byte read limit`);
       const contents = await readFile(path);
       abortIfNeeded(signal);
+      if (contents.length > maxBytes) throw new Error(`File exceeds the ${maxBytes} byte read limit`);
       if (isBinary(contents)) throw new Error("Cannot read binary file as text");
       return contents.toString("utf8");
     },
@@ -84,11 +85,9 @@ export function createApplyPatchTool(workspace: string): ToolDefinition<z.infer<
       const prepared: Array<{ path: string; content: string }> = [];
       for (const change of changes) {
         const path = await guard.destination(change.path);
-        let original = "";
-        try { original = await readText(await guard.existing(change.path)); }
-        catch (error) {
-          if (!change.created) throw error;
-        }
+        const original = change.created
+          ? await requireAbsent(guard, change.path)
+          : await readText(await guard.existing(change.path));
         prepared.push({ path, content: applyHunks(original, change.hunks) });
       }
       for (const change of prepared) await atomicWrite(change.path, change.content, signal);
@@ -166,10 +165,9 @@ async function readText(path: string): Promise<string> {
 }
 
 function isBinary(contents: Buffer): boolean {
-  const sample = contents.subarray(0, Math.min(contents.length, 8_000));
-  if (sample.includes(0)) return true;
+  if (contents.includes(0)) return true;
   try {
-    new TextDecoder("utf-8", { fatal: true }).decode(sample);
+    new TextDecoder("utf-8", { fatal: true }).decode(contents);
     return false;
   } catch {
     return true;
@@ -202,22 +200,33 @@ function parsePatch(patch: string): PatchFile[] {
     const next = lines[index + 1];
     if (next === undefined || !next.startsWith("+++ ")) throw new Error("Invalid unified diff: missing +++ header");
     const newPath = patchPath(next.slice(4));
-    const path = newPath === "/dev/null" ? oldPath : newPath;
-    if (path === "/dev/null") throw new Error("Invalid unified diff path");
+    if (newPath === "/dev/null") throw new Error("File deletion patches are not supported");
+    if (oldPath !== "/dev/null" && oldPath !== newPath) {
+      throw new Error("Patch old and new paths differ; renames are not supported");
+    }
+    const path = newPath;
     index += 2;
     const hunks: PatchHunk[] = [];
     while (index < lines.length && !lines[index]?.startsWith("--- ")) {
-      const header = lines[index]?.match(/^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@/);
+      const header = lines[index]?.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
       if (!header) { index += 1; continue; }
       const hunk: PatchHunk = { oldStart: Number(header[1]), lines: [] };
+      const expectedOld = header[2] === undefined ? 1 : Number(header[2]);
+      const expectedNew = header[4] === undefined ? 1 : Number(header[4]);
       index += 1;
       while (index < lines.length && !lines[index]?.startsWith("@@ ") && !lines[index]?.startsWith("--- ")) {
         const line = lines[index]!;
-        if (line.startsWith("\\ No newline")) { index += 1; continue; }
+        if (line.startsWith("\\ No newline")) throw new Error("No-final-newline markers are not supported");
         if (line !== "" && ![" ", "+", "-"].includes(line[0]!)) throw new Error("Invalid unified diff line");
         if (line === "" && index === lines.length - 1) { index += 1; break; }
+        if (line === "") throw new Error("Invalid unified diff line");
         hunk.lines.push(line);
         index += 1;
+      }
+      const actualOld = hunk.lines.filter((line) => line[0] === " " || line[0] === "-").length;
+      const actualNew = hunk.lines.filter((line) => line[0] === " " || line[0] === "+").length;
+      if (actualOld !== expectedOld || actualNew !== expectedNew) {
+        throw new Error(`Patch hunk count mismatch: expected ${expectedOld}/${expectedNew}, received ${actualOld}/${actualNew}`);
       }
       hunks.push(hunk);
     }
@@ -225,7 +234,18 @@ function parsePatch(patch: string): PatchFile[] {
     files.push({ path, created: oldPath === "/dev/null", hunks });
   }
   if (files.length === 0) throw new Error("Invalid unified diff: no files");
+  if (files.length > 1) throw new Error("ApplyPatch supports a single file per call");
   return files;
+}
+
+async function requireAbsent(guard: PathGuard, path: string): Promise<string> {
+  try {
+    await guard.existing(path);
+  } catch (error) {
+    if (isMissing(error)) return "";
+    throw error;
+  }
+  throw new Error("Patch creation destination already exists");
 }
 
 function patchPath(header: string): string {

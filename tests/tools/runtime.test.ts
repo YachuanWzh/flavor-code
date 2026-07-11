@@ -76,6 +76,68 @@ describe("ToolRuntime", () => {
     expect(approvals).toBe(1);
   });
 
+  it("combines pre-hook and permission asks into one ordered approval", async () => {
+    const f = fixture("ask");
+    f.hooks.on("PreToolUse", () => ({ decision: "ask", reason: "pre asks" }));
+    f.hooks.on("PermissionRequest", () => { f.calls.push("request"); return { decision: "allow" }; });
+    const runtime = new ToolRuntime({
+      tools: [f.tool], hooks: f.hooks, permissions: f.permissions,
+      approve: async () => { f.calls.push("approval"); return true; },
+    });
+
+    await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: true });
+    expect(f.calls).toEqual(["pre", "permission", "request", "approval", "execute", "post"]);
+  });
+
+  it("stops when PermissionRequest denies or applies failurePolicy deny", async () => {
+    for (const throwing of [false, true]) {
+      const f = fixture("ask");
+      f.hooks.on("PermissionRequest", () => {
+        f.calls.push("request");
+        if (throwing) throw new Error("request hook failed");
+        return { decision: "deny", reason: "request denied" };
+      }, throwing ? { failurePolicy: "deny" } : {});
+      let approvals = 0;
+      const runtime = new ToolRuntime({
+        tools: [f.tool], hooks: f.hooks, permissions: f.permissions,
+        approve: async () => { approvals += 1; return true; },
+      });
+
+      await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } }, { agent: "main" }))
+        .resolves.toMatchObject({ ok: false });
+      expect(f.calls).toEqual(["pre", "permission", "request", "failure"]);
+      expect(approvals).toBe(0);
+    }
+  });
+
+  it("never invokes approval for a subagent after PermissionRequest", async () => {
+    const f = fixture("ask");
+    f.hooks.on("PermissionRequest", () => { f.calls.push("request"); return { decision: "allow" }; });
+    let approvals = 0;
+    const runtime = new ToolRuntime({
+      tools: [f.tool], hooks: f.hooks, permissions: f.permissions,
+      approve: async () => { approvals += 1; return true; },
+    });
+
+    await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } }, { agent: "subagent" }))
+      .resolves.toMatchObject({ ok: false, error: { code: "approval_required" } });
+    expect(f.calls).toEqual(["pre", "permission", "request", "failure"]);
+    expect(approvals).toBe(0);
+  });
+
+  it("disposes its payload schemas idempotently", async () => {
+    const f = fixture();
+    const runtime = new ToolRuntime({ tools: [f.tool], hooks: f.hooks, permissions: f.permissions });
+    await expect(f.hooks.emit({ version: 1, type: "PreToolUse", payload: { released: true } })).rejects.toThrow();
+
+    runtime.dispose();
+    runtime.dispose();
+
+    await expect(f.hooks.emit({ version: 1, type: "PreToolUse", payload: { released: true } }))
+      .resolves.toMatchObject({ decision: "allow" });
+  });
+
   it("validates hook-modified input before permission and execution", async () => {
     const f = fixture();
     f.hooks.on("PreToolUse", () => ({

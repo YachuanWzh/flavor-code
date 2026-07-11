@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import type { HookBus } from "../hooks/bus.js";
-import type { PermissionDecision, PermissionEngine, PermissionRequest } from "../permissions/engine.js";
+import type { PermissionEngine, PermissionRequest } from "../permissions/engine.js";
 import type { ToolCall, ToolContext, ToolDefinition, ToolResult } from "./types.js";
 
 export type ApprovalCallback = (request: PermissionRequest & { reason?: string }) => boolean | Promise<boolean>;
@@ -29,16 +29,26 @@ export class ToolRuntime {
   readonly #hooks: HookBus;
   readonly #permissions: PermissionEngine;
   readonly #approve: ApprovalCallback | undefined;
+  readonly #disposeSchemas: Array<() => void>;
+  #disposed = false;
 
   constructor(options: ToolRuntimeOptions) {
     this.#tools = new Map(options.tools.map((tool) => [tool.name, tool]));
     this.#hooks = options.hooks;
     this.#permissions = options.permissions;
     this.#approve = options.approve;
-    this.#hooks.registerPayloadSchema("PreToolUse", PreToolUsePayload);
-    this.#hooks.registerPayloadSchema("PermissionRequest", PermissionRequestPayload);
-    this.#hooks.registerPayloadSchema("PostToolUse", PostToolUsePayload);
-    this.#hooks.registerPayloadSchema("PostToolUseFailure", PostToolUseFailurePayload);
+    this.#disposeSchemas = [
+      this.#hooks.registerPayloadSchema("PreToolUse", PreToolUsePayload),
+      this.#hooks.registerPayloadSchema("PermissionRequest", PermissionRequestPayload),
+      this.#hooks.registerPayloadSchema("PostToolUse", PostToolUsePayload),
+      this.#hooks.registerPayloadSchema("PostToolUseFailure", PostToolUseFailurePayload),
+    ];
+  }
+
+  dispose(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    for (const dispose of this.#disposeSchemas) dispose();
   }
 
   async execute(call: ToolCall, context: ToolContext): Promise<ToolResult> {
@@ -67,15 +77,31 @@ export class ToolRuntime {
       if (pre.decision === "deny") {
         return this.#fail(tool.name, input, context.agent, "hook_denied", pre.reason ?? "Tool use denied by hook");
       }
-      if (pre.decision === "ask" && !(await this.#requestApproval(tool, input, context, pre.reason))) {
-        return this.#fail(tool.name, input, context.agent, context.agent === "main" ? "permission_denied" : "approval_required", pre.reason ?? "Approval required");
-      }
 
       const request: PermissionRequest = { agent: context.agent, tool: tool.name, paths: tool.paths(input) };
       const permission = this.#permissions.decide(request);
-      if (!(await this.#allowed(permission, request, input, context))) {
-        const code = permission.decision === "ask" && context.agent === "subagent" ? "approval_required" : "permission_denied";
-        return this.#fail(tool.name, input, context.agent, code, permission.reason ?? "Tool use denied");
+      if (permission.decision === "deny") {
+        return this.#fail(tool.name, input, context.agent, "permission_denied", permission.reason ?? "Tool use denied");
+      }
+      if (pre.decision === "ask" || permission.decision === "ask") {
+        const reason = [pre.reason, permission.reason].filter((value): value is string => value !== undefined).join("\n") || "Approval required";
+        const requestDecision = await this.#hooks.emit({
+          version: 1,
+          type: "PermissionRequest",
+          payload: { tool: tool.name, input, agent: context.agent, reason },
+        });
+        if (requestDecision.decision === "deny") {
+          return this.#fail(tool.name, input, context.agent, "permission_denied", requestDecision.reason ?? "Permission request denied");
+        }
+        if (requestDecision.updatedInput !== undefined) {
+          return this.#fail(tool.name, input, context.agent, "invalid_input", "PermissionRequest cannot modify an already-authorized tool call");
+        }
+        if (context.agent !== "main") {
+          return this.#fail(tool.name, input, context.agent, "approval_required", reason);
+        }
+        if (this.#approve === undefined || !(await this.#approve({ ...request, reason }))) {
+          return this.#fail(tool.name, input, context.agent, "permission_denied", reason);
+        }
       }
 
       const signal = context.signal ?? new AbortController().signal;
@@ -88,25 +114,6 @@ export class ToolRuntime {
     } catch (error) {
       return this.#fail(tool.name, input, context.agent, "tool_error", message(error));
     }
-  }
-
-  async #allowed(decision: PermissionDecision, request: PermissionRequest, input: unknown, context: ToolContext): Promise<boolean> {
-    if (decision.decision === "allow") return true;
-    if (decision.decision === "deny") return false;
-    return this.#requestApproval(this.#tools.get(request.tool)!, input, context, decision.reason, request);
-  }
-
-  async #requestApproval(
-    tool: ToolDefinition<unknown>, input: unknown, context: ToolContext, reason?: string, existing?: PermissionRequest,
-  ): Promise<boolean> {
-    await this.#hooks.emit({
-      version: 1,
-      type: "PermissionRequest",
-      payload: { tool: tool.name, input, agent: context.agent, ...(reason === undefined ? {} : { reason }) },
-    });
-    if (context.agent !== "main" || this.#approve === undefined) return false;
-    const request = existing ?? { agent: context.agent, tool: tool.name, paths: tool.paths(input) };
-    return this.#approve({ ...request, ...(reason === undefined ? {} : { reason }) });
   }
 
   async #fail(tool: string, input: unknown, agent: ToolContext["agent"], code: string, errorMessage: string): Promise<ToolResult> {
