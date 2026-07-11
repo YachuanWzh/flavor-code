@@ -28,7 +28,9 @@ export class HookBus {
 
   registerPayloadSchema(type: HookEventName, schema: z.ZodType<Record<string, unknown>>): () => void {
     this.#payloadSchemas.set(type, schema);
-    return () => { this.#payloadSchemas.delete(type); };
+    return () => {
+      if (this.#payloadSchemas.get(type) === schema) this.#payloadSchemas.delete(type);
+    };
   }
 
   on(type: HookEventName, handler: HookHandler | ShellHookHandler, options: HookHandlerOptions = {}): () => void {

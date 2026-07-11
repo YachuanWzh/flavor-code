@@ -23,7 +23,9 @@ const READ_TOOLS = new Set(["Read", "Glob", "Grep", "Search", "List"]);
 const WRITE_TOOLS = new Set(["Write", "Edit", "ApplyPatch", "Delete", "Move", "Copy", "Mkdir"]);
 const SHELL_TOOLS = new Set(["Shell", "Bash", "Command", "Exec"]);
 const NETWORK_TOOLS = new Set(["WebFetch", "WebSearch", "Fetch", "Network"]);
-const PATH_REQUIRED_TOOLS = new Set(["Read", "Write", "Edit", "ApplyPatch", "Glob", "Grep"]);
+const PATH_REQUIRED_TOOLS = new Set([
+  "Read", "Write", "Edit", "ApplyPatch", "Glob", "Grep", "Delete", "Move", "Copy", "Mkdir",
+]);
 
 export class PermissionEngine {
   readonly #workspace: string;
@@ -39,6 +41,9 @@ export class PermissionEngine {
     const paths = request.paths ?? [];
     if (PATH_REQUIRED_TOOLS.has(request.tool) && paths.length === 0) {
       return { decision: "deny", reason: `${request.tool} requires at least one path` };
+    }
+    if ((request.tool === "Move" || request.tool === "Copy") && paths.length < 2) {
+      return { decision: "deny", reason: `${request.tool} requires source and destination paths` };
     }
     for (const path of paths) {
       const classification = classifyPath(this.#workspace, path);
@@ -74,6 +79,12 @@ export class PermissionEngine {
       if (cwd.escape || !cwd.inside) return { decision: "deny", reason: "Subagent shell cwd must remain in the workspace" };
       if (analysis.destructive) return { decision: "deny", reason: "Destructive commands are forbidden for subagents" };
       if (analysis.wrapped || analysis.opaque || !isRoutineCommand(analysis.command)) return { decision: "ask", reason: "Subagent shell command requires main-Agent approval" };
+      const argumentDecision = assessRoutineArguments(analysis.command, request.cwd, this.#workspace);
+      if (argumentDecision !== "allow") {
+        return argumentDecision === "deny"
+          ? { decision: "deny", reason: "Subagent command arguments escape the workspace" }
+          : { decision: "ask", reason: "Ambiguous subagent command arguments require main-Agent approval" };
+      }
       return { decision: "allow" };
     }
     if (analysis.destructive) {
@@ -81,7 +92,7 @@ export class PermissionEngine {
         ? { decision: "deny", reason: "Explicitly forbidden high-risk command" }
         : { decision: "ask", reason: "Risky shell command requires approval" };
     }
-    if (analysis.opaque) return { decision: "ask", reason: "Opaque shell wrapper requires approval" };
+    if (analysis.wrapped || analysis.opaque) return { decision: "ask", reason: "Shell wrapper requires approval" };
     if (this.#mode === "full") return { decision: "allow" };
     if (this.#mode === "workspace" && isRoutineCommand(analysis.command)) return { decision: "allow" };
     return { decision: "ask", reason: "Shell command requires approval" };
@@ -157,7 +168,12 @@ function analyzeCommand(raw: string, depth = 0): CommandAnalysis {
     if (flag < 0 || command.args[flag + 1] === undefined) return { command, destructive: false, opaque: true, wrapped: true };
     return { ...analyzeCommand(command.args.slice(flag + 1).join(" "), depth + 1), wrapped: true };
   }
-  return { command, destructive: isForbiddenCommand(command), opaque: false, wrapped: depth > 0 };
+  if (wrapper === "call") {
+    if (command.args.length === 0) return { command, destructive: false, opaque: true, wrapped: true };
+    return { ...analyzeCommand(command.args.join(" "), depth + 1), wrapped: true };
+  }
+  const opaque = ["start", "for", "if"].includes(wrapper) || /[%!()]/.test(command.raw);
+  return { command, destructive: isForbiddenCommand(command), opaque, wrapped: depth > 0 };
 }
 
 function parseCommand(raw: string): ParsedCommand {
@@ -198,5 +214,69 @@ function isRoutineCommand(command: ParsedCommand): boolean {
   }
   if (["cargo", "dotnet", "gradle", "gradlew", "mvn"].includes(command.executable)) return ["test", "build", "check", "verify"].includes(first ?? "");
   if (command.executable === "go") return first === "test";
-  return ["pytest", "vitest", "jest", "eslint", "tsc", "make"].includes(command.executable);
+  return ["pytest", "vitest", "jest", "eslint", "tsc"].includes(command.executable);
+}
+
+type ArgumentDecision = "allow" | "ask" | "deny";
+
+function assessRoutineArguments(command: ParsedCommand, cwd: string, workspace: string): ArgumentDecision {
+  const args = routineArguments(command);
+  if (args === undefined) return "ask";
+  const pathOptions = new Set([
+    "config", "configuration", "cwd", "prefix", "directory", "project", "root", "output", "out-dir", "outdir", "cache", "file",
+  ]);
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === undefined || arg === "--") continue;
+    const equals = arg.match(/^--?([^=]+)=(.*)$/);
+    if (equals) {
+      const option = equals[1]?.toLowerCase() ?? "";
+      const value = equals[2] ?? "";
+      if (!pathOptions.has(option)) return "ask";
+      const decision = assessArgumentPath(value, cwd, workspace);
+      if (decision !== "allow") return decision;
+      continue;
+    }
+    const option = arg.match(/^--?(.+)$/)?.[1]?.toLowerCase();
+    if (option !== undefined && pathOptions.has(option)) {
+      const value = args[index + 1];
+      if (value === undefined || value.startsWith("-")) return "ask";
+      const decision = assessArgumentPath(value, cwd, workspace);
+      if (decision !== "allow") return decision;
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("-")) continue;
+    if (looksLikePath(arg)) {
+      const decision = assessArgumentPath(arg, cwd, workspace);
+      if (decision !== "allow") return decision;
+      continue;
+    }
+    return "ask";
+  }
+  return "allow";
+}
+
+function routineArguments(command: ParsedCommand): readonly string[] | undefined {
+  const first = command.args[0]?.toLowerCase();
+  if (["npm", "pnpm", "yarn", "bun"].includes(command.executable)) {
+    if (first === "run") return command.args.slice(2);
+    return command.args.slice(1);
+  }
+  if (["cargo", "dotnet", "gradle", "gradlew", "mvn", "go"].includes(command.executable)) return command.args.slice(1);
+  if (["pytest", "vitest", "jest", "eslint", "tsc"].includes(command.executable)) return command.args;
+  return undefined;
+}
+
+function assessArgumentPath(value: string, cwd: string, workspace: string): ArgumentDecision {
+  if (value.length === 0) return "ask";
+  const resolved = resolve(cwd, value);
+  const classification = classifyPath(workspace, resolved);
+  return classification.escape || !classification.inside ? "deny" : "allow";
+}
+
+function looksLikePath(value: string): boolean {
+  return isAbsolute(value) || value === "." || value === ".." || value.startsWith("./") || value.startsWith(".\\")
+    || value.startsWith("../") || value.startsWith("..\\") || value.includes("/") || value.includes("\\");
 }

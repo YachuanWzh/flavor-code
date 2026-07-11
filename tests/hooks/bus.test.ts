@@ -46,6 +46,17 @@ describe("HookBus", () => {
     await expect(bus.emit({ version: 1, type: "PreToolUse", payload: { tool: "Read", input: { path: "ok" } } })).rejects.toThrow();
   });
 
+  it("does not let an older payload-schema disposer remove its replacement", async () => {
+    const bus = new HookBus();
+    const disposeFirst = bus.registerPayloadSchema("PreToolUse", z.object({ first: z.string() }));
+    const disposeSecond = bus.registerPayloadSchema("PreToolUse", z.object({ second: z.string() }));
+    disposeFirst();
+
+    await expect(bus.emit({ version: 1, type: "PreToolUse", payload: { first: "stale" } })).rejects.toThrow();
+    await expect(bus.emit({ version: 1, type: "PreToolUse", payload: { second: "current" } })).resolves.toMatchObject({ decision: "allow" });
+    disposeSecond();
+  });
+
   it("preserves all accumulated context through ask and deny", async () => {
     const bus = new HookBus();
     bus.on("PreToolUse", async () => ({ decision: "allow", additionalContext: "one" }));

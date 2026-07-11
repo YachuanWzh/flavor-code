@@ -90,12 +90,37 @@ describe("PermissionEngine", () => {
   it("does not authorize path-bearing tools without paths", () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-workspace-"));
     const engine = new PermissionEngine({ workspace, mode: "full" });
-    for (const tool of ["Read", "Write", "Edit", "ApplyPatch", "Glob", "Grep"]) {
+    for (const tool of ["Read", "Write", "Edit", "ApplyPatch", "Glob", "Grep", "Delete", "Move", "Copy", "Mkdir"]) {
       expect(engine.decide({ agent: "main", tool, paths: [] }), tool).toMatchObject({
         decision: "deny",
         reason: expect.stringContaining("path"),
       });
     }
+    expect(engine.decide({ agent: "main", tool: "Move", paths: [join(workspace, "source")] }).decision).toBe("deny");
+    expect(engine.decide({ agent: "main", tool: "Copy", paths: [join(workspace, "source")] }).decision).toBe("deny");
+  });
+
+  it("checks subagent routine-command path arguments against the workspace", () => {
+    const root = mkdtempSync(join(tmpdir(), "flavor-command-paths-"));
+    const workspace = join(root, "workspace");
+    const outside = join(root, "outside");
+    mkdirSync(workspace); mkdirSync(outside);
+    const engine = new PermissionEngine({ workspace, mode: "full" });
+
+    expect(engine.decide({ agent: "subagent", tool: "Shell", cwd: workspace, command: `pytest ${outside}` }).decision).toBe("deny");
+    expect(engine.decide({ agent: "subagent", tool: "Shell", cwd: workspace, command: `npm test -- --config ${outside}` }).decision).toBe("deny");
+    expect(engine.decide({ agent: "subagent", tool: "Shell", cwd: workspace, command: "npm test -- --config=../outside/config.ts" }).decision).toBe("deny");
+    expect(engine.decide({ agent: "subagent", tool: "Shell", cwd: workspace, command: `pytest ${join(workspace, "tests")}` }).decision).toBe("allow");
+    expect(engine.decide({ agent: "subagent", tool: "Shell", cwd: workspace, command: "pytest ambiguous-target" }).decision).toBe("ask");
+    expect(engine.decide({ agent: "subagent", tool: "Shell", cwd: workspace, command: "make test" }).decision).toBe("ask");
+  });
+
+  it("does not auto-allow cmd indirections or unproven wrappers in full mode", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-workspace-"));
+    const engine = new PermissionEngine({ workspace, mode: "full" });
+    expect(engine.decide({ agent: "main", tool: "Shell", command: "cmd /c call format C:" }).decision).toBe("deny");
+    expect(engine.decide({ agent: "main", tool: "Shell", command: "cmd /c echo ok" }).decision).toBe("ask");
+    expect(engine.decide({ agent: "main", tool: "Shell", command: "sh -c 'echo ok'" }).decision).toBe("ask");
   });
 
   it("defaults to workspace mode", () => {
