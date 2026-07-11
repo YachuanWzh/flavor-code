@@ -68,13 +68,16 @@ export class HookBus {
     let aggregate: HookDecision = { decision: "allow" };
 
     for (const registered of this.#handlers.get(event.type) ?? []) {
+      externalSignal?.throwIfAborted();
       let decision: HookDecision;
       try {
         decision = await this.#invoke(registered, event, externalSignal);
       } catch (error) {
+        if (externalSignal?.aborted) throw externalSignal.reason;
         if (registered.failurePolicy === "error") throw error;
         decision = { decision: registered.failurePolicy, reason: `Hook failed: ${errorMessage(error)}` };
       }
+      externalSignal?.throwIfAborted();
 
       if (decision.updatedInput !== undefined) {
         const payload = this.#validatePayload(event.type, decision.updatedInput);
@@ -101,6 +104,7 @@ export class HookBus {
   async #invoke(registered: RegisteredHandler, event: HookEvent, externalSignal?: AbortSignal): Promise<HookDecision> {
     const timeoutSignal = AbortSignal.timeout(registered.timeoutMs);
     const signal = externalSignal === undefined ? timeoutSignal : AbortSignal.any([timeoutSignal, externalSignal]);
+    signal.throwIfAborted();
     const invocation = typeof registered.handler === "function"
       ? Promise.resolve(registered.handler(event, signal))
       : runShellHandler(registered.handler, event, signal);

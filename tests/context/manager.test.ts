@@ -151,6 +151,29 @@ describe("ContextManager", () => {
     await expect(compacting).rejects.toThrow("pre aborted");
     expect(summarizeCalled).toBe(false);
   });
+
+  it("stops hook dispatch immediately when external cancellation interrupts PreCompact", async () => {
+    const hooks = new HookBus();
+    let secondCalled = false;
+    hooks.on("PreCompact", async (_event, signal) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }), { failurePolicy: "allow" });
+    hooks.on("PreCompact", async () => {
+      secondCalled = true;
+      return new Promise(() => undefined);
+    });
+    const controller = new AbortController();
+    const context = createContext({ hooks, compactAtChars: 1, recentTurns: 0 });
+    context.append({ role: "user", content: "old" });
+    const before = context.messagesForModel();
+
+    const compacting = context.compact(controller.signal);
+    queueMicrotask(() => controller.abort(new Error("dispatch cancelled")));
+
+    await expect(compacting).rejects.toThrow("dispatch cancelled");
+    expect(secondCalled).toBe(false);
+    expect(context.messagesForModel()).toEqual(before);
+  });
 });
 
 function createContext(overrides: Partial<ConstructorParameters<typeof ContextManager>[0]> = {}) {

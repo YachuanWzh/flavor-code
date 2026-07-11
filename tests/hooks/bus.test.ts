@@ -5,6 +5,16 @@ import { HookBus } from "../../src/hooks/bus.js";
 import { HookEventSchema } from "../../src/hooks/types.js";
 
 describe("HookBus", () => {
+  it("does not invoke handlers when the external signal is already aborted", async () => {
+    const hooks = new HookBus();
+    let called = false;
+    hooks.on("PreCompact", () => { called = true; return { decision: "allow" }; }, { failurePolicy: "allow" });
+    const controller = new AbortController();
+    controller.abort(new Error("already cancelled"));
+
+    await expect(hooks.emit({ version: 1, type: "PreCompact", payload: {} }, controller.signal)).rejects.toThrow("already cancelled");
+    expect(called).toBe(false);
+  });
   it("runs handlers in registration order and stops on deny", async () => {
     const calls: string[] = [];
     const bus = new HookBus();
