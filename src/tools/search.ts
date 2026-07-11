@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
-import { opendir, readFile, stat } from "node:fs/promises";
+import { open, opendir, readFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { rgPath as bundledRgPath } from "@vscode/ripgrep";
+import createIgnore from "ignore";
 import { z } from "zod";
 
 import type { ToolDefinition } from "./types.js";
@@ -9,6 +10,8 @@ import type { ToolDefinition } from "./types.js";
 const DEFAULT_RESULT_LIMIT = 1_000;
 const DEFAULT_MAX_FILE_BYTES = 1_048_576;
 const DEFAULT_MAX_SEARCH_BYTES = 16_777_216;
+const DEFAULT_MAX_DIRECTORY_ENTRIES = 50_000;
+const DEFAULT_MAX_DISCOVERED_FILES = 100_000;
 
 const GlobInput = z.object({
   pattern: z.string().min(1),
@@ -32,6 +35,7 @@ export interface SearchToolOptions {
   defaultLimit?: number;
   maxFileBytes?: number;
   maxSearchBytes?: number;
+  maxDirectoryEntries?: number;
 }
 
 export interface SearchResult<T> {
@@ -62,16 +66,17 @@ export function createGlobTool(
       const limit = input.limit ?? options.defaultLimit ?? DEFAULT_RESULT_LIMIT;
       const start = scope(root, input.path);
       const matcher = globRegex(input.pattern);
+      const directoryCap = options.maxDirectoryEntries ?? DEFAULT_MAX_DIRECTORY_ENTRIES;
       let paths: string[];
       if (options.forceNode === true) {
-        paths = await nodeFiles(root, start, signal, (path) => matcher.test(path), limit + 1);
+        paths = await nodeFiles(root, start, signal, (path) => matcher.test(path), limit + 1, directoryCap);
       } else {
         try {
-          paths = await rgFiles(root, start, input.pattern, signal, options.rgPath ?? bundledRgPath, options.rgArgsPrefix ?? [], limit + 1, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES);
+          paths = await rgFiles(root, start, input.pattern, signal, options.rgPath ?? bundledRgPath, options.rgArgsPrefix ?? [], limit + 1, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, directoryCap);
         } catch (error) {
           if (signal.aborted) throw signal.reason;
           if (!(error instanceof SearchSpawnError) || !error.fallbackSafe) throw error;
-          paths = await nodeFiles(root, start, signal);
+          paths = await nodeFiles(root, start, signal, (path) => matcher.test(path), limit + 1, directoryCap);
         }
       }
       const matches = paths.filter((path) => matcher.test(path)).sort(comparePaths);
@@ -98,14 +103,14 @@ export function createGrepTool(
       const start = scope(root, input.path);
       let matches: GrepMatch[];
       if (options.forceNode === true) {
-        matches = await nodeGrep(root, start, input.glob, input.type, expression, context, signal, limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES);
+        matches = await nodeGrep(root, start, input.glob, input.type, expression, context, signal, limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, options.maxDirectoryEntries ?? DEFAULT_MAX_DIRECTORY_ENTRIES);
       } else {
         try {
-          matches = await rgGrep(root, start, input, context, signal, options.rgPath ?? bundledRgPath, options.rgArgsPrefix ?? [], limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES);
+          matches = await rgGrep(root, start, input, context, signal, options.rgPath ?? bundledRgPath, options.rgArgsPrefix ?? [], limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, options.maxDirectoryEntries ?? DEFAULT_MAX_DIRECTORY_ENTRIES);
         } catch (error) {
           if (signal.aborted) throw signal.reason;
           if (!(error instanceof SearchSpawnError) || !error.fallbackSafe) throw error;
-          matches = await nodeGrep(root, start, input.glob, input.type, expression, context, signal, limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES);
+          matches = await nodeGrep(root, start, input.glob, input.type, expression, context, signal, limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, options.maxDirectoryEntries ?? DEFAULT_MAX_DIRECTORY_ENTRIES);
         }
       }
       matches.sort((a, b) => comparePaths(a.path, b.path) || a.line - b.line || a.column - b.column);
@@ -115,19 +120,20 @@ export function createGrepTool(
 }
 
 async function rgFiles(
-  root: string, start: string, pattern: string, signal: AbortSignal, executable: string, argsPrefix: string[], limit: number, maxBytes: number,
+  root: string, start: string, pattern: string, signal: AbortSignal, executable: string, argsPrefix: string[], limit: number, maxBytes: number, maxDirectoryEntries: number,
 ): Promise<string[]> {
   const target = relative(root, start) || ".";
   const matcher = globRegex(pattern);
+  const ignoreLayers = await collectIgnoreLayers(root, start, signal, maxDirectoryEntries);
   const paths: string[] = [];
   const parser = delimitedParser(0, (record) => {
     if (record.length === 0) return true;
     const path = normalizedRelative(root, resolve(root, decodeUtf8(record, "ripgrep path")));
-    if (!matcher.test(path)) return true;
+    if (!matcher.test(path) || ignored(path, false, ignoreLayers)) return true;
     paths.push(path);
     return paths.length < limit;
   });
-  const output = await runStreaming(executable, [...argsPrefix, "--files", "--null", "--hidden", "--glob", "!.git", "--", target], root, signal, maxBytes, parser);
+  const output = await runStreaming(executable, [...argsPrefix, "--files", "--null", "--sort", "path", "--hidden", "--glob", "!.git", "--glob", pattern, "--", target], root, signal, maxBytes, parser);
   if (!output.stoppedEarly && output.code !== 0) throw new Error(output.stderr || `ripgrep exited with ${output.code}`);
   parser.finish();
   return paths;
@@ -144,14 +150,14 @@ async function rgGrep(
   limit: number,
   maxFileBytes: number,
   maxBytes: number,
+  maxDirectoryEntries: number,
 ): Promise<GrepMatch[]> {
-  const args = ["--json", "--line-number", "--column", "--hidden", "--glob", "!.git", "--max-filesize", String(maxFileBytes), "--context", String(context)];
-  if (input.glob !== undefined) {
-    for (const glob of expandBraces(input.glob)) args.push("--glob", glob);
-  }
+  const args = ["--json", "--line-number", "--column", "--sort", "path", "--hidden", "--glob", "!.git", "--max-filesize", String(maxFileBytes), "--context", String(context)];
+  if (input.glob !== undefined) args.push("--glob", input.glob);
   if (input.type !== undefined) args.push("--type", input.type);
   args.push("--regexp", input.pattern, "--", relative(root, start) || ".");
   const matches: GrepMatch[] = [];
+  const ignoreLayers = await collectIgnoreLayers(root, start, signal, maxDirectoryEntries);
   const parser = delimitedParser(10, (record) => {
     if (record.length === 0) return true;
     const event = JSON.parse(decodeUtf8(record, "ripgrep JSON")) as RgEvent;
@@ -163,6 +169,7 @@ async function rgGrep(
     const lineWithEnding = tryDecodeUtf8(lineValue);
     if (decodedPath === undefined || lineWithEnding === undefined) return true;
     const path = normalizePath(decodedPath).replace(/^\.\//, "");
+    if (ignored(path, false, ignoreLayers)) return true;
     const text = lineWithEnding.replace(/\r?\n$/, "");
     const startByte = event.data.submatches?.[0]?.start ?? 0;
     const prefix = lineValue.subarray(0, Math.min(startByte, lineValue.length));
@@ -179,19 +186,23 @@ async function rgGrep(
   const output = await runStreaming(executable, [...argsPrefix, ...args], root, signal, maxBytes, parser);
   if (!output.stoppedEarly && output.code !== 0 && output.code !== 1) throw new Error(output.stderr || `ripgrep exited with ${output.code}`);
   parser.finish();
-  await hydrateContext(root, matches, context, signal, maxFileBytes);
+  await hydrateContext(root, matches, context, signal, maxFileBytes, maxBytes);
   return matches;
 }
 
-async function hydrateContext(root: string, matches: GrepMatch[], context: number, signal: AbortSignal, maxFileBytes: number): Promise<void> {
+async function hydrateContext(root: string, matches: GrepMatch[], context: number, signal: AbortSignal, maxFileBytes: number, maxTotalBytes: number): Promise<void> {
   if (context === 0) return;
   const byPath = new Map<string, GrepMatch[]>();
   for (const match of matches) byPath.set(match.path, [...(byPath.get(match.path) ?? []), match]);
+  let totalBytes = 0;
   for (const [path, pathMatches] of byPath) {
     abort(signal);
     const absolute = resolve(root, path);
-    if ((await stat(absolute)).size > maxFileBytes) continue;
-    const lines = (await readFile(absolute, "utf8")).replaceAll("\r\n", "\n").split("\n");
+    const contents = await readBoundedFile(absolute, maxFileBytes, signal);
+    if (contents === undefined) continue;
+    totalBytes += contents.length;
+    if (totalBytes > maxTotalBytes) throw new Error(`Search context exceeded the ${maxTotalBytes} byte limit`);
+    const lines = contents.toString("utf8").replaceAll("\r\n", "\n").split("\n");
     if (lines.at(-1) === "") lines.pop();
     for (const match of pathMatches) {
       const index = match.line - 1;
@@ -224,8 +235,10 @@ async function nodeGrep(
   maxMatches: number,
   maxFileBytes: number,
   maxSearchBytes: number,
+  maxDirectoryEntries: number,
 ): Promise<GrepMatch[]> {
-  const files = await nodeFiles(root, start, signal, () => true, 100_001);
+  const files = await nodeFiles(root, start, signal, () => true, DEFAULT_MAX_DISCOVERED_FILES + 1, maxDirectoryEntries);
+  if (files.length > DEFAULT_MAX_DISCOVERED_FILES) throw new Error(`File discovery limit of ${DEFAULT_MAX_DISCOVERED_FILES} exceeded`);
   const matcher = glob === undefined ? undefined : globRegex(glob);
   const extension = type === undefined ? undefined : typeExtension(type);
   if (type !== undefined && extension === undefined) throw new Error(`Unsupported file type: ${type}`);
@@ -233,18 +246,14 @@ async function nodeGrep(
   let searchedBytes = 0;
   for (const path of files.sort(comparePaths)) {
     abort(signal);
+    if (searchedBytes >= maxSearchBytes) break;
     if (matcher !== undefined && !matcher.test(path)) continue;
     if (extension !== undefined && !extension.some((suffix) => path.endsWith(suffix))) continue;
     const absolute = resolve(root, path);
-    let size: number;
-    try { size = (await stat(absolute)).size; }
-    catch { continue; }
-    if (size > maxFileBytes || searchedBytes + size > maxSearchBytes) continue;
-    searchedBytes += size;
-    let bytes: Buffer;
-    try { bytes = await readFile(absolute); }
-    catch { continue; }
-    if (bytes.length > maxFileBytes || bytes.includes(0)) continue;
+    const bytes = await readBoundedFile(absolute, Math.min(maxFileBytes, maxSearchBytes - searchedBytes), signal);
+    if (bytes === undefined) continue;
+    searchedBytes += bytes.length;
+    if (bytes.includes(0)) continue;
     let content: string;
     try { content = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
     catch { continue; }
@@ -274,8 +283,9 @@ async function nodeFiles(
   signal: AbortSignal,
   accept: (path: string) => boolean = () => true,
   limit = Number.POSITIVE_INFINITY,
+  maxDirectoryEntries = DEFAULT_MAX_DIRECTORY_ENTRIES,
 ): Promise<string[]> {
-  const ignores: IgnoreRule[] = [];
+  const ignores: IgnoreLayer[] = [];
   const output: string[] = [];
   const delta = relative(root, start);
   const segments = delta === "" ? [] : delta.split(sep);
@@ -291,8 +301,11 @@ async function nodeFiles(
     await loadIgnoreFiles(directory, relativeDirectory, ignores);
     const handle = await opendir(directory);
     const entries = [];
-    for await (const entry of handle) entries.push(entry);
-    entries.sort((a, b) => comparePaths(a.name, b.name));
+    for await (const entry of handle) {
+      entries.push(entry);
+      if (entries.length > maxDirectoryEntries) throw new Error(`Directory entry limit of ${maxDirectoryEntries} exceeded: ${relativeDirectory}`);
+    }
+    entries.sort((a, b) => comparePaths(a.isDirectory() ? `${a.name}/` : a.name, b.isDirectory() ? `${b.name}/` : b.name));
     for (const entry of entries) {
       abort(signal);
       const absolute = resolve(directory, entry.name);
@@ -308,38 +321,67 @@ async function nodeFiles(
   return output;
 }
 
-async function loadIgnoreFiles(directory: string, base: string, rules: IgnoreRule[]): Promise<void> {
+async function collectIgnoreLayers(
+  root: string,
+  start: string,
+  signal: AbortSignal,
+  maxDirectoryEntries: number,
+): Promise<IgnoreLayer[]> {
+  const layers: IgnoreLayer[] = [];
+  const delta = relative(root, start);
+  const segments = delta === "" ? [] : delta.split(sep);
+  let ancestor = root;
+  for (let index = 0; index < segments.length; index += 1) {
+    await loadIgnoreFiles(ancestor, normalizedRelative(root, ancestor), layers);
+    ancestor = resolve(ancestor, segments[index]!);
+  }
+  async function walk(directory: string): Promise<void> {
+    abort(signal);
+    const relativeDirectory = normalizedRelative(root, directory);
+    await loadIgnoreFiles(directory, relativeDirectory, layers);
+    const handle = await opendir(directory);
+    let count = 0;
+    for await (const entry of handle) {
+      count += 1;
+      if (count > maxDirectoryEntries) throw new Error(`Directory entry limit of ${maxDirectoryEntries} exceeded: ${relativeDirectory}`);
+      if (!entry.isDirectory() || entry.name === ".git") continue;
+      const absolute = resolve(directory, entry.name);
+      const path = normalizedRelative(root, absolute);
+      if (!ignored(path, true, layers)) await walk(absolute);
+    }
+  }
+  await walk(start);
+  return layers;
+}
+
+async function loadIgnoreFiles(directory: string, base: string, rules: IgnoreLayer[]): Promise<void> {
   for (const name of [".gitignore", ".ignore"]) {
     try {
       const ignoreText = await readFile(resolve(directory, name), "utf8");
-      rules.push(...parseIgnores(ignoreText, base));
+      rules.push({ base, matcher: createIgnore().add(ignoreText) });
     } catch {
       // A directory without an ignore file has no additional local rules.
     }
   }
 }
 
-interface IgnoreRule { negative: boolean; directoryOnly: boolean; regex: RegExp }
+interface IgnoreLayer { base: string; matcher: ReturnType<typeof createIgnore> }
 
-function parseIgnores(contents: string, base: string): IgnoreRule[] {
-  return contents.replaceAll("\r\n", "\n").split("\n").flatMap((raw) => {
-    if (raw === "" || raw.startsWith("#")) return [];
-    const negative = raw.startsWith("!");
-    const pattern = negative ? raw.slice(1) : raw;
-    const directoryOnly = pattern.endsWith("/");
-    const clean = directoryOnly ? pattern.slice(0, -1) : pattern;
-    const rooted = clean.startsWith("/") ? clean.slice(1) : clean;
-    const relativePattern = clean.includes("/") ? joinPath(base, rooted) : joinPath(base, `**/${rooted}`);
-    return [{ negative, directoryOnly, regex: globRegex(relativePattern) }];
-  });
-}
-
-function ignored(path: string, directory: boolean, rules: readonly IgnoreRule[]): boolean {
+function ignored(path: string, directory: boolean, rules: readonly IgnoreLayer[]): boolean {
   let result = false;
   for (const rule of rules) {
-    if ((!rule.directoryOnly || directory) && rule.regex.test(path)) result = !rule.negative;
+    const scoped = relativeIgnorePath(rule.base, path);
+    if (scoped === undefined || scoped === "") continue;
+    const decision = rule.matcher.test(directory ? `${scoped}/` : scoped);
+    if (decision.ignored) result = true;
+    else if (decision.unignored) result = false;
   }
   return result;
+}
+
+function relativeIgnorePath(base: string, path: string): string | undefined {
+  if (base === "" || base === ".") return path;
+  return path.startsWith(`${base}/`) ? path.slice(base.length + 1) : undefined;
 }
 
 function globRegex(pattern: string): RegExp {
@@ -402,8 +444,7 @@ function normalizedRelative(root: string, path: string): string {
 }
 
 function normalizePath(path: string): string { return path.replaceAll("\\", "/"); }
-function joinPath(left: string, right: string): string { return [left, right].filter((part) => part !== "" && part !== ".").join("/"); }
-function comparePaths(a: string, b: string): number { return a.localeCompare(b, "en"); }
+function comparePaths(a: string, b: string): number { return a < b ? -1 : a > b ? 1 : 0; }
 function abort(signal: AbortSignal): void { if (signal.aborted) throw signal.reason; }
 
 interface StreamParser { push(chunk: Buffer): boolean; finish(): void }
@@ -488,8 +529,15 @@ function runStreaming(
 
 function rgBytes(value: RgText): Buffer | undefined {
   if (value.text !== undefined) return Buffer.from(value.text);
-  if (value.bytes !== undefined) return Buffer.from(value.bytes, "base64");
+  if (value.bytes !== undefined) {
+    if (!isStrictBase64(value.bytes)) throw new Error("ripgrep bytes payload is malformed base64");
+    return Buffer.from(value.bytes, "base64");
+  }
   return undefined;
+}
+
+function isStrictBase64(value: string): boolean {
+  return value.length % 4 === 0 && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
 }
 
 function decodeUtf8(value: Buffer, label: string): string {
@@ -500,4 +548,27 @@ function decodeUtf8(value: Buffer, label: string): string {
 function tryDecodeUtf8(value: Buffer): string | undefined {
   try { return new TextDecoder("utf-8", { fatal: true }).decode(value); }
   catch { return undefined; }
+}
+
+async function readBoundedFile(path: string, maxBytes: number, signal: AbortSignal): Promise<Buffer | undefined> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) return undefined;
+  let handle: Awaited<ReturnType<typeof open>>;
+  try { handle = await open(path, "r"); }
+  catch { return undefined; }
+  const buffer = Buffer.allocUnsafe(maxBytes + 1);
+  let offset = 0;
+  try {
+    while (offset < buffer.length) {
+      abort(signal);
+      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, null);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+  } catch (error) {
+    if (signal.aborted) throw error;
+    return undefined;
+  } finally {
+    await handle.close();
+  }
+  return offset > maxBytes ? undefined : buffer.subarray(0, offset);
 }

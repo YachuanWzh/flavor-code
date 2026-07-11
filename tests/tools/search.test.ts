@@ -30,7 +30,7 @@ describe("search tools", () => {
     const signal = new AbortController().signal;
 
     const ripgrep = await createGlobTool(root).execute(input, signal);
-    const node = await createGlobTool(root, { forceNode: true }).execute(input, signal);
+    const node = await createGlobTool(root, { forceNode: true }).execute(input, signal) as { matches: string[]; truncated: boolean };
 
     expect(node).toEqual(ripgrep);
     expect(node).toEqual({ matches: ["src/a.ts", "src/nested/b.ts"], truncated: false });
@@ -163,5 +163,56 @@ describe("search tools", () => {
     await expect(createGrepTool(root, fakeRipgrep(root, `${valid}\n{broken`)).execute(
       { pattern: "needle" }, new AbortController().signal,
     )).rejects.toThrow();
+  });
+
+  it("selects the same lexical first glob result before applying the limit", async () => {
+    const root = mkdtempSync(join(tmpdir(), "flavor-search-order-"));
+    mkdirSync(join(root, "a"));
+    writeFileSync(join(root, "a", "z.ts"), "hit\n");
+    writeFileSync(join(root, "a.ts"), "hit\n");
+    writeFileSync(join(root, "b.ts"), "hit\n");
+    const input = { pattern: "**/*.ts", limit: 1 };
+    const signal = new AbortController().signal;
+
+    const node = await createGlobTool(root, { forceNode: true }).execute(input, signal);
+    const rg = await createGlobTool(root).execute(input, signal);
+    expect(node).toEqual(rg);
+    expect(node).toEqual({ matches: ["a.ts"], truncated: true });
+  });
+
+  it("errors conservatively when one directory exceeds the discovery cap", async () => {
+    const root = mkdtempSync(join(tmpdir(), "flavor-search-directory-cap-"));
+    for (let index = 0; index < 4; index += 1) writeFileSync(join(root, `${index}.ts`), "hit\n");
+    await expect(createGlobTool(root, { forceNode: true, maxDirectoryEntries: 3 }).execute(
+      { pattern: "**/*.ts", limit: 1 }, new AbortController().signal,
+    )).rejects.toThrow(/directory.*limit/i);
+  });
+
+  it("matches escaped gitignore rules in both backends", async () => {
+    const root = mkdtempSync(join(tmpdir(), "flavor-search-ignore-escape-"));
+    writeFileSync(join(root, ".gitignore"), "\\#literal.ts\n\\!bang.ts\ntrail\\ \n");
+    writeFileSync(join(root, "#literal.ts"), "hit\n");
+    writeFileSync(join(root, "!bang.ts"), "hit\n");
+    writeFileSync(join(root, "trail "), "hit\n");
+    writeFileSync(join(root, "kept.ts"), "hit\n");
+    const input = { pattern: "**/*" };
+    const signal = new AbortController().signal;
+    const node = await createGlobTool(root, { forceNode: true }).execute(input, signal) as { matches: string[]; truncated: boolean };
+    expect(node).toEqual(await createGlobTool(root).execute(input, signal));
+    expect(node.matches).toContain("kept.ts");
+    expect(node.matches).not.toContain("#literal.ts");
+    expect(node.matches).not.toContain("!bang.ts");
+    expect(node.matches).not.toContain("trail ");
+  });
+
+  it("rejects malformed ripgrep base64 payloads", async () => {
+    const root = mkdtempSync(join(tmpdir(), "flavor-search-rg-bad-base64-"));
+    const event = JSON.stringify({
+      type: "match",
+      data: { path: { bytes: "%%%" }, lines: { bytes: "not-base64!" }, line_number: 1, submatches: [{ start: 0 }] },
+    });
+    await expect(createGrepTool(root, fakeRipgrep(root, `${event}\n`)).execute(
+      { pattern: "hit" }, new AbortController().signal,
+    )).rejects.toThrow(/base64/i);
   });
 });

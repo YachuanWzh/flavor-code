@@ -71,15 +71,15 @@ async function executeShell(
       windowsHide: true,
       detached: process.platform !== "win32",
     });
-    let closed = false;
+    let exitObserved = false;
     let settled = false;
     let terminationReason: ShellResult["terminationReason"] = null;
     let termination: Promise<void> | undefined;
     let terminalTimer: NodeJS.Timeout | undefined;
     const terminate = (reason: Exclude<ShellResult["terminationReason"], null>) => {
-      if (termination !== undefined) return;
+      if (termination !== undefined || exitObserved) return;
       terminationReason = reason;
-      termination = terminateTree(child.pid, () => closed);
+      termination = terminateTree(child.pid);
       terminalTimer = setTimeout(() => finishReject(new Error(`Process did not close after ${reason} termination`)), TERMINATION_FAILURE_MS);
       terminalTimer.unref();
     };
@@ -89,11 +89,14 @@ async function executeShell(
     cancellation.addEventListener("abort", onCancel, { once: true });
     child.stdout.on("data", (chunk: Buffer) => stdout.add(chunk));
     child.stderr.on("data", (chunk: Buffer) => stderr.add(chunk));
+    child.once("exit", () => {
+      exitObserved = true;
+      if (timer !== undefined) clearTimeout(timer);
+    });
     child.once("error", (error) => {
       finishReject(error);
     });
     child.once("close", async (exitCode, signal) => {
-      closed = true;
       if (termination !== undefined) await termination;
       if (settled) return;
       settled = true;
@@ -168,7 +171,7 @@ function workingDirectory(root: string, cwd = "."): string {
   return candidate;
 }
 
-async function terminateTree(pid: number | undefined, closed: () => boolean): Promise<void> {
+async function terminateTree(pid: number | undefined): Promise<void> {
   if (pid === undefined) return;
   if (process.platform === "win32") {
     await waitForProcess(spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { shell: false, windowsHide: true }));
@@ -177,10 +180,8 @@ async function terminateTree(pid: number | undefined, closed: () => boolean): Pr
     try { process.kill(-pid, "SIGTERM"); }
     catch { try { process.kill(pid, "SIGTERM"); } catch { /* Already exited. */ } }
     await delay(TERMINATION_GRACE_MS);
-    if (!closed()) {
-      try { process.kill(-pid, "SIGKILL"); }
-      catch { try { process.kill(pid, "SIGKILL"); } catch { /* Already exited. */ } }
-    }
+    try { process.kill(-pid, "SIGKILL"); }
+    catch { try { process.kill(pid, "SIGKILL"); } catch { /* ESRCH: the whole group has exited. */ } }
   }
 }
 

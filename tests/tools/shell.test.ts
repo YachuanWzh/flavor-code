@@ -90,4 +90,32 @@ describe("Shell", () => {
     }, controller.signal);
     expect(cancelled.terminationReason).toBe("cancelled");
   });
+
+  it("does not mark a timeout after the direct child has already exited", async () => {
+    const script = [
+      "const {spawn}=require('node:child_process')",
+      "spawn(process.execPath,['-e','setTimeout(()=>{},800)'],{stdio:['ignore',1,2]}).unref()",
+    ].join(";");
+    const result = await createShellTool(process.cwd()).execute({
+      command: node, args: ["-e", script], timeoutMs: 300,
+    }, signal);
+    expect(result).toMatchObject({ exitCode: 0, signal: null, terminationReason: null });
+  });
+
+  it.skipIf(process.platform === "win32")("kills a TERM-resistant descendant after its parent exits", async () => {
+    const script = [
+      "const {spawn}=require('node:child_process')",
+      "const child=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});process.send('ready');setInterval(()=>{},1000)\"],{stdio:['ignore','ignore','ignore','ipc']})",
+      "child.once('message',()=>process.stdout.write(String(child.pid)))",
+      "setInterval(()=>{},1000)",
+    ].join(";");
+    const result = await createShellTool(process.cwd()).execute({ command: node, args: ["-e", script], timeoutMs: 500 }, signal);
+    const descendant = Number(result.stdout);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(() => process.kill(descendant, 0)).toThrow();
+    } finally {
+      try { process.kill(descendant, "SIGKILL"); } catch { /* Expected when escalation succeeded. */ }
+    }
+  });
 });
