@@ -48,6 +48,7 @@ export interface ShellHookHandler {
   timeoutMs?: number;
   failurePolicy?: "error" | "allow" | "deny" | "ask";
   env?: Readonly<Record<string, string>>;
+  maxOutputBytes?: number;
 }
 
 export interface HookHandlerOptions {

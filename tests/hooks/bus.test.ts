@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import { HookBus } from "../../src/hooks/bus.js";
 import { HookEventSchema } from "../../src/hooks/types.js";
@@ -37,6 +38,26 @@ describe("HookBus", () => {
     await expect(bus.emit({ version: 1, type: "PreToolUse", payload: {} })).rejects.toThrow();
   });
 
+  it("validates modified input against the event-specific payload schema", async () => {
+    const bus = new HookBus();
+    bus.registerPayloadSchema("PreToolUse", z.object({ tool: z.string(), input: z.object({ path: z.string() }) }));
+    bus.on("PreToolUse", async () => ({ decision: "allow", updatedInput: { tool: "Read", input: { path: 42 } } }));
+
+    await expect(bus.emit({ version: 1, type: "PreToolUse", payload: { tool: "Read", input: { path: "ok" } } })).rejects.toThrow();
+  });
+
+  it("preserves all accumulated context through ask and deny", async () => {
+    const bus = new HookBus();
+    bus.on("PreToolUse", async () => ({ decision: "allow", additionalContext: "one" }));
+    bus.on("PreToolUse", async () => ({ decision: "ask", additionalContext: "two" }));
+    bus.on("PreToolUse", async () => ({ decision: "deny", additionalContext: "three" }));
+
+    expect(await bus.emit({ version: 1, type: "PreToolUse", payload: {} })).toMatchObject({
+      decision: "deny",
+      additionalContext: "one\ntwo\nthree",
+    });
+  });
+
   it("applies per-handler timeouts", async () => {
     const bus = new HookBus();
     bus.on("PreToolUse", async (_event, signal) => {
@@ -45,6 +66,60 @@ describe("HookBus", () => {
     }, { timeoutMs: 5 });
 
     await expect(bus.emit({ version: 1, type: "PreToolUse", payload: {} })).rejects.toThrow();
+  });
+
+  it("passes an abort signal and ignores a late plugin result", async () => {
+    const bus = new HookBus();
+    let signalAborted = false;
+    bus.on("PreToolUse", async (_event, signal) => {
+      signal.addEventListener("abort", () => { signalAborted = true; });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return { decision: "allow", updatedInput: { late: true } };
+    }, { timeoutMs: 5, failurePolicy: "deny" });
+
+    const decision = await bus.emit({ version: 1, type: "PreToolUse", payload: {} });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(signalAborted).toBe(true);
+    expect(decision).toMatchObject({ decision: "deny" });
+    expect(decision).not.toHaveProperty("updatedInput");
+  });
+
+  it("runs shell handlers and applies their failure policy", async () => {
+    const bus = new HookBus();
+    bus.on("PreToolUse", {
+      command: process.execPath,
+      args: ["-e", "process.stdin.resume(); process.stdin.on('end',()=>process.stdout.write(JSON.stringify({decision:'allow'})))"],
+    });
+    bus.on("PreToolUse", {
+      command: process.execPath,
+      args: ["-e", "process.exit(2)"],
+      failurePolicy: "ask",
+    });
+
+    expect(await bus.emit({ version: 1, type: "PreToolUse", payload: {} })).toMatchObject({ decision: "ask" });
+  });
+
+  it("terminates timed-out shell handlers and bounds their output", async () => {
+    const timedOut = new HookBus();
+    timedOut.on("PreToolUse", {
+      command: process.execPath,
+      args: ["-e", "setInterval(()=>{}, 1000)"],
+      timeoutMs: 20,
+      failurePolicy: "deny",
+    });
+    expect(await timedOut.emit({ version: 1, type: "PreToolUse", payload: {} })).toMatchObject({ decision: "deny" });
+
+    const noisy = new HookBus();
+    noisy.on("PreToolUse", {
+      command: process.execPath,
+      args: ["-e", "process.stdout.write('x'.repeat(1000))"],
+      maxOutputBytes: 32,
+      failurePolicy: "deny",
+    });
+    expect(await noisy.emit({ version: 1, type: "PreToolUse", payload: {} })).toMatchObject({
+      decision: "deny",
+      reason: expect.stringContaining("output limit"),
+    });
   });
 
   it("accepts every approved event and rejects unknown names", () => {

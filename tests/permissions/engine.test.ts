@@ -54,4 +54,55 @@ describe("PermissionEngine", () => {
     const engine = new PermissionEngine({ workspace, mode: "safe" });
     expect(engine.decide({ agent: "subagent", tool: "Write", paths: [join(workspace, "x")] }).decision).toBe("ask");
   });
+
+  it("applies subagent restrictions before full-mode shortcuts", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-workspace-"));
+    const outside = mkdtempSync(join(tmpdir(), "flavor-outside-"));
+    const engine = new PermissionEngine({ workspace, mode: "full" });
+    expect(engine.decide({ agent: "subagent", tool: "WebFetch" }).decision).toBe("ask");
+    expect(engine.decide({ agent: "subagent", tool: "Shell", command: "npm test", cwd: workspace }).decision).toBe("allow");
+    expect(engine.decide({ agent: "subagent", tool: "Shell", command: "npm test" }).decision).toBe("ask");
+    expect(engine.decide({ agent: "subagent", tool: "Shell", command: "curl https://example.com", cwd: workspace }).decision).toBe("ask");
+    expect(engine.decide({ agent: "subagent", tool: "Shell", command: "sh -c 'npm test'", cwd: workspace }).decision).toBe("ask");
+    expect(engine.decide({ agent: "subagent", tool: "Shell", command: "rm -r -f /", cwd: workspace }).decision).toBe("deny");
+    expect(engine.decide({ agent: "subagent", tool: "Shell", command: "npm test", cwd: outside }).decision).toBe("deny");
+  });
+
+  it("detects destructive and opaque commands behind wrappers", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-workspace-"));
+    const engine = new PermissionEngine({ workspace, mode: "full" });
+    for (const command of [
+      "rm -r -f /",
+      "rm --recursive --force /",
+      "npm test && rm -r -f /",
+      "cmd /c rm -r -f /",
+      "sh -c 'rm -r -f /'",
+      "bash -c 'rm -rf /'",
+      "zsh -c 'rm -rf /'",
+      "powershell -Command 'Remove-Item -Recurse C:\\'",
+      "pwsh -Command 'Remove-Item -r C:\\'",
+    ]) {
+      expect(engine.decide({ agent: "main", tool: "Shell", command }).decision, command).toBe("deny");
+    }
+    expect(engine.decide({ agent: "main", tool: "Shell", command: "pwsh -File script.ps1" }).decision).toBe("ask");
+  });
+
+  it("does not authorize path-bearing tools without paths", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-workspace-"));
+    const engine = new PermissionEngine({ workspace, mode: "full" });
+    for (const tool of ["Read", "Write", "Edit", "ApplyPatch", "Glob", "Grep"]) {
+      expect(engine.decide({ agent: "main", tool, paths: [] }), tool).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining("path"),
+      });
+    }
+  });
+
+  it("defaults to workspace mode", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-workspace-"));
+    const outside = mkdtempSync(join(tmpdir(), "flavor-outside-"));
+    const engine = new PermissionEngine({ workspace });
+    expect(engine.decide({ agent: "main", tool: "Write", paths: [join(workspace, "x")] }).decision).toBe("allow");
+    expect(engine.decide({ agent: "main", tool: "Write", paths: [join(outside, "x")] }).decision).toBe("ask");
+  });
 });
