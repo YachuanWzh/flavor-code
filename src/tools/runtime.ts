@@ -4,7 +4,9 @@ import type { HookBus } from "../hooks/bus.js";
 import type { PermissionEngine, PermissionRequest } from "../permissions/engine.js";
 import type { ToolCall, ToolContext, ToolDefinition, ToolResult } from "./types.js";
 
-export type ApprovalCallback = (request: PermissionRequest & { reason?: string }) => boolean | Promise<boolean>;
+export type ApprovalCallback = (
+  request: PermissionRequest & { reason?: string }, signal: AbortSignal,
+) => boolean | Promise<boolean>;
 
 export interface ToolRuntimeOptions {
   tools: readonly ToolDefinition<unknown>[];
@@ -54,6 +56,7 @@ export class ToolRuntime {
   async execute(call: ToolCall, context: ToolContext): Promise<ToolResult> {
     const tool = this.#tools.get(call.name);
     if (tool === undefined) return { ok: false, error: { code: "unknown_tool", message: `Unknown tool: ${call.name}` } };
+    const signal = context.signal ?? new AbortController().signal;
 
     let input: unknown;
     try {
@@ -103,12 +106,12 @@ export class ToolRuntime {
         if (context.agent !== "main") {
           return this.#fail(tool.name, input, context.agent, "approval_required", reason);
         }
-        if (this.#approve === undefined || !(await this.#approve({ ...request, reason }))) {
+        if (signal.aborted) throw signal.reason;
+        if (this.#approve === undefined || !(await this.#approve({ ...request, reason }, signal))) {
           return this.#fail(tool.name, input, context.agent, "permission_denied", reason);
         }
       }
 
-      const signal = context.signal ?? new AbortController().signal;
       if (signal.aborted) throw signal.reason;
       const output = await tool.execute(input, signal);
       await this.#hooks.emit({

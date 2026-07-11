@@ -43,6 +43,7 @@ export class LocalHarness {
   readonly #contexts = new WeakSet<ContextManager>();
   readonly #children = new Set<SubagentHarness>();
   readonly main: HarnessProfile;
+  #disposed = false;
 
   constructor(options: LocalHarnessOptions) {
     this.#options = options;
@@ -65,6 +66,7 @@ export class LocalHarness {
   setPermissionMode(mode: PermissionMode): void { this.#mainPermissions.setMode(mode); }
 
   createSubagent(task: TaskNode): SubagentHarness {
+    if (this.#disposed) throw new Error("LocalHarness is disposed");
     const tools = this.#options.tools.filter((tool) => tool.name !== "Task");
     const context = this.#options.createContext();
     this.#claimContext(context);
@@ -92,6 +94,7 @@ export class LocalHarness {
     execute: (harness: SubagentHarness, signal: AbortSignal) => Promise<T>,
     signal: AbortSignal = new AbortController().signal,
   ): Promise<T> {
+    if (this.#disposed) throw new Error("LocalHarness is disposed");
     const child = this.createSubagent(task);
     try {
       signal.throwIfAborted();
@@ -100,6 +103,15 @@ export class LocalHarness {
       await child[Symbol.asyncDispose]();
     }
   }
+
+  dispose(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    for (const child of [...this.#children]) child.dispose();
+    this.main.runtime.dispose();
+  }
+
+  async [Symbol.asyncDispose](): Promise<void> { this.dispose(); }
 
   #claimContext(context: ContextManager): void {
     if (this.#contexts.has(context)) {

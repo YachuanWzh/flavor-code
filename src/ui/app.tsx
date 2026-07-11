@@ -4,6 +4,7 @@ import { Box, Text, useApp, useInput } from "ink";
 
 import { createProductionRuntime, type ProductionRuntime } from "../production.js";
 import type { SessionOutput } from "./session.js";
+import { createSessionInterruptHandler, installSigintHandler } from "./signals.js";
 
 export interface FlavorAppProps { workspace: string; home?: string }
 
@@ -15,7 +16,8 @@ export function App({ workspace, home }: FlavorAppProps): React.JSX.Element {
   const [lines, setLines] = useState<Line[]>([]);
   const [input, setInput] = useState("");
   const [history, setHistory] = useState<string[]>([]);
-  const [cursor, setCursor] = useState(0);
+  const [historyCursor, setHistoryCursor] = useState(0);
+  const [promptCursor, setPromptCursor] = useState(0);
   const [revision, setRevision] = useState(0);
   const nextId = useRef(0);
   const closing = useRef(false);
@@ -33,6 +35,13 @@ export function App({ workspace, home }: FlavorAppProps): React.JSX.Element {
     setLines((current) => reduceOutput(current, event, nextId));
   };
   const runtimeRef = useRef<ProductionRuntime | undefined>(undefined);
+  const shutdownRef = useRef(shutdown); shutdownRef.current = shutdown;
+  const interruptRef = useRef<(() => void) | undefined>(undefined);
+  interruptRef.current ??= createSessionInterruptHandler(
+    () => runtimeRef.current?.session,
+    () => shutdownRef.current(runtimeRef.current),
+  );
+  const interrupt = interruptRef.current;
 
   useEffect(() => {
     let disposed = false;
@@ -48,10 +57,16 @@ export function App({ workspace, home }: FlavorAppProps): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspace, home]);
 
+  useEffect(() => {
+    return installSigintHandler(process, interrupt);
+    // The handler reads the current runtime through a ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useInput((character, key) => {
     const active = runtimeRef.current;
     if (key.ctrl && character === "c") {
-      if (active?.session.interrupt() === "exit") void shutdown(active);
+      interrupt();
       return;
     }
     if (active?.approvals.pending !== undefined) {
@@ -62,14 +77,21 @@ export function App({ workspace, home }: FlavorAppProps): React.JSX.Element {
     if (key.return) {
       const prompt = input.trim(); if (!prompt || active === undefined || active.session.active) return;
       setLines((current) => [...current, { id: nextId.current++, kind: "user", text: prompt }]);
-      setHistory((current) => [...current, prompt]); setCursor(history.length + 1); setInput("");
+      setHistory((current) => [...current, prompt]); setHistoryCursor(history.length + 1); setInput(""); setPromptCursor(0);
       void active.session.submit(prompt);
-    } else if (key.backspace || key.delete) setInput((value) => value.slice(0, -1));
+    } else if (key.backspace) updatePrompt({ type: "backspace" }, input, promptCursor, setInput, setPromptCursor);
+    else if (key.delete) updatePrompt({ type: "delete" }, input, promptCursor, setInput, setPromptCursor);
+    else if (key.leftArrow) setPromptCursor((value) => Math.max(0, value - 1));
+    else if (key.rightArrow) setPromptCursor((value) => Math.min([...input].length, value + 1));
     else if (key.upArrow && history.length) {
-      const next = Math.max(0, cursor - 1); setCursor(next); setInput(history[next] ?? "");
+      const next = Math.max(0, historyCursor - 1); const value = history[next] ?? "";
+      setHistoryCursor(next); setInput(value); setPromptCursor([...value].length);
     } else if (key.downArrow && history.length) {
-      const next = Math.min(history.length, cursor + 1); setCursor(next); setInput(history[next] ?? "");
-    } else if (!key.ctrl && !key.meta && character) setInput((value) => value + character);
+      const next = Math.min(history.length, historyCursor + 1); const value = history[next] ?? "";
+      setHistoryCursor(next); setInput(value); setPromptCursor([...value].length);
+    } else if (!key.ctrl && !key.meta && character) {
+      updatePrompt({ type: "insert", value: character }, input, promptCursor, setInput, setPromptCursor);
+    }
   });
 
   const approval = runtime?.approvals.pending;
@@ -82,9 +104,41 @@ export function App({ workspace, home }: FlavorAppProps): React.JSX.Element {
       <Text>{approval.reason ?? "This action needs permission."}</Text>
       <Text bold>Allow? y / n</Text>
     </Box>}
-    <Box><Text color="yellow" bold>› </Text><Text>{input}</Text><Text inverse> </Text></Box>
+    <PromptLine input={input} cursor={promptCursor} />
     <Text dimColor>{runtime?.session.active ? "Ctrl+C cancel · Ctrl+C again exit" : "Enter send · ↑ history · Ctrl+C exit"}</Text>
   </Box>;
+}
+
+function PromptLine({ input, cursor }: { input: string; cursor: number }): React.JSX.Element {
+  const points = [...input];
+  return <Box><Text color="yellow" bold>› </Text><Text>{points.slice(0, cursor).join("")}</Text>
+    <Text inverse>{points[cursor] ?? " "}</Text><Text>{points.slice(cursor + 1).join("")}</Text></Box>;
+}
+
+export interface PromptEditState { text: string; cursor: number }
+export type PromptEdit = { type: "insert"; value: string } | { type: "backspace" | "delete" | "left" | "right" };
+export function editPrompt(state: PromptEditState, edit: PromptEdit): PromptEditState {
+  const points = [...state.text];
+  const cursor = Math.max(0, Math.min(points.length, state.cursor));
+  if (edit.type === "insert") {
+    const inserted = [...edit.value]; points.splice(cursor, 0, ...inserted);
+    return { text: points.join(""), cursor: cursor + inserted.length };
+  }
+  if (edit.type === "left") return { text: state.text, cursor: Math.max(0, cursor - 1) };
+  if (edit.type === "right") return { text: state.text, cursor: Math.min(points.length, cursor + 1) };
+  if (edit.type === "backspace") {
+    if (cursor === 0) return { text: state.text, cursor };
+    points.splice(cursor - 1, 1); return { text: points.join(""), cursor: cursor - 1 };
+  }
+  if (edit.type === "delete") { points.splice(cursor, 1); return { text: points.join(""), cursor }; }
+  return { text: state.text, cursor };
+}
+
+function updatePrompt(
+  edit: PromptEdit, text: string, cursor: number,
+  setText: React.Dispatch<React.SetStateAction<string>>, setCursor: React.Dispatch<React.SetStateAction<number>>,
+): void {
+  const next = editPrompt({ text, cursor }, edit); setText(next.text); setCursor(next.cursor);
 }
 
 function LineView({ line }: { line: Line }): React.JSX.Element {

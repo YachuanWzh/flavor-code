@@ -20,7 +20,7 @@ export interface PermissionEngineOptions {
   mode?: PermissionMode;
 }
 
-const READ_TOOLS = new Set(["Read", "Glob", "Grep", "Search", "List"]);
+const READ_TOOLS = new Set(["Read", "Glob", "Grep", "Search", "List", "SkillResource"]);
 const WRITE_TOOLS = new Set(["Write", "Edit", "ApplyPatch", "Delete", "Move", "Copy", "Mkdir"]);
 const SHELL_TOOLS = new Set(["Shell", "Bash", "Command", "Exec"]);
 const NETWORK_TOOLS = new Set(["WebFetch", "WebSearch", "Fetch", "Network"]);

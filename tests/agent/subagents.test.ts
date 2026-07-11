@@ -328,6 +328,17 @@ describe("LocalHarness", () => {
     cancellationDispose.mockRestore();
   });
 
+  it("disposes the main runtime and all live children idempotently", async () => {
+    const harness = harnessFixture(() => contextFixture());
+    const mainDispose = vi.spyOn(harness.main.runtime, "dispose");
+    const child = harness.createSubagent(node("live"));
+    const childDispose = vi.spyOn(child.runtime, "dispose");
+    harness.dispose(); harness.dispose(); await harness[Symbol.asyncDispose]();
+    expect(mainDispose).toHaveBeenCalledTimes(1);
+    expect(childDispose).toHaveBeenCalledTimes(1);
+    expect(() => harness.createSubagent(node("late"))).toThrow("disposed");
+  });
+
   it("runs child loops with the cheap model, subagent identity, no Task tool, and no approval callback", async () => {
     const requests: Array<{ model: string; tools: string[]; messages: string[] }> = [];
     let cheapCalls = 0;

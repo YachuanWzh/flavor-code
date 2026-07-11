@@ -1,0 +1,20 @@
+import { expect, it } from "vitest";
+import { EventEmitter } from "node:events";
+import { editPrompt } from "../../src/ui/app.js";
+import { installSigintHandler } from "../../src/ui/signals.js";
+
+it("edits prompts by Unicode code point with a movable cursor", () => {
+  let state = { text: "A🍜B", cursor: 3 };
+  state = editPrompt(state, { type: "left" });
+  state = editPrompt(state, { type: "backspace" });
+  expect(state).toEqual({ text: "AB", cursor: 1 });
+  state = editPrompt(state, { type: "insert", value: "香" });
+  expect(state).toEqual({ text: "A香B", cursor: 2 });
+});
+
+it("installs and cleans the process SIGINT bridge", () => {
+  const source = new EventEmitter(); let calls = 0;
+  const cleanup = installSigintHandler(source, () => { calls += 1; });
+  source.emit("SIGINT"); cleanup(); source.emit("SIGINT");
+  expect(calls).toBe(1);
+});

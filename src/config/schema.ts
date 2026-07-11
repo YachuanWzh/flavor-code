@@ -4,14 +4,16 @@ export const ProviderConfigSchema = z.object({
   type: z.string(),
   baseURL: z.string().url().optional(),
   apiKey: z.string().optional(),
+  defaultModel: z.string().min(1).optional(),
+  cheapModel: z.string().min(1).optional(),
 });
 
 export const FlavorConfigSchema = z.object({
   providers: z.record(z.string(), ProviderConfigSchema).default({}),
   agents: z
     .object({
-      main: z.object({ model: z.string() }),
-      subagent: z.object({ model: z.string() }),
+      main: z.object({ model: z.string() }).optional(),
+      subagent: z.object({ model: z.string() }).optional(),
     })
     .optional(),
   maxSubagents: z.number().int().min(1).max(16).default(3),

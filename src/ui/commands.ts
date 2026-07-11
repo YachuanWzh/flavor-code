@@ -9,15 +9,19 @@ export type ModelRole = "main" | "subagent";
 export type SlashCommand =
   | { name: "model"; role: ModelRole; modelId: string }
   | { name: "permissions"; mode: PermissionCommandMode }
+  | { name: "plugin"; command: string; args: string[] }
   | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions"> }
   | { name: "unknown"; input: string; suggestions: string[] }
   | { name: "invalid"; command: string; message: string };
 
-export function parseSlashCommand(input: string): SlashCommand | null {
+export function parseSlashCommand(input: string, dynamicCommands: readonly string[] = []): SlashCommand | null {
   const trimmed = input.trim();
   if (!trimmed.startsWith("/")) return null;
   const [rawName = "", ...args] = trimmed.slice(1).split(/\s+/);
   const name = rawName.toLowerCase();
+  if (name !== "ide" && !(MVP_COMMANDS as readonly string[]).includes(name) && dynamicCommands.includes(name)) {
+    return { name: "plugin", command: name, args };
+  }
   if (!(MVP_COMMANDS as readonly string[]).includes(name)) {
     return { name: "unknown", input: rawName, suggestions: suggestionsFor(name) };
   }

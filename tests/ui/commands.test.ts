@@ -24,6 +24,14 @@ describe("parseSlashCommand", () => {
     expect(parseSlashCommand("/ide")).toMatchObject({ name: "unknown" });
   });
 
+  it("parses only explicitly registered dynamic plugin commands", () => {
+    expect(parseSlashCommand("/taste saffron plum", ["taste"])).toEqual({
+      name: "plugin", command: "taste", args: ["saffron", "plum"],
+    });
+    expect(parseSlashCommand("/taste saffron")).toMatchObject({ name: "unknown" });
+    expect(parseSlashCommand("/ide", ["ide"])).toMatchObject({ name: "unknown" });
+  });
+
   it("reports invalid arguments without throwing", () => {
     expect(parseSlashCommand("/permissions reckless")).toMatchObject({ name: "invalid", command: "permissions" });
     expect(parseSlashCommand("/model sidekick foo:bar")).toMatchObject({ name: "invalid", command: "model" });

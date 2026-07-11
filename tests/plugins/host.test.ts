@@ -221,20 +221,17 @@ describe("PluginHost", () => {
     await plugin(f.project, "hanging", `export async function activate(ctx) {
       globalThis.hangingSignal = ctx.signal;
       ctx.registerCommand('early', {});
-      setTimeout(() => { try { ctx.registerCommand('late', {}); } catch { globalThis.lateRejected = true; } }, 30);
+      ctx.signal.addEventListener('abort', () => {
+        try { ctx.registerCommand('late', {}); } catch { globalThis.lateRejected = true; }
+      }, { once: true });
       return new Promise(() => {});
     }`, { contributes: { ...baseManifest.contributes, commands: [{ name: "early" }, { name: "late" }] } });
-    await plugin(f.project, "healthy", "export function activate(ctx) { ctx.registerCommand('healthy', {}); }", {
-      contributes: { ...baseManifest.contributes, commands: [{ name: "healthy" }] },
-    });
     const r = registrations();
     const host = new PluginHost({ projectPluginDirs: [f.project], registrations: r.callbacks, activationTimeoutMs: 10 });
 
     await host.loadAll();
-    await vi.waitFor(() => expect((globalThis as Record<string, unknown>).lateRejected).toBe(true));
-
-    expect(host.loadedPlugins.map(({ name }) => name)).toEqual(["healthy"]);
-    expect(r.active).toEqual(["healthy"]);
+    expect(host.loadedPlugins).toEqual([]);
+    expect(r.active).toEqual([]);
     expect(host.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ plugin: "hanging", message: expect.stringMatching(/timeout/i) })]));
     expect(host.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ plugin: "import-hanging", message: expect.stringMatching(/timeout/i) })]));
     expect((globalThis as Record<string, unknown>).lateRejected).toBe(true);
@@ -245,14 +242,13 @@ describe("PluginHost", () => {
 
   it("runs a disposer returned by activation after its timeout exactly once", async () => {
     const f = await fixture();
-    await plugin(f.project, "late-cleanup", `export async function activate() {
+    await plugin(f.project, "late-cleanup", `export async function activate(ctx) {
       globalThis.lateEffect = true;
-      await new Promise((resolve) => setTimeout(resolve, 30));
-      return () => {
-        globalThis.lateEffect = false;
-        globalThis.lateCleanupCount = (globalThis.lateCleanupCount ?? 0) + 1;
-        return new Promise(() => {});
-      };
+      return new Promise((resolve) => ctx.signal.addEventListener('abort', () => resolve(() => {
+          globalThis.lateEffect = false;
+          globalThis.lateCleanupCount = (globalThis.lateCleanupCount ?? 0) + 1;
+          return new Promise(() => {});
+        }), { once: true }));
     }`);
     await plugin(f.project, "healthy-late", "export function activate(ctx) { ctx.registerCommand('healthy-late', {}); }", {
       contributes: { ...baseManifest.contributes, commands: [{ name: "healthy-late" }] },

@@ -24,11 +24,50 @@ function services(events: string[], outputs: string[]): SessionServices {
     initialize: async () => ({ path: "/work/FLAVOR.md", created: true }),
     config: () => ({ providers: { openai: { apiKey: "top-secret", token: "also-secret" } } }),
     skills: async () => [], plugins: () => [], hooksStatus: () => [], tasks: () => [],
+    pluginCommands: () => [], runPluginCommand: async () => undefined,
     output: (event) => outputs.push(event.type === "text" ? event.text : event.type === "notice" ? event.message : event.type),
   };
 }
 
 describe("FlavorSession", () => {
+  it("shares startup, serializes submissions, and ends only after Stop", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    let releaseStart!: () => void;
+    const startGate = new Promise<void>((resolve) => { releaseStart = resolve; });
+    base.hooks.on("SessionStart", async () => {
+      await startGate;
+      return { decision: "allow" };
+    });
+    const order: string[] = [];
+    base.run = async function* (prompt) {
+      order.push(`run:${prompt}`); yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
+    };
+    const session = new FlavorSession(base);
+    const startOne = session.start(); const startTwo = session.start();
+    const first = session.submit("one"); const second = session.submit("two");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(order).toEqual([]);
+    releaseStart(); await Promise.all([startOne, startTwo, first, second]);
+    await session.close();
+    expect(events.filter((event) => event === "SessionStart")).toHaveLength(1);
+    expect(order).toEqual(["run:one", "run:two"]);
+    expect(events.slice(-2)).toEqual(["Stop", "SessionEnd"]);
+  });
+
+  it("close waits for an active cancellation and Stop before SessionEnd", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    base.run = async function* (_prompt, signal) {
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+      yield { type: "error", error: { code: "cancelled", message: "cancelled" } };
+    };
+    const session = new FlavorSession(base); await session.start();
+    const pending = session.submit("wait"); await new Promise((resolve) => setTimeout(resolve, 0));
+    session.interrupt();
+    await session.close(); await pending;
+    expect(events.slice(-2)).toEqual(["Stop", "SessionEnd"]);
+  });
   it("balances lifecycle hooks and streams prompt output", async () => {
     const events: string[] = []; const outputs: string[] = [];
     const session = new FlavorSession(services(events, outputs));

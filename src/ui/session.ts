@@ -25,6 +25,8 @@ export interface SessionServices {
   plugins(): readonly unknown[];
   hooksStatus(): readonly unknown[];
   tasks(): readonly unknown[];
+  pluginCommands(): readonly string[];
+  runPluginCommand(name: string, args: readonly string[], signal: AbortSignal): Promise<unknown>;
   output(event: SessionOutput): void;
 }
 
@@ -41,6 +43,9 @@ export class FlavorSession {
   #started = false;
   #closed = false;
   #interrupted = false;
+  #startPromise: Promise<void> | undefined;
+  #submissionTail: Promise<void> = Promise.resolve();
+  #closePromise: Promise<void> | undefined;
 
   constructor(services: SessionServices) { this.#services = services; }
 
@@ -48,16 +53,25 @@ export class FlavorSession {
 
   async start(): Promise<void> {
     if (this.#started) return;
-    await this.#services.hooks.emit({ version: 1, type: "SessionStart", payload: { workspace: this.#services.workspace } });
-    this.#started = true;
+    if (this.#closed) throw new Error("Session is closed");
+    this.#startPromise ??= this.#services.hooks.emit({
+      version: 1, type: "SessionStart", payload: { workspace: this.#services.workspace },
+    }).then(() => { this.#started = true; });
+    return this.#startPromise;
   }
 
   async submit(input: string): Promise<void> {
-    if (!this.#started) await this.start();
     if (this.#closed) throw new Error("Session is closed");
-    if (this.#active !== undefined) throw new Error("A prompt is already running");
     const prompt = input.trim();
     if (!prompt) return;
+    const operation = this.#submissionTail.catch(() => {}).then(() => this.#runSubmission(prompt));
+    this.#submissionTail = operation;
+    return operation;
+  }
+
+  async #runSubmission(prompt: string): Promise<void> {
+    await this.start();
+    if (this.#closed) throw new Error("Session is closed");
     const controller = new AbortController();
     this.#active = controller;
     this.#interrupted = false;
@@ -71,7 +85,7 @@ export class FlavorSession {
         this.#notice(decision.reason ?? "Prompt denied by hook.");
         return;
       }
-      const command = parseSlashCommand(prompt);
+      const command = parseSlashCommand(prompt, this.#services.pluginCommands());
       if (command !== null) await this.#dispatch(command, controller.signal);
       else for await (const event of this.#services.run(prompt, controller.signal)) this.#services.output(event);
       if (controller.signal.aborted) outcome = "cancelled";
@@ -95,9 +109,15 @@ export class FlavorSession {
   }
 
   async close(): Promise<void> {
-    if (this.#closed) return;
+    this.#closePromise ??= this.#close();
+    return this.#closePromise;
+  }
+
+  async #close(): Promise<void> {
     this.#closed = true;
     this.#active?.abort(new Error("Session closed"));
+    await this.#submissionTail.catch(() => {});
+    await this.#startPromise?.catch(() => {});
     if (this.#started) await this.#services.hooks.emit({
       version: 1, type: "SessionEnd", payload: { workspace: this.#services.workspace },
     });
@@ -115,6 +135,8 @@ export class FlavorSession {
     } else if (command.name === "permissions") {
       this.#services.setPermissionMode(command.mode);
       this.#notice(`Main permissions set to ${command.mode}. Child agents remain workspace-limited.`);
+    } else if (command.name === "plugin") {
+      this.#notice(format(await this.#services.runPluginCommand(command.command, command.args, signal)));
     } else if (command.name === "compact") {
       this.#notice(await this.#services.compact(signal) ? "Context compacted." : "Context does not need compaction.");
     } else if (command.name === "init") {

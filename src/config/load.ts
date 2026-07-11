@@ -9,6 +9,7 @@ export interface LoadConfigOptions {
   cwd: string;
   home: string;
   cli?: ConfigObject;
+  environment?: Record<string, string | undefined>;
 }
 
 export interface LoadedConfig {
@@ -107,7 +108,7 @@ export async function loadConfig(options: LoadConfigOptions): Promise<LoadedConf
     options.cli ?? {},
   );
   const interpolated = interpolate(merged, {
-    ...process.env,
+    ...(options.environment ?? process.env),
     ...projectEnvironment,
   });
 

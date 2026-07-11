@@ -53,3 +53,29 @@ Final verification evidence:
 - Plugin-contributed slash commands are not executable in the MVP because command parsing is deliberately a closed union; `/plugins` and `/config` expose the resulting diagnostic.
 - Context summarization in the production root is deterministic and local. It avoids a second credential-dependent bootstrap path but is less semantic than model-generated summarization.
 - Ink interaction is covered through the renderer-neutral session tests rather than terminal snapshot tests; the built CLI paths were smoke-tested separately.
+
+## Hardening Follow-up
+
+Review hardening was completed in a second RED/GREEN pass:
+
+- Session startup is shared, submissions are serialized, and close waits for the active cancellation and `Stop` before emitting `SessionEnd`.
+- Raw Ink Ctrl+C and process `SIGINT` use one stable interrupt controller. The listener is removed on unmount. A spawned-process regression runs on non-Windows platforms; Windows runs the portable controller/listener test because Node cannot deliver catchable `SIGINT` to a child there.
+- Approval callbacks now receive the run `AbortSignal`. Aborting removes the bridge listener, clears pending UI state, and resolves the tool decision without hanging.
+- Configuration interpolation accepts an injected environment; project `.env` values override it. SDK construction always receives an explicit key and cannot fall back to an unrelated global environment.
+- Providers accept `defaultModel` and `cheapModel`. Configured providers are selected deterministically; OpenAI defaults to `gpt-5` / `gpt-5-mini`, Anthropic defaults to an Opus main / Sonnet child, and custom providers require explicit defaults rather than silently reusing the main model.
+- Plugin commands now have a typed handler contract, validated lowercase names, built-in/conflict rejection, dynamic pure parsing, dispatch with cancellation, and unload cleanup.
+- `SkillResource` exposes only registry-issued capabilities for resources explicitly linked from a skill. UTF-8 decoding is fatal; binary content is bounded base64 with metadata. Paths are not returned and scripts are never executed. The tool remains available to child agents through `ToolRuntime`.
+- `LocalHarness` and the production runtime now dispose main/child tool runtimes idempotently, clear pending approval, and unload plugins.
+- `--print` differentiates startup exit 2 from prompt/hook/runtime exit 1, redacts credential-shaped failures, and always closes/disposes after runtime construction.
+- Prompt editing now uses Unicode code points and supports left/right cursor movement, backspace, and delete.
+- Plugin timeout tests synchronize on abort conditions and no longer require a healthy dynamic import to beat a 10ms wall-clock race under full-suite contention.
+
+Hardening verification:
+
+- Focused UI/CLI/runtime/config/plugin/skill/subagent suites passed.
+- Full suite: 23 test files passed and 1 platform-guarded file skipped; 248 tests passed and 2 skipped.
+- Typecheck and production build passed.
+- Built `--version` smoke returned 0 and printed `0.1.0`.
+- Built no-key `--print` smoke returned 1 with actionable `.flavor/flavor.json` / environment-key guidance.
+
+Remaining limitation: the literal child-process `SIGINT` regression is skipped on Windows due the platform's Node signal semantics; equivalent controller registration/cleanup and lifecycle ordering are exercised there without spawning.

@@ -52,6 +52,8 @@ export interface PluginServices {
 }
 
 export type PluginDisposer = () => void | Promise<void>;
+export interface PluginCommandContext { readonly workspace: string; readonly signal: AbortSignal }
+export type PluginCommandHandler = (args: readonly string[], context: PluginCommandContext) => unknown | Promise<unknown>;
 
 /**
  * A deliberately narrow registration surface. Plugins run in-process and are trusted in the
@@ -62,7 +64,7 @@ export interface PluginContext {
   readonly config: unknown;
   readonly logger: PluginLogger;
   readonly services: PluginServices;
-  registerCommand(name: string, command: unknown): PluginDisposer;
+  registerCommand(name: string, command: PluginCommandHandler): PluginDisposer;
   registerTool(name: string, tool: ToolDefinition<unknown>): PluginDisposer;
   registerHook(name: HookEventName, hook: HookHandler, options?: HookHandlerOptions): PluginDisposer;
   registerSkillRoot(name: string, root: string): PluginDisposer;
@@ -88,7 +90,7 @@ export interface LoadedPlugin {
 }
 
 export interface PluginRegistrationCallbacks {
-  command(name: string, command: unknown): PluginDisposer;
+  command(name: string, command: PluginCommandHandler): PluginDisposer;
   tool(name: string, tool: ToolDefinition<unknown>): PluginDisposer;
   hook(name: HookEventName, hook: HookHandler, options?: HookHandlerOptions): PluginDisposer;
   /** Consumers must revalidate identity before access, or delegate reading to SkillRegistry. */

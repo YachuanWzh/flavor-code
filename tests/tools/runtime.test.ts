@@ -116,6 +116,20 @@ describe("ToolRuntime", () => {
     expect(approvals).toBe(1);
   });
 
+  it("passes cancellation into approval and completes without executing", async () => {
+    const f = fixture("ask"); const controller = new AbortController();
+    const runtime = new ToolRuntime({ tools: [f.tool], hooks: f.hooks, permissions: f.permissions,
+      approve: async (_request, signal) => new Promise<boolean>((resolve) => {
+        signal.addEventListener("abort", () => resolve(false), { once: true });
+      }),
+    });
+    const pending = runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } },
+      { agent: "main", signal: controller.signal });
+    controller.abort(new Error("cancel"));
+    await expect(pending).resolves.toMatchObject({ ok: false });
+    expect(f.calls).not.toContain("execute");
+  });
+
   it("combines pre-hook and permission asks into one ordered approval", async () => {
     const f = fixture("ask");
     f.hooks.on("PreToolUse", () => ({ decision: "ask", reason: "pre asks" }));

@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { Command } from "commander";
 
-import { createProductionRuntime } from "./production.js";
+import { createProductionRuntime, type ProductionRuntime } from "./production.js";
 
 export function createProgram(): Command {
   return new Command()
@@ -28,29 +28,49 @@ export function createProgram(): Command {
     });
 }
 
-export async function runPrint(prompt: string): Promise<number> {
+export interface PrintDependencies {
+  createRuntime?: typeof createProductionRuntime;
+  stdout?(text: string): void;
+  stderr?(text: string): void;
+}
+
+export async function runPrint(prompt: string, dependencies: PrintDependencies = {}): Promise<number> {
   let code = 0;
-  let runtime;
+  let runtime: ProductionRuntime;
+  const stdout = dependencies.stdout ?? ((text: string) => process.stdout.write(text));
+  const stderr = dependencies.stderr ?? ((text: string) => process.stderr.write(text));
   try {
-    runtime = await createProductionRuntime({
+    runtime = await (dependencies.createRuntime ?? createProductionRuntime)({
       workspace: process.cwd(), home: homedir(), approvalPolicy: "deny",
       output(event) {
-        if (event.type === "text") process.stdout.write(event.text);
-        else if (event.type === "notice") process.stdout.write(`${event.message}\n`);
-        else if (event.type === "error") { process.stderr.write(`${event.error.code}: ${event.error.message}\n`); code = 1; }
+        if (event.type === "text") stdout(event.text);
+        else if (event.type === "notice") stdout(`${event.message}\n`);
+        else if (event.type === "error") { stderr(`${event.error.code}: ${event.error.message}\n`); code = 1; }
       },
     });
+  } catch (error) {
+    stderr(`startup: ${safeError(error)}\n`);
+    return 2;
+  }
+  try {
     await runtime.session.start();
     await runtime.session.submit(prompt);
-    if (code === 0) process.stdout.write("\n");
-    return code;
   } catch (error) {
-    process.stderr.write(`startup: ${error instanceof Error ? error.message : String(error)}\n`);
-    return 2;
+    stderr(`runtime: ${safeError(error)}\n`); code = 1;
   } finally {
-    await runtime?.session.close();
-    await runtime?.dispose();
+    try { await runtime.session.close(); }
+    catch (error) { stderr(`runtime: ${safeError(error)}\n`); code = 1; }
+    try { await runtime.dispose(); }
+    catch (error) { stderr(`runtime: ${safeError(error)}\n`); code = 1; }
   }
+  if (code === 0) stdout("\n");
+  return code;
+}
+
+function safeError(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error))
+    .replace(/\bsk-[A-Za-z0-9_-]+\b/g, "[redacted]")
+    .replace(/(authorization|api[_ -]?key|token)\s*[:=]\s*\S+/gi, "$1=[redacted]");
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

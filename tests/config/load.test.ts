@@ -110,6 +110,19 @@ it("interpolates provider secrets from the project environment", async () => {
   ]);
 });
 
+it("uses an injected environment without consulting process.env and lets project .env override it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "flavor-config-"));
+  const home = join(root, "home"); const cwd = join(root, "repo");
+  await mkdir(join(cwd, ".flavor"), { recursive: true });
+  process.env.CUSTOM_API_KEY = "unrelated-global";
+  await writeFile(join(cwd, ".env"), "CUSTOM_API_KEY=project-value\n");
+  await writeFile(join(cwd, ".flavor", "flavor.json"), JSON.stringify({
+    providers: { custom: { type: "openai-compatible", apiKey: "${CUSTOM_API_KEY}", defaultModel: "large", cheapModel: "small" } },
+  }));
+  const loaded = await loadConfig({ cwd, home, environment: { CUSTOM_API_KEY: "injected-value" } });
+  expect(loaded.config.providers.custom).toMatchObject({ apiKey: "project-value", defaultModel: "large", cheapModel: "small" });
+});
+
 it.each([
   {
     name: "global",
