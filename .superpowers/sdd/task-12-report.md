@@ -92,3 +92,9 @@ A final failure-path pass added the following guarantees and regressions:
 The contributed-invalid-tool regression verifies that bootstrap fails with the original schema error and still invokes the activated plugin disposer.
 
 Final verification after these cleanup changes: 24 test files passed and 1 platform-guarded file skipped; 251 tests passed and 2 skipped. Typecheck, build, diff check, version smoke, and no-key print smoke all passed with the expected exit codes.
+
+### Partial harness construction
+
+`LocalHarness` now guards the profile-construction region after `ToolRuntime` creation. If model-tool JSON-schema conversion or `AgentLoop` construction throws, the runtime is disposed before the original error is rethrown. The regression supplies an invalid Zod-to-JSON-schema tool, verifies the constructor failure, then emits a generic `PreToolUse` payload to prove no runtime payload schema registration leaked. The production bootstrap rollback regression continues to verify the contributing plugin disposer runs.
+
+Final narrow-fix verification: 252 tests passed and 2 platform skips; typecheck and build passed.

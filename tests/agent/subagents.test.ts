@@ -9,6 +9,7 @@ import { LocalHarness } from "../../src/harness/local.js";
 import { SubagentResultSchema, SubagentScheduler } from "../../src/agent/subagents.js";
 import { TaskGraphSchema } from "../../src/agent/planner.js";
 import { ToolRuntime } from "../../src/tools/runtime.js";
+import type { ToolDefinition } from "../../src/tools/types.js";
 
 const node = (id: string, dependencies: string[] = []) => ({
   id,
@@ -225,6 +226,21 @@ describe("SubagentScheduler", () => {
 });
 
 describe("LocalHarness", () => {
+  it("disposes runtime hook schemas when profile construction fails", async () => {
+    const hooks = new HookBus();
+    const invalidTool = {
+      name: "Invalid", description: "invalid schema", inputSchema: {}, paths: () => [], execute: async () => null,
+    } as unknown as ToolDefinition<unknown>;
+    expect(() => new LocalHarness({
+      registry: new ModelRegistry(), hooks, workspace: process.cwd(),
+      mainModelId: "missing:main", subagentModelId: "missing:child", tools: [invalidTool],
+      createContext: () => contextFixture(hooks),
+    })).toThrow();
+    await expect(hooks.emit({
+      version: 1, type: "PreToolUse", payload: { genericPluginPayload: true },
+    })).resolves.toEqual({ decision: "allow" });
+  });
+
   it("switches role models and only changes main permissions", () => {
     const harness = harnessFixture(() => contextFixture());
     harness.setModel("main", "fake:new-main");

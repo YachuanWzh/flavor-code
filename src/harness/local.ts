@@ -138,17 +138,22 @@ export class LocalHarness {
       permissions,
       ...(agent === "main" && approve !== undefined ? { approve } : {}),
     });
-    const tools = definitions.map(toModelTool);
-    const loop = new AgentLoop({
-      registry: this.#options.registry,
-      modelId,
-      context,
-      runtime,
-      hooks: this.#options.hooks,
-      tools,
-      agent,
-    });
-    return { get modelId() { return loop.modelId; }, context, runtime, tools, loop };
+    try {
+      const tools = definitions.map(toModelTool);
+      const loop = new AgentLoop({
+        registry: this.#options.registry,
+        modelId,
+        context,
+        runtime,
+        hooks: this.#options.hooks,
+        tools,
+        agent,
+      });
+      return { get modelId() { return loop.modelId; }, context, runtime, tools, loop };
+    } catch (error) {
+      runtime.dispose();
+      throw error;
+    }
   }
 }
 
