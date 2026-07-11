@@ -24,6 +24,7 @@
     "ink": "^7.1.0",
     "openai": "^6.46.0",
     "react": "^19.2.7",
+    "yaml": "^2.9.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
