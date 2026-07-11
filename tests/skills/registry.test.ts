@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { SkillRegistry } from "../../src/skills/registry.js";
+import type { ResolvedSkillResource } from "../../src/skills/registry.js";
 
 async function skill(root: string, folder: string, frontmatter: string, body = "Instructions") {
   const directory = join(root, folder);
@@ -104,7 +105,7 @@ describe("SkillRegistry", () => {
     await expect(registry.resolveResource(matched, "../outside.md")).rejects.toThrow(/escape|traversal/i);
     await expect(registry.resolveResource(matched, "assets/outside.md")).rejects.toThrow(/symlink|escape/i);
     await expect(registry.resolveResource(matched, "references/unmentioned.md")).rejects.toThrow(/referenced/i);
-    await expect(registry.readResource(matched, "references/checklist.md")).rejects.toThrow(/permission/i);
+    await expect(registry.resolveResource(matched, "references/checklist.md")).rejects.toThrow(/permission/i);
     expect(authorizeResource).toHaveBeenCalledWith(join(directory, "references", "checklist.md"), matched);
   });
 
@@ -128,8 +129,9 @@ describe("SkillRegistry", () => {
     const matched = (await registry.match("bounded data"))!;
     const hugeBody = (await registry.match("huge body"))!;
     await expect(registry.loadBody(hugeBody)).rejects.toThrow(/body.*large/i);
-    await expect(registry.readResource(matched, "references/data.txt")).rejects.toThrow(/resource.*large/i);
-    expect((await registry.readResource(matched, "scripts/run.js")).toString("utf8")).toContain("must not execute");
+    await expect(registry.resolveResource(matched, "references/data.txt")).rejects.toThrow(/resource.*large/i);
+    const script = await registry.resolveResource(matched, "scripts/run.js");
+    expect((await registry.readResource(script)).toString("utf8")).toContain("must not execute");
   });
 
   it("rejects skill directories and SKILL files that are symlinks", async () => {
@@ -180,10 +182,15 @@ describe("SkillRegistry", () => {
     const directory = await skill(
       f.globalRoot, "references", "name: references\ndescription: Explicit references",
       "xassets/prefix.bin https://host/assets/url.bin never use assets/negative.bin "
+        + "\\[escaped\\]\\(assets/escaped.bin\\)\n"
+        + "<!-- [hidden](assets/hidden.bin) -->\n"
+        + "```md\n[fenced](assets/fenced.bin) and `assets/fenced-code.bin`\n```\n"
         + "[real](assets/real.bin) and `scripts/run.js`.",
     );
     await mkdir(join(directory, "assets")); await mkdir(join(directory, "scripts"));
-    for (const file of ["prefix.bin", "url.bin", "negative.bin", "real.bin"]) {
+    for (const file of [
+      "prefix.bin", "url.bin", "negative.bin", "escaped.bin", "hidden.bin", "fenced.bin", "fenced-code.bin", "real.bin",
+    ]) {
       await writeFile(join(directory, "assets", file), file);
     }
     await writeFile(join(directory, "scripts", "run.js"), "code");
@@ -193,10 +200,18 @@ describe("SkillRegistry", () => {
     await expect(registry.resolveResource(matched, "assets/prefix.bin")).rejects.toThrow(/referenced/i);
     await expect(registry.resolveResource(matched, "assets/url.bin")).rejects.toThrow(/referenced/i);
     await expect(registry.resolveResource(matched, "assets/negative.bin")).rejects.toThrow(/referenced/i);
-    await expect(registry.resolveResource(matched, "assets/real.bin")).resolves.toMatchObject({
-      path: join(directory, "assets", "real.bin"), reference: "assets/real.bin", size: 8,
+    await expect(registry.resolveResource(matched, "assets/escaped.bin")).rejects.toThrow(/referenced/i);
+    await expect(registry.resolveResource(matched, "assets/hidden.bin")).rejects.toThrow(/referenced/i);
+    await expect(registry.resolveResource(matched, "assets/fenced.bin")).rejects.toThrow(/referenced/i);
+    await expect(registry.resolveResource(matched, "assets/fenced-code.bin")).rejects.toThrow(/referenced/i);
+    const asset = await registry.resolveResource(matched, "assets/real.bin");
+    expect(asset).toMatchObject({
+      displayPath: "assets/real.bin", kind: "asset", size: 8,
+      skill: { name: "references", source: "global" },
     });
-    await expect(registry.resolveResource(matched, "scripts/run.js")).resolves.toMatchObject({ reference: "scripts/run.js" });
+    expect(asset).not.toHaveProperty("path");
+    expect(JSON.stringify(asset)).not.toContain(directory);
+    await expect(registry.resolveResource(matched, "scripts/run.js")).resolves.toMatchObject({ displayPath: "scripts/run.js" });
   });
 
   it("preserves binary resources and fatally decodes explicit text reads", async () => {
@@ -212,8 +227,10 @@ describe("SkillRegistry", () => {
     const registry = new SkillRegistry({ globalRoots: [f.globalRoot], authorizeResource: () => true });
     const matched = (await registry.match("binary assets"))!;
 
-    expect(await registry.readResource(matched, "assets/blob.bin")).toEqual(binary);
-    await expect(registry.readTextResource(matched, "references/invalid.txt")).rejects.toThrow(/utf-?8|encoding/i);
+    const blob = await registry.resolveResource(matched, "assets/blob.bin");
+    const text = await registry.resolveResource(matched, "references/invalid.txt");
+    expect(await registry.readResource(blob)).toEqual(binary);
+    await expect(registry.readTextResource(text)).rejects.toThrow(/utf-?8|encoding/i);
   });
 
   it("pins SKILL.md reads to the verified handle and rejects opened-file identity mismatches", async () => {
@@ -264,7 +281,7 @@ describe("SkillRegistry", () => {
       globalRoots: [f.globalRoot], maxResourceBytes: 4, authorizeResource: () => true,
       openFile: async (path, flags) => {
         const handle = await fsOpen(path, flags);
-        if (path.endsWith("race.bin") && ++resourceOpens === 1) {
+        if (path.endsWith("race.bin") && ++resourceOpens === 3) {
           await rename(path, `${path}.old`);
           await writeFile(path, "NEW");
         }
@@ -274,7 +291,50 @@ describe("SkillRegistry", () => {
     const matched = (await registry.match("resource race"))!;
 
     await expect(registry.resolveResource(matched, "assets/large.bin")).rejects.toThrow(/resource.*large/i);
-    await expect(registry.readResource(matched, "assets/race.bin")).rejects.toThrow(/changed|identity|mismatch/i);
+    const capability = await registry.resolveResource(matched, "assets/race.bin");
+    await expect(registry.readResource(capability)).rejects.toThrow(/changed|identity|mismatch/i);
+  });
+
+  it("issues opaque registry-bound capabilities and rejects forged or foreign capabilities", async () => {
+    const f = await fixture();
+    const directory = await skill(
+      f.globalRoot, "capability", "name: capability\ndescription: Capability resource", "[data](assets/data.bin)",
+    );
+    await mkdir(join(directory, "assets")); await writeFile(join(directory, "assets", "data.bin"), "data");
+    const registry = new SkillRegistry({ globalRoots: [f.globalRoot], authorizeResource: () => true });
+    const matched = (await registry.match("capability resource"))!;
+    const capability = await registry.resolveResource(matched, "assets/data.bin");
+
+    expect(Object.isFrozen(capability)).toBe(true);
+    expect(capability).not.toHaveProperty("path");
+    expect(await registry.readTextResource(capability)).toBe("data");
+    const forged = Object.freeze({
+      displayPath: "assets/data.bin", kind: "asset", size: 4,
+      skill: Object.freeze({ name: "capability", source: "global" }),
+    }) as ResolvedSkillResource;
+    await expect(registry.readResource(forged)).rejects.toThrow(/capability|unknown|forged/i);
+    const other = new SkillRegistry({ globalRoots: [f.globalRoot], authorizeResource: () => true });
+    await expect(other.readResource(capability)).rejects.toThrow(/capability|unknown|forged/i);
+  });
+
+  it("revalidates the resource pathname after asynchronous authorization", async () => {
+    const f = await fixture();
+    const directory = await skill(
+      f.globalRoot, "authorization-race", "name: authorization-race\ndescription: Authorization race",
+      "[data](assets/data.bin)",
+    );
+    const assets = join(directory, "assets"); await mkdir(assets);
+    const path = join(assets, "data.bin"); await writeFile(path, "OLD");
+    const registry = new SkillRegistry({
+      globalRoots: [f.globalRoot],
+      authorizeResource: async () => {
+        await rename(path, `${path}.old`);
+        await writeFile(path, "NEW");
+        return true;
+      },
+    });
+    const matched = (await registry.match("authorization race"))!;
+    await expect(registry.resolveResource(matched, "assets/data.bin")).rejects.toThrow(/changed|identity|metadata/i);
   });
 
   it("does not depend on locale collation for discovery or matching", async () => {

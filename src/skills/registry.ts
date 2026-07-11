@@ -1,9 +1,10 @@
 import { constants } from "node:fs";
-import type { Stats } from "node:fs";
+import type { BigIntStats } from "node:fs";
 import { lstat, open as defaultOpen, readdir, realpath } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
+import { marked } from "marked";
 import { parseDocument } from "yaml";
 
 export type SkillSource = "global" | "project";
@@ -32,10 +33,13 @@ export type SkillResourceAuthorizer = (
 
 export type SkillFileOpener = (path: string, flags: number) => Promise<FileHandle>;
 
+export type SkillResourceKind = "asset" | "reference" | "script";
+
 export interface ResolvedSkillResource {
-  readonly path: string;
-  readonly reference: string;
+  readonly displayPath: string;
+  readonly kind: SkillResourceKind;
   readonly size: number;
+  readonly skill: Readonly<Pick<SkillMetadata, "name" | "source">>;
 }
 
 export interface SkillRegistryOptions {
@@ -61,17 +65,25 @@ interface ParsedFrontmatter {
 }
 
 interface FileSnapshot {
-  dev: number;
-  ino: number;
-  size: number;
-  mtimeMs: number;
-  ctimeMs: number;
+  dev: bigint;
+  ino: bigint;
+  mode: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
 }
 
 interface VerifiedFile {
   handle: FileHandle;
   path: string;
   snapshot: FileSnapshot;
+}
+
+interface ResolvedResourceRecord {
+  path: string;
+  reference: string;
+  snapshot: FileSnapshot;
+  record: SkillRecord;
 }
 
 const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -86,6 +98,7 @@ export class SkillRegistry {
     "globalRoots" | "projectRoots" | "maxMetadataBytes" | "maxBodyBytes" | "maxResourceBytes"
   >> & Pick<SkillRegistryOptions, "selector" | "authorizeResource"> & { openFile: SkillFileOpener };
   readonly #records = new Map<string, SkillRecord>();
+  readonly #capabilities = new WeakMap<ResolvedSkillResource, ResolvedResourceRecord>();
   #diagnostics: SkillDiagnostic[] = [];
   #discovered = false;
 
@@ -149,7 +162,7 @@ export class SkillRegistry {
       if (parsed.name !== record.metadata.name || parsed.description !== record.metadata.description) {
         throw new Error(`Skill frontmatter changed after discovery: ${record.metadata.name}`);
       }
-      const expectedBytes = file.snapshot.size - parsed.bodyOffset;
+      const expectedBytes = Number(file.snapshot.size) - parsed.bodyOffset;
       if (expectedBytes > this.#options.maxBodyBytes) throw new Error(`Skill body is too large: ${record.metadata.name}`);
       const body = await readBounded(file.handle, parsed.bodyOffset, this.#options.maxBodyBytes);
       if (body.length !== expectedBytes) throw new Error(`Skill body changed while loading: ${record.metadata.name}`);
@@ -162,17 +175,25 @@ export class SkillRegistry {
 
   async resolveResource(skill: SkillMetadata, reference: string): Promise<ResolvedSkillResource> {
     const resolved = await this.#resolveResource(skill, reference);
-    return Object.freeze({ path: resolved.path, reference: resolved.reference, size: resolved.snapshot.size });
+    const capability: ResolvedSkillResource = Object.freeze({
+      displayPath: resolved.reference,
+      kind: resourceKind(resolved.reference),
+      size: Number(resolved.snapshot.size),
+      skill: Object.freeze({ name: resolved.record.metadata.name, source: resolved.record.metadata.source }),
+    });
+    this.#capabilities.set(capability, resolved);
+    return capability;
   }
 
-  async readResource(skill: SkillMetadata, reference: string): Promise<Buffer> {
-    const resolved = await this.#resolveResource(skill, reference);
+  async readResource(capability: ResolvedSkillResource): Promise<Buffer> {
+    const resolved = this.#capabilities.get(capability);
+    if (resolved === undefined) throw new Error("Unknown or forged skill resource capability");
     const file = await openVerifiedFile(
       resolved.path, resolved.record.metadata.root, "Resource", this.#options.openFile, resolved.snapshot,
     );
     try {
       const content = await readBounded(file.handle, 0, this.#options.maxResourceBytes);
-      if (content.length !== file.snapshot.size) throw new Error(`Skill resource changed while loading: ${resolved.reference}`);
+      if (content.length !== Number(file.snapshot.size)) throw new Error(`Skill resource changed while loading: ${resolved.reference}`);
       await assertHandleUnchanged(file.handle, file.snapshot, "Resource");
       return content;
     } finally {
@@ -180,13 +201,11 @@ export class SkillRegistry {
     }
   }
 
-  async readTextResource(skill: SkillMetadata, reference: string): Promise<string> {
-    return decodeUtf8(await this.readResource(skill, reference), `Skill resource ${reference}`);
+  async readTextResource(capability: ResolvedSkillResource): Promise<string> {
+    return decodeUtf8(await this.readResource(capability), `Skill resource ${capability.displayPath}`);
   }
 
-  async #resolveResource(skill: SkillMetadata, reference: string): Promise<{
-    path: string; reference: string; snapshot: FileSnapshot; record: SkillRecord;
-  }> {
+  async #resolveResource(skill: SkillMetadata, reference: string): Promise<ResolvedResourceRecord> {
     const record = await this.#recordFor(skill);
     const normalized = normalizeReference(reference);
     const parts = normalized.split("/");
@@ -200,13 +219,21 @@ export class SkillRegistry {
     const candidate = resolve(record.metadata.root, ...parts);
     const file = await openVerifiedFile(candidate, record.metadata.root, "Resource", this.#options.openFile);
     try {
-      if (file.snapshot.size > this.#options.maxResourceBytes) throw new Error(`Skill resource is too large: ${reference}`);
+      if (file.snapshot.size > BigInt(this.#options.maxResourceBytes)) throw new Error(`Skill resource is too large: ${reference}`);
       const authorize = this.#options.authorizeResource;
       if (authorize === undefined || !(await authorize(file.path, record.metadata))) {
         throw new Error(`Permission denied for skill resource: ${reference}`);
       }
       await assertHandleUnchanged(file.handle, file.snapshot, "Resource");
-      return { path: file.path, reference: normalized, snapshot: file.snapshot, record };
+      const revalidated = await openVerifiedFile(
+        file.path, record.metadata.root, "Resource", this.#options.openFile, file.snapshot,
+      );
+      try {
+        await assertHandleUnchanged(revalidated.handle, revalidated.snapshot, "Resource");
+        return { path: revalidated.path, reference: normalized, snapshot: revalidated.snapshot, record };
+      } finally {
+        await revalidated.handle.close();
+      }
     } finally {
       await file.handle.close();
     }
@@ -383,7 +410,7 @@ async function openVerifiedFile(
   opener: SkillFileOpener,
   expected?: FileSnapshot,
 ): Promise<VerifiedFile> {
-  const initial = await lstat(path);
+  const initial = await lstat(path, { bigint: true });
   if (initial.isSymbolicLink()) throw new Error(`${label} symlinks are not allowed`);
   assertRegular(initial, label);
   const canonical = await realpath(path);
@@ -391,7 +418,7 @@ async function openVerifiedFile(
   const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
   const handle = await opener(canonical, constants.O_RDONLY | noFollow);
   try {
-    const opened = await handle.stat();
+    const opened = await handle.stat({ bigint: true });
     assertRegular(opened, label);
     const initialSnapshot = snapshot(initial);
     const openedSnapshot = snapshot(opened);
@@ -406,25 +433,32 @@ async function openVerifiedFile(
   }
 }
 
-function assertRegular(info: Stats, label: string): void {
+function assertRegular(info: BigIntStats, label: string): void {
   if (!info.isFile()) throw new Error(`${label} must be a regular file`);
 }
 
-function snapshot(info: Stats): FileSnapshot {
-  return { dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs };
+function snapshot(info: BigIntStats): FileSnapshot {
+  return {
+    dev: info.dev,
+    ino: info.ino,
+    mode: info.mode,
+    size: info.size,
+    mtimeNs: info.mtimeNs,
+    ctimeNs: info.ctimeNs,
+  };
 }
 
 function sameSnapshot(left: FileSnapshot, right: FileSnapshot): boolean {
   return sameIdentityAndSize(left, right)
-    && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+    && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
 }
 
 function sameIdentityAndSize(left: FileSnapshot, right: FileSnapshot): boolean {
-  return left.dev === right.dev && left.ino === right.ino && left.size === right.size;
+  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode && left.size === right.size;
 }
 
 async function assertHandleUnchanged(handle: FileHandle, expected: FileSnapshot, label: string): Promise<void> {
-  const current = await handle.stat();
+  const current = await handle.stat({ bigint: true });
   assertRegular(current, label);
   if (!sameSnapshot(expected, snapshot(current))) throw new Error(`${label} changed while reading`);
 }
@@ -464,10 +498,11 @@ function normalizeReference(reference: string): string {
 
 function extractResourceReferences(body: string): Set<string> {
   const found = new Set<string>();
-  const markdownLink = /!?\[[^\]\r\n]*\]\(\s*(?:<([^>\r\n]+)>|([^\s)\r\n]+))(?:\s+["'][^"'\r\n]*["'])?\s*\)/g;
-  for (const match of body.matchAll(markdownLink)) addExplicitReference(found, match[1] ?? match[2] ?? "");
-  const inlineCode = /(`+)([^`\r\n]+)\1/g;
-  for (const match of body.matchAll(inlineCode)) addExplicitReference(found, match[2]?.trim() ?? "");
+  const tokens = marked.lexer(body, { async: false, gfm: true });
+  marked.walkTokens(tokens, (token) => {
+    if (token.type === "link" || token.type === "image") addExplicitReference(found, token.href);
+    if (token.type === "codespan") addExplicitReference(found, token.text.trim());
+  });
   return found;
 }
 
@@ -481,6 +516,12 @@ function addExplicitReference(found: Set<string>, value: string): void {
 
 function compareCodePoints(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function resourceKind(reference: string): SkillResourceKind {
+  if (reference.startsWith("assets/")) return "asset";
+  if (reference.startsWith("references/")) return "reference";
+  return "script";
 }
 
 function terms(value: string): Set<string> {
