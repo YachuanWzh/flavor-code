@@ -18,7 +18,11 @@ export interface LoadedConfig {
 
 async function readJsonIfPresent(path: string): Promise<ConfigObject | undefined> {
   try {
-    return JSON.parse(await readFile(path, "utf8")) as ConfigObject;
+    const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+    if (!isPlainObject(parsed)) {
+      throw new Error(`Configuration file ${path} must contain a JSON object`);
+    }
+    return parsed;
   } catch (error) {
     if (isMissingFileError(error)) {
       return undefined;
@@ -53,6 +57,9 @@ function isPlainObject(value: unknown): value is ConfigObject {
 function mergeConfig(base: ConfigObject, override: ConfigObject): ConfigObject {
   const result: ConfigObject = { ...base };
   for (const [key, value] of Object.entries(override)) {
+    if (value === undefined) {
+      continue;
+    }
     const current = result[key];
     result[key] =
       isPlainObject(current) && isPlainObject(value)
