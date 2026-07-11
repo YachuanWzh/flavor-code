@@ -74,6 +74,26 @@ describe("file tools", () => {
     expect(closed).toBe(true);
   });
 
+  it("Read rejects an unsafe maxBytes before opening a handle", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "a");
+    let opened = 0;
+    let closed = 0;
+    const tool = createReadTool(workspace, { openFile: async () => {
+      opened += 1;
+      return {
+        read: async () => ({ bytesRead: 0 }),
+        close: async () => { closed += 1; },
+      };
+    } });
+    const maxBytes = Number.MAX_SAFE_INTEGER;
+
+    await expect(tool.execute({ path, maxBytes }, new AbortController().signal)).rejects.toThrow();
+    expect({ opened, closed }).toEqual({ opened: 0, closed: 0 });
+    expect(tool.inputSchema.safeParse({ path, maxBytes }).success).toBe(false);
+  });
+
   it("Edit fails unless oldText has exactly one match", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
     const path = join(workspace, "file.txt");

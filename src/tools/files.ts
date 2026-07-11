@@ -6,12 +6,15 @@ import { z } from "zod";
 
 import type { ToolDefinition } from "./types.js";
 
-const ReadInput = z.object({ path: z.string().min(1), maxBytes: z.number().int().positive().optional() });
+export const MAX_READ_BYTES = 1_048_576;
+
+const ReadInput = z.object({
+  path: z.string().min(1),
+  maxBytes: z.number().int().positive().max(MAX_READ_BYTES).optional(),
+});
 const WriteInput = z.object({ path: z.string().min(1), content: z.string() });
 const EditInput = z.object({ path: z.string().min(1), oldText: z.string().min(1), newText: z.string() });
 const ApplyPatchInput = z.object({ patch: z.string().min(1) });
-
-const DEFAULT_MAX_READ_BYTES = 1_048_576;
 
 export interface ReadFileHandle {
   read(buffer: Buffer, offset: number, length: number, position: number | null): Promise<{ bytesRead: number }>;
@@ -34,7 +37,10 @@ export function createReadTool(workspace: string, options: ReadToolOptions = {})
       abortIfNeeded(signal);
       const path = await guard.existing(input.path);
       const info = await stat(path);
-      const maxBytes = input.maxBytes ?? DEFAULT_MAX_READ_BYTES;
+      const maxBytes = input.maxBytes ?? MAX_READ_BYTES;
+      if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > MAX_READ_BYTES) {
+        throw new Error(`maxBytes must be a positive integer no greater than ${MAX_READ_BYTES}`);
+      }
       if (info.size > maxBytes) throw new Error(`File exceeds the ${maxBytes} byte read limit`);
       const contents = await readBounded(path, maxBytes, signal, openFile);
       if (contents.length > maxBytes) throw new Error(`File exceeds the ${maxBytes} byte read limit`);
@@ -189,8 +195,8 @@ async function readBounded(
   signal: AbortSignal,
   openFile: (path: string) => Promise<ReadFileHandle>,
 ): Promise<Buffer> {
-  const handle = await openFile(path);
   const buffer = Buffer.allocUnsafe(maxBytes + 1);
+  const handle = await openFile(path);
   let offset = 0;
   try {
     while (offset < buffer.length) {
