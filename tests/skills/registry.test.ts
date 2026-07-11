@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open as fsOpen, rename, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -89,7 +89,7 @@ describe("SkillRegistry", () => {
     const f = await fixture();
     const directory = await skill(
       f.projectRoot, "deploy", "name: deploy\ndescription: Deploy an app",
-      "Read [the checklist](references/checklist.md); never follow assets/outside.md.",
+      "Read [the checklist](references/checklist.md); [outside](assets/outside.md) is unsafe.",
     );
     await mkdir(join(directory, "references"));
     await writeFile(join(directory, "references", "checklist.md"), "safe");
@@ -113,7 +113,7 @@ describe("SkillRegistry", () => {
     await skill(f.globalRoot, "huge-meta", `name: huge-meta\ndescription: ${"x".repeat(200)}`);
     const directory = await skill(
       f.globalRoot, "bounded", "name: bounded\ndescription: Bounded data",
-      "Use scripts/run.js and references/data.txt.",
+      "Use `scripts/run.js` and [data](references/data.txt).",
     );
     await skill(f.globalRoot, "huge-body", "name: huge-body\ndescription: Huge body", "b".repeat(100));
     await mkdir(join(directory, "scripts")); await mkdir(join(directory, "references"));
@@ -129,7 +129,7 @@ describe("SkillRegistry", () => {
     const hugeBody = (await registry.match("huge body"))!;
     await expect(registry.loadBody(hugeBody)).rejects.toThrow(/body.*large/i);
     await expect(registry.readResource(matched, "references/data.txt")).rejects.toThrow(/resource.*large/i);
-    expect(await registry.readResource(matched, "scripts/run.js")).toContain("must not execute");
+    expect((await registry.readResource(matched, "scripts/run.js")).toString("utf8")).toContain("must not execute");
   });
 
   it("rejects skill directories and SKILL files that are symlinks", async () => {
@@ -146,5 +146,148 @@ describe("SkillRegistry", () => {
     const registry = new SkillRegistry({ globalRoots: [f.globalRoot] });
     expect(await registry.discover()).toEqual([]);
     expect(registry.diagnostics).toHaveLength(2);
+  });
+
+  it("rejects duplicate keys, aliases, tags, multiple YAML documents, and invalid UTF-8 metadata", async () => {
+    const f = await fixture();
+    await skill(f.globalRoot, "duplicate-key", "name: duplicate-key\nname: duplicate-key\ndescription: duplicate");
+    await skill(f.globalRoot, "alias-skill", "name: &skill alias-skill\ndescription: *skill");
+    await skill(f.globalRoot, "multi-doc", "name: multi-doc\ndescription: first\n...\nname: second");
+    await skill(f.globalRoot, "tagged", "name: tagged\ndescription: !untrusted tagged");
+    const invalid = join(f.globalRoot, "invalid-utf8"); await mkdir(invalid);
+    await writeFile(join(invalid, "SKILL.md"), Buffer.concat([
+      Buffer.from("---\nname: invalid-utf8\ndescription: "), Buffer.from([0xff]), Buffer.from("\n---\nbody"),
+    ]));
+
+    const registry = new SkillRegistry({ globalRoots: [f.globalRoot] });
+    expect(await registry.discover()).toEqual([]);
+    expect(registry.diagnostics).toHaveLength(5);
+  });
+
+  it("decodes SKILL.md bodies with fatal UTF-8", async () => {
+    const f = await fixture();
+    const directory = await skill(f.globalRoot, "invalid-body", "name: invalid-body\ndescription: Invalid body", "");
+    await writeFile(join(directory, "SKILL.md"), Buffer.concat([
+      Buffer.from("---\nname: invalid-body\ndescription: Invalid body\n---\n"), Buffer.from([0xff]),
+    ]));
+    const registry = new SkillRegistry({ globalRoots: [f.globalRoot] });
+    const matched = (await registry.match("invalid body"))!;
+    await expect(registry.loadBody(matched)).rejects.toThrow(/utf-?8|encoding/i);
+  });
+
+  it("extracts only Markdown destinations and inline-code resource references", async () => {
+    const f = await fixture();
+    const directory = await skill(
+      f.globalRoot, "references", "name: references\ndescription: Explicit references",
+      "xassets/prefix.bin https://host/assets/url.bin never use assets/negative.bin "
+        + "[real](assets/real.bin) and `scripts/run.js`.",
+    );
+    await mkdir(join(directory, "assets")); await mkdir(join(directory, "scripts"));
+    for (const file of ["prefix.bin", "url.bin", "negative.bin", "real.bin"]) {
+      await writeFile(join(directory, "assets", file), file);
+    }
+    await writeFile(join(directory, "scripts", "run.js"), "code");
+    const registry = new SkillRegistry({ globalRoots: [f.globalRoot], authorizeResource: () => true });
+    const matched = (await registry.match("explicit references"))!;
+
+    await expect(registry.resolveResource(matched, "assets/prefix.bin")).rejects.toThrow(/referenced/i);
+    await expect(registry.resolveResource(matched, "assets/url.bin")).rejects.toThrow(/referenced/i);
+    await expect(registry.resolveResource(matched, "assets/negative.bin")).rejects.toThrow(/referenced/i);
+    await expect(registry.resolveResource(matched, "assets/real.bin")).resolves.toMatchObject({
+      path: join(directory, "assets", "real.bin"), reference: "assets/real.bin", size: 8,
+    });
+    await expect(registry.resolveResource(matched, "scripts/run.js")).resolves.toMatchObject({ reference: "scripts/run.js" });
+  });
+
+  it("preserves binary resources and fatally decodes explicit text reads", async () => {
+    const f = await fixture();
+    const directory = await skill(
+      f.globalRoot, "binary", "name: binary\ndescription: Binary assets",
+      "[blob](assets/blob.bin) and [text](references/invalid.txt)",
+    );
+    await mkdir(join(directory, "assets")); await mkdir(join(directory, "references"));
+    const binary = Buffer.from([0x00, 0xff, 0x01]);
+    await writeFile(join(directory, "assets", "blob.bin"), binary);
+    await writeFile(join(directory, "references", "invalid.txt"), Buffer.from([0xff]));
+    const registry = new SkillRegistry({ globalRoots: [f.globalRoot], authorizeResource: () => true });
+    const matched = (await registry.match("binary assets"))!;
+
+    expect(await registry.readResource(matched, "assets/blob.bin")).toEqual(binary);
+    await expect(registry.readTextResource(matched, "references/invalid.txt")).rejects.toThrow(/utf-?8|encoding/i);
+  });
+
+  it("pins SKILL.md reads to the verified handle and rejects opened-file identity mismatches", async () => {
+    const f = await fixture();
+    const directory = await skill(f.globalRoot, "pinned", "name: pinned\ndescription: Pinned body", "ORIGINAL");
+    let opens = 0;
+    const registry = new SkillRegistry({
+      globalRoots: [f.globalRoot],
+      openFile: async (path, flags) => {
+        opens += 1;
+        if (opens !== 2) return fsOpen(path, flags);
+        const handle = await fsOpen(path, flags);
+        await rename(path, `${path}.old`);
+        await writeFile(path, "---\nname: pinned\ndescription: Pinned body\n---\nREPLACEMENT");
+        return handle;
+      },
+    });
+    const matched = (await registry.match("pinned body"))!;
+    expect(await registry.loadBody(matched)).toBe("ORIGINAL");
+    expect(opens).toBe(2);
+
+    let mismatchOpens = 0;
+    const mismatch = new SkillRegistry({
+      globalRoots: [f.globalRoot],
+      openFile: async (path, flags) => {
+        mismatchOpens += 1;
+        if (mismatchOpens !== 2) return fsOpen(path, flags);
+        await rename(path, `${path}.replacement-old`);
+        await writeFile(path, "---\nname: pinned\ndescription: Pinned body\n---\nDIFFERENT");
+        return fsOpen(path, flags);
+      },
+    });
+    const mismatched = (await mismatch.match("pinned body"))!;
+    await expect(mismatch.loadBody(mismatched)).rejects.toThrow(/changed|identity|mismatch/i);
+  });
+
+  it("enforces resource bounds during resolution and detects replacement before reading", async () => {
+    const f = await fixture();
+    const directory = await skill(
+      f.globalRoot, "resource-race", "name: resource-race\ndescription: Resource race",
+      "[large](assets/large.bin) and [race](assets/race.bin)",
+    );
+    await mkdir(join(directory, "assets"));
+    await writeFile(join(directory, "assets", "large.bin"), Buffer.alloc(5));
+    await writeFile(join(directory, "assets", "race.bin"), Buffer.from("OLD"));
+    let resourceOpens = 0;
+    const registry = new SkillRegistry({
+      globalRoots: [f.globalRoot], maxResourceBytes: 4, authorizeResource: () => true,
+      openFile: async (path, flags) => {
+        const handle = await fsOpen(path, flags);
+        if (path.endsWith("race.bin") && ++resourceOpens === 1) {
+          await rename(path, `${path}.old`);
+          await writeFile(path, "NEW");
+        }
+        return handle;
+      },
+    });
+    const matched = (await registry.match("resource race"))!;
+
+    await expect(registry.resolveResource(matched, "assets/large.bin")).rejects.toThrow(/resource.*large/i);
+    await expect(registry.readResource(matched, "assets/race.bin")).rejects.toThrow(/changed|identity|mismatch/i);
+  });
+
+  it("does not depend on locale collation for discovery or matching", async () => {
+    const f = await fixture();
+    await skill(f.globalRoot, "alpha", "name: alpha\ndescription: Tie");
+    await skill(f.globalRoot, "beta", "name: beta\ndescription: Tie");
+    const original = String.prototype.localeCompare;
+    String.prototype.localeCompare = () => { throw new Error("locale collation used"); };
+    try {
+      const registry = new SkillRegistry({ globalRoots: [f.globalRoot] });
+      expect((await registry.match("tie"))?.name).toBe("alpha");
+    } finally {
+      String.prototype.localeCompare = original;
+    }
   });
 });

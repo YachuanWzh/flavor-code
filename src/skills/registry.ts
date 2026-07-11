@@ -1,5 +1,7 @@
 import { constants } from "node:fs";
-import { access, lstat, open, readdir, readFile, realpath, stat } from "node:fs/promises";
+import type { Stats } from "node:fs";
+import { lstat, open as defaultOpen, readdir, realpath } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import { parseDocument } from "yaml";
@@ -28,6 +30,14 @@ export type SkillResourceAuthorizer = (
   skill: SkillMetadata,
 ) => boolean | Promise<boolean>;
 
+export type SkillFileOpener = (path: string, flags: number) => Promise<FileHandle>;
+
+export interface ResolvedSkillResource {
+  readonly path: string;
+  readonly reference: string;
+  readonly size: number;
+}
+
 export interface SkillRegistryOptions {
   globalRoots?: readonly string[];
   projectRoots?: readonly string[];
@@ -36,6 +46,7 @@ export interface SkillRegistryOptions {
   maxMetadataBytes?: number;
   maxBodyBytes?: number;
   maxResourceBytes?: number;
+  openFile?: SkillFileOpener;
 }
 
 interface SkillRecord {
@@ -49,6 +60,20 @@ interface ParsedFrontmatter {
   bodyOffset: number;
 }
 
+interface FileSnapshot {
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}
+
+interface VerifiedFile {
+  handle: FileHandle;
+  path: string;
+  snapshot: FileSnapshot;
+}
+
 const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const RESOURCE_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 const RESOURCE_DIRECTORIES = new Set(["assets", "references", "scripts"]);
@@ -59,7 +84,7 @@ const DEFAULT_RESOURCE_LIMIT = 1024 * 1024;
 export class SkillRegistry {
   readonly #options: Required<Pick<SkillRegistryOptions,
     "globalRoots" | "projectRoots" | "maxMetadataBytes" | "maxBodyBytes" | "maxResourceBytes"
-  >> & Pick<SkillRegistryOptions, "selector" | "authorizeResource">;
+  >> & Pick<SkillRegistryOptions, "selector" | "authorizeResource"> & { openFile: SkillFileOpener };
   readonly #records = new Map<string, SkillRecord>();
   #diagnostics: SkillDiagnostic[] = [];
   #discovered = false;
@@ -71,6 +96,7 @@ export class SkillRegistry {
       maxMetadataBytes: positiveLimit(options.maxMetadataBytes, DEFAULT_METADATA_LIMIT, "maxMetadataBytes"),
       maxBodyBytes: positiveLimit(options.maxBodyBytes, DEFAULT_BODY_LIMIT, "maxBodyBytes"),
       maxResourceBytes: positiveLimit(options.maxResourceBytes, DEFAULT_RESOURCE_LIMIT, "maxResourceBytes"),
+      openFile: options.openFile ?? openFile,
       ...(options.selector === undefined ? {} : { selector: options.selector }),
       ...(options.authorizeResource === undefined ? {} : { authorizeResource: options.authorizeResource }),
     };
@@ -99,7 +125,7 @@ export class SkillRegistry {
     const candidates = this.#sortedMetadata()
       .map((metadata) => ({ metadata, score: score(metadata, queryTerms) }))
       .filter(({ score: value }) => value > 0)
-      .sort((left, right) => right.score - left.score || left.metadata.name.localeCompare(right.metadata.name))
+      .sort((left, right) => right.score - left.score || compareCodePoints(left.metadata.name, right.metadata.name))
       .map(({ metadata }) => metadata);
     if (candidates.length === 0) return undefined;
 
@@ -117,56 +143,73 @@ export class SkillRegistry {
 
   async loadBody(skill: SkillMetadata): Promise<string> {
     const record = await this.#recordFor(skill);
-    await assertRegularContainedFile(record.skillFile, record.metadata.root, "Skill file");
-    const parsed = await readFrontmatter(record.skillFile, this.#options.maxMetadataBytes);
-    if (parsed.name !== record.metadata.name || parsed.description !== record.metadata.description) {
-      throw new Error(`Skill frontmatter changed after discovery: ${record.metadata.name}`);
-    }
-    const info = await stat(record.skillFile);
-    const bodyBytes = info.size - parsed.bodyOffset;
-    if (bodyBytes > this.#options.maxBodyBytes) {
-      throw new Error(`Skill body is too large: ${record.metadata.name}`);
-    }
-    const handle = await open(record.skillFile, "r");
+    const file = await openVerifiedFile(record.skillFile, record.metadata.root, "Skill file", this.#options.openFile);
     try {
-      const body = Buffer.alloc(bodyBytes);
-      let bytesRead = 0;
-      while (bytesRead < bodyBytes) {
-        const result = await handle.read(body, bytesRead, bodyBytes - bytesRead, parsed.bodyOffset + bytesRead);
-        if (result.bytesRead === 0) throw new Error(`Skill body changed while loading: ${record.metadata.name}`);
-        bytesRead += result.bytesRead;
+      const parsed = await readFrontmatter(file.handle, this.#options.maxMetadataBytes);
+      if (parsed.name !== record.metadata.name || parsed.description !== record.metadata.description) {
+        throw new Error(`Skill frontmatter changed after discovery: ${record.metadata.name}`);
       }
-      return body.toString("utf8");
+      const expectedBytes = file.snapshot.size - parsed.bodyOffset;
+      if (expectedBytes > this.#options.maxBodyBytes) throw new Error(`Skill body is too large: ${record.metadata.name}`);
+      const body = await readBounded(file.handle, parsed.bodyOffset, this.#options.maxBodyBytes);
+      if (body.length !== expectedBytes) throw new Error(`Skill body changed while loading: ${record.metadata.name}`);
+      await assertHandleUnchanged(file.handle, file.snapshot, "Skill file");
+      return decodeUtf8(body, `Skill body for ${record.metadata.name}`);
     } finally {
-      await handle.close();
+      await file.handle.close();
     }
   }
 
-  async resolveResource(skill: SkillMetadata, reference: string): Promise<string> {
+  async resolveResource(skill: SkillMetadata, reference: string): Promise<ResolvedSkillResource> {
+    const resolved = await this.#resolveResource(skill, reference);
+    return Object.freeze({ path: resolved.path, reference: resolved.reference, size: resolved.snapshot.size });
+  }
+
+  async readResource(skill: SkillMetadata, reference: string): Promise<Buffer> {
+    const resolved = await this.#resolveResource(skill, reference);
+    const file = await openVerifiedFile(
+      resolved.path, resolved.record.metadata.root, "Resource", this.#options.openFile, resolved.snapshot,
+    );
+    try {
+      const content = await readBounded(file.handle, 0, this.#options.maxResourceBytes);
+      if (content.length !== file.snapshot.size) throw new Error(`Skill resource changed while loading: ${resolved.reference}`);
+      await assertHandleUnchanged(file.handle, file.snapshot, "Resource");
+      return content;
+    } finally {
+      await file.handle.close();
+    }
+  }
+
+  async readTextResource(skill: SkillMetadata, reference: string): Promise<string> {
+    return decodeUtf8(await this.readResource(skill, reference), `Skill resource ${reference}`);
+  }
+
+  async #resolveResource(skill: SkillMetadata, reference: string): Promise<{
+    path: string; reference: string; snapshot: FileSnapshot; record: SkillRecord;
+  }> {
     const record = await this.#recordFor(skill);
-    const normalized = reference.replaceAll("\\", "/");
+    const normalized = normalizeReference(reference);
     const parts = normalized.split("/");
     if (isAbsolute(reference) || parts.includes("..") || parts.length !== 2 || !RESOURCE_DIRECTORIES.has(parts[0] ?? "")
       || !RESOURCE_NAME.test(parts[1] ?? "")) {
       throw new Error(`Resource reference escapes the skill root or is not a direct resource: ${reference}`);
     }
-    const body = (await this.loadBody(record.metadata)).replaceAll("\\", "/");
-    const references = new Set(body.match(/(?:assets|references|scripts)\/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?/g) ?? []);
+    const body = await this.loadBody(record.metadata);
+    const references = extractResourceReferences(body);
     if (!references.has(normalized)) throw new Error(`Skill resource is not directly referenced: ${reference}`);
     const candidate = resolve(record.metadata.root, ...parts);
-    await assertRegularContainedFile(candidate, record.metadata.root, "Resource");
-    const authorize = this.#options.authorizeResource;
-    if (authorize === undefined || !(await authorize(candidate, record.metadata))) {
-      throw new Error(`Permission denied for skill resource: ${reference}`);
+    const file = await openVerifiedFile(candidate, record.metadata.root, "Resource", this.#options.openFile);
+    try {
+      if (file.snapshot.size > this.#options.maxResourceBytes) throw new Error(`Skill resource is too large: ${reference}`);
+      const authorize = this.#options.authorizeResource;
+      if (authorize === undefined || !(await authorize(file.path, record.metadata))) {
+        throw new Error(`Permission denied for skill resource: ${reference}`);
+      }
+      await assertHandleUnchanged(file.handle, file.snapshot, "Resource");
+      return { path: file.path, reference: normalized, snapshot: file.snapshot, record };
+    } finally {
+      await file.handle.close();
     }
-    return candidate;
-  }
-
-  async readResource(skill: SkillMetadata, reference: string): Promise<string> {
-    const path = await this.resolveResource(skill, reference);
-    const info = await stat(path);
-    if (info.size > this.#options.maxResourceBytes) throw new Error(`Skill resource is too large: ${reference}`);
-    return readFile(path, "utf8");
   }
 
   async #discoverSource(roots: readonly string[], source: SkillSource): Promise<SkillRecord[]> {
@@ -183,7 +226,7 @@ export class SkillRegistry {
         this.#diagnose(root, error);
         continue;
       }
-      entries.sort((left, right) => left.name.localeCompare(right.name));
+      entries.sort((left, right) => compareCodePoints(left.name, right.name));
       for (const entry of entries) {
         const skillRoot = resolve(root, entry.name);
         try {
@@ -192,8 +235,9 @@ export class SkillRegistry {
           const physicalRoot = await realpath(skillRoot);
           if (!isWithin(root, physicalRoot)) throw new Error("Skill directory escapes its registry root");
           const skillFile = resolve(skillRoot, "SKILL.md");
-          await assertRegularContainedFile(skillFile, physicalRoot, "Skill file");
-          const parsed = await readFrontmatter(skillFile, this.#options.maxMetadataBytes);
+          const parsed = await readFrontmatterFile(
+            skillFile, physicalRoot, this.#options.maxMetadataBytes, this.#options.openFile,
+          );
           if (!SKILL_NAME.test(parsed.name)) throw new Error(`Invalid skill name: ${parsed.name}`);
           if (entry.name !== parsed.name) throw new Error("Skill folder must exactly match frontmatter name");
           found.push({
@@ -228,7 +272,7 @@ export class SkillRegistry {
 
   #sortedMetadata(): SkillMetadata[] {
     return [...this.#records.values()].map(({ metadata }) => metadata)
-      .sort((left, right) => left.name.localeCompare(right.name));
+      .sort((left, right) => compareCodePoints(left.name, right.name));
   }
 
   #diagnose(path: string, error: unknown): void {
@@ -242,22 +286,43 @@ function positiveLimit(value: number | undefined, fallback: number, name: string
   return result;
 }
 
-async function readFrontmatter(path: string, maxBytes: number): Promise<ParsedFrontmatter> {
-  const handle = await open(path, "r");
+async function readFrontmatterFile(
+  path: string,
+  root: string,
+  maxBytes: number,
+  opener: SkillFileOpener,
+): Promise<ParsedFrontmatter> {
+  const file = await openVerifiedFile(path, root, "Skill file", opener);
+  try {
+    const parsed = await readFrontmatter(file.handle, maxBytes);
+    await assertHandleUnchanged(file.handle, file.snapshot, "Skill file");
+    return parsed;
+  } finally {
+    await file.handle.close();
+  }
+}
+
+async function readFrontmatter(handle: FileHandle, maxBytes: number): Promise<ParsedFrontmatter> {
   try {
     let offset = 0;
     const first = await readLine(handle, offset, maxBytes);
-    if (first === undefined || cleanLine(first.bytes) !== "---") throw new Error("SKILL.md must open with YAML frontmatter");
+    if (first === undefined || !isDelimiter(first.bytes)) throw new Error("SKILL.md must open with YAML frontmatter");
     offset = first.nextOffset;
     const yamlLines: Buffer[] = [];
     while (offset <= maxBytes) {
       const line = await readLine(handle, offset, maxBytes - offset);
       if (line === undefined) throw new Error("YAML frontmatter is not closed");
       offset = line.nextOffset;
-      if (cleanLine(line.bytes) === "---") {
-        const document = parseDocument(Buffer.concat(yamlLines).toString("utf8"), { uniqueKeys: true });
+      if (isDelimiter(line.bytes)) {
+        const document = parseDocument(decodeUtf8(Buffer.concat(yamlLines), "Skill frontmatter"), { uniqueKeys: true });
         if (document.errors.length > 0) throw new Error(`Invalid YAML frontmatter: ${document.errors[0]?.message ?? "parse error"}`);
-        const metadata: unknown = document.toJS({ maxAliasCount: 20 });
+        if (document.warnings.length > 0) throw new Error(`Unsafe YAML frontmatter: ${document.warnings[0]?.message ?? "warning"}`);
+        let metadata: unknown;
+        try {
+          metadata = document.toJS({ maxAliasCount: 0 });
+        } catch (error) {
+          throw new Error("YAML aliases are not allowed", { cause: error });
+        }
         if (!isPlainRecord(metadata)) throw new Error("Skill frontmatter must be a mapping");
         const keys = Object.keys(metadata).sort();
         if (keys.length !== 2 || keys[0] !== "description" || keys[1] !== "name") {
@@ -274,15 +339,13 @@ async function readFrontmatter(path: string, maxBytes: number): Promise<ParsedFr
   } catch (error) {
     if (error instanceof MetadataLimitError) throw new Error("Skill metadata is too large");
     throw error;
-  } finally {
-    await handle.close();
   }
 }
 
 class MetadataLimitError extends Error {}
 
 async function readLine(
-  handle: Awaited<ReturnType<typeof open>>,
+  handle: FileHandle,
   start: number,
   remaining: number,
 ): Promise<{ bytes: Buffer; nextOffset: number } | undefined> {
@@ -300,21 +363,90 @@ async function readLine(
   throw new MetadataLimitError();
 }
 
-function cleanLine(line: Buffer): string {
-  return line.toString("utf8").replace(/\r?\n$/, "");
+function isDelimiter(line: Buffer): boolean {
+  const end = line.at(-1) === 10 ? line.length - (line.at(-2) === 13 ? 2 : 1) : line.length;
+  return end === 3 && line[0] === 45 && line[1] === 45 && line[2] === 45;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-async function assertRegularContainedFile(path: string, root: string, label: string): Promise<void> {
-  const info = await lstat(path);
-  if (info.isSymbolicLink()) throw new Error(`${label} symlinks are not allowed`);
+async function openFile(path: string, flags: number): Promise<FileHandle> {
+  return defaultOpen(path, flags);
+}
+
+async function openVerifiedFile(
+  path: string,
+  root: string,
+  label: string,
+  opener: SkillFileOpener,
+  expected?: FileSnapshot,
+): Promise<VerifiedFile> {
+  const initial = await lstat(path);
+  if (initial.isSymbolicLink()) throw new Error(`${label} symlinks are not allowed`);
+  assertRegular(initial, label);
+  const canonical = await realpath(path);
+  if (!isWithin(root, canonical)) throw new Error(`${label} escapes the skill root`);
+  const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+  const handle = await opener(canonical, constants.O_RDONLY | noFollow);
+  try {
+    const opened = await handle.stat();
+    assertRegular(opened, label);
+    const initialSnapshot = snapshot(initial);
+    const openedSnapshot = snapshot(opened);
+    if (!sameIdentityAndSize(initialSnapshot, openedSnapshot)
+      || (expected !== undefined && !sameSnapshot(expected, openedSnapshot))) {
+      throw new Error(`${label} identity or metadata changed while opening`);
+    }
+    return { handle, path: canonical, snapshot: openedSnapshot };
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+}
+
+function assertRegular(info: Stats, label: string): void {
   if (!info.isFile()) throw new Error(`${label} must be a regular file`);
-  await access(path, constants.R_OK);
-  const physical = await realpath(path);
-  if (!isWithin(root, physical)) throw new Error(`${label} escapes the skill root`);
+}
+
+function snapshot(info: Stats): FileSnapshot {
+  return { dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs };
+}
+
+function sameSnapshot(left: FileSnapshot, right: FileSnapshot): boolean {
+  return sameIdentityAndSize(left, right)
+    && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
+
+function sameIdentityAndSize(left: FileSnapshot, right: FileSnapshot): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size;
+}
+
+async function assertHandleUnchanged(handle: FileHandle, expected: FileSnapshot, label: string): Promise<void> {
+  const current = await handle.stat();
+  assertRegular(current, label);
+  if (!sameSnapshot(expected, snapshot(current))) throw new Error(`${label} changed while reading`);
+}
+
+async function readBounded(handle: FileHandle, position: number, maxBytes: number): Promise<Buffer> {
+  const buffer = Buffer.alloc(maxBytes + 1);
+  let total = 0;
+  while (total < buffer.length) {
+    const { bytesRead } = await handle.read(buffer, total, buffer.length - total, position + total);
+    if (bytesRead === 0) break;
+    total += bytesRead;
+  }
+  if (total > maxBytes) throw new Error("File content exceeds configured size limit");
+  return buffer.subarray(0, total);
+}
+
+function decodeUtf8(content: Uint8Array, label: string): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(content);
+  } catch (error) {
+    throw new Error(`${label} contains invalid UTF-8 encoding`, { cause: error });
+  }
 }
 
 function isWithin(root: string, candidate: string): boolean {
@@ -324,6 +456,31 @@ function isWithin(root: string, candidate: string): boolean {
 
 function isMissing(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+function normalizeReference(reference: string): string {
+  return reference.replaceAll("\\", "/");
+}
+
+function extractResourceReferences(body: string): Set<string> {
+  const found = new Set<string>();
+  const markdownLink = /!?\[[^\]\r\n]*\]\(\s*(?:<([^>\r\n]+)>|([^\s)\r\n]+))(?:\s+["'][^"'\r\n]*["'])?\s*\)/g;
+  for (const match of body.matchAll(markdownLink)) addExplicitReference(found, match[1] ?? match[2] ?? "");
+  const inlineCode = /(`+)([^`\r\n]+)\1/g;
+  for (const match of body.matchAll(inlineCode)) addExplicitReference(found, match[2]?.trim() ?? "");
+  return found;
+}
+
+function addExplicitReference(found: Set<string>, value: string): void {
+  const normalized = normalizeReference(value);
+  const parts = normalized.split("/");
+  if (parts.length === 2 && RESOURCE_DIRECTORIES.has(parts[0] ?? "") && RESOURCE_NAME.test(parts[1] ?? "")) {
+    found.add(normalized);
+  }
+}
+
+function compareCodePoints(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function terms(value: string): Set<string> {
