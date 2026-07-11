@@ -143,8 +143,18 @@ export class AgentLoop {
         }
         yield { type: "tool-start", id: call.id, name: call.name, input: call.input };
         const result = await this.#options.runtime.execute(call, { agent: "main", ...(request.signal === undefined ? {} : { signal: request.signal }) });
+        if (request.signal?.aborted) {
+          yield { type: "error", error: { code: "cancelled", message: abortMessage(request.signal) } };
+          return;
+        }
+        try {
+          const message = toolResultMessage(call.id, result);
+          this.#options.context.append(message);
+        } catch (error) {
+          yield { type: "error", error: normalizeProviderError(error) };
+          return;
+        }
         yield { type: "tool-end", id: call.id, name: call.name, result };
-        this.#options.context.append(toolResultMessage(call.id, result));
       }
     }
 

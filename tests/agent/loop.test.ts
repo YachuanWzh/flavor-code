@@ -88,11 +88,44 @@ describe("AgentLoop", () => {
     expect(events).toContainEqual({ type: "usage", inputTokens: 4, outputTokens: 2, totalInputTokens: 4, totalOutputTokens: 2 });
     expect(events.at(-1)).toEqual({ type: "error", error: { code: "context_overflow", message: "incomplete" } });
   });
+
+  it("reports cancellation that occurs while a tool is running", async () => {
+    const controller = new AbortController();
+    const fixture = createLoop({
+      adapter: fakeAdapter([[
+        { type: "tool-call", id: "call", name: "echo", input: { value: "wait" } },
+        { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      ]]),
+      execute: async (_input, signal) => new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        queueMicrotask(() => controller.abort(new Error("stop now")));
+      }),
+    });
+
+    const events = await collect(fixture.loop.run({ prompt: "go", signal: controller.signal }));
+
+    expect(events.at(-1)).toEqual({ type: "error", error: { code: "cancelled", message: "stop now" } });
+    expect(events.some((event) => event.type === "tool-end")).toBe(false);
+  });
+
+  it("turns non-serializable tool output into a typed terminal error", async () => {
+    const fixture = createLoop({
+      adapter: fakeAdapter([[
+        { type: "tool-call", id: "call", name: "echo", input: { value: "big" } },
+        { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      ]]),
+      execute: async () => 1n,
+    });
+
+    const events = await collect(fixture.loop.run({ prompt: "go" }));
+
+    expect(events.at(-1)).toEqual(expect.objectContaining({ type: "error", error: { code: "unknown", message: expect.stringContaining("BigInt") } }));
+  });
 });
 
 function createLoop(options: {
   adapter: ModelAdapter;
-  execute?: (input: { value: string }) => Promise<unknown>;
+  execute?: (input: { value: string }, signal: AbortSignal) => Promise<unknown>;
   maxIterations?: number;
 }) {
   const hooks = new HookBus();

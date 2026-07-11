@@ -67,6 +67,17 @@ describe("ContextManager", () => {
   it("uses the documented character token estimate", () => {
     expect(estimateTokens("12345")).toBe(2);
   });
+
+  it("includes model-visible tool-call arguments in compaction sizing", () => {
+    const context = createContext({ compactAtChars: 100, recentTurns: 0 });
+    context.append({
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "call", name: "echo", input: { value: "x".repeat(200) } }],
+    });
+    expect(context.needsCompaction()).toBe(true);
+    expect(context.estimatedTokens()).toBeGreaterThan(50);
+  });
 });
 
 function createContext(overrides: Partial<ConstructorParameters<typeof ContextManager>[0]> = {}) {

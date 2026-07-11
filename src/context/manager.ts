@@ -58,11 +58,11 @@ export class ContextManager {
   }
 
   estimatedTokens(): number {
-    return estimateTokens(this.messagesForModel().map((message) => message.content).join("\n"));
+    return estimateTokens(this.messagesForModel().map(messageVisibleText).join("\n"));
   }
 
   needsCompaction(): boolean {
-    return this.messagesForModel().reduce((total, message) => total + message.content.length, 0) >= this.#compactAtChars;
+    return this.messagesForModel().reduce((total, message) => total + messageVisibleText(message).length, 0) >= this.#compactAtChars;
   }
 
   async compact(): Promise<boolean> {
@@ -118,5 +118,20 @@ function truncateToolOutput(content: string, limit: number): string {
 }
 
 function estimateMessageTokens(messages: readonly ModelMessage[]): number {
-  return estimateTokens(messages.map((message) => message.content).join("\n"));
+  return estimateTokens(messages.map(messageVisibleText).join("\n"));
+}
+
+function messageVisibleText(message: ModelMessage): string {
+  return `${message.content}${message.toolCalls === undefined ? "" : `\n${serializeForEstimate(message.toolCalls)}`}`;
+}
+
+function serializeForEstimate(value: unknown): string {
+  const seen = new WeakSet<object>();
+  return JSON.stringify(value, (_key, item: unknown) => {
+    if (typeof item === "bigint") return `${item}n`;
+    if (typeof item !== "object" || item === null) return item;
+    if (seen.has(item)) return "[Circular]";
+    seen.add(item);
+    return item;
+  }) ?? String(value);
 }
