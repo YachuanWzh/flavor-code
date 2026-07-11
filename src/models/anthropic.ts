@@ -1,4 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
+import type {
+  MessageDeltaUsage,
+  MessageParam,
+  MessageStreamParams,
+  RawMessageStreamEvent,
+  Usage,
+} from "@anthropic-ai/sdk/resources/messages/messages.js";
 
 import {
   normalizeProviderError,
@@ -7,9 +14,12 @@ import {
   type ModelRequest,
 } from "./types.js";
 
-interface AnthropicClient {
+export interface AnthropicClient {
   messages: {
-    stream(body: unknown, options?: unknown): AsyncIterable<unknown>;
+    stream(
+      body: MessageStreamParams,
+      options?: Anthropic.RequestOptions,
+    ): AsyncIterable<RawMessageStreamEvent>;
   };
 }
 
@@ -19,19 +29,24 @@ export interface AnthropicModelAdapterOptions {
   client?: AnthropicClient;
 }
 
-interface AnthropicEvent {
-  type?: string;
-  index?: number;
-  message?: { usage?: { input_tokens?: number; output_tokens?: number } };
-  usage?: { input_tokens?: number | null; output_tokens?: number };
-  content_block?: { type?: string; id?: string; name?: string };
-  delta?: { type?: string; text?: string; partial_json?: string };
-}
+type AnthropicUsage = Pick<
+  Usage | MessageDeltaUsage,
+  | "input_tokens"
+  | "cache_creation_input_tokens"
+  | "cache_read_input_tokens"
+  | "output_tokens"
+>;
 
 interface PendingToolCall {
   id: string;
   name: string;
   json: string;
+}
+
+interface InputUsageSnapshot {
+  base: number;
+  cacheCreation: number;
+  cacheRead: number;
 }
 
 function parseJson(input: string): unknown {
@@ -40,6 +55,17 @@ function parseJson(input: string): unknown {
   } catch {
     return input;
   }
+}
+
+function updateInputUsage(snapshot: InputUsageSnapshot, usage: AnthropicUsage | undefined): number {
+  if (usage?.input_tokens != null) snapshot.base = usage.input_tokens;
+  if (usage?.cache_creation_input_tokens != null) {
+    snapshot.cacheCreation = usage.cache_creation_input_tokens;
+  }
+  if (usage?.cache_read_input_tokens != null) {
+    snapshot.cacheRead = usage.cache_read_input_tokens;
+  }
+  return snapshot.base + snapshot.cacheCreation + snapshot.cacheRead;
 }
 
 export class AnthropicModelAdapter implements ModelAdapter {
@@ -57,6 +83,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
   async *stream(request: ModelRequest): AsyncIterable<ModelEvent> {
     let inputTokens = 0;
     let outputTokens = 0;
+    const inputUsage = { base: 0, cacheCreation: 0, cacheRead: 0 };
     const pendingTools = new Map<number, PendingToolCall>();
 
     try {
@@ -64,7 +91,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
         .filter((message) => message.role === "system")
         .map((message) => message.content)
         .join("\n\n");
-      const messages = request.messages
+      const messages: MessageParam[] = request.messages
         .filter((message) => message.role !== "system")
         .map((message) => {
           if (message.role === "tool") {
@@ -83,25 +110,22 @@ export class AnthropicModelAdapter implements ModelAdapter {
           return { role: message.role, content: message.content };
         });
 
-      const stream = this.client.messages.stream(
-        {
-          model: request.model,
-          max_tokens: 4096,
-          messages,
-          ...(system ? { system } : {}),
-          tools: request.tools.map((tool) => ({
-            name: tool.name,
-            description: tool.description,
-            input_schema: tool.inputSchema,
-          })),
-        },
-        { signal: request.signal },
-      );
+      const body: MessageStreamParams = {
+        model: request.model,
+        max_tokens: 4096,
+        messages,
+        ...(system ? { system } : {}),
+        tools: request.tools.map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          input_schema: { ...tool.inputSchema, type: "object" as const },
+        })),
+      };
+      const stream = this.client.messages.stream(body, { signal: request.signal });
 
-      for await (const rawEvent of stream) {
-        const event = rawEvent as AnthropicEvent;
+      for await (const event of stream) {
         if (event.type === "message_start") {
-          inputTokens = event.message?.usage?.input_tokens ?? inputTokens;
+          inputTokens = updateInputUsage(inputUsage, event.message?.usage);
           outputTokens = event.message?.usage?.output_tokens ?? outputTokens;
         } else if (
           event.type === "content_block_start" &&
@@ -136,7 +160,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
             pendingTools.delete(event.index);
           }
         } else if (event.type === "message_delta") {
-          inputTokens = event.usage?.input_tokens ?? inputTokens;
+          inputTokens = updateInputUsage(inputUsage, event.usage);
           outputTokens = event.usage?.output_tokens ?? outputTokens;
         } else if (event.type === "message_stop") {
           const usage = { inputTokens, outputTokens };

@@ -1,4 +1,8 @@
 import OpenAI from "openai";
+import type {
+  ResponseInputItem,
+  ResponseStreamEvent,
+} from "openai/resources/responses/responses.js";
 
 import {
   normalizeProviderError,
@@ -8,9 +12,14 @@ import {
   type ModelRequest,
 } from "./types.js";
 
-interface OpenAIClient {
+type OpenAIStreamRequest = Parameters<OpenAI["responses"]["stream"]>[0];
+
+export interface OpenAIClient {
   responses: {
-    stream(body: unknown, options?: unknown): AsyncIterable<unknown>;
+    stream(
+      body: OpenAIStreamRequest,
+      options?: OpenAI.RequestOptions,
+    ): AsyncIterable<ResponseStreamEvent>;
   };
 }
 
@@ -20,26 +29,7 @@ export interface OpenAIModelAdapterOptions {
   client?: OpenAIClient;
 }
 
-interface StreamEvent {
-  type?: string;
-  delta?: string;
-  item_id?: string;
-  name?: string;
-  arguments?: string;
-  item?: {
-    type?: string;
-    id?: string;
-    call_id?: string;
-  };
-  code?: string | null;
-  message?: string;
-  response?: {
-    usage?: { input_tokens?: number; output_tokens?: number } | null;
-    error?: { code?: string; message?: string } | null;
-  };
-}
-
-function toInput(message: ModelMessage): Record<string, unknown> {
+function toInput(message: ModelMessage): ResponseInputItem {
   if (message.role === "tool") {
     if (!message.toolCallId) throw new Error("Tool messages require toolCallId");
     return {
@@ -72,45 +62,62 @@ export class OpenAIModelAdapter implements ModelAdapter {
   }
 
   async *stream(request: ModelRequest): AsyncIterable<ModelEvent> {
-    const callIds = new Map<string, string>();
+    const callIds = new Map<number, string>();
+    const pendingCalls = new Map<number, { name: string; arguments: string }>();
     try {
-      const stream = this.client.responses.stream(
-        {
-          model: request.model,
-          input: request.messages.map(toInput),
-          tools: request.tools.map((tool) => ({
-            type: "function",
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.inputSchema,
-            strict: false,
-          })),
-        },
-        { signal: request.signal },
-      );
+      const body: OpenAIStreamRequest = {
+        model: request.model,
+        input: request.messages.map(toInput),
+        tools: request.tools.map((tool) => ({
+          type: "function",
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.inputSchema,
+          strict: false,
+        })),
+      };
+      const stream = this.client.responses.stream(body, { signal: request.signal });
 
-      for await (const rawEvent of stream) {
-        const event = rawEvent as StreamEvent;
+      for await (const event of stream) {
         if (
-          event.type === "response.output_item.added" &&
+          (event.type === "response.output_item.added" ||
+            event.type === "response.output_item.done") &&
           event.item?.type === "function_call" &&
-          event.item.id &&
+          event.output_index !== undefined &&
           event.item.call_id
         ) {
-          callIds.set(event.item.id, event.item.call_id);
+          callIds.set(event.output_index, event.item.call_id);
+          const pending = pendingCalls.get(event.output_index);
+          if (pending) {
+            yield {
+              type: "tool-call",
+              id: event.item.call_id,
+              name: pending.name,
+              input: parseJson(pending.arguments),
+            };
+            pendingCalls.delete(event.output_index);
+          }
         } else if (event.type === "response.output_text.delta" && event.delta) {
           yield { type: "text", text: event.delta };
         } else if (
           event.type === "response.function_call_arguments.done" &&
-          event.item_id &&
+          event.output_index !== undefined &&
           event.name
         ) {
-          yield {
-            type: "tool-call",
-            id: callIds.get(event.item_id) ?? event.item_id,
-            name: event.name,
-            input: parseJson(event.arguments ?? ""),
-          };
+          const callId = callIds.get(event.output_index);
+          if (callId) {
+            yield {
+              type: "tool-call",
+              id: callId,
+              name: event.name,
+              input: parseJson(event.arguments ?? ""),
+            };
+          } else {
+            pendingCalls.set(event.output_index, {
+              name: event.name,
+              arguments: event.arguments ?? "",
+            });
+          }
         } else if (event.type === "response.completed") {
           const usage = {
             inputTokens: event.response?.usage?.input_tokens ?? 0,
@@ -118,6 +125,18 @@ export class OpenAIModelAdapter implements ModelAdapter {
           };
           yield { type: "usage", ...usage };
           yield { type: "done", usage };
+        } else if (event.type === "response.incomplete") {
+          const usage = {
+            inputTokens: event.response?.usage?.input_tokens ?? 0,
+            outputTokens: event.response?.usage?.output_tokens ?? 0,
+          };
+          const reason = event.response?.incomplete_details?.reason ?? "unknown reason";
+          yield { type: "usage", ...usage };
+          yield {
+            type: "error",
+            error: normalizeProviderError({ message: `Response incomplete: ${reason}` }),
+          };
+          return;
         } else if (event.type === "error") {
           yield { type: "error", error: normalizeProviderError(event) };
           return;
