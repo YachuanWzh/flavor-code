@@ -121,6 +121,61 @@ describe("AgentLoop", () => {
 
     expect(events.at(-1)).toEqual(expect.objectContaining({ type: "error", error: { code: "unknown", message: expect.stringContaining("BigInt") } }));
   });
+
+  it("records a complete multi-tool turn atomically when cancellation interrupts execution", async () => {
+    const controller = new AbortController();
+    const requests: ModelRequest[] = [];
+    const fixture = createLoop({
+      adapter: fakeAdapter([[
+        { type: "tool-call", id: "one", name: "echo", input: { value: "one" } },
+        { type: "tool-call", id: "two", name: "echo", input: { value: "two" } },
+        { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      ], [
+        { type: "text", text: "recovered" },
+        { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      ]], requests),
+      execute: async (_input, signal) => new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        queueMicrotask(() => controller.abort(new Error("cancel tools")));
+      }),
+    });
+
+    await collect(fixture.loop.run({ prompt: "first", signal: controller.signal }));
+    const events = await collect(fixture.loop.run({ prompt: "second" }));
+
+    expect(events.at(-1)?.type).toBe("done");
+    const assistant = requests[1]?.messages.find((message) => message.toolCalls?.length === 2);
+    expect(assistant?.toolCalls?.map((call) => call.id)).toEqual(["one", "two"]);
+    expect(requests[1]?.messages.filter((message) => message.role === "tool").map((message) => message.toolCallId)).toEqual(["one", "two"]);
+    expect(requests[1]?.messages.filter((message) => message.role === "tool").every((message) => message.content.includes("cancel"))).toBe(true);
+  });
+
+  it.each([
+    ["BigInt", () => 1n],
+    ["cyclic", () => { const value: Record<string, unknown> = {}; value.self = value; return value; }],
+    ["toJSON", () => ({ toJSON() { throw new Error("bad toJSON"); } })],
+  ])("stages typed results for every call when %s output cannot serialize", async (_name, output) => {
+    const requests: ModelRequest[] = [];
+    let executions = 0;
+    const fixture = createLoop({
+      adapter: fakeAdapter([[
+        { type: "tool-call", id: "bad", name: "echo", input: { value: "bad" } },
+        { type: "tool-call", id: "skipped", name: "echo", input: { value: "skip" } },
+        { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      ], [
+        { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      ]], requests),
+      execute: async () => { executions += 1; return output(); },
+    });
+
+    await collect(fixture.loop.run({ prompt: "first" }));
+    await collect(fixture.loop.run({ prompt: "second" }));
+
+    expect(executions).toBe(1);
+    const tools = requests[1]?.messages.filter((message) => message.role === "tool") ?? [];
+    expect(tools.map((message) => message.toolCallId)).toEqual(["bad", "skipped"]);
+    expect(tools.every((message) => message.content.includes("error"))).toBe(true);
+  });
 });
 
 function createLoop(options: {
@@ -159,7 +214,7 @@ function createLoop(options: {
     tools: [{ name: tool.name, description: tool.description, inputSchema: { type: "object" } }],
     maxIterations: options.maxIterations ?? 4,
   };
-  return { loop: new AgentLoop(loopOptions), runtime };
+  return { loop: new AgentLoop(loopOptions), runtime, context };
 }
 
 function fakeAdapter(streams: ModelEvent[][], requests: ModelRequest[] = []): ModelAdapter {

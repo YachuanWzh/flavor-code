@@ -36,7 +36,7 @@ export class AgentLoop {
         return;
       }
       try {
-        if (await this.#options.context.compact()) yield { type: "compacted" };
+        if (await this.#options.context.compact(request.signal)) yield { type: "compacted" };
       } catch (error) {
         yield { type: "error", error: normalizeProviderError(error) };
         return;
@@ -122,13 +122,10 @@ export class AgentLoop {
         return;
       }
 
-      if (assistantText || toolCalls.length > 0) {
+      if (toolCalls.length === 0 && assistantText) {
         this.#options.context.append({
           role: "assistant",
           content: assistantText,
-          ...(toolCalls.length === 0 ? {} : {
-            toolCalls: toolCalls.map(({ id, name, input }) => ({ id, name, input })),
-          }),
         });
       }
       if (toolCalls.length === 0) {
@@ -136,25 +133,47 @@ export class AgentLoop {
         return;
       }
 
-      for (const call of toolCalls) {
+      const stagedMessages: ModelMessage[] = [];
+      const stagedResults: Array<{ call: (typeof toolCalls)[number]; result: ToolResult }> = [];
+      let turnError: ReturnType<typeof normalizeProviderError> | undefined;
+      for (let index = 0; index < toolCalls.length; index += 1) {
+        const call = toolCalls[index]!;
         if (request.signal?.aborted) {
-          yield { type: "error", error: { code: "cancelled", message: abortMessage(request.signal) } };
-          return;
+          turnError = { code: "cancelled", message: abortMessage(request.signal) };
+          stageSyntheticResults(toolCalls, index, turnError, stagedMessages);
+          break;
         }
         yield { type: "tool-start", id: call.id, name: call.name, input: call.input };
         const result = await this.#options.runtime.execute(call, { agent: "main", ...(request.signal === undefined ? {} : { signal: request.signal }) });
         if (request.signal?.aborted) {
-          yield { type: "error", error: { code: "cancelled", message: abortMessage(request.signal) } };
-          return;
+          turnError = { code: "cancelled", message: abortMessage(request.signal) };
+          stageSyntheticResults(toolCalls, index, turnError, stagedMessages);
+          break;
         }
         try {
-          const message = toolResultMessage(call.id, result);
-          this.#options.context.append(message);
+          stagedMessages.push(toolResultMessage(call.id, result));
+          stagedResults.push({ call, result });
         } catch (error) {
-          yield { type: "error", error: normalizeProviderError(error) };
-          return;
+          turnError = normalizeProviderError(error);
+          stageSyntheticResults(toolCalls, index, {
+            code: "serialization_error",
+            message: turnError.message,
+          }, stagedMessages);
+          break;
         }
+      }
+      const assistantMessage: ModelMessage = {
+        role: "assistant",
+        content: assistantText,
+        toolCalls: toolCalls.map(({ id, name, input }) => ({ id, name, input })),
+      };
+      this.#options.context.appendMany([assistantMessage, ...stagedMessages]);
+      for (const { call, result } of stagedResults) {
         yield { type: "tool-end", id: call.id, name: call.name, result };
+      }
+      if (turnError !== undefined) {
+        yield { type: "error", error: turnError };
+        return;
       }
     }
 
@@ -171,4 +190,19 @@ function toolResultMessage(toolCallId: string, result: ToolResult): ModelMessage
 
 function abortMessage(signal: AbortSignal): string {
   return signal.reason instanceof Error ? signal.reason.message : "Agent run cancelled";
+}
+
+function stageSyntheticResults(
+  calls: readonly { id: string; name: string; input: unknown }[],
+  start: number,
+  error: { code: string; message: string },
+  messages: ModelMessage[],
+): void {
+  for (let index = start; index < calls.length; index += 1) {
+    const call = calls[index]!;
+    const result: ToolResult = index === start
+      ? { ok: false, error }
+      : { ok: false, error: { code: "skipped", message: `Skipped after ${error.code}: ${error.message}` } };
+    messages.push(toolResultMessage(call.id, result));
+  }
 }

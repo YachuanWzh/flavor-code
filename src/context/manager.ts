@@ -10,7 +10,7 @@ export interface ContextManagerOptions {
   recentTurns?: number;
   /** @deprecated Prefer recentTurns. */
   recentMessages?: number;
-  summarize(messages: readonly ModelMessage[]): Promise<string>;
+  summarize(messages: readonly ModelMessage[], signal: AbortSignal): Promise<string>;
   hooks: HookBus;
 }
 
@@ -46,7 +46,14 @@ export class ContextManager {
   }
 
   append(message: ModelMessage): void {
-    this.#messages.push(message.role === "tool" ? { ...message, content: truncateToolOutput(message.content, this.#toolOutputChars) } : { ...message });
+    this.appendMany([message]);
+  }
+
+  appendMany(messages: readonly ModelMessage[]): void {
+    const prepared = messages.map((message) => message.role === "tool"
+      ? { ...message, content: truncateToolOutput(message.content, this.#toolOutputChars) }
+      : { ...message });
+    this.#messages.push(...prepared);
   }
 
   updateTaskState(taskState: string | undefined): void {
@@ -58,14 +65,15 @@ export class ContextManager {
   }
 
   estimatedTokens(): number {
-    return estimateTokens(this.messagesForModel().map(messageVisibleText).join("\n"));
+    return estimateTokens(modelVisibleText(this.messagesForModel()));
   }
 
   needsCompaction(): boolean {
-    return this.messagesForModel().reduce((total, message) => total + messageVisibleText(message).length, 0) >= this.#compactAtChars;
+    return modelVisibleText(this.messagesForModel()).length >= this.#compactAtChars;
   }
 
-  async compact(): Promise<boolean> {
+  async compact(signal: AbortSignal = new AbortController().signal): Promise<boolean> {
+    signal.throwIfAborted();
     if (!this.needsCompaction()) return false;
     const splitAt = recentTurnStart(this.#messages, this.#recentTurns);
     const older = this.#messages.slice(0, splitAt);
@@ -75,18 +83,27 @@ export class ContextManager {
       version: 1,
       type: "PreCompact",
       payload: { messageCount: inputs.length, estimatedTokens: estimateMessageTokens(inputs) },
-    });
+    }, signal);
+    signal.throwIfAborted();
     if (before.decision === "deny") return false;
 
-    const summary = await this.#summarize(inputs.map((message) => ({ ...message })));
-    this.#summary = { role: "system", content: `Conversation summary\n${summary}` };
-    this.#messages = this.#messages.slice(splitAt);
+    const summary = await awaitWithSignal(
+      this.#summarize(inputs.map((message) => ({ ...message })), signal),
+      signal,
+    );
+    signal.throwIfAborted();
+    const nextSummary: ModelMessage = { role: "system", content: `Conversation summary\n${summary}` };
+    const nextMessages = this.#messages.slice(splitAt);
+    const nextVisible = [...this.#pinnedMessages(), nextSummary, ...nextMessages];
 
     await this.#hooks.emit({
       version: 1,
       type: "PostCompact",
-      payload: { messageCount: inputs.length, estimatedTokens: this.estimatedTokens() },
-    });
+      payload: { messageCount: inputs.length, estimatedTokens: estimateTokens(modelVisibleText(nextVisible)) },
+    }, signal);
+    signal.throwIfAborted();
+    this.#summary = nextSummary;
+    this.#messages = nextMessages;
     return true;
   }
 
@@ -118,11 +135,27 @@ function truncateToolOutput(content: string, limit: number): string {
 }
 
 function estimateMessageTokens(messages: readonly ModelMessage[]): number {
-  return estimateTokens(messages.map(messageVisibleText).join("\n"));
+  return estimateTokens(modelVisibleText(messages));
 }
 
-function messageVisibleText(message: ModelMessage): string {
+function modelVisibleText(messages: readonly ModelMessage[]): string {
+  return messages.map(messageVisiblePart).join("\n");
+}
+
+function messageVisiblePart(message: ModelMessage): string {
   return `${message.content}${message.toolCalls === undefined ? "" : `\n${serializeForEstimate(message.toolCalls)}`}`;
+}
+
+function awaitWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => { signal.removeEventListener("abort", onAbort); resolve(value); },
+      (error: unknown) => { signal.removeEventListener("abort", onAbort); reject(error); },
+    );
+  });
 }
 
 function serializeForEstimate(value: unknown): string {

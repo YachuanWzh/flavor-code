@@ -149,6 +149,13 @@ export class OpenAIModelAdapter implements ModelAdapter {
           yield { type: "error", error: normalizeProviderError(event) };
           return;
         } else if (event.type === "response.failed") {
+          if (event.response?.usage !== undefined) {
+            yield {
+              type: "usage",
+              inputTokens: event.response.usage.input_tokens ?? 0,
+              outputTokens: event.response.usage.output_tokens ?? 0,
+            };
+          }
           yield {
             type: "error",
             error: normalizeProviderError(event.response?.error ?? event),

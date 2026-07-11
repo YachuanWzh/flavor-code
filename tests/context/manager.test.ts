@@ -78,6 +78,79 @@ describe("ContextManager", () => {
     expect(context.needsCompaction()).toBe(true);
     expect(context.estimatedTokens()).toBeGreaterThan(50);
   });
+
+  it("uses the same separator-inclusive character count for the threshold and token estimate", () => {
+    const context = new ContextManager({
+      system: "a",
+      compactAtChars: 3,
+      toolOutputChars: 100,
+      summarize: async () => "summary",
+      hooks: new HookBus(),
+    });
+    context.append({ role: "user", content: "b" });
+    expect(context.estimatedTokens()).toBe(1);
+    expect(context.needsCompaction()).toBe(true);
+  });
+
+  it("aborts summarization promptly without allowing a late result to mutate context", async () => {
+    const controller = new AbortController();
+    let finish!: (summary: string) => void;
+    let receivedSignal: AbortSignal | undefined;
+    const context = createContext({
+      compactAtChars: 1,
+      recentTurns: 0,
+      summarize: (_messages, signal) => {
+        receivedSignal = signal;
+        return new Promise((resolve) => { finish = resolve; });
+      },
+    });
+    context.append({ role: "user", content: "old" });
+    const before = context.messagesForModel();
+
+    const compacting = context.compact(controller.signal);
+    await Promise.resolve();
+    controller.abort(new Error("stop compacting"));
+
+    await expect(compacting).rejects.toThrow("stop compacting");
+    expect(receivedSignal?.aborted).toBe(true);
+    finish("late summary");
+    await Promise.resolve();
+    expect(context.messagesForModel()).toEqual(before);
+  });
+
+  it("leaves context unchanged when PostCompact fails", async () => {
+    const hooks = new HookBus();
+    hooks.on("PostCompact", () => { throw new Error("post failed"); });
+    const context = createContext({ hooks, compactAtChars: 1, recentTurns: 0 });
+    context.append({ role: "user", content: "old" });
+    const before = context.messagesForModel();
+
+    await expect(context.compact()).rejects.toThrow("post failed");
+
+    expect(context.messagesForModel()).toEqual(before);
+  });
+
+  it("does not start summarization after PreCompact is externally aborted", async () => {
+    const hooks = new HookBus();
+    hooks.on("PreCompact", async (_event, signal) => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }), { failurePolicy: "allow" });
+    const controller = new AbortController();
+    let summarizeCalled = false;
+    const context = createContext({
+      hooks,
+      compactAtChars: 1,
+      recentTurns: 0,
+      summarize: async () => { summarizeCalled = true; return "summary"; },
+    });
+    context.append({ role: "user", content: "old" });
+
+    const compacting = context.compact(controller.signal);
+    queueMicrotask(() => controller.abort(new Error("pre aborted")));
+
+    await expect(compacting).rejects.toThrow("pre aborted");
+    expect(summarizeCalled).toBe(false);
+  });
 });
 
 function createContext(overrides: Partial<ConstructorParameters<typeof ContextManager>[0]> = {}) {

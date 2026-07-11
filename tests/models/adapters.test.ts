@@ -125,6 +125,17 @@ describe("OpenAIModelAdapter", () => {
     ]);
   });
 
+  it("preserves response usage before a failed response error", async () => {
+    const client = { responses: { stream: () => events({
+      type: "response.failed",
+      response: { usage: { input_tokens: 8, output_tokens: 3 }, error: { message: "failed" } },
+    }) } };
+    await expect(collect(new OpenAIModelAdapter({ client: asOpenAIClient(client) }).stream(request))).resolves.toEqual([
+      { type: "usage", inputTokens: 8, outputTokens: 3 },
+      { type: "error", error: { code: "unknown", message: "failed" } },
+    ]);
+  });
+
   it("maps tool results and function schemas to the Responses request", async () => {
     const stream = vi.fn(() => events());
     const client = { responses: { stream } };
@@ -219,6 +230,18 @@ describe("AnthropicModelAdapter", () => {
       collect(new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream(request)),
     ).resolves.toEqual([
       { type: "error", error: { code: "authentication", message: "bad key" } },
+    ]);
+  });
+
+  it("emits accumulated usage before an Anthropic stream error", async () => {
+    const client = { messages: { stream: () => (async function* () {
+      yield { type: "message_start", message: { usage: { input_tokens: 5, output_tokens: 0 } } };
+      yield { type: "message_delta", delta: {}, usage: { output_tokens: 2 } };
+      throw new Error("stream broke");
+    })() } };
+    await expect(collect(new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream(request))).resolves.toEqual([
+      { type: "usage", inputTokens: 5, outputTokens: 2 },
+      { type: "error", error: { code: "unknown", message: "stream broke" } },
     ]);
   });
 

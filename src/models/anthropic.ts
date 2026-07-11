@@ -83,6 +83,8 @@ export class AnthropicModelAdapter implements ModelAdapter {
   async *stream(request: ModelRequest): AsyncIterable<ModelEvent> {
     let inputTokens = 0;
     let outputTokens = 0;
+    let hasUsage = false;
+    let usageEmitted = false;
     const inputUsage = { base: 0, cacheCreation: 0, cacheRead: 0 };
     const pendingTools = new Map<number, PendingToolCall>();
 
@@ -139,6 +141,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
 
       for await (const event of stream) {
         if (event.type === "message_start") {
+          hasUsage = event.message?.usage !== undefined;
           inputTokens = updateInputUsage(inputUsage, event.message?.usage);
           outputTokens = event.message?.usage?.output_tokens ?? outputTokens;
         } else if (
@@ -174,15 +177,18 @@ export class AnthropicModelAdapter implements ModelAdapter {
             pendingTools.delete(event.index);
           }
         } else if (event.type === "message_delta") {
+          hasUsage ||= event.usage !== undefined;
           inputTokens = updateInputUsage(inputUsage, event.usage);
           outputTokens = event.usage?.output_tokens ?? outputTokens;
         } else if (event.type === "message_stop") {
           const usage = { inputTokens, outputTokens };
+          usageEmitted = true;
           yield { type: "usage", ...usage };
           yield { type: "done", usage };
         }
       }
     } catch (error) {
+      if (hasUsage && !usageEmitted) yield { type: "usage", inputTokens, outputTokens };
       yield { type: "error", error: normalizeProviderError(error) };
     }
   }

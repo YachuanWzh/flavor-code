@@ -61,7 +61,8 @@ export class HookBus {
     };
   }
 
-  async emit(rawEvent: HookEvent): Promise<HookDecision> {
+  async emit(rawEvent: HookEvent, externalSignal?: AbortSignal): Promise<HookDecision> {
+    externalSignal?.throwIfAborted();
     let event = HookEventSchema.parse(rawEvent);
     event = { ...event, payload: this.#validatePayload(event.type, event.payload) } as HookEvent;
     let aggregate: HookDecision = { decision: "allow" };
@@ -69,7 +70,7 @@ export class HookBus {
     for (const registered of this.#handlers.get(event.type) ?? []) {
       let decision: HookDecision;
       try {
-        decision = await this.#invoke(registered, event);
+        decision = await this.#invoke(registered, event, externalSignal);
       } catch (error) {
         if (registered.failurePolicy === "error") throw error;
         decision = { decision: registered.failurePolicy, reason: `Hook failed: ${errorMessage(error)}` };
@@ -97,8 +98,9 @@ export class HookBus {
     return schema ? schema.parse(payload) : zodRecord(payload);
   }
 
-  async #invoke(registered: RegisteredHandler, event: HookEvent): Promise<HookDecision> {
-    const signal = AbortSignal.timeout(registered.timeoutMs);
+  async #invoke(registered: RegisteredHandler, event: HookEvent, externalSignal?: AbortSignal): Promise<HookDecision> {
+    const timeoutSignal = AbortSignal.timeout(registered.timeoutMs);
+    const signal = externalSignal === undefined ? timeoutSignal : AbortSignal.any([timeoutSignal, externalSignal]);
     const invocation = typeof registered.handler === "function"
       ? Promise.resolve(registered.handler(event, signal))
       : runShellHandler(registered.handler, event, signal);
