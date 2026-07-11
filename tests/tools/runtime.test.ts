@@ -138,6 +138,18 @@ describe("ToolRuntime", () => {
       .resolves.toMatchObject({ decision: "allow" });
   });
 
+  it("preserves schemas owned by another live runtime on the same bus", async () => {
+    const f = fixture();
+    const first = new ToolRuntime({ tools: [f.tool], hooks: f.hooks, permissions: f.permissions });
+    const second = new ToolRuntime({ tools: [f.tool], hooks: f.hooks, permissions: f.permissions });
+
+    first.dispose();
+    await expect(f.hooks.emit({ version: 1, type: "PreToolUse", payload: { unrestricted: true } })).rejects.toThrow();
+    second.dispose();
+    await expect(f.hooks.emit({ version: 1, type: "PreToolUse", payload: { unrestricted: true } }))
+      .resolves.toMatchObject({ decision: "allow" });
+  });
+
   it("validates hook-modified input before permission and execution", async () => {
     const f = fixture();
     f.hooks.on("PreToolUse", () => ({

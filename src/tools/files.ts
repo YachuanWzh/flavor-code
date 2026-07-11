@@ -13,8 +13,18 @@ const ApplyPatchInput = z.object({ patch: z.string().min(1) });
 
 const DEFAULT_MAX_READ_BYTES = 1_048_576;
 
-export function createReadTool(workspace: string): ToolDefinition<z.infer<typeof ReadInput>> {
+export interface ReadFileHandle {
+  read(buffer: Buffer, offset: number, length: number, position: number | null): Promise<{ bytesRead: number }>;
+  close(): Promise<void>;
+}
+
+export interface ReadToolOptions {
+  openFile?: (path: string) => Promise<ReadFileHandle>;
+}
+
+export function createReadTool(workspace: string, options: ReadToolOptions = {}): ToolDefinition<z.infer<typeof ReadInput>> {
   const guard = createPathGuard(workspace);
+  const openFile = options.openFile ?? ((path: string) => open(path, constants.O_RDONLY));
   return {
     name: "Read",
     description: "Read a UTF-8 text file",
@@ -26,8 +36,7 @@ export function createReadTool(workspace: string): ToolDefinition<z.infer<typeof
       const info = await stat(path);
       const maxBytes = input.maxBytes ?? DEFAULT_MAX_READ_BYTES;
       if (info.size > maxBytes) throw new Error(`File exceeds the ${maxBytes} byte read limit`);
-      const contents = await readFile(path);
-      abortIfNeeded(signal);
+      const contents = await readBounded(path, maxBytes, signal, openFile);
       if (contents.length > maxBytes) throw new Error(`File exceeds the ${maxBytes} byte read limit`);
       if (isBinary(contents)) throw new Error("Cannot read binary file as text");
       return contents.toString("utf8");
@@ -174,6 +183,29 @@ function isBinary(contents: Buffer): boolean {
   }
 }
 
+async function readBounded(
+  path: string,
+  maxBytes: number,
+  signal: AbortSignal,
+  openFile: (path: string) => Promise<ReadFileHandle>,
+): Promise<Buffer> {
+  const handle = await openFile(path);
+  const buffer = Buffer.allocUnsafe(maxBytes + 1);
+  let offset = 0;
+  try {
+    while (offset < buffer.length) {
+      abortIfNeeded(signal);
+      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, null);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    abortIfNeeded(signal);
+    return buffer.subarray(0, offset);
+  } finally {
+    await handle.close();
+  }
+}
+
 function within(root: string, candidate: string): boolean {
   const delta = relative(root, candidate);
   return delta === "" || (!delta.startsWith(`..${sep}`) && delta !== ".." && !isAbsolute(delta));
@@ -195,7 +227,10 @@ function parsePatch(patch: string): PatchFile[] {
   const files: PatchFile[] = [];
   let index = 0;
   while (index < lines.length) {
-    if (!lines[index]?.startsWith("--- ")) { index += 1; continue; }
+    if (lines[index] === "") { index += 1; continue; }
+    if (!lines[index]?.startsWith("--- ")) {
+      throw new Error(`Unsupported unified diff metadata or line: ${lines[index]}`);
+    }
     const oldPath = patchPath(lines[index]!.slice(4));
     const next = lines[index + 1];
     if (next === undefined || !next.startsWith("+++ ")) throw new Error("Invalid unified diff: missing +++ header");
@@ -208,8 +243,9 @@ function parsePatch(patch: string): PatchFile[] {
     index += 2;
     const hunks: PatchHunk[] = [];
     while (index < lines.length && !lines[index]?.startsWith("--- ")) {
+      if (lines[index] === "") { index += 1; continue; }
       const header = lines[index]?.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
-      if (!header) { index += 1; continue; }
+      if (!header) throw new Error(`Unsupported unified diff metadata or line: ${lines[index]}`);
       const hunk: PatchHunk = { oldStart: Number(header[1]), lines: [] };
       const expectedOld = header[2] === undefined ? 1 : Number(header[2]);
       const expectedNew = header[4] === undefined ? 1 : Number(header[4]);

@@ -57,6 +57,25 @@ describe("HookBus", () => {
     disposeSecond();
   });
 
+  it("restores stacked payload schemas and tracks identical owners independently", async () => {
+    const bus = new HookBus();
+    const first = z.object({ first: z.string() });
+    const second = z.object({ second: z.string() });
+    const disposeFirst = bus.registerPayloadSchema("PreToolUse", first);
+    const disposeSecond = bus.registerPayloadSchema("PreToolUse", second);
+
+    await expect(bus.emit({ version: 1, type: "PreToolUse", payload: { first: "hidden" } })).rejects.toThrow();
+    disposeSecond();
+    await expect(bus.emit({ version: 1, type: "PreToolUse", payload: { second: "removed" } })).rejects.toThrow();
+    await expect(bus.emit({ version: 1, type: "PreToolUse", payload: { first: "restored" } })).resolves.toMatchObject({ decision: "allow" });
+
+    const disposeIdentical = bus.registerPayloadSchema("PreToolUse", first);
+    disposeIdentical();
+    await expect(bus.emit({ version: 1, type: "PreToolUse", payload: { second: "still invalid" } })).rejects.toThrow();
+    disposeFirst();
+    await expect(bus.emit({ version: 1, type: "PreToolUse", payload: { unrestricted: true } })).resolves.toMatchObject({ decision: "allow" });
+  });
+
   it("preserves all accumulated context through ask and deny", async () => {
     const bus = new HookBus();
     bus.on("PreToolUse", async () => ({ decision: "allow", additionalContext: "one" }));

@@ -19,17 +19,29 @@ interface RegisteredHandler {
   failurePolicy: "error" | "allow" | "deny" | "ask";
 }
 
+interface RegisteredPayloadSchema {
+  schema: z.ZodType<Record<string, unknown>>;
+}
+
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1_048_576;
 
 export class HookBus {
   readonly #handlers = new Map<HookEventName, RegisteredHandler[]>();
-  readonly #payloadSchemas = new Map<HookEventName, z.ZodType<Record<string, unknown>>>();
+  readonly #payloadSchemas = new Map<HookEventName, RegisteredPayloadSchema[]>();
 
   registerPayloadSchema(type: HookEventName, schema: z.ZodType<Record<string, unknown>>): () => void {
-    this.#payloadSchemas.set(type, schema);
+    const registrations = this.#payloadSchemas.get(type) ?? [];
+    const registration: RegisteredPayloadSchema = { schema };
+    registrations.push(registration);
+    this.#payloadSchemas.set(type, registrations);
     return () => {
-      if (this.#payloadSchemas.get(type) === schema) this.#payloadSchemas.delete(type);
+      const index = registrations.indexOf(registration);
+      if (index < 0) return;
+      registrations.splice(index, 1);
+      if (registrations.length === 0 && this.#payloadSchemas.get(type) === registrations) {
+        this.#payloadSchemas.delete(type);
+      }
     };
   }
 
@@ -81,7 +93,7 @@ export class HookBus {
   }
 
   #validatePayload(type: HookEventName, payload: unknown): Record<string, unknown> {
-    const schema = this.#payloadSchemas.get(type);
+    const schema = this.#payloadSchemas.get(type)?.at(-1)?.schema;
     return schema ? schema.parse(payload) : zodRecord(payload);
   }
 

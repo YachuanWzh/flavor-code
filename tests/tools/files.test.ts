@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { createApplyPatchTool, createEditTool, createReadTool, createWriteTool } from "../../src/tools/files.js";
 
@@ -35,27 +35,43 @@ describe("file tools", () => {
     }
   });
 
-  it("Read rechecks actual bytes when a file grows after stat", async () => {
+  it("Read requests at most maxBytes plus one across partial reads", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
     const path = join(workspace, "growing.txt");
     writeFileSync(path, "a");
-    vi.resetModules();
-    vi.doMock("node:fs/promises", async () => {
-      const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
-      return {
-        ...actual,
-        stat: async (...args: Parameters<typeof actual.stat>) => ({ ...(await actual.stat(...args)), size: 1 }),
-        readFile: async () => Buffer.from("grew"),
-      };
-    });
-    try {
-      const { createReadTool: createMockedReadTool } = await import("../../src/tools/files.js");
-      await expect(createMockedReadTool(workspace).execute({ path, maxBytes: 1 }, new AbortController().signal))
-        .rejects.toThrow(/limit/i);
-    } finally {
-      vi.doUnmock("node:fs/promises");
-      vi.resetModules();
-    }
+    const data = Buffer.from("abcdef");
+    const requested: number[] = [];
+    let position = 0;
+    let closed = false;
+    const tool = createReadTool(workspace, { openFile: async () => ({
+      read: async (buffer, offset, length) => {
+        requested.push(length);
+        const bytesRead = Math.min(length, 2, data.length - position);
+        data.copy(buffer, offset, position, position + bytesRead);
+        position += bytesRead;
+        return { bytesRead };
+      },
+      close: async () => { closed = true; },
+    }) });
+
+    await expect(tool.execute({ path, maxBytes: 3 }, new AbortController().signal)).rejects.toThrow(/limit/i);
+    expect(requested).toEqual([4, 2]);
+    expect(position).toBe(4);
+    expect(closed).toBe(true);
+  });
+
+  it("Read closes its handle when a bounded read fails", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "a");
+    let closed = false;
+    const tool = createReadTool(workspace, { openFile: async () => ({
+      read: async () => { throw new Error("read failed"); },
+      close: async () => { closed = true; },
+    }) });
+
+    await expect(tool.execute({ path, maxBytes: 3 }, new AbortController().signal)).rejects.toThrow("read failed");
+    expect(closed).toBe(true);
   });
 
   it("Edit fails unless oldText has exactly one match", async () => {
@@ -173,5 +189,26 @@ describe("file tools", () => {
     await expect(createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal))
       .rejects.toThrow(/newline/i);
     expect(readFileSync(path, "utf8")).toBe("old");
+  });
+
+  it("ApplyPatch rejects git mode metadata before a valid hunk", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "old\n");
+    const patch = [
+      "diff --git a/file.txt b/file.txt",
+      "old mode 100644",
+      "new mode 100755",
+      "--- a/file.txt",
+      "+++ b/file.txt",
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+      "",
+    ].join("\n");
+
+    await expect(createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal))
+      .rejects.toThrow(/unsupported|metadata/i);
+    expect(readFileSync(path, "utf8")).toBe("old\n");
   });
 });
