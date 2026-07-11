@@ -138,7 +138,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     emitLifecycle: async (type, plugin) => { await hooks.emit({ version: 1, type, payload: { name: plugin.name, version: plugin.version } }); },
   });
   await pluginHost.loadAll();
-
+  let harness!: LocalHarness;
+  let harnessCreated = false;
+  try {
   const skills = new SkillRegistry({
     globalRoots: [join(home, ".flavor-code", "skills")],
     projectRoots: [join(workspace, ".flavor", "skills"), ...pluginSkillRoots],
@@ -150,7 +152,6 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const selectedModels = selectModels(config, registeredProviders, diagnostics);
   const mainModel = selectedModels.main;
   const childModel = selectedModels.child;
-  let harness!: LocalHarness;
   let taskResults: SubagentResult[] = [];
 
   const taskTool: ToolDefinition<unknown> = {
@@ -186,6 +187,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     tools, createContext, permissionMode: config.permissionMode,
     approve: options.approvalPolicy === "deny" ? () => false : (request, signal) => approvals.request(request, signal),
   });
+  harnessCreated = true;
 
   const services: SessionServices = {
     hooks, workspace,
@@ -223,11 +225,14 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     async dispose() {
       if (disposed) return;
       disposed = true;
-      approvals.resolve(false);
-      await pluginHost.unloadAll();
-      harness.dispose();
+      await cleanupProduction(approvals, pluginHost, harness);
     },
   };
+  } catch (primaryError) {
+    try { await cleanupProduction(approvals, pluginHost, harnessCreated ? harness : undefined); }
+    catch (cleanupError) { attachCleanupError(primaryError, cleanupError); }
+    throw primaryError;
+  }
 }
 
 async function* runMain(
@@ -395,4 +400,31 @@ function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T>
       (error: unknown) => { signal.removeEventListener("abort", onAbort); reject(error); },
     );
   });
+}
+
+async function cleanupProduction(
+  approvals: ApprovalBridge, pluginHost: PluginHost, harness: LocalHarness | undefined,
+): Promise<void> {
+  let primary: unknown;
+  try { approvals.resolve(false); }
+  catch (error) { primary = error; }
+  try { await pluginHost.unloadAll(); }
+  catch (error) {
+    if (primary === undefined) primary = error;
+    else attachCleanupError(primary, error);
+  }
+  finally {
+    try { harness?.dispose(); }
+    catch (error) {
+      if (primary === undefined) primary = error;
+      else attachCleanupError(primary, error);
+    }
+  }
+  if (primary !== undefined) throw primary;
+}
+
+function attachCleanupError(primary: unknown, cleanup: unknown): void {
+  if ((typeof primary !== "object" && typeof primary !== "function") || primary === null || !Object.isExtensible(primary)) return;
+  try { Object.defineProperty(primary, "cleanupError", { value: cleanup, configurable: true }); }
+  catch { /* Preserve the primary error even when diagnostics cannot be attached. */ }
 }

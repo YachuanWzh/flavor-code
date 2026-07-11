@@ -106,4 +106,20 @@ describe("production runtime", () => {
     await expect(runtime.services.run("late", new AbortController().signal)[Symbol.asyncIterator]().next())
       .resolves.toMatchObject({ value: { type: "error" } });
   });
+
+  it("rolls back activated plugins when contributed tool schema breaks bootstrap", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-")); roots.push(workspace);
+    const root = join(workspace, ".flavor", "plugins", "broken-tool"); await mkdir(root, { recursive: true });
+    await writeFile(join(root, "flavor-plugin.json"), JSON.stringify({
+      name: "broken-tool", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
+      contributes: { commands: [], tools: [{ name: "Broken" }], hooks: [], skillRoots: [], modelAdapters: [] },
+    }));
+    await writeFile(join(root, "index.mjs"), `export function activate(ctx) {
+      ctx.registerTool("Broken", { name: "Broken", description: "bad", inputSchema: {}, paths: () => [], execute: async () => null });
+      return () => { globalThis.brokenToolDisposed = true; };
+    }`);
+    await expect(createProductionRuntime({ workspace, home: workspace, environment: {}, output: () => {} })).rejects.toThrow();
+    expect((globalThis as Record<string, unknown>).brokenToolDisposed).toBe(true);
+    delete (globalThis as Record<string, unknown>).brokenToolDisposed;
+  });
 });

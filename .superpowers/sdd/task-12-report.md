@@ -16,7 +16,7 @@ The main loop accepts prompt-scoped additional context so a matching skill body 
 
 The main-only `Task` tool validates input through `TaskPlanner`, executes through `SubagentScheduler`, and returns only the scheduler's structured state/results object. Child execution uses `LocalHarness.runSubagent`, the configured subagent model, no `Task` tool, strict final JSON parsing, and the scheduler's one repair attempt.
 
-Plugin tools, hooks, skill roots, and model adapters are connected through typed host callbacks. Duplicate core tools/providers are rejected. Plugin commands are recorded as diagnostics because the MVP command parser is intentionally closed. Unsupported provider types are also diagnostic rather than cast into an adapter.
+Plugin tools, hooks, skill roots, model adapters, and validated command handlers are connected through typed host callbacks. Duplicate core tools/providers/commands are rejected. The pure parser accepts only the currently registered dynamic command names in addition to its closed built-in set. Unsupported provider types remain diagnostic rather than being cast into an adapter.
 
 ## TDD Evidence
 
@@ -50,7 +50,6 @@ Final verification evidence:
 
 ## Limitations
 
-- Plugin-contributed slash commands are not executable in the MVP because command parsing is deliberately a closed union; `/plugins` and `/config` expose the resulting diagnostic.
 - Context summarization in the production root is deterministic and local. It avoids a second credential-dependent bootstrap path but is less semantic than model-generated summarization.
 - Ink interaction is covered through the renderer-neutral session tests rather than terminal snapshot tests; the built CLI paths were smoke-tested separately.
 
@@ -79,3 +78,17 @@ Hardening verification:
 - Built no-key `--print` smoke returned 1 with actionable `.flavor/flavor.json` / environment-key guidance.
 
 Remaining limitation: the literal child-process `SIGINT` regression is skipped on Windows due the platform's Node signal semantics; equivalent controller registration/cleanup and lifecycle ordering are exercised there without spawning.
+
+## Final Cleanup Guarantees
+
+A final failure-path pass added the following guarantees and regressions:
+
+- Interactive shutdown reports a bounded, secret-redacted close error, always attempts runtime disposal, and always exits through nested `finally` paths.
+- React unmount cleanup attempts close and disposal even when `SessionEnd` rejects; diagnostic failure cannot interrupt cleanup.
+- Fire-and-forget prompt submission catches `Stop` hook rejection and renders it as an error instead of creating an unhandled rejection.
+- Production bootstrap is transactional after plugin activation. Skill, FLAVOR, tool-schema, or harness construction failure unloads plugins, clears approval state, disposes any partial harness, and rethrows the original error with secondary cleanup diagnostics attached when possible.
+- Successful production disposal is idempotent and attempts both plugin unload and harness disposal even if the first cleanup step fails.
+
+The contributed-invalid-tool regression verifies that bootstrap fails with the original schema error and still invokes the activated plugin disposer.
+
+Final verification after these cleanup changes: 24 test files passed and 1 platform-guarded file skipped; 251 tests passed and 2 skipped. Typecheck, build, diff check, version smoke, and no-key print smoke all passed with the expected exit codes.

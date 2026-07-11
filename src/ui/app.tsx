@@ -25,9 +25,9 @@ export function App({ workspace, home }: FlavorAppProps): React.JSX.Element {
   const shutdown = async (active: ProductionRuntime | undefined) => {
     if (closing.current) return;
     closing.current = true;
-    await active?.session.close();
-    await active?.dispose();
-    exit();
+    await shutdownRuntime(active, exit, (error) => {
+      setLines((current) => [...current, { id: nextId.current++, kind: "error", text: error }]);
+    });
   };
   const receive = (event: SessionOutput) => {
     if (event.type === "clear") { setLines([]); return; }
@@ -52,7 +52,10 @@ export function App({ workspace, home }: FlavorAppProps): React.JSX.Element {
       if (disposed) { await created.dispose(); return; }
       runtimeRef.current = created; setRuntime(created); await created.session.start();
     }).catch((error: unknown) => setLines([{ id: nextId.current++, kind: "error", text: message(error) }]));
-    return () => { disposed = true; void runtimeRef.current?.session.close().then(() => runtimeRef.current?.dispose()); };
+    return () => {
+      disposed = true;
+      void closeAndDisposeRuntime(runtimeRef.current, (error) => process.stderr.write(`flavor cleanup: ${error}\n`));
+    };
     // Runtime lifetime is intentionally tied only to the workspace.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspace, home]);
@@ -78,7 +81,9 @@ export function App({ workspace, home }: FlavorAppProps): React.JSX.Element {
       const prompt = input.trim(); if (!prompt || active === undefined || active.session.active) return;
       setLines((current) => [...current, { id: nextId.current++, kind: "user", text: prompt }]);
       setHistory((current) => [...current, prompt]); setHistoryCursor(history.length + 1); setInput(""); setPromptCursor(0);
-      void active.session.submit(prompt);
+      void submitSafely(active.session, prompt, (error) => receive({
+        type: "error", error: { code: "unknown", message: error },
+      }));
     } else if (key.backspace) updatePrompt({ type: "backspace" }, input, promptCursor, setInput, setPromptCursor);
     else if (key.delete) updatePrompt({ type: "delete" }, input, promptCursor, setInput, setPromptCursor);
     else if (key.leftArrow) setPromptCursor((value) => Math.max(0, value - 1));
@@ -166,3 +171,39 @@ function reduceOutput(lines: Line[], event: Exclude<SessionOutput, { type: "clea
 }
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+
+export async function submitSafely(
+  session: Pick<ProductionRuntime["session"], "submit">, prompt: string, report: (message: string) => void,
+): Promise<void> {
+  try { await session.submit(prompt); }
+  catch (error) { safeReport(report, safeUiError(error)); }
+}
+
+export async function shutdownRuntime(
+  runtime: ProductionRuntime | undefined, exit: () => void, report: (message: string) => void,
+): Promise<void> {
+  try { await closeAndDisposeRuntime(runtime, report); }
+  finally { exit(); }
+}
+
+export async function closeAndDisposeRuntime(
+  runtime: ProductionRuntime | undefined, report: (message: string) => void,
+): Promise<void> {
+  if (runtime === undefined) return;
+  try { await runtime.session.close(); }
+  catch (error) { safeReport(report, safeUiError(error)); }
+  finally {
+    try { await runtime.dispose(); }
+    catch (error) { safeReport(report, safeUiError(error)); }
+  }
+}
+
+function safeUiError(error: unknown): string {
+  return message(error)
+    .replace(/\bsk-[A-Za-z0-9_-]+\b/g, "[redacted]")
+    .replace(/(authorization|api[_ -]?key|token)\s*[:=]\s*\S+/gi, "$1=[redacted]")
+    .slice(0, 2_000);
+}
+function safeReport(report: (message: string) => void, value: string): void {
+  try { report(value); } catch { /* Cleanup and exit must not depend on diagnostics. */ }
+}
