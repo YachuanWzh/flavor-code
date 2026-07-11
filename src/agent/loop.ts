@@ -14,15 +14,16 @@ export interface AgentLoopOptions {
   hooks: HookBus;
   tools: readonly ModelTool[];
   maxIterations?: number;
+  agent?: "main" | "subagent";
 }
 
 export class AgentLoop {
-  readonly #options: Required<Pick<AgentLoopOptions, "maxIterations">> & Omit<AgentLoopOptions, "maxIterations">;
+  readonly #options: Required<Pick<AgentLoopOptions, "maxIterations" | "agent">> & Omit<AgentLoopOptions, "maxIterations" | "agent">;
 
   constructor(options: AgentLoopOptions) {
     const maxIterations = options.maxIterations ?? 20;
     if (maxIterations <= 0 || !Number.isInteger(maxIterations)) throw new Error("maxIterations must be a positive integer");
-    this.#options = { ...options, maxIterations };
+    this.#options = { ...options, maxIterations, agent: options.agent ?? "main" };
   }
 
   async *run(request: AgentRunRequest): AsyncIterable<AgentEvent> {
@@ -144,7 +145,7 @@ export class AgentLoop {
           break;
         }
         yield { type: "tool-start", id: call.id, name: call.name, input: call.input };
-        const result = await this.#options.runtime.execute(call, { agent: "main", ...(request.signal === undefined ? {} : { signal: request.signal }) });
+        const result = await this.#options.runtime.execute(call, { agent: this.#options.agent, ...(request.signal === undefined ? {} : { signal: request.signal }) });
         if (request.signal?.aborted) {
           turnError = { code: "cancelled", message: abortMessage(request.signal) };
           stageSyntheticResults(toolCalls, index, turnError, stagedMessages);
