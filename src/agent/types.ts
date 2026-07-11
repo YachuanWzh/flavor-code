@@ -4,6 +4,8 @@ import type { ToolResult } from "../tools/types.js";
 export interface AgentRunRequest {
   prompt: string;
   signal?: AbortSignal;
+  /** Prompt-scoped system context, such as a matched skill body. It is never stored. */
+  additionalContext?: string;
 }
 
 export type AgentErrorCode = ProviderErrorCode | "iteration_limit" | "incomplete_stream";

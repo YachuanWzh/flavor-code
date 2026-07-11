@@ -225,6 +225,17 @@ describe("SubagentScheduler", () => {
 });
 
 describe("LocalHarness", () => {
+  it("switches role models and only changes main permissions", () => {
+    const harness = harnessFixture(() => contextFixture());
+    harness.setModel("main", "fake:new-main");
+    harness.setModel("subagent", "fake:new-child");
+    harness.setPermissionMode("full");
+    expect(harness.mainModelId).toBe("fake:new-main");
+    expect(harness.subagentModelId).toBe("fake:new-child");
+    expect(harness.permissionMode).toBe("full");
+    expect(harness.createSubagent(node("fresh")).modelId).toBe("fake:new-child");
+  });
+
   it("creates isolated cheaper subagents without Task and with workspace permissions", async () => {
     const hooks = new HookBus();
     const adapter: ModelAdapter = { async *stream() { yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } }; } };

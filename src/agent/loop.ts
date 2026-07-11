@@ -26,6 +26,13 @@ export class AgentLoop {
     this.#options = { ...options, maxIterations, agent: options.agent ?? "main" };
   }
 
+  get modelId(): string { return this.#options.modelId; }
+
+  setModel(modelId: string): void {
+    this.#options.registry.get(modelId);
+    this.#options.modelId = modelId;
+  }
+
   async *run(request: AgentRunRequest): AsyncIterable<AgentEvent> {
     this.#options.context.append({ role: "user", content: request.prompt });
     let totalInputTokens = 0;
@@ -52,7 +59,10 @@ export class AgentLoop {
       const { adapter, model } = resolved;
       const modelRequest = {
         model,
-        messages: this.#options.context.messagesForModel(),
+        messages: [
+          ...this.#options.context.messagesForModel(),
+          ...(request.additionalContext ? [{ role: "system" as const, content: request.additionalContext }] : []),
+        ],
         tools: [...this.#options.tools],
         ...(request.signal === undefined ? {} : { signal: request.signal }),
       };

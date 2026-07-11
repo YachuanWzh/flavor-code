@@ -23,6 +23,13 @@ export class ModelRegistry {
     return this;
   }
 
+  has(provider: string): boolean { return this.adapters.has(provider); }
+
+  unregister(provider: string, adapter?: ModelAdapter): boolean {
+    if (adapter !== undefined && this.adapters.get(provider) !== adapter) return false;
+    return this.adapters.delete(provider);
+  }
+
   get(id: string): { adapter: ModelAdapter; model: string } {
     const { provider, model } = parseModelId(id);
     const adapter = this.adapters.get(provider);

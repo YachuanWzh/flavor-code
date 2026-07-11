@@ -38,22 +38,37 @@ export interface SubagentHarness extends HarnessProfile {
 
 export class LocalHarness {
   readonly #options: LocalHarnessOptions;
+  #subagentModelId: string;
+  #mainPermissions!: PermissionEngine;
   readonly #contexts = new WeakSet<ContextManager>();
   readonly #children = new Set<SubagentHarness>();
   readonly main: HarnessProfile;
 
   constructor(options: LocalHarnessOptions) {
     this.#options = options;
+    this.#subagentModelId = options.subagentModelId;
     const context = options.createContext();
     this.#claimContext(context);
     this.main = this.#createProfile(options.mainModelId, options.tools, "main", context, options.approve);
   }
 
+  get mainModelId(): string { return this.main.loop.modelId; }
+  get subagentModelId(): string { return this.#subagentModelId; }
+  get permissionMode(): PermissionMode { return this.#mainPermissions.mode; }
+
+  setModel(role: "main" | "subagent", modelId: string): void {
+    this.#options.registry.get(modelId);
+    if (role === "main") this.main.loop.setModel(modelId);
+    else this.#subagentModelId = modelId;
+  }
+
+  setPermissionMode(mode: PermissionMode): void { this.#mainPermissions.setMode(mode); }
+
   createSubagent(task: TaskNode): SubagentHarness {
     const tools = this.#options.tools.filter((tool) => tool.name !== "Task");
     const context = this.#options.createContext();
     this.#claimContext(context);
-    const profile = this.#createProfile(this.#options.subagentModelId, tools, "subagent", context);
+    const profile = this.#createProfile(this.#subagentModelId, tools, "subagent", context);
     let disposed = false;
     const child: SubagentHarness = {
       ...profile,
@@ -104,6 +119,7 @@ export class LocalHarness {
       workspace: this.#options.workspace,
       mode: agent === "subagent" ? "workspace" : (this.#options.permissionMode ?? "workspace"),
     });
+    if (agent === "main") this.#mainPermissions = permissions;
     const runtime = new ToolRuntime({
       tools: definitions,
       hooks: this.#options.hooks,
@@ -120,7 +136,7 @@ export class LocalHarness {
       tools,
       agent,
     });
-    return { modelId, context, runtime, tools, loop };
+    return { get modelId() { return loop.modelId; }, context, runtime, tools, loop };
   }
 }
 

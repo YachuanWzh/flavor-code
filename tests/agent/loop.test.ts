@@ -11,6 +11,32 @@ import { PermissionEngine } from "../../src/permissions/engine.js";
 import { ToolRuntime } from "../../src/tools/runtime.js";
 
 describe("AgentLoop", () => {
+  it("switches models without replacing its context", async () => {
+    const requests: ModelRequest[] = [];
+    const fixture = createLoop({ adapter: fakeAdapter([
+      [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
+      [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
+    ], requests) });
+    await collect(fixture.loop.run({ prompt: "first" }));
+    fixture.loop.setModel("fake:other");
+    await collect(fixture.loop.run({ prompt: "second" }));
+    expect(fixture.loop.modelId).toBe("fake:other");
+    expect(requests[1]?.model).toBe("other");
+    expect(requests[1]?.messages).toContainEqual({ role: "user", content: "first" });
+  });
+
+  it("adds transient skill context for one run without persisting it", async () => {
+    const requests: ModelRequest[] = [];
+    const fixture = createLoop({ adapter: fakeAdapter([
+      [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
+      [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
+    ], requests) });
+    await collect(fixture.loop.run({ prompt: "first", additionalContext: "Skill body" }));
+    await collect(fixture.loop.run({ prompt: "second" }));
+    expect(requests[0]?.messages).toContainEqual({ role: "system", content: "Skill body" });
+    expect(requests[1]?.messages).not.toContainEqual({ role: "system", content: "Skill body" });
+  });
+
   it("streams text, executes a tool once, feeds back its result, and records usage", async () => {
     const requests: ModelRequest[] = [];
     const streams: ModelEvent[][] = [

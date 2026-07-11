@@ -30,7 +30,7 @@ const PATH_REQUIRED_TOOLS = new Set([
 
 export class PermissionEngine {
   readonly #workspace: string;
-  readonly #mode: PermissionMode;
+  #mode: PermissionMode;
 
   constructor(options: PermissionEngineOptions) {
     const root = resolve(options.workspace);
@@ -38,7 +38,14 @@ export class PermissionEngine {
     this.#mode = options.mode ?? "workspace";
   }
 
+  get mode(): PermissionMode { return this.#mode; }
+
+  setMode(mode: PermissionMode): void { this.#mode = mode; }
+
   decide(request: PermissionRequest): PermissionDecision {
+    if (request.tool === "Task") return request.agent === "main"
+      ? { decision: "allow" }
+      : { decision: "deny", reason: "Task delegation is restricted to the main agent" };
     const paths = request.paths ?? [];
     if (PATH_REQUIRED_TOOLS.has(request.tool) && paths.length === 0) {
       return { decision: "deny", reason: `${request.tool} requires at least one path` };

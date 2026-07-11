@@ -35,3 +35,13 @@ it("registers an adapter and resolves its provider-neutral model name", () => {
   });
   expect(() => registry.get("anthropic:claude-example")).toThrow(/anthropic/);
 });
+
+it("unregisters only the adapter that owns a provider", () => {
+  const first: ModelAdapter = { async *stream() {} };
+  const second: ModelAdapter = { async *stream() {} };
+  const registry = new ModelRegistry().register("one", first);
+  expect(registry.has("one")).toBe(true);
+  expect(registry.unregister("one", second)).toBe(false);
+  expect(registry.unregister("one", first)).toBe(true);
+  expect(registry.has("one")).toBe(false);
+});

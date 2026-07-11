@@ -6,6 +6,21 @@ import { describe, expect, it } from "vitest";
 import { PermissionEngine } from "../../src/permissions/engine.js";
 
 describe("PermissionEngine", () => {
+  it("updates the main permission mode for subsequent decisions", () => {
+    const engine = new PermissionEngine({ workspace: process.cwd(), mode: "safe" });
+    const request = { agent: "main" as const, tool: "Shell", command: "npm", args: ["test"], cwd: process.cwd() };
+    expect(engine.decide(request).decision).toBe("ask");
+    engine.setMode("workspace");
+    expect(engine.mode).toBe("workspace");
+    expect(engine.decide(request).decision).toBe("allow");
+  });
+
+  it("allows the internal Task tool only for the main agent", () => {
+    const engine = new PermissionEngine({ workspace: process.cwd() });
+    expect(engine.decide({ agent: "main", tool: "Task" }).decision).toBe("allow");
+    expect(engine.decide({ agent: "subagent", tool: "Task" }).decision).toBe("deny");
+  });
+
   it("never permits a subagent write outside the workspace", () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-workspace-"));
     const outside = mkdtempSync(join(tmpdir(), "flavor-outside-"));
