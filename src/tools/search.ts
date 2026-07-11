@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { open, opendir, readFile } from "node:fs/promises";
+import { open, opendir } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { rgPath as bundledRgPath } from "@vscode/ripgrep";
 import createIgnore from "ignore";
@@ -12,6 +12,12 @@ const DEFAULT_MAX_FILE_BYTES = 1_048_576;
 const DEFAULT_MAX_SEARCH_BYTES = 16_777_216;
 const DEFAULT_MAX_DIRECTORY_ENTRIES = 50_000;
 const DEFAULT_MAX_DISCOVERED_FILES = 100_000;
+const DEFAULT_MAX_IGNORE_FILE_BYTES = 65_536;
+const DEFAULT_MAX_TOTAL_IGNORE_BYTES = 1_048_576;
+const DEFAULT_MAX_IGNORE_LAYERS = 4_096;
+const DEFAULT_MAX_IGNORE_RULES = 100_000;
+const DEFAULT_MAX_IGNORE_TRAVERSED_DIRECTORIES = 100_000;
+const DEFAULT_MAX_IGNORE_TRAVERSED_ENTRIES = 500_000;
 
 const GlobInput = z.object({
   pattern: z.string().min(1),
@@ -35,7 +41,14 @@ export interface SearchToolOptions {
   defaultLimit?: number;
   maxFileBytes?: number;
   maxSearchBytes?: number;
-  maxDirectoryEntries?: number;
+  maxEntriesPerDirectory?: number;
+  maxDiscoveredFiles?: number;
+  maxIgnoreFileBytes?: number;
+  maxTotalIgnoreBytes?: number;
+  maxIgnoreLayers?: number;
+  maxIgnoreRules?: number;
+  maxIgnoreTraversedDirectories?: number;
+  maxIgnoreTraversedEntries?: number;
 }
 
 export interface SearchResult<T> {
@@ -52,11 +65,32 @@ export interface GrepMatch {
   after: string[];
 }
 
+interface SearchResources {
+  maxEntriesPerDirectory: number;
+  maxDiscoveredFiles: number;
+  maxIgnoreFileBytes: number;
+  maxTotalIgnoreBytes: number;
+  maxIgnoreLayers: number;
+  maxIgnoreRules: number;
+  maxIgnoreTraversedDirectories: number;
+  maxIgnoreTraversedEntries: number;
+}
+
+interface IgnoreBudget {
+  limits: SearchResources;
+  totalBytes: number;
+  layers: number;
+  rules: number;
+  directories: number;
+  entries: number;
+}
+
 export function createGlobTool(
   workspace: string,
   options: SearchToolOptions = {},
 ): ToolDefinition<z.infer<typeof GlobInput>> {
   const root = resolve(workspace);
+  const resources = searchResources(options);
   return {
     name: "Glob",
     description: "Find workspace files matching a glob",
@@ -66,17 +100,17 @@ export function createGlobTool(
       const limit = input.limit ?? options.defaultLimit ?? DEFAULT_RESULT_LIMIT;
       const start = scope(root, input.path);
       const matcher = globRegex(input.pattern);
-      const directoryCap = options.maxDirectoryEntries ?? DEFAULT_MAX_DIRECTORY_ENTRIES;
+      const ignoreBudget = createIgnoreBudget(resources);
       let paths: string[];
       if (options.forceNode === true) {
-        paths = await nodeFiles(root, start, signal, (path) => matcher.test(path), limit + 1, directoryCap);
+        paths = await nodeFiles(root, start, signal, (path) => matcher.test(path), limit + 1, resources, ignoreBudget);
       } else {
         try {
-          paths = await rgFiles(root, start, input.pattern, signal, options.rgPath ?? bundledRgPath, options.rgArgsPrefix ?? [], limit + 1, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, directoryCap);
+          paths = await rgFiles(root, start, input.pattern, signal, options.rgPath ?? bundledRgPath, options.rgArgsPrefix ?? [], limit + 1, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, resources, ignoreBudget);
         } catch (error) {
           if (signal.aborted) throw signal.reason;
           if (!(error instanceof SearchSpawnError) || !error.fallbackSafe) throw error;
-          paths = await nodeFiles(root, start, signal, (path) => matcher.test(path), limit + 1, directoryCap);
+          paths = await nodeFiles(root, start, signal, (path) => matcher.test(path), limit + 1, resources, createIgnoreBudget(resources));
         }
       }
       const matches = paths.filter((path) => matcher.test(path)).sort(comparePaths);
@@ -90,6 +124,7 @@ export function createGrepTool(
   options: SearchToolOptions = {},
 ): ToolDefinition<z.infer<typeof GrepInput>> {
   const root = resolve(workspace);
+  const resources = searchResources(options);
   return {
     name: "Grep",
     description: "Search workspace text with a regular expression",
@@ -101,40 +136,41 @@ export function createGrepTool(
       const limit = input.limit ?? options.defaultLimit ?? DEFAULT_RESULT_LIMIT;
       const context = input.context ?? 0;
       const start = scope(root, input.path);
+      const ignoreBudget = createIgnoreBudget(resources);
       let matches: GrepMatch[];
       if (options.forceNode === true) {
-        matches = await nodeGrep(root, start, input.glob, input.type, expression, context, signal, limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, options.maxDirectoryEntries ?? DEFAULT_MAX_DIRECTORY_ENTRIES);
+        matches = await nodeGrep(root, start, input.glob, input.type, expression, context, signal, limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, resources, ignoreBudget);
       } else {
         try {
-          matches = await rgGrep(root, start, input, context, signal, options.rgPath ?? bundledRgPath, options.rgArgsPrefix ?? [], limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, options.maxDirectoryEntries ?? DEFAULT_MAX_DIRECTORY_ENTRIES);
+          matches = await rgGrep(root, start, input, context, signal, options.rgPath ?? bundledRgPath, options.rgArgsPrefix ?? [], limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, resources, ignoreBudget);
         } catch (error) {
           if (signal.aborted) throw signal.reason;
           if (!(error instanceof SearchSpawnError) || !error.fallbackSafe) throw error;
-          matches = await nodeGrep(root, start, input.glob, input.type, expression, context, signal, limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, options.maxDirectoryEntries ?? DEFAULT_MAX_DIRECTORY_ENTRIES);
+          matches = await nodeGrep(root, start, input.glob, input.type, expression, context, signal, limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, resources, createIgnoreBudget(resources));
         }
       }
-      matches.sort((a, b) => comparePaths(a.path, b.path) || a.line - b.line || a.column - b.column);
+      matches.sort(compareGrepMatches);
       return { matches: matches.slice(0, limit), truncated: matches.length > limit };
     },
   };
 }
 
 async function rgFiles(
-  root: string, start: string, pattern: string, signal: AbortSignal, executable: string, argsPrefix: string[], limit: number, maxBytes: number, maxDirectoryEntries: number,
+  root: string, start: string, pattern: string, signal: AbortSignal, executable: string, argsPrefix: string[], limit: number, maxBytes: number, resources: SearchResources, ignoreBudget: IgnoreBudget,
 ): Promise<string[]> {
   const target = relative(root, start) || ".";
   const matcher = globRegex(pattern);
-  const ignoreLayers = await collectIgnoreLayers(root, start, signal, maxDirectoryEntries);
+  const ignoreLayers = await collectIgnoreLayers(root, start, signal, resources, ignoreBudget);
   const paths: string[] = [];
   const parser = delimitedParser(0, (record) => {
     if (record.length === 0) return true;
     const path = normalizedRelative(root, resolve(root, decodeUtf8(record, "ripgrep path")));
     if (!matcher.test(path) || ignored(path, false, ignoreLayers)) return true;
-    paths.push(path);
-    return paths.length < limit;
+    retainTopK(paths, path, limit, comparePaths);
+    return true;
   });
   const output = await runStreaming(executable, [...argsPrefix, "--files", "--null", "--sort", "path", "--hidden", "--glob", "!.git", "--glob", pattern, "--", target], root, signal, maxBytes, parser);
-  if (!output.stoppedEarly && output.code !== 0) throw new Error(output.stderr || `ripgrep exited with ${output.code}`);
+  if (!output.stoppedEarly && output.code !== 0 && output.code !== 1) throw new Error(output.stderr || `ripgrep exited with ${output.code}`);
   parser.finish();
   return paths;
 }
@@ -150,14 +186,15 @@ async function rgGrep(
   limit: number,
   maxFileBytes: number,
   maxBytes: number,
-  maxDirectoryEntries: number,
+  resources: SearchResources,
+  ignoreBudget: IgnoreBudget,
 ): Promise<GrepMatch[]> {
   const args = ["--json", "--line-number", "--column", "--sort", "path", "--hidden", "--glob", "!.git", "--max-filesize", String(maxFileBytes), "--context", String(context)];
   if (input.glob !== undefined) args.push("--glob", input.glob);
   if (input.type !== undefined) args.push("--type", input.type);
   args.push("--regexp", input.pattern, "--", relative(root, start) || ".");
   const matches: GrepMatch[] = [];
-  const ignoreLayers = await collectIgnoreLayers(root, start, signal, maxDirectoryEntries);
+  const ignoreLayers = await collectIgnoreLayers(root, start, signal, resources, ignoreBudget);
   const parser = delimitedParser(10, (record) => {
     if (record.length === 0) return true;
     const event = JSON.parse(decodeUtf8(record, "ripgrep JSON")) as RgEvent;
@@ -173,15 +210,16 @@ async function rgGrep(
     const text = lineWithEnding.replace(/\r?\n$/, "");
     const startByte = event.data.submatches?.[0]?.start ?? 0;
     const prefix = lineValue.subarray(0, Math.min(startByte, lineValue.length));
-    matches.push({
+    const match = {
       path,
       line: event.data.line_number,
       column: decodeUtf8(prefix, "ripgrep match prefix").length + 1,
       text,
       before: [],
       after: [],
-    });
-    return matches.length < limit;
+    } satisfies GrepMatch;
+    retainTopK(matches, match, limit, compareGrepMatches);
+    return true;
   });
   const output = await runStreaming(executable, [...argsPrefix, ...args], root, signal, maxBytes, parser);
   if (!output.stoppedEarly && output.code !== 0 && output.code !== 1) throw new Error(output.stderr || `ripgrep exited with ${output.code}`);
@@ -235,10 +273,11 @@ async function nodeGrep(
   maxMatches: number,
   maxFileBytes: number,
   maxSearchBytes: number,
-  maxDirectoryEntries: number,
+  resources: SearchResources,
+  ignoreBudget: IgnoreBudget,
 ): Promise<GrepMatch[]> {
-  const files = await nodeFiles(root, start, signal, () => true, DEFAULT_MAX_DISCOVERED_FILES + 1, maxDirectoryEntries);
-  if (files.length > DEFAULT_MAX_DISCOVERED_FILES) throw new Error(`File discovery limit of ${DEFAULT_MAX_DISCOVERED_FILES} exceeded`);
+  const files = await nodeFiles(root, start, signal, () => true, resources.maxDiscoveredFiles + 1, resources, ignoreBudget);
+  if (files.length > resources.maxDiscoveredFiles) throw new Error(`Aggregate discovered file limit of ${resources.maxDiscoveredFiles} exceeded`);
   const matcher = glob === undefined ? undefined : globRegex(glob);
   const extension = type === undefined ? undefined : typeExtension(type);
   if (type !== undefined && extension === undefined) throw new Error(`Unsupported file type: ${type}`);
@@ -281,9 +320,10 @@ async function nodeFiles(
   root: string,
   start: string,
   signal: AbortSignal,
-  accept: (path: string) => boolean = () => true,
-  limit = Number.POSITIVE_INFINITY,
-  maxDirectoryEntries = DEFAULT_MAX_DIRECTORY_ENTRIES,
+  accept: (path: string) => boolean,
+  limit: number,
+  resources: SearchResources,
+  ignoreBudget: IgnoreBudget,
 ): Promise<string[]> {
   const ignores: IgnoreLayer[] = [];
   const output: string[] = [];
@@ -291,19 +331,22 @@ async function nodeFiles(
   const segments = delta === "" ? [] : delta.split(sep);
   let ancestor = root;
   for (let index = 0; index < segments.length; index += 1) {
-    await loadIgnoreFiles(ancestor, normalizedRelative(root, ancestor), ignores);
+    noteIgnoreDirectory(ignoreBudget);
+    await loadIgnoreFiles(ancestor, normalizedRelative(root, ancestor), ignores, ignoreBudget, signal);
     ancestor = resolve(ancestor, segments[index]!);
   }
   async function walk(directory: string): Promise<void> {
     abort(signal);
     const relativeDirectory = normalizedRelative(root, directory);
     const ruleCount = ignores.length;
-    await loadIgnoreFiles(directory, relativeDirectory, ignores);
+    noteIgnoreDirectory(ignoreBudget);
+    await loadIgnoreFiles(directory, relativeDirectory, ignores, ignoreBudget, signal);
     const handle = await opendir(directory);
     const entries = [];
     for await (const entry of handle) {
       entries.push(entry);
-      if (entries.length > maxDirectoryEntries) throw new Error(`Directory entry limit of ${maxDirectoryEntries} exceeded: ${relativeDirectory}`);
+      noteIgnoreEntry(ignoreBudget);
+      if (entries.length > resources.maxEntriesPerDirectory) throw new Error(`Per-directory entry limit of ${resources.maxEntriesPerDirectory} exceeded: ${relativeDirectory}`);
     }
     entries.sort((a, b) => comparePaths(a.isDirectory() ? `${a.name}/` : a.name, b.isDirectory() ? `${b.name}/` : b.name));
     for (const entry of entries) {
@@ -325,25 +368,29 @@ async function collectIgnoreLayers(
   root: string,
   start: string,
   signal: AbortSignal,
-  maxDirectoryEntries: number,
+  resources: SearchResources,
+  ignoreBudget: IgnoreBudget,
 ): Promise<IgnoreLayer[]> {
   const layers: IgnoreLayer[] = [];
   const delta = relative(root, start);
   const segments = delta === "" ? [] : delta.split(sep);
   let ancestor = root;
   for (let index = 0; index < segments.length; index += 1) {
-    await loadIgnoreFiles(ancestor, normalizedRelative(root, ancestor), layers);
+    noteIgnoreDirectory(ignoreBudget);
+    await loadIgnoreFiles(ancestor, normalizedRelative(root, ancestor), layers, ignoreBudget, signal);
     ancestor = resolve(ancestor, segments[index]!);
   }
   async function walk(directory: string): Promise<void> {
     abort(signal);
     const relativeDirectory = normalizedRelative(root, directory);
-    await loadIgnoreFiles(directory, relativeDirectory, layers);
+    noteIgnoreDirectory(ignoreBudget);
+    await loadIgnoreFiles(directory, relativeDirectory, layers, ignoreBudget, signal);
     const handle = await opendir(directory);
     let count = 0;
     for await (const entry of handle) {
       count += 1;
-      if (count > maxDirectoryEntries) throw new Error(`Directory entry limit of ${maxDirectoryEntries} exceeded: ${relativeDirectory}`);
+      noteIgnoreEntry(ignoreBudget);
+      if (count > resources.maxEntriesPerDirectory) throw new Error(`Per-directory entry limit of ${resources.maxEntriesPerDirectory} exceeded: ${relativeDirectory}`);
       if (!entry.isDirectory() || entry.name === ".git") continue;
       const absolute = resolve(directory, entry.name);
       const path = normalizedRelative(root, absolute);
@@ -354,18 +401,69 @@ async function collectIgnoreLayers(
   return layers;
 }
 
-async function loadIgnoreFiles(directory: string, base: string, rules: IgnoreLayer[]): Promise<void> {
+async function loadIgnoreFiles(
+  directory: string,
+  base: string,
+  rules: IgnoreLayer[],
+  budget: IgnoreBudget,
+  signal: AbortSignal,
+): Promise<void> {
   for (const name of [".gitignore", ".ignore"]) {
-    try {
-      const ignoreText = await readFile(resolve(directory, name), "utf8");
-      rules.push({ base, matcher: createIgnore().add(ignoreText) });
-    } catch {
-      // A directory without an ignore file has no additional local rules.
-    }
+    const path = resolve(directory, name);
+    const contents = await readOptionalIgnoreFile(path, budget.limits.maxIgnoreFileBytes, signal);
+    if (contents === undefined) continue;
+    budget.totalBytes += contents.length;
+    if (budget.totalBytes > budget.limits.maxTotalIgnoreBytes) throw new Error(`Aggregate ignore byte limit of ${budget.limits.maxTotalIgnoreBytes} exceeded`);
+    budget.layers += 1;
+    if (budget.layers > budget.limits.maxIgnoreLayers) throw new Error(`Ignore layer limit of ${budget.limits.maxIgnoreLayers} exceeded`);
+    budget.rules += countIgnoreRules(contents.toString("utf8"));
+    if (budget.rules > budget.limits.maxIgnoreRules) throw new Error(`Ignore rule limit of ${budget.limits.maxIgnoreRules} exceeded`);
+    rules.push({ base, matcher: createIgnore().add(contents.toString("utf8")) });
   }
 }
 
 interface IgnoreLayer { base: string; matcher: ReturnType<typeof createIgnore> }
+
+function searchResources(options: SearchToolOptions): SearchResources {
+  return {
+    maxEntriesPerDirectory: resourceLimit(options.maxEntriesPerDirectory, DEFAULT_MAX_DIRECTORY_ENTRIES, "maxEntriesPerDirectory"),
+    maxDiscoveredFiles: resourceLimit(options.maxDiscoveredFiles, DEFAULT_MAX_DISCOVERED_FILES, "maxDiscoveredFiles"),
+    maxIgnoreFileBytes: resourceLimit(options.maxIgnoreFileBytes, DEFAULT_MAX_IGNORE_FILE_BYTES, "maxIgnoreFileBytes"),
+    maxTotalIgnoreBytes: resourceLimit(options.maxTotalIgnoreBytes, DEFAULT_MAX_TOTAL_IGNORE_BYTES, "maxTotalIgnoreBytes"),
+    maxIgnoreLayers: resourceLimit(options.maxIgnoreLayers, DEFAULT_MAX_IGNORE_LAYERS, "maxIgnoreLayers"),
+    maxIgnoreRules: resourceLimit(options.maxIgnoreRules, DEFAULT_MAX_IGNORE_RULES, "maxIgnoreRules"),
+    maxIgnoreTraversedDirectories: resourceLimit(options.maxIgnoreTraversedDirectories, DEFAULT_MAX_IGNORE_TRAVERSED_DIRECTORIES, "maxIgnoreTraversedDirectories"),
+    maxIgnoreTraversedEntries: resourceLimit(options.maxIgnoreTraversedEntries, DEFAULT_MAX_IGNORE_TRAVERSED_ENTRIES, "maxIgnoreTraversedEntries"),
+  };
+}
+
+function resourceLimit(value: number | undefined, fallback: number, name: string): number {
+  const resolved = value ?? fallback;
+  if (!Number.isSafeInteger(resolved) || resolved <= 0) throw new Error(`${name} must be a positive safe integer`);
+  return resolved;
+}
+
+function createIgnoreBudget(limits: SearchResources): IgnoreBudget {
+  return { limits, totalBytes: 0, layers: 0, rules: 0, directories: 0, entries: 0 };
+}
+
+function noteIgnoreDirectory(budget: IgnoreBudget): void {
+  budget.directories += 1;
+  if (budget.directories > budget.limits.maxIgnoreTraversedDirectories) {
+    throw new Error(`Ignore traversed directory limit of ${budget.limits.maxIgnoreTraversedDirectories} exceeded`);
+  }
+}
+
+function noteIgnoreEntry(budget: IgnoreBudget): void {
+  budget.entries += 1;
+  if (budget.entries > budget.limits.maxIgnoreTraversedEntries) {
+    throw new Error(`Ignore traversed entry limit of ${budget.limits.maxIgnoreTraversedEntries} exceeded`);
+  }
+}
+
+function countIgnoreRules(contents: string): number {
+  return contents.replaceAll("\r\n", "\n").split("\n").filter((line) => line !== "" && (!line.startsWith("#") || line.startsWith("\\#"))).length;
+}
 
 function ignored(path: string, directory: boolean, rules: readonly IgnoreLayer[]): boolean {
   let result = false;
@@ -445,6 +543,21 @@ function normalizedRelative(root: string, path: string): string {
 
 function normalizePath(path: string): string { return path.replaceAll("\\", "/"); }
 function comparePaths(a: string, b: string): number { return a < b ? -1 : a > b ? 1 : 0; }
+function compareGrepMatches(a: GrepMatch, b: GrepMatch): number {
+  return comparePaths(a.path, b.path) || a.line - b.line || a.column - b.column;
+}
+
+function retainTopK<T>(items: T[], value: T, limit: number, compare: (left: T, right: T) => number): void {
+  let low = 0;
+  let high = items.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (compare(items[middle]!, value) <= 0) low = middle + 1;
+    else high = middle;
+  }
+  items.splice(low, 0, value);
+  if (items.length > limit) items.pop();
+}
 function abort(signal: AbortSignal): void { if (signal.aborted) throw signal.reason; }
 
 interface StreamParser { push(chunk: Buffer): boolean; finish(): void }
@@ -571,4 +684,31 @@ async function readBoundedFile(path: string, maxBytes: number, signal: AbortSign
     await handle.close();
   }
   return offset > maxBytes ? undefined : buffer.subarray(0, offset);
+}
+
+async function readOptionalIgnoreFile(path: string, maxBytes: number, signal: AbortSignal): Promise<Buffer | undefined> {
+  let handle: Awaited<ReturnType<typeof open>>;
+  try { handle = await open(path, "r"); }
+  catch (error) {
+    if (isMissing(error)) return undefined;
+    throw error;
+  }
+  const buffer = Buffer.allocUnsafe(maxBytes + 1);
+  let offset = 0;
+  try {
+    while (offset < buffer.length) {
+      abort(signal);
+      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, null);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+  } finally {
+    await handle.close();
+  }
+  if (offset > maxBytes) throw new Error(`Ignore file byte limit of ${maxBytes} exceeded: ${path}`);
+  return buffer.subarray(0, offset);
+}
+
+function isMissing(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }

@@ -183,7 +183,7 @@ describe("search tools", () => {
   it("errors conservatively when one directory exceeds the discovery cap", async () => {
     const root = mkdtempSync(join(tmpdir(), "flavor-search-directory-cap-"));
     for (let index = 0; index < 4; index += 1) writeFileSync(join(root, `${index}.ts`), "hit\n");
-    await expect(createGlobTool(root, { forceNode: true, maxDirectoryEntries: 3 }).execute(
+    await expect(createGlobTool(root, { forceNode: true, maxEntriesPerDirectory: 3 }).execute(
       { pattern: "**/*.ts", limit: 1 }, new AbortController().signal,
     )).rejects.toThrow(/directory.*limit/i);
   });
@@ -214,5 +214,48 @@ describe("search tools", () => {
     await expect(createGrepTool(root, fakeRipgrep(root, `${event}\n`)).execute(
       { pattern: "hit" }, new AbortController().signal,
     )).rejects.toThrow(/base64/i);
+  });
+
+  it("orders limited glob results by normalized separators", async () => {
+    const root = mkdtempSync(join(tmpdir(), "flavor-search-normalized-order-"));
+    mkdirSync(join(root, "a"));
+    writeFileSync(join(root, "a", "z.ts"), "hit\n");
+    writeFileSync(join(root, "a0.ts"), "hit\n");
+    const input = { pattern: "**/*.ts", limit: 1 };
+    const signal = new AbortController().signal;
+    const node = await createGlobTool(root, { forceNode: true }).execute(input, signal);
+    const rg = await createGlobTool(root).execute(input, signal);
+    expect(rg).toEqual(node);
+    expect(rg).toEqual({ matches: ["a/z.ts"], truncated: true });
+  });
+
+  it("fails closed when one ignore file exceeds its byte budget", async () => {
+    const root = mkdtempSync(join(tmpdir(), "flavor-search-ignore-file-cap-"));
+    writeFileSync(join(root, ".gitignore"), "ignored-one\nignored-two\n");
+    writeFileSync(join(root, "kept.ts"), "hit\n");
+    await expect(createGlobTool(root, { forceNode: true, maxIgnoreFileBytes: 8 }).execute(
+      { pattern: "**/*.ts" }, new AbortController().signal,
+    )).rejects.toThrow(/ignore file.*byte limit/i);
+  });
+
+  it("fails closed when retained ignore layers exceed their cap", async () => {
+    const root = mkdtempSync(join(tmpdir(), "flavor-search-ignore-layer-cap-"));
+    let directory = root;
+    for (let index = 0; index < 4; index += 1) {
+      writeFileSync(join(directory, ".gitignore"), `ignored-${index}\n`);
+      directory = join(directory, `d${index}`);
+      mkdirSync(directory);
+    }
+    await expect(createGlobTool(root, { maxIgnoreLayers: 2 }).execute(
+      { pattern: "**/*.ts" }, new AbortController().signal,
+    )).rejects.toThrow(/ignore layer limit/i);
+  });
+
+  it("fails closed when ignore traversal exceeds its directory cap", async () => {
+    const root = mkdtempSync(join(tmpdir(), "flavor-search-ignore-directory-cap-"));
+    for (let index = 0; index < 4; index += 1) mkdirSync(join(root, `d${index}`));
+    await expect(createGlobTool(root, { maxIgnoreTraversedDirectories: 2 }).execute(
+      { pattern: "**/*.ts" }, new AbortController().signal,
+    )).rejects.toThrow(/traversed directory limit/i);
   });
 });
