@@ -5,6 +5,15 @@ const GENERATED_START = "<!-- flavor-code:start -->";
 const GENERATED_END = "<!-- flavor-code:end -->";
 const MAX_MANIFEST_BYTES = 1_000_000;
 
+const JAVASCRIPT_LOCKFILES = [
+  { name: "package-lock.json", manager: "npm" },
+  { name: "npm-shrinkwrap.json", manager: "npm" },
+  { name: "pnpm-lock.yaml", manager: "pnpm" },
+  { name: "yarn.lock", manager: "yarn" },
+  { name: "bun.lock", manager: "bun" },
+  { name: "bun.lockb", manager: "bun" },
+] as const;
+
 const SOURCE_DIRECTORIES = [
   "src",
   "app",
@@ -127,14 +136,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function sanitizeProjectName(value: string, fallback: string): string {
+function sanitizeProjectName(value: string): string | undefined {
   const sanitized = value
     .replace(/<!--/g, "")
     .replace(/-->/g, "")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 120);
-  return sanitized === "" ? fallback : sanitized;
+  return sanitized === "" ? undefined : sanitized;
+}
+
+function joinWithAnd(values: string[]): string {
+  if (values.length < 2) return values[0] ?? "";
+  return `${values.slice(0, -1).join(", ")} and ${values.at(-1)}`;
 }
 
 function packageCommand(manager: string, script: string): string {
@@ -224,12 +239,7 @@ export async function inspectProject(cwd: string): Promise<ProjectFacts> {
 
   const manifestNames = [
     "package.json",
-    "package-lock.json",
-    "npm-shrinkwrap.json",
-    "pnpm-lock.yaml",
-    "yarn.lock",
-    "bun.lock",
-    "bun.lockb",
+    ...JAVASCRIPT_LOCKFILES.map(({ name }) => name),
     "pyproject.toml",
     "requirements.txt",
     "uv.lock",
@@ -241,31 +251,29 @@ export async function inspectProject(cwd: string): Promise<ProjectFacts> {
     if ((await pathKind(join(cwd, manifest), root)) === "file") present.add(manifest);
   }
 
-  const packageManagers: string[] = [];
-  if (present.has("package-lock.json") || present.has("npm-shrinkwrap.json")) {
-    packageManagers.push("npm");
-  } else if (present.has("pnpm-lock.yaml")) {
-    packageManagers.push("pnpm");
-  } else if (present.has("yarn.lock")) {
-    packageManagers.push("yarn");
-  } else if (present.has("bun.lock") || present.has("bun.lockb")) {
-    packageManagers.push("bun");
-  } else if (present.has("package.json")) {
-    packageManagers.push("npm");
-  }
+  const detectedLockfiles = JAVASCRIPT_LOCKFILES.filter(({ name }) => present.has(name));
+  const detectedJsManagers = [
+    ...new Set(detectedLockfiles.map(({ manager }) => manager)),
+  ];
+  const pythonManagers: string[] = [];
   if (present.has("uv.lock")) {
-    packageManagers.push("uv");
+    pythonManagers.push("uv");
   } else if (present.has("poetry.lock")) {
-    packageManagers.push("poetry");
+    pythonManagers.push("poetry");
   } else if (present.has("Pipfile")) {
-    packageManagers.push("pipenv");
+    pythonManagers.push("pipenv");
   } else if (present.has("pyproject.toml") || present.has("requirements.txt")) {
-    packageManagers.push("pip");
+    pythonManagers.push("pip");
   }
 
   const cautions: string[] = [];
+  if (detectedLockfiles.length > 1) {
+    cautions.push(
+      `Multiple JavaScript lockfiles detected: ${detectedLockfiles.map(({ name }) => name).join(", ")}.`,
+    );
+  }
   const scripts: Record<string, string> = {};
-  let projectName = basename(cwd);
+  let projectName = sanitizeProjectName(basename(cwd)) ?? "project";
   let declaredJsManager: string | undefined;
   if (present.has("package.json")) {
     const text = await readTextIfSmall(join(cwd, "package.json"), root);
@@ -276,8 +284,8 @@ export async function inspectProject(cwd: string): Promise<ProjectFacts> {
         const parsed: unknown = JSON.parse(text);
         if (!isRecord(parsed)) throw new Error("not an object");
         const manifest = parsed as PackageManifest;
-        if (typeof manifest.name === "string" && manifest.name.trim() !== "") {
-          projectName = sanitizeProjectName(manifest.name, projectName);
+        if (typeof manifest.name === "string") {
+          projectName = sanitizeProjectName(manifest.name) ?? projectName;
         }
         if (typeof manifest.packageManager === "string") {
           declaredJsManager = /^(npm|pnpm|yarn|bun)@/.exec(manifest.packageManager)?.[1];
@@ -295,23 +303,29 @@ export async function inspectProject(cwd: string): Promise<ProjectFacts> {
     }
   }
 
+  let selectedJsManager: string | undefined;
   if (declaredJsManager !== undefined) {
-    const jsManagers = new Set(["npm", "pnpm", "yarn", "bun"]);
-    const detectedIndex = packageManagers.findIndex((manager) => jsManagers.has(manager));
-    const detected = detectedIndex === -1 ? undefined : packageManagers[detectedIndex];
-    if (detected !== undefined && detected !== declaredJsManager) {
+    selectedJsManager = declaredJsManager;
+    const conflicts = detectedJsManagers.filter((manager) => manager !== declaredJsManager);
+    if (conflicts.length > 0) {
       cautions.push(
-        `package.json declares ${declaredJsManager}, but the lockfile indicates ${detected}; using the declaration.`,
+        `package.json declares ${declaredJsManager}, but lockfiles for ${joinWithAnd(conflicts)} were also detected; using the declaration.`,
       );
     }
-    if (detectedIndex === -1) packageManagers.unshift(declaredJsManager);
-    else packageManagers.splice(detectedIndex, 1, declaredJsManager);
+  } else if (detectedJsManagers.length === 1) {
+    selectedJsManager = detectedJsManagers[0];
+  } else if (detectedJsManagers.length === 0 && present.has("package.json")) {
+    selectedJsManager = "npm";
+  } else if (detectedJsManagers.length > 1) {
+    cautions.push("JavaScript package manager is ambiguous; script commands were omitted.");
   }
 
-  const packageManager = packageManagers[0];
-  const jsManager = packageManagers.find((manager) =>
-    ["npm", "pnpm", "yarn", "bun"].includes(manager),
-  );
+  const orderedJsManagers = selectedJsManager === undefined
+    ? detectedJsManagers
+    : [selectedJsManager, ...detectedJsManagers.filter((manager) => manager !== selectedJsManager)];
+  const packageManagers = [...orderedJsManagers, ...pythonManagers];
+  const packageManager = selectedJsManager ?? pythonManagers[0];
+  const jsManager = selectedJsManager;
   const buildCommands: string[] = [];
   const testCommands: string[] = [];
   const lintCommands: string[] = [];
@@ -328,9 +342,7 @@ export async function inspectProject(cwd: string): Promise<ProjectFacts> {
     ? await readTextIfSmall(join(cwd, "requirements.txt"), root)
     : undefined;
   const pythonTools = detectPythonTools(pyproject, requirements, configFiles);
-  const pythonManager = packageManagers.find((manager) =>
-    ["uv", "poetry", "pipenv", "pip"].includes(manager),
-  );
+  const pythonManager = pythonManagers[0];
   const pythonPrefix =
     pythonManager === "uv"
       ? "uv run "
@@ -437,10 +449,18 @@ function detectNewline(text: string): string {
 function mergeGeneratedSection(existing: string | undefined, generated: string): string {
   if (existing === undefined || existing === "") return `${generated}\n`;
   const newline = detectNewline(existing);
-  const start = existing.lastIndexOf(GENERATED_START);
-  const end = start === -1 ? -1 : existing.indexOf(GENERATED_END, start);
-  if (start !== -1 && end !== -1) {
-    return `${existing.slice(0, start)}${generated}${existing.slice(end + GENERATED_END.length)}`;
+  let searchFrom = 0;
+  let lastPair: { start: number; end: number } | undefined;
+  while (searchFrom < existing.length) {
+    const start = existing.indexOf(GENERATED_START, searchFrom);
+    if (start === -1) break;
+    const end = existing.indexOf(GENERATED_END, start + GENERATED_START.length);
+    if (end === -1) break;
+    lastPair = { start, end };
+    searchFrom = end + GENERATED_END.length;
+  }
+  if (lastPair !== undefined) {
+    return `${existing.slice(0, lastPair.start)}${generated}${existing.slice(lastPair.end + GENERATED_END.length)}`;
   }
   const separator = existing.endsWith("\n") ? newline : `${newline}${newline}`;
   return `${existing}${separator}${generated}${newline}`;
