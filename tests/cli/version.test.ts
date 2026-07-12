@@ -11,6 +11,7 @@ describe("flavor CLI", () => {
     const program = createProgram();
     expect(program.name()).toBe("flavor");
     expect(program.version()).toMatch(/^0\.1\.0$/);
+    expect(program.options.find((option) => option.long === "--resume")?.optional).toBe(true);
   });
 
   it("prints the package version when executed", async () => {

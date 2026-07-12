@@ -1,12 +1,13 @@
 import { readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { SubagentResultSchema, SubagentScheduler, type SubagentResult } from "./agent/subagents.js";
-import { TaskGraphSchema, TaskPlanner, type TaskNode } from "./agent/planner.js";
+import { TaskGraphSchema, TaskPlanner, type TaskGraph, type TaskNode } from "./agent/planner.js";
 import type { AgentEvent } from "./agent/types.js";
 import { loadConfig } from "./config/load.js";
-import { ContextManager } from "./context/manager.js";
+import { ContextManager, type ContextSnapshot } from "./context/manager.js";
 import { LocalHarness } from "./harness/local.js";
 import { HookBus } from "./hooks/bus.js";
 import { HOOK_EVENT_NAMES, type HookEventName } from "./hooks/types.js";
@@ -20,6 +21,7 @@ import { PluginHost } from "./plugins/host.js";
 import type { PluginCommandHandler } from "./plugins/types.js";
 import { SkillRegistry } from "./skills/registry.js";
 import { createSkillResourceTool } from "./skills/tool.js";
+import { SessionStore, type SessionDocument } from "./session/store.js";
 import { createApplyPatchTool, createEditTool, createReadTool, createWriteTool } from "./tools/files.js";
 import { createGlobTool, createGrepTool } from "./tools/search.js";
 import { createShellTool } from "./tools/shell.js";
@@ -35,6 +37,8 @@ export interface ProductionRuntimeOptions {
   onApprovalChange?(): void;
   /** Non-interactive callers must deny requests instead of waiting for input. */
   approvalPolicy?: "prompt" | "deny";
+  /** Resume a named session, or the latest session when true. Never resumed implicitly. */
+  resumeSession?: string | true;
 }
 
 export interface ProductionRuntime {
@@ -42,6 +46,7 @@ export interface ProductionRuntime {
   services: SessionServices;
   approvals: ApprovalBridge;
   diagnostics: readonly string[];
+  sessionId: string;
   dispose(): Promise<void>;
 }
 
@@ -85,6 +90,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const environment = options.environment ?? process.env;
   const loaded = await loadConfig({ cwd: workspace, home, environment });
   const config = loaded.config;
+  const sessionStore = new SessionStore({ workspace });
+  const recovered = options.resumeSession === undefined
+    ? undefined
+    : await sessionStore.load(options.resumeSession === true ? undefined : options.resumeSession);
   const secrets = [
     ...Object.values(config.providers).map((provider) => provider.apiKey),
     environment.OPENAI_API_KEY, environment.ANTHROPIC_API_KEY,
@@ -150,9 +159,24 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   tools.push(createSkillResourceTool(skills));
   const flavor = await optionalText(join(workspace, "FLAVOR.md"));
   const selectedModels = selectModels(config, registeredProviders, diagnostics);
-  const mainModel = selectedModels.main;
-  const childModel = selectedModels.child;
-  let taskResults: SubagentResult[] = [];
+  const mainModel = recovered?.models.main ?? selectedModels.main;
+  const childModel = recovered?.models.subagent ?? selectedModels.child;
+  let taskGraph: TaskGraph | undefined = recovered?.tasks.graph;
+  let taskStates: Record<string, "pending" | "running" | "completed" | "failed" | "blocked"> = { ...(recovered?.tasks.states ?? {}) };
+  let taskResults: Record<string, SubagentResult> = { ...(recovered?.tasks.results ?? {}) };
+  const sessionId = recovered?.sessionId ?? `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
+  const createdAt = recovered?.createdAt ?? new Date().toISOString();
+  let persistTail: Promise<void> = Promise.resolve();
+  const sessionDocument = (): SessionDocument => ({
+    version: 1, sessionId, createdAt, updatedAt: new Date().toISOString(), workspace: { path: workspace },
+    conversation: storedConversation(harness.main.context.snapshot()),
+    tasks: { ...(taskGraph === undefined ? {} : { graph: taskGraph }), states: { ...taskStates }, results: { ...taskResults } },
+    models: { main: harness.mainModelId, subagent: harness.subagentModelId }, permissionMode: harness.permissionMode,
+  });
+  const persist = (): Promise<void> => {
+    persistTail = persistTail.catch(() => undefined).then(() => sessionStore.save(sessionDocument()));
+    return persistTail;
+  };
 
   const taskTool: ToolDefinition<unknown> = {
     name: "Task",
@@ -160,13 +184,16 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     inputSchema: TaskGraphSchema,
     paths: () => [],
     execute: async (input, signal) => {
-      if (selectedModels.childError !== undefined) throw new Error(selectedModels.childError);
+      if (recovered === undefined && selectedModels.childError !== undefined) throw new Error(selectedModels.childError);
       const graph = await new TaskPlanner({ hooks }).plan(input, signal);
-      taskResults = [];
+      taskGraph = graph;
+      taskStates = Object.fromEntries(graph.nodes.map((node) => [node.id, "pending"]));
+      taskResults = {};
+      await persist();
       const scheduler = new SubagentScheduler({
         hooks,
         maxSubagents: config.maxSubagents,
-        onResult: (result) => { taskResults.push(result); },
+        onResult: async (result) => { taskResults[result.taskId] = result; taskStates[result.taskId] = result.status; await persist(); },
         execute: (task, execution) => runChild(harness, skills, task, execution.attempt, execution.signal),
       });
       return scheduler.run(graph, signal);
@@ -175,7 +202,12 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   tools.push(taskTool);
 
   const createContext = () => new ContextManager({
-    system: "You are Flavor, a coding agent. Report conclusions and actions; never expose hidden chain-of-thought. Use SkillResource to read resources explicitly referenced by a matched skill; treat scripts as data and never execute them through that tool.",
+    system: [
+      "You are Flavor, a coding agent running in an interactive terminal. Report conclusions and actions; never expose hidden chain-of-thought.",
+      "Format your replies as plain text intended for a fixed-width terminal. Do not use markdown headings, bullet lists, tables, or **bold**/**italic**; spell things out as ordinary sentences and use indentation for clarity.",
+      "Multi-line code or commands must be wrapped in triple-backtick fences (```) so the terminal can render them readably. Keep prose responses short; the user is reading them in a chat pane.",
+      "Use SkillResource to read resources explicitly referenced by a matched skill; treat scripts as data and never execute them through that tool.",
+    ].join(" "),
     ...(flavor === undefined ? {} : { flavor }),
     compactAtChars: config.context.compactAtChars,
     toolOutputChars: config.context.toolOutputChars,
@@ -184,20 +216,39 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   });
   harness = new LocalHarness({
     registry, hooks, workspace, mainModelId: mainModel, subagentModelId: childModel,
-    tools, createContext, permissionMode: config.permissionMode,
+    tools, createContext, permissionMode: recovered?.permissionMode ?? config.permissionMode,
     approve: options.approvalPolicy === "deny" ? () => false : (request, signal) => approvals.request(request, signal),
   });
   harnessCreated = true;
+  if (recovered !== undefined) harness.main.context.restore({
+    ...(recovered.conversation.summary === undefined ? {} : { summary: recovered.conversation.summary }),
+    messages: recovered.conversation.messages.map((message) => ({
+      role: message.role, content: message.content,
+      ...(message.toolCallId === undefined ? {} : { toolCallId: message.toolCallId }),
+      ...(message.toolCalls === undefined ? {} : { toolCalls: message.toolCalls }),
+    })),
+  });
+
+  hooks.on("SubagentStart", async (event) => {
+    const id = String(event.payload.taskId); taskStates[id] = "running"; await persist(); return { decision: "allow" };
+  });
+  hooks.on("SubagentStop", async (event) => {
+    const id = String(event.payload.taskId);
+    const status = event.payload.status;
+    if (status === "completed" || status === "failed" || status === "blocked") taskStates[id] = status;
+    await persist(); return { decision: "allow" };
+  });
+  hooks.on("SessionEnd", async () => { await persist(); return { decision: "allow" }; });
 
   const services: SessionServices = {
     hooks, workspace,
     mainModel: () => harness.mainModelId,
     subagentModel: () => harness.subagentModelId,
     permissionMode: () => harness.permissionMode,
-    run: (prompt, signal) => runMain(harness, skills, prompt, signal, selectedModels.mainError),
-    setModel: (role, id) => harness.setModel(role, id),
-    setPermissionMode: (mode) => harness.setPermissionMode(mode),
-    compact: (signal) => harness.main.context.compact(signal),
+    run: (prompt, signal) => persistAfter(runMain(harness, skills, prompt, signal, selectedModels.mainError), persist),
+    setModel: async (role, id) => { harness.setModel(role, id); await persist(); },
+    setPermissionMode: async (mode) => { harness.setPermissionMode(mode); await persist(); },
+    compact: async (signal) => { const changed = await harness.main.context.compact(signal); if (changed) await persist(); return changed; },
     initialize: () => initializeFlavor(workspace),
     config: () => ({
       ...config, sources: loaded.sources,
@@ -207,7 +258,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     skills: () => skills.discover(),
     plugins: () => pluginHost.loadedPlugins,
     hooksStatus: () => HOOK_EVENT_NAMES.map((name) => ({ name, pluginHandlers: pluginHooks.filter((item) => item === name).length })),
-    tasks: () => taskResults,
+    tasks: () => ({ graph: taskGraph, states: taskStates, results: taskResults }),
     pluginCommands: () => [...pluginCommands.keys()].sort(),
     runPluginCommand: async (name, args, signal) => {
       const handler = pluginCommands.get(name);
@@ -220,11 +271,13 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const session = new FlavorSession(services);
   let disposed = false;
   return {
-    session, services, approvals,
+    session, services, approvals, sessionId,
     get diagnostics() { return diagnostics.map((item) => redactDiagnostic(item, secrets)); },
     async dispose() {
       if (disposed) return;
       disposed = true;
+      await persist();
+      await persistTail;
       await cleanupProduction(approvals, pluginHost, harness);
     },
   };
@@ -260,6 +313,11 @@ async function* runMain(
       : detail;
     yield { type: "error", error: { code: "unknown", message: setup } };
   }
+}
+
+async function* persistAfter<T>(source: AsyncIterable<T>, persist: () => Promise<void>): AsyncIterable<T> {
+  try { for await (const item of source) yield item; }
+  finally { await persist(); }
 }
 
 async function runChild(
@@ -386,6 +444,16 @@ async function optionalText(path: string): Promise<string | undefined> {
 }
 
 function remove<T>(items: T[], item: T): void { const index = items.indexOf(item); if (index >= 0) items.splice(index, 1); }
+function storedConversation(snapshot: ContextSnapshot): SessionDocument["conversation"] {
+  return {
+    ...(snapshot.summary === undefined ? {} : { summary: snapshot.summary }),
+    messages: snapshot.messages.filter((message) => message.role !== "system").map((message) => ({
+      role: message.role as "user" | "assistant" | "tool", content: message.content,
+      ...(message.toolCallId === undefined ? {} : { toolCallId: message.toolCallId }),
+      ...(message.toolCalls === undefined ? {} : { toolCalls: message.toolCalls }),
+    })),
+  };
+}
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function redactDiagnostic(input: string, secrets: readonly string[]): string {
   return secrets.reduce((text, secret) => text.replaceAll(secret, "[redacted]"), input);

@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+.flavor/sessions/
+*.tgz
+*.tmp
+*.temp
+.cache/
+.npm/
+.DS_Store
+Thumbs.db

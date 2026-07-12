@@ -5,6 +5,12 @@
   "bin": {
     "flavor": "dist/cli.js"
   },
+  "files": [
+    "dist/",
+    "README.md",
+    "技术方案报告.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=20"
   },
@@ -13,11 +19,13 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
+    "smoke:install": "node scripts/smoke-install.mjs",
     "prepack": "npm run build"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",
     "@vscode/ripgrep": "^1.18.0",
+    "chalk": "^5.6.2",
     "commander": "^15.0.0",
     "dotenv": "^17.4.2",
     "ignore": "^7.0.6",

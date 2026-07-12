@@ -16,15 +16,15 @@ export interface SessionServices {
   subagentModel(): string;
   permissionMode(): PermissionMode;
   run(prompt: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
-  setModel(role: ModelRole, modelId: string): void;
-  setPermissionMode(mode: PermissionMode): void;
+  setModel(role: ModelRole, modelId: string): void | Promise<void>;
+  setPermissionMode(mode: PermissionMode): void | Promise<void>;
   compact(signal?: AbortSignal): Promise<boolean>;
   initialize(): Promise<{ path: string; created: boolean }>;
   config(): unknown;
   skills(): Promise<readonly unknown[]>;
   plugins(): readonly unknown[];
   hooksStatus(): readonly unknown[];
-  tasks(): readonly unknown[];
+  tasks(): unknown;
   pluginCommands(): readonly string[];
   runPluginCommand(name: string, args: readonly string[], signal: AbortSignal): Promise<unknown>;
   output(event: SessionOutput): void;
@@ -130,10 +130,10 @@ export class FlavorSession {
         : `Unknown command /${command.input}. Use /help to list commands.`);
     } else if (command.name === "invalid") this.#notice(command.message);
     else if (command.name === "model") {
-      this.#services.setModel(command.role, command.modelId);
+      await this.#services.setModel(command.role, command.modelId);
       this.#notice(`${command.role} model set to ${command.modelId}.`);
     } else if (command.name === "permissions") {
-      this.#services.setPermissionMode(command.mode);
+      await this.#services.setPermissionMode(command.mode);
       this.#notice(`Main permissions set to ${command.mode}. Child agents remain workspace-limited.`);
     } else if (command.name === "plugin") {
       this.#notice(format(await this.#services.runPluginCommand(command.command, command.args, signal)));

@@ -310,6 +310,48 @@ describe("AnthropicModelAdapter", () => {
     ]);
   });
 
+  it("merges consecutive tool messages into a single user message", async () => {
+    const stream = vi.fn(() => events());
+    const client = { messages: { stream } };
+    const mappingRequest: ModelRequest = {
+      ...request,
+      messages: [
+        { role: "assistant", content: "", toolCalls: [
+          { id: "t1", name: "weather", input: { city: "Paris" } },
+          { id: "t2", name: "weather", input: { city: "London" } },
+        ]},
+        { role: "tool", toolCallId: "t1", content: "sunny" },
+        { role: "tool", toolCallId: "t2", content: "rainy" },
+      ],
+    };
+
+    await collect(
+      new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream(mappingRequest),
+    );
+
+    expect(stream).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "t1", name: "weather", input: { city: "Paris" } },
+              { type: "tool_use", id: "t2", name: "weather", input: { city: "London" } },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: "t1", content: "sunny" },
+              { type: "tool_result", tool_use_id: "t2", content: "rainy" },
+            ],
+          },
+        ],
+      }),
+      { signal },
+    );
+  });
+
   it("maps system prompts and tool results to the Messages request", async () => {
     const stream = vi.fn(() => events());
     const client = { messages: { stream } };

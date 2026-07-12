@@ -93,38 +93,39 @@ export class AnthropicModelAdapter implements ModelAdapter {
         .filter((message) => message.role === "system")
         .map((message) => message.content)
         .join("\n\n");
-      const messages: MessageParam[] = request.messages
-        .filter((message) => message.role !== "system")
-        .map((message) => {
-          if (message.role === "tool") {
-            if (!message.toolCallId) throw new Error("Tool messages require toolCallId");
-            return {
-              role: "user",
-              content: [
-                {
-                  type: "tool_result",
-                  tool_use_id: message.toolCallId,
-                  content: message.content,
-                },
-              ],
-            };
+      const messages: MessageParam[] = [];
+      const nonSystem = request.messages.filter((m) => m.role !== "system");
+      for (let i = 0; i < nonSystem.length; i += 1) {
+        const message = nonSystem[i]!;
+        if (message.role === "tool") {
+          if (!message.toolCallId) throw new Error("Tool messages require toolCallId");
+          const results: Array<{ type: "tool_result"; tool_use_id: string; content: string }> = [
+            { type: "tool_result", tool_use_id: message.toolCallId, content: message.content },
+          ];
+          while (i + 1 < nonSystem.length && nonSystem[i + 1]!.role === "tool") {
+            i += 1;
+            const next = nonSystem[i]!;
+            if (!next.toolCallId) throw new Error("Tool messages require toolCallId");
+            results.push({ type: "tool_result", tool_use_id: next.toolCallId, content: next.content });
           }
-          if (message.role === "assistant" && message.toolCalls?.length) {
-            return {
-              role: "assistant",
-              content: [
-                ...(message.content ? [{ type: "text" as const, text: message.content }] : []),
-                ...message.toolCalls.map((call) => ({
-                  type: "tool_use" as const,
-                  id: call.id,
-                  name: call.name,
-                  input: call.input,
-                })),
-              ],
-            };
-          }
-          return { role: message.role, content: message.content };
-        });
+          messages.push({ role: "user" as const, content: results });
+        } else if (message.role === "assistant" && message.toolCalls?.length) {
+          messages.push({
+            role: "assistant",
+            content: [
+              ...(message.content ? [{ type: "text" as const, text: message.content }] : []),
+              ...message.toolCalls.map((call) => ({
+                type: "tool_use" as const,
+                id: call.id,
+                name: call.name,
+                input: call.input,
+              })),
+            ],
+          });
+        } else {
+          messages.push({ role: message.role, content: message.content } as MessageParam);
+        }
+      }
 
       const body: MessageStreamParams = {
         model: request.model,

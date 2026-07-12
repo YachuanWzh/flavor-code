@@ -14,6 +14,11 @@ export interface ContextManagerOptions {
   hooks: HookBus;
 }
 
+export interface ContextSnapshot {
+  summary?: { role: "system"; content: string };
+  messages: ModelMessage[];
+}
+
 export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
@@ -58,6 +63,23 @@ export class ContextManager {
 
   updateTaskState(taskState: string | undefined): void {
     this.#taskState = taskState;
+  }
+
+  snapshot(): ContextSnapshot {
+    return {
+      ...(this.#summary === undefined ? {} : { summary: { role: "system" as const, content: this.#summary.content } }),
+      messages: providerValidMessages(this.#messages),
+    };
+  }
+
+  restore(snapshot: ContextSnapshot): void {
+    const messages = providerValidMessages(snapshot.messages);
+    this.#summary = snapshot.summary?.role === "system" && snapshot.summary.content.startsWith("Conversation summary\n")
+      ? { role: "system", content: snapshot.summary.content }
+      : undefined;
+    this.#messages = messages.map((message) => message.role === "tool"
+      ? { ...message, content: truncateToolOutput(message.content, this.#toolOutputChars) }
+      : cloneMessage(message));
   }
 
   messagesForModel(): ModelMessage[] {
@@ -167,4 +189,34 @@ function serializeForEstimate(value: unknown): string {
     seen.add(item);
     return item;
   }) ?? String(value);
+}
+
+function cloneMessage(message: ModelMessage): ModelMessage {
+  return {
+    ...message,
+    ...(message.toolCalls === undefined ? {} : { toolCalls: message.toolCalls.map((call) => ({ ...call })) }),
+  };
+}
+
+function providerValidMessages(input: readonly ModelMessage[]): ModelMessage[] {
+  const announced = new Set<string>();
+  const availableResults = new Set(input.filter((message) => message.role === "tool" && message.toolCallId).map((message) => message.toolCallId!));
+  const output: ModelMessage[] = [];
+  for (const original of input) {
+    if (original.role === "system") continue;
+    if (original.role === "assistant" && original.toolCalls !== undefined) {
+      const calls = original.toolCalls.filter((call) => call.id && call.name && availableResults.has(call.id));
+      calls.forEach((call) => announced.add(call.id));
+      if (!original.content && calls.length === 0) continue;
+      output.push({ role: "assistant", content: original.content, ...(calls.length === 0 ? {} : { toolCalls: calls.map((call) => ({ ...call })) }) });
+      continue;
+    }
+    if (original.role === "tool") {
+      if (!original.toolCallId || !announced.has(original.toolCallId)) continue;
+      output.push({ role: "tool", content: original.content, toolCallId: original.toolCallId });
+      continue;
+    }
+    output.push(cloneMessage(original));
+  }
+  return output;
 }

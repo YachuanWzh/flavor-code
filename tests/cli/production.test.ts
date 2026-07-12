@@ -4,12 +4,36 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createProductionRuntime } from "../../src/production.js";
+import { SessionStore } from "../../src/session/store.js";
 import { writeFile, mkdir } from "node:fs/promises";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("production runtime", () => {
+  it("saves lifecycle state and resumes only when explicitly requested", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-")); roots.push(workspace);
+    await mkdir(join(workspace, ".flavor"), { recursive: true });
+    await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
+      providers: { local: { type: "openai-compatible", baseURL: "http://127.0.0.1:1/v1", defaultModel: "large", cheapModel: "small" } },
+    }));
+    const first = await createProductionRuntime({ workspace, home: workspace, environment: {}, output: () => {} });
+    await first.session.start();
+    first.services.setPermissionMode("safe");
+    await first.session.submit("persist me");
+    await first.session.close(); await first.dispose();
+    const saved = await new SessionStore({ workspace }).load();
+    expect(saved.conversation.messages.some((message) => message.role === "user" && message.content === "persist me")).toBe(true);
+    expect(saved.permissionMode).toBe("safe");
+
+    const fresh = await createProductionRuntime({ workspace, home: workspace, environment: {}, output: () => {} });
+    expect(fresh.services.permissionMode()).toBe("workspace");
+    await fresh.dispose();
+    const resumed = await createProductionRuntime({ workspace, home: workspace, environment: {}, resumeSession: saved.sessionId, output: () => {} });
+    expect(resumed.services.permissionMode()).toBe("safe");
+    expect(resumed.sessionId).toBe(saved.sessionId);
+    await resumed.dispose();
+  });
   it("starts without credentials and returns actionable model setup output", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-")); roots.push(workspace);
     const output: string[] = [];

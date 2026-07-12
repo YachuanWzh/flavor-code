@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+        node: [20, 24]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - name: Test (Windows, excluding POSIX signal/process contract)
+        if: runner.os == 'Windows'
+        run: npm test -- --exclude tests/cli/sigint-process.test.ts
+      - name: Test (macOS, including POSIX signal/process contract)
+        if: runner.os == 'macOS'
+        run: npm test
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run smoke:install
