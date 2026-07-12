@@ -1,5 +1,5 @@
 import { basename } from "node:path";
-import React, { useEffect, useReducer, useRef, useState } from "react";
+import React, { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { Box, Static, Text, useApp, useInput, useStdout } from "ink";
 
 import { createProductionRuntime, type ProductionRuntime } from "../production.js";
@@ -33,6 +33,16 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   const [transcript, dispatch] = useReducer(transcriptReducer, undefined, createTranscriptState);
   const runtimeRef = useRef<ProductionRuntime | undefined>(undefined);
   const closing = useRef(false);
+  const textBuf = useRef<{ pending: string; timer: ReturnType<typeof setTimeout> | null }>({ pending: "", timer: null });
+
+  const flushText = (): void => {
+    const t = textBuf.current;
+    if (t.timer !== null) { clearTimeout(t.timer); t.timer = null; }
+    if (t.pending.length > 0) {
+      dispatch({ type: "session", event: { type: "text", text: t.pending } });
+      t.pending = "";
+    }
+  };
 
   const shutdown = async (active: ProductionRuntime | undefined) => {
     if (closing.current) return;
@@ -52,12 +62,26 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
 
   useEffect(() => {
     let disposed = false;
+    const FLUSH_MS = 100;
     const receive = (event: SessionOutput): void => {
       if (event.type === "exit") {
+        flushText();
         void shutdownRef.current(runtimeRef.current);
         return;
       }
-      dispatch(event.type === "clear" ? { type: "clear" } : { type: "session", event });
+      if (event.type === "clear") {
+        flushText();
+        dispatch({ type: "clear" });
+        return;
+      }
+      if (event.type === "text") {
+        const t = textBuf.current;
+        t.pending += event.text;
+        if (t.timer === null) t.timer = setTimeout(flushText, FLUSH_MS);
+        return;
+      }
+      flushText();
+      dispatch({ type: "session", event });
     };
     void createProductionRuntime({
       workspace,
@@ -76,6 +100,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     });
     return () => {
       disposed = true;
+      flushText();
       void closeAndDisposeRuntime(runtimeRef.current, (error) => process.stderr.write(`flavor cleanup: ${error}\n`));
     };
   }, [workspace, home, resumeSession]);
@@ -186,16 +211,16 @@ export function TerminalLayout({
   model, workspaceName, completed, active, input, promptCursor, columns, rows = 24, activeSession, approval,
 }: TerminalLayoutProps): React.JSX.Element {
   const dividerWidth = Math.max(1, columns - 1);
-  const staticRows: StaticRow[] = [
+  const staticRows = useMemo<StaticRow[]>(() => [
     { kind: "header", model, workspaceName },
     ...completed.map((turn) => ({ kind: "turn" as const, turn })),
-  ];
+  ], [model, workspaceName, completed]);
   return <>
     <Static items={staticRows}>{(row) => row.kind === "header"
       ? <Text key="header" dimColor>flavor · {row.model} · {row.workspaceName}</Text>
       : <TurnView key={row.turn.id} turn={row.turn} />}
     </Static>
-    <Box flexDirection="column" minHeight={Math.max(4, rows - 1)}>
+    <Box flexDirection="column" flexGrow={1}>
       {active === undefined ? null : <TurnView turn={active} />}
       <Box flexGrow={1} />
       {approval === undefined ? null : <Box flexDirection="column">

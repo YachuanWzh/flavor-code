@@ -33,7 +33,7 @@ export function createProgram(): Command {
       }), {
         exitOnCtrlC: false,
         incrementalRendering: true,
-        maxFps: 15,
+        maxFps: 10,
         // Use the alternate screen so that on exit Ink restores whatever the
         // shell had on screen, leaving no stale prompt fragments behind.
         alternateScreen: true,
