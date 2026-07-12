@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { EventEmitter } from "node:events";
-import { editPrompt } from "../../src/ui/app.js";
+import { editPrompt, navigateHistory } from "../../src/ui/app.js";
 import { installSigintHandler } from "../../src/ui/signals.js";
 
 it("edits prompts by Unicode code point with a movable cursor", () => {
@@ -17,4 +17,16 @@ it("installs and cleans the process SIGINT bridge", () => {
   const cleanup = installSigintHandler(source, () => { calls += 1; });
   source.emit("SIGINT"); cleanup(); source.emit("SIGINT");
   expect(calls).toBe(1);
+});
+
+it("uses only up and down navigation to recall submitted queries", () => {
+  const history = ["one", "two"];
+  const recalled = navigateHistory({ history, cursor: 2 }, "up");
+  expect(recalled).toEqual({ cursor: 1, input: "two", promptCursor: 3 });
+
+  const older = navigateHistory({ history, cursor: recalled.cursor }, "up");
+  expect(older).toEqual({ cursor: 0, input: "one", promptCursor: 3 });
+
+  const cleared = navigateHistory({ history, cursor: older.cursor }, "down");
+  expect(cleared).toEqual({ cursor: 1, input: "two", promptCursor: 3 });
 });
