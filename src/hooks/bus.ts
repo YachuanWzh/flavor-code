@@ -12,6 +12,7 @@ import {
   type HookHandlerOptions,
   type ShellHookHandler,
 } from "./types.js";
+import { message as errorMessage } from "../utils/error.js";
 
 interface RegisteredHandler {
   handler: HookHandler | ShellHookHandler;
@@ -192,6 +193,4 @@ function zodRecord(payload: unknown): Record<string, unknown> {
   return HookEventSchema.options[0].shape.payload.parse(payload);
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
+

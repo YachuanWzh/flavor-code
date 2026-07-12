@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { HookBus } from "../hooks/bus.js";
 import type { PermissionEngine, PermissionRequest } from "../permissions/engine.js";
 import type { ToolCall, ToolContext, ToolDefinition, ToolResult } from "./types.js";
+import { message } from "../utils/error.js";
 
 export type ApprovalCallback = (
   request: PermissionRequest & { reason?: string }, signal: AbortSignal,
@@ -134,8 +135,4 @@ export class ToolRuntime {
     }
     return result;
   }
-}
-
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

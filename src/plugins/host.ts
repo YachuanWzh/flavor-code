@@ -9,6 +9,7 @@ import type {
   LoadedPlugin, PluginContext, PluginDiagnostic, PluginDisposer, PluginHostOptions, PluginLogger,
   PluginManifest, PluginRegistrationCallbacks, PluginSkillRootCapability, PluginSource,
 } from "./types.js";
+import { message } from "../utils/error.js";
 import { PluginManifestSchema } from "./types.js";
 
 const MANIFEST = "flavor-plugin.json";
@@ -391,4 +392,3 @@ function positiveTimeout(value: number | undefined, fallback: number, label: str
   return result;
 }
 function compare(left: string, right: string): number { return left < right ? -1 : left > right ? 1 : 0; }
-function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }

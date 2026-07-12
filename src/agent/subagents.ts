@@ -2,6 +2,8 @@ import { z } from "zod";
 
 import type { HookBus } from "../hooks/bus.js";
 import { TaskGraphSchema, type TaskGraph, type TaskNode } from "./planner.js";
+import { awaitWithSignal } from "../utils/async.js";
+import { message } from "../utils/error.js";
 
 export const SubagentResultSchema = z.object({
   taskId: z.string().min(1),
@@ -206,18 +208,4 @@ function orderedOutcome(
   return { states: orderedStates, results: orderedResults };
 }
 
-function awaitWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  signal.throwIfAborted();
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(
-      (value) => { signal.removeEventListener("abort", onAbort); resolve(value); },
-      (error: unknown) => { signal.removeEventListener("abort", onAbort); reject(error); },
-    );
-  });
-}
 
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}

@@ -12,6 +12,8 @@ import {
   type TranscriptTurn,
 } from "./transcript.js";
 import { wrapPromptInput } from "./wrap-prompt.js";
+import { message } from "../utils/error.js";
+import { redactErrorText } from "../utils/redact.js";
 
 export const HISTORY_CAP = 200;
 
@@ -275,6 +277,8 @@ function updatePrompt(
   const next = editPrompt({ text, cursor }, edit); setText(next.text); setCursor(next.cursor);
 }
 
+
+
 export async function submitSafely(
   session: Pick<ProductionRuntime["session"], "submit">, prompt: string, report: (message: string) => void,
 ): Promise<void> {
@@ -302,10 +306,7 @@ export async function closeAndDisposeRuntime(
 }
 
 function safeUiError(error: unknown): string {
-  return message(error)
-    .replace(/\bsk-[A-Za-z0-9_-]+\b/g, "[redacted]")
-    .replace(/(authorization|api[_ -]?key|token)\s*[:=]\s*\S+/gi, "$1=[redacted]")
-    .slice(0, 2_000);
+  return redactErrorText(message(error)).slice(0, 2_000);
 }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function safeReport(report: (message: string) => void, value: string): void {

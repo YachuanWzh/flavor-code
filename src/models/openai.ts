@@ -11,6 +11,7 @@ import {
   type ModelMessage,
   type ModelRequest,
 } from "./types.js";
+import { parseJson } from "../utils/json.js";
 
 type OpenAIStreamRequest = Parameters<OpenAI["responses"]["stream"]>[0];
 
@@ -47,14 +48,6 @@ function toInput(message: ModelMessage): ResponseInputItem[] {
       arguments: JSON.stringify(call.input) ?? "null",
     })),
   ];
-}
-
-function parseJson(input: string): unknown {
-  try {
-    return JSON.parse(input) as unknown;
-  } catch {
-    return input;
-  }
 }
 
 export class OpenAIModelAdapter implements ModelAdapter {

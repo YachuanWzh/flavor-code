@@ -1,5 +1,6 @@
 import type { HookBus } from "../hooks/bus.js";
 import type { ModelMessage } from "../models/types.js";
+import { awaitWithSignal } from "../utils/async.js";
 
 export interface ContextManagerOptions {
   system: string;
@@ -166,18 +167,6 @@ function modelVisibleText(messages: readonly ModelMessage[]): string {
 
 function messageVisiblePart(message: ModelMessage): string {
   return `${message.content}${message.toolCalls === undefined ? "" : `\n${serializeForEstimate(message.toolCalls)}`}`;
-}
-
-function awaitWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  signal.throwIfAborted();
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(
-      (value) => { signal.removeEventListener("abort", onAbort); resolve(value); },
-      (error: unknown) => { signal.removeEventListener("abort", onAbort); reject(error); },
-    );
-  });
 }
 
 function serializeForEstimate(value: unknown): string {

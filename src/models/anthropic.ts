@@ -13,6 +13,7 @@ import {
   type ModelEvent,
   type ModelRequest,
 } from "./types.js";
+import { parseJson } from "../utils/json.js";
 
 export interface AnthropicClient {
   messages: {
@@ -47,14 +48,6 @@ interface InputUsageSnapshot {
   base: number;
   cacheCreation: number;
   cacheRead: number;
-}
-
-function parseJson(input: string): unknown {
-  try {
-    return JSON.parse(input) as unknown;
-  } catch {
-    return input;
-  }
 }
 
 function updateInputUsage(snapshot: InputUsageSnapshot, usage: AnthropicUsage | undefined): number {

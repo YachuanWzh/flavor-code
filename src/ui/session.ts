@@ -3,6 +3,7 @@ import { redactConfig } from "../config/load.js";
 import type { HookBus } from "../hooks/bus.js";
 import type { PermissionMode } from "../permissions/engine.js";
 import { parseSlashCommand, type ModelRole, type SlashCommand } from "./commands.js";
+import { message } from "../utils/error.js";
 
 export type SessionOutput = AgentEvent
   | { type: "notice"; message: string }
@@ -160,4 +161,3 @@ function format(value: unknown): string {
   return JSON.stringify(value, null, 2) ?? String(value);
 }
 
-function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }

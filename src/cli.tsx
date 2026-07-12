@@ -4,6 +4,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Command } from "commander";
 
 import { createProductionRuntime, type ProductionRuntime } from "./production.js";
+import { message } from "./utils/error.js";
+import { redactErrorText } from "./utils/redact.js";
 
 export function createProgram(): Command {
   return new Command()
@@ -81,9 +83,7 @@ export async function runPrint(prompt: string, dependencies: PrintDependencies =
 }
 
 function safeError(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error))
-    .replace(/\bsk-[A-Za-z0-9_-]+\b/g, "[redacted]")
-    .replace(/(authorization|api[_ -]?key|token)\s*[:=]\s*\S+/gi, "$1=[redacted]");
+  return redactErrorText(message(error));
 }
 
 if (process.argv[1]) {

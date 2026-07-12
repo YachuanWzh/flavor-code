@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import { TaskGraphSchema } from "../agent/planner.js";
 import { SubagentResultSchema } from "../agent/subagents.js";
+import { message } from "../utils/error.js";
 
 export const SESSION_VERSION = 1 as const;
 export const DEFAULT_MAX_SESSION_BYTES = 5 * 1024 * 1024;
@@ -208,7 +209,6 @@ function isWithin(root: string, path: string): boolean {
 }
 async function canonical(path: string): Promise<string> { try { return await realpath(resolve(path)); } catch { return resolve(path); } }
 function isCode(error: unknown, code: string): boolean { return typeof error === "object" && error !== null && "code" in error && error.code === code; }
-function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
 function sanitize(input: unknown, seen = new WeakSet<object>()): unknown {
   if (typeof input === "string") {

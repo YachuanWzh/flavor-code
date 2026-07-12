@@ -28,6 +28,9 @@ import { createShellTool } from "./tools/shell.js";
 import type { ToolDefinition } from "./tools/types.js";
 import { FlavorSession, type SessionOutput, type SessionServices } from "./ui/session.js";
 import { MVP_COMMANDS } from "./ui/commands.js";
+import { awaitWithSignal } from "./utils/async.js";
+import { message } from "./utils/error.js";
+import { redactSecrets } from "./utils/redact.js";
 
 export interface ProductionRuntimeOptions {
   workspace?: string;
@@ -174,7 +177,19 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     models: { main: harness.mainModelId, subagent: harness.subagentModelId }, permissionMode: harness.permissionMode,
   });
   const persist = (): Promise<void> => {
-    persistTail = persistTail.catch(() => undefined).then(() => sessionStore.save(sessionDocument()));
+    let persistFailed = false;
+  const persist = (): Promise<void> => {
+    persistTail = persistTail.catch(() => undefined).then(
+      () => sessionStore.save(sessionDocument()),
+    ).catch((err) => {
+      if (!persistFailed) {
+        persistFailed = true;
+        try { options.output({ type: "notice", message: `Session save failed: ${message(err)}. Your conversation may not be preserved.` }); }
+        catch { /* Output may be unavailable during shutdown */ }
+      }
+    });
+    return persistTail;
+  };
     return persistTail;
   };
 
@@ -253,7 +268,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     config: () => ({
       ...config, sources: loaded.sources,
       diagnostics: [...diagnostics, ...pluginHost.diagnostics.map((item) => `${item.plugin}: ${item.message}`),
-        ...skills.diagnostics.map((item) => `${item.path}: ${item.message}`)].map((item) => redactDiagnostic(item, secrets)),
+        ...skills.diagnostics.map((item) => `${item.path}: ${item.message}`)].map((item) => redactSecrets(item, secrets)),
     }),
     skills: () => skills.discover(),
     plugins: () => pluginHost.loadedPlugins,
@@ -264,7 +279,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       const handler = pluginCommands.get(name);
       if (handler === undefined) throw new Error(`Plugin command /${name} is no longer registered.`);
       signal.throwIfAborted();
-      return awaitWithAbort(Promise.resolve(handler(args, { workspace, signal })), signal);
+      return awaitWithSignal(Promise.resolve(handler(args, { workspace, signal })), signal);
     },
     output: options.output,
   };
@@ -453,21 +468,6 @@ function storedConversation(snapshot: ContextSnapshot): SessionDocument["convers
       ...(message.toolCalls === undefined ? {} : { toolCalls: message.toolCalls }),
     })),
   };
-}
-function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-function redactDiagnostic(input: string, secrets: readonly string[]): string {
-  return secrets.reduce((text, secret) => text.replaceAll(secret, "[redacted]"), input);
-}
-function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  signal.throwIfAborted();
-  return new Promise<T>((resolvePromise, reject) => {
-    const onAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(
-      (value) => { signal.removeEventListener("abort", onAbort); resolvePromise(value); },
-      (error: unknown) => { signal.removeEventListener("abort", onAbort); reject(error); },
-    );
-  });
 }
 
 async function cleanupProduction(
