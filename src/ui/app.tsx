@@ -98,7 +98,13 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
       appendStreamEvent(stream, event);
       const finalized = stream.finalize();
       if (finalized) {
-        setRenderedMessages((prev) => [...prev, { role: "assistant" as const, text: finalized }]);
+        // Replace the pending user prompt (added on Enter) with the complete
+        // turn that includes both the user prompt and the assistant response.
+        setRenderedMessages((prev) => {
+          const base = prev.length > 0 && prev[prev.length - 1]!.role === "user"
+            ? prev.slice(0, -1) : prev;
+          return [...base, { role: "assistant" as const, text: finalized }];
+        });
       }
       return;
     }
@@ -163,16 +169,28 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     }
     if (key.return) {
       const prompt = input.trim(); if (!prompt || active === undefined || active.session.active) return;
+      // Pre-fill the stream with the user prompt so it appears at the top
+      // of the band and scrolls naturally as streaming text arrives below it.
+      stream.start(`you › ${prompt}\n`);
+      // Add as a pending user prompt — replaced by the complete turn
+      // (user + assistant) when the stream finalizes.
       setRenderedMessages((prev) => [...prev, { role: "user" as const, text: prompt }]);
       setHistory((current) => [...current, prompt].slice(-HISTORY_CAP));
       setHistoryCursor(history.length + 1); setInput(""); setPromptCursor(0);
       void submitSafely(active.session, prompt, (error) => {
-        setRenderedMessages((prev) => [...prev, { role: "assistant" as const, text: `◆ ${error}` }]);
+        setRenderedMessages((prev) => {
+          const base = prev.length > 0 && prev[prev.length - 1]!.role === "user"
+            ? prev.slice(0, -1) : prev;
+          return [...base, { role: "assistant" as const, text: `you › ${prompt}\n◆ ${error}` }];
+        });
       });
     } else if (key.backspace) updatePrompt({ type: "backspace" }, input, promptCursor, setInput, setPromptCursor);
     else if (key.delete) updatePrompt({ type: "delete" }, input, promptCursor, setInput, setPromptCursor);
     else if (key.leftArrow) setPromptCursor((value) => Math.max(0, value - 1));
     else if (key.rightArrow) setPromptCursor((value) => Math.min([...input].length, value + 1));
+    // Ignore pageUp/pageDown — most terminals translate mouse scroll into
+    // these sequences in alternate screen mode. History is ↑/↓ only.
+    else if (key.pageUp || key.pageDown) { /* no-op: mouse scroll */ }
     else if (key.upArrow && history.length) {
       const next = Math.max(0, historyCursor - 1); const value = history[next] ?? "";
       setHistoryCursor(next); setInput(value); setPromptCursor([...value].length);
@@ -190,12 +208,17 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   // Detect streaming end: when session transitions from active to idle,
   // finalize the raw stream and persist the accumulated text as a React-
   // rendered message so it survives subsequent re-renders.
+  // This is a fallback for cases where "done" was not received (cancel/error).
   const isActive = runtime?.session.active ?? false;
   useEffect(() => {
     if (wasActiveRef.current && !isActive) {
       const finalized = stream.finalize();
       if (finalized) {
-        setRenderedMessages((prev) => [...prev, { role: "assistant" as const, text: finalized }]);
+        setRenderedMessages((prev) => {
+          const base = prev.length > 0 && prev[prev.length - 1]!.role === "user"
+            ? prev.slice(0, -1) : prev;
+          return [...base, { role: "assistant" as const, text: finalized }];
+        });
       }
     }
     wasActiveRef.current = isActive;
@@ -227,7 +250,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
         fills it via createRawStream. When idle, persisted messages are
         rendered as React components so they survive reconciliation. */}
     <Box flexShrink={1} flexGrow={1} height={streamHeight} flexDirection="column">
-      {!isActive && bandLines.map((item, idx) => (
+      {bandLines.map((item, idx) => (
         <Box key={idx}>
           {item.role === "user"
             ? <><Text color="yellow" bold>you › </Text><Text>{item.line}</Text></>

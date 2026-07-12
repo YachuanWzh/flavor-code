@@ -36,8 +36,9 @@ export interface RawStreamOptions {
 }
 
 export interface RawStreamHandle {
-  /** Begin a new stream. Resets the cursor to the band's top-left. */
-  start(): void;
+  /** Begin a new stream. Optionally pre-fill with content (e.g. the user's
+   *  prompt) so it appears at the top of the band before streaming text. */
+  start(initialContent?: string): void;
   /** Write `chunk` at the current cursor and advance the virtual cursor. */
   append(chunk: string): void;
   /** End the current stream and return the accumulated full text. */
@@ -172,12 +173,27 @@ export function createRawStream(options: RawStreamOptions): RawStreamHandle {
 
   return {
     get active() { return active; },
-    start() {
+    start(initialContent?: string) {
       buffer = "";
       contentBuffer = "";
       cursorRow = 0;
       cursorCol = 1;
       active = true;
+      if (initialContent) {
+        // Pre-fill the band with initial content (e.g. user's prompt).
+        // This content becomes part of the stream — it scrolls naturally
+        // as streaming text is appended below it.
+        contentBuffer = initialContent;
+        buffer = initialContent;
+        // Write at the top of the band.
+        positionCursor();
+        write(initialContent);
+        advance(initialContent);
+        // If initial content overflowed the band, redraw.
+        if (cursorRow > maxBandRow) {
+          redrawBand();
+        }
+      }
     },
     append(chunk: string) {
       if (!active) this.start();
