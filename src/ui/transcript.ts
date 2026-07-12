@@ -67,7 +67,7 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
   if (event.type === "error") {
     return { ...state, active: addText(state.active, `◆ ${event.error.code}: ${event.error.message}`, true) };
   }
-  if (event.type === "usage") return addStatus(state, `· ${event.totalInputTokens} in · ${event.totalOutputTokens} out`);
+  if (event.type === "usage") return state;
   if (event.type === "compacted") return addStatus(state, "· Context compacted.");
   return state;
 }
