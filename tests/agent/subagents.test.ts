@@ -275,7 +275,7 @@ describe("LocalHarness", () => {
       mainModelId: "fake:expensive",
       subagentModelId: "fake:cheap",
       tools,
-      approve: () => true,
+      approve: () => "once",
       createContext: () => new ContextManager({
         system: "system",
         compactAtChars: 10_000,
@@ -384,7 +384,7 @@ describe("LocalHarness", () => {
         { name: "Task", description: "delegate", inputSchema: z.object({}), paths: () => [], execute: async () => null },
         { name: "Network", description: "network", inputSchema: z.object({}), paths: () => [], execute: async () => null },
       ],
-      approve: () => { approvals += 1; return true; },
+      approve: () => { approvals += 1; return "once"; },
       createContext: () => new ContextManager({
         system: "system", compactAtChars: 10_000, toolOutputChars: 1_000, summarize: async () => "summary", hooks,
       }),

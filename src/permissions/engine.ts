@@ -20,6 +20,7 @@ export interface PermissionEngineOptions {
   mode?: PermissionMode;
 }
 
+const CONTROL_TOOLS = new Set(["TaskPlan", "TaskUpdate"]);
 const READ_TOOLS = new Set(["Read", "Glob", "Grep", "Search", "List", "SkillResource"]);
 const WRITE_TOOLS = new Set(["Write", "Edit", "ApplyPatch", "Delete", "Move", "Copy", "Mkdir"]);
 const SHELL_TOOLS = new Set(["Shell", "Bash", "Command", "Exec"]);
@@ -46,6 +47,7 @@ export class PermissionEngine {
     if (request.tool === "Task") return request.agent === "main"
       ? { decision: "allow" }
       : { decision: "deny", reason: "Task delegation is restricted to the main agent" };
+    if (CONTROL_TOOLS.has(request.tool)) return { decision: "allow" };
     const paths = request.paths ?? [];
     if (PATH_REQUIRED_TOOLS.has(request.tool) && paths.length === 0) {
       return { decision: "deny", reason: `${request.tool} requires at least one path` };

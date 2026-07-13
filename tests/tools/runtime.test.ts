@@ -101,7 +101,7 @@ describe("ToolRuntime", () => {
     let approvals = 0;
     const runtime = new ToolRuntime({
       tools: [main.tool], hooks: main.hooks, permissions: main.permissions,
-      approve: async () => { approvals += 1; return true; },
+      approve: async () => { approvals += 1; return "once"; },
     });
     expect((await runtime.execute({ name: "Test", input: { path: join(main.workspace, "x") } }, { agent: "main" })).ok).toBe(true);
     expect(approvals).toBe(1);
@@ -109,7 +109,7 @@ describe("ToolRuntime", () => {
     const sub = fixture("ask");
     const subRuntime = new ToolRuntime({
       tools: [sub.tool], hooks: sub.hooks, permissions: sub.permissions,
-      approve: async () => { approvals += 1; return true; },
+      approve: async () => { approvals += 1; return "once"; },
     });
     await expect(subRuntime.execute({ name: "Test", input: { path: join(sub.workspace, "x") } }, { agent: "subagent" }))
       .resolves.toMatchObject({ ok: false, error: { code: "approval_required" } });
@@ -119,8 +119,8 @@ describe("ToolRuntime", () => {
   it("passes cancellation into approval and completes without executing", async () => {
     const f = fixture("ask"); const controller = new AbortController();
     const runtime = new ToolRuntime({ tools: [f.tool], hooks: f.hooks, permissions: f.permissions,
-      approve: async (_request, signal) => new Promise<boolean>((resolve) => {
-        signal.addEventListener("abort", () => resolve(false), { once: true });
+      approve: async (_request, signal) => new Promise<import('../../src/tools/runtime.js').ApprovalDecision>((resolve) => {
+        signal.addEventListener("abort", () => resolve("deny"), { once: true });
       }),
     });
     const pending = runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } },
@@ -136,7 +136,7 @@ describe("ToolRuntime", () => {
     f.hooks.on("PermissionRequest", () => { f.calls.push("request"); return { decision: "allow" }; });
     const runtime = new ToolRuntime({
       tools: [f.tool], hooks: f.hooks, permissions: f.permissions,
-      approve: async () => { f.calls.push("approval"); return true; },
+      approve: async () => { f.calls.push("approval"); return "once"; },
     });
 
     await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } }, { agent: "main" }))
@@ -155,7 +155,7 @@ describe("ToolRuntime", () => {
       let approvals = 0;
       const runtime = new ToolRuntime({
         tools: [f.tool], hooks: f.hooks, permissions: f.permissions,
-        approve: async () => { approvals += 1; return true; },
+        approve: async () => { approvals += 1; return "once"; },
       });
 
       await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } }, { agent: "main" }))
@@ -171,7 +171,7 @@ describe("ToolRuntime", () => {
     let approvals = 0;
     const runtime = new ToolRuntime({
       tools: [f.tool], hooks: f.hooks, permissions: f.permissions,
-      approve: async () => { approvals += 1; return true; },
+      approve: async () => { approvals += 1; return "once"; },
     });
 
     await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } }, { agent: "subagent" }))
@@ -225,5 +225,41 @@ describe("ToolRuntime", () => {
     await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } }, { agent: "main" }))
       .resolves.toEqual({ ok: false, error: { code: "tool_error", message: "boom" } });
     expect(f.calls).toEqual(["pre", "permission", "execute", "failure"]);
+  });
+
+  it("bypasses approval for tools previously marked always-allowed", async () => {
+    const f = fixture("ask");
+    let approvals = 0;
+    const runtime = new ToolRuntime({
+      tools: [f.tool], hooks: f.hooks, permissions: f.permissions,
+      approve: async () => { approvals += 1; return "always"; },
+    });
+    // First call: approval asked, user says "always"
+    await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: true });
+    expect(approvals).toBe(1);
+
+    // Second call with same tool: approval bypassed
+    await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "y") } }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: true });
+    expect(approvals).toBe(1);
+  });
+
+  it("asks again when previous approval was once, not always", async () => {
+    const f = fixture("ask");
+    let approvals = 0;
+    const runtime = new ToolRuntime({
+      tools: [f.tool], hooks: f.hooks, permissions: f.permissions,
+      approve: async () => { approvals += 1; return "once"; },
+    });
+    // First call: approval asked, user says "once"
+    await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: true });
+    expect(approvals).toBe(1);
+
+    // Second call: same tool, approval asked again
+    await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "y") } }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: true });
+    expect(approvals).toBe(2);
   });
 });

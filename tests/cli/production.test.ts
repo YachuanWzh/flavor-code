@@ -105,7 +105,7 @@ describe("production runtime", () => {
     const controller = new AbortController();
     const pending = runtime.approvals.request({ agent: "main", tool: "Write", paths: [workspace] }, controller.signal);
     controller.abort(new Error("cancel approval"));
-    await expect(pending).resolves.toBe(false);
+    await expect(pending).resolves.toBe("deny");
     expect(runtime.approvals.pending).toBeUndefined();
     await runtime.dispose();
   });

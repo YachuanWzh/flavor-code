@@ -21,6 +21,21 @@ describe("PermissionEngine", () => {
     expect(engine.decide({ agent: "subagent", tool: "Task" }).decision).toBe("deny");
   });
 
+  it("always allows the internal TaskPlan and TaskUpdate tools", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-workspace-"));
+    const outside = mkdtempSync(join(tmpdir(), "flavor-outside-"));
+    for (const mode of ["safe", "workspace", "full"] as const) {
+      for (const tool of ["TaskPlan", "TaskUpdate"]) {
+        for (const agent of ["main", "subagent"] as const) {
+          const engine = new PermissionEngine({ workspace, mode });
+          expect(engine.decide({ agent, tool }).decision, `${mode} ${agent} ${tool}`).toBe("allow");
+          // paths are irrelevant for control tools
+          expect(engine.decide({ agent, tool, paths: [join(outside, "x")] }).decision, `${mode} ${agent} ${tool} with outside path`).toBe("allow");
+        }
+      }
+    }
+  });
+
   it("never permits a subagent write outside the workspace", () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-workspace-"));
     const outside = mkdtempSync(join(tmpdir(), "flavor-outside-"));

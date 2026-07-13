@@ -226,7 +226,7 @@ function createLoop(options: {
     tools: [tool],
     hooks,
     permissions: new PermissionEngine({ workspace: process.cwd() }),
-    approve: () => true,
+    approve: () => "once",
   });
   const registry = new ModelRegistry().register("fake", options.adapter);
   const context = new ContextManager({

@@ -5,9 +5,11 @@ import type { PermissionEngine, PermissionRequest } from "../permissions/engine.
 import type { ToolCall, ToolContext, ToolDefinition, ToolResult } from "./types.js";
 import { message } from "../utils/error.js";
 
+export type ApprovalDecision = "once" | "always" | "deny";
+
 export type ApprovalCallback = (
   request: PermissionRequest & { reason?: string }, signal: AbortSignal,
-) => boolean | Promise<boolean>;
+) => ApprovalDecision | Promise<ApprovalDecision>;
 
 export interface ToolRuntimeOptions {
   tools: readonly ToolDefinition<unknown>[];
@@ -32,6 +34,7 @@ export class ToolRuntime {
   readonly #hooks: HookBus;
   readonly #permissions: PermissionEngine;
   readonly #approve: ApprovalCallback | undefined;
+  readonly #alwaysAllowed: Set<string>;
   readonly #disposeSchemas: Array<() => void>;
   #disposed = false;
 
@@ -40,6 +43,7 @@ export class ToolRuntime {
     this.#hooks = options.hooks;
     this.#permissions = options.permissions;
     this.#approve = options.approve;
+    this.#alwaysAllowed = new Set();
     this.#disposeSchemas = [
       this.#hooks.registerPayloadSchema("PreToolUse", PreToolUsePayload),
       this.#hooks.registerPayloadSchema("PermissionRequest", PermissionRequestPayload),
@@ -108,8 +112,20 @@ export class ToolRuntime {
           return this.#fail(tool.name, input, context.agent, "approval_required", reason);
         }
         if (signal.aborted) throw signal.reason;
-        if (this.#approve === undefined || !(await this.#approve({ ...request, reason }, signal))) {
+
+        // Check if this tool has been always-allowed for this session.
+        if (this.#alwaysAllowed.has(tool.name)) {
+          // Skip the approval callback — already authorized for this tool type.
+        } else if (this.#approve === undefined) {
           return this.#fail(tool.name, input, context.agent, "permission_denied", reason);
+        } else {
+          const decision = await this.#approve({ ...request, reason }, signal);
+          if (decision === "deny") {
+            return this.#fail(tool.name, input, context.agent, "permission_denied", reason);
+          }
+          if (decision === "always") {
+            this.#alwaysAllowed.add(tool.name);
+          }
         }
       }
 

@@ -215,8 +215,9 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     const active = runtimeRef.current;
     if (key.ctrl && character === "c") { interrupt(); return; }
     if (active?.approvals.pending !== undefined) {
-      if (character.toLowerCase() === "y") active.approvals.resolve(true);
-      if (character.toLowerCase() === "n" || key.escape) active.approvals.resolve(false);
+      if (character.toLowerCase() === "y") active.approvals.resolve("once");
+      if (character.toLowerCase() === "n" || key.escape) active.approvals.resolve("deny");
+      if (character.toLowerCase() === "a") active.approvals.resolve("always");
       return;
     }
     const menuAction = slashKeyAction(key, slashCompletion);
@@ -355,7 +356,7 @@ export function TerminalLayout({
       {approval === undefined ? null : <Box flexDirection="column">
         <Text color="magenta">┌ approval · {approval.tool}</Text>
         <Text wrap="truncate-end">{approval.reason ?? "This action needs permission."}</Text>
-        <Text bold>Allow? y / n</Text>
+        <Text bold>Allow? y=once / a=same-type / n=deny</Text>
       </Box>}
       {completion === undefined ? null : <SlashMenu completion={completion} />}
       <Text dimColor>{"─".repeat(dividerWidth)}</Text>

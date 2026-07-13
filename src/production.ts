@@ -19,6 +19,7 @@ import { OpenAIModelAdapter } from "./models/openai.js";
 import { ModelRegistry, parseModelId } from "./models/registry.js";
 import type { ModelAdapter } from "./models/types.js";
 import type { PermissionRequest } from "./permissions/engine.js";
+import type { ApprovalDecision } from "./tools/runtime.js";
 import { PluginHost } from "./plugins/host.js";
 import type { PluginCommandHandler } from "./plugins/types.js";
 import { SkillRegistry } from "./skills/registry.js";
@@ -58,34 +59,34 @@ export interface ProductionRuntime {
 
 export class ApprovalBridge {
   #pending: (PermissionRequest & { reason?: string }) | undefined;
-  #settle: ((approved: boolean) => void) | undefined;
+  #settle: ((decision: ApprovalDecision) => void) | undefined;
   #removeAbort: (() => void) | undefined;
   readonly #onChange: (() => void) | undefined;
 
   constructor(onChange?: () => void) { this.#onChange = onChange; }
   get pending(): (PermissionRequest & { reason?: string }) | undefined { return this.#pending; }
 
-  request(request: PermissionRequest & { reason?: string }, signal: AbortSignal = new AbortController().signal): Promise<boolean> {
-    if (this.#settle !== undefined) return Promise.resolve(false);
-    if (signal.aborted) return Promise.resolve(false);
+  request(request: PermissionRequest & { reason?: string }, signal: AbortSignal = new AbortController().signal): Promise<ApprovalDecision> {
+    if (this.#settle !== undefined) return Promise.resolve("deny");
+    if (signal.aborted) return Promise.resolve("deny");
     this.#pending = request;
     this.#onChange?.();
-    return new Promise<boolean>((resolvePromise) => {
+    return new Promise<ApprovalDecision>((resolvePromise) => {
       this.#settle = resolvePromise;
-      const onAbort = () => this.resolve(false);
+      const onAbort = () => this.resolve("deny");
       signal.addEventListener("abort", onAbort, { once: true });
       this.#removeAbort = () => signal.removeEventListener("abort", onAbort);
     });
   }
 
-  resolve(approved: boolean): void {
+  resolve(decision: ApprovalDecision): void {
     const settle = this.#settle;
     const changed = settle !== undefined || this.#pending !== undefined;
     this.#removeAbort?.();
     this.#removeAbort = undefined;
     this.#settle = undefined;
     this.#pending = undefined;
-    settle?.(approved);
+    settle?.(decision);
     if (changed) this.#onChange?.();
   }
 }
@@ -279,7 +280,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   harness = new LocalHarness({
     registry, hooks, workspace, mainModelId: mainModel, subagentModelId: childModel,
     tools, createContext, permissionMode: recovered?.permissionMode ?? config.permissionMode,
-    approve: options.approvalPolicy === "deny" ? () => false : (request, signal) => approvals.request(request, signal),
+    approve: options.approvalPolicy === "deny" ? () => "deny" as ApprovalDecision : (request, signal) => approvals.request(request, signal),
   });
   harnessCreated = true;
   if (recovered !== undefined) harness.main.context.restore({
@@ -564,7 +565,7 @@ async function cleanupProduction(
   approvals: ApprovalBridge, pluginHost: PluginHost, harness: LocalHarness | undefined,
 ): Promise<void> {
   let primary: unknown;
-  try { approvals.resolve(false); }
+  try { approvals.resolve("deny"); }
   catch (error) { primary = error; }
   try { await pluginHost.unloadAll(); }
   catch (error) {
