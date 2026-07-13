@@ -29,7 +29,7 @@ const GrepInput = z.object({
   pattern: z.string().min(1),
   path: z.string().min(1).nullable().optional(),
   glob: z.string().min(1).nullable().optional(),
-  type: z.string().min(1).nullable().optional(),
+  fileType: z.string().min(1).nullable().optional(),
   context: z.number().int().nonnegative().max(100).nullable().optional(),
   limit: z.number().int().positive().max(100_000).nullable().optional(),
 });
@@ -127,7 +127,7 @@ export function createGrepTool(
   const resources = searchResources(options);
   return {
     name: "Grep",
-    description: "Search workspace text with a regular expression",
+    description: "Search workspace text with a regular expression. Use fileType to filter by language (e.g. js, ts, py, rust, go) — see rg --type-list for all supported types.",
     inputSchema: GrepInput,
     paths: (input) => [scope(root, input.path ?? undefined)],
     execute: async (input, signal) => {
@@ -139,14 +139,14 @@ export function createGrepTool(
       const ignoreBudget = createIgnoreBudget(resources);
       let matches: GrepMatch[];
       if (options.forceNode === true) {
-        matches = await nodeGrep(root, start, input.glob ?? undefined, input.type ?? undefined, expression, context, signal, limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, resources, ignoreBudget);
+        matches = await nodeGrep(root, start, input.glob ?? undefined, input.fileType ?? undefined, expression, context, signal, limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, resources, ignoreBudget);
       } else {
         try {
           matches = await rgGrep(root, start, input, context, signal, options.rgPath ?? bundledRgPath, options.rgArgsPrefix ?? [], limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, resources, ignoreBudget);
         } catch (error) {
           if (signal.aborted) throw signal.reason;
           if (!(error instanceof SearchSpawnError) || !error.fallbackSafe) throw error;
-          matches = await nodeGrep(root, start, input.glob ?? undefined, input.type ?? undefined, expression, context, signal, limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, resources, createIgnoreBudget(resources));
+          matches = await nodeGrep(root, start, input.glob ?? undefined, input.fileType ?? undefined, expression, context, signal, limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, resources, createIgnoreBudget(resources));
         }
       }
       matches.sort(compareGrepMatches);
@@ -191,7 +191,7 @@ async function rgGrep(
 ): Promise<GrepMatch[]> {
   const args = ["--json", "--line-number", "--column", "--sort", "path", "--hidden", "--glob", "!.git", "--max-filesize", String(maxFileBytes), "--context", String(context)];
   if (input.glob !== undefined && input.glob !== null) args.push("--glob", input.glob);
-  if (input.type !== undefined && input.type !== null) args.push("--type", input.type);
+  if (input.fileType !== undefined && input.fileType !== null) args.push("--type", input.fileType);
   args.push("--regexp", input.pattern, "--", relative(root, start) || ".");
   const matches: GrepMatch[] = [];
   const ignoreLayers = await collectIgnoreLayers(root, start, signal, resources, ignoreBudget);
