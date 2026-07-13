@@ -200,12 +200,15 @@ export class AgentLoop {
           totalOutputTokens += usage.outputTokens;
           yield { type: "usage", ...usage, totalInputTokens, totalOutputTokens };
         }
-        if (terminalError?.code === "context_overflow" && !reactiveRetried) {
+        const providerProducedOutput = assistantText.length > 0 || toolCalls.length > 0;
+        if (terminalError?.code === "context_overflow" && !reactiveRetried && !providerProducedOutput) {
           let compacted = false;
           try { compacted = await this.#options.context.compact(request.signal, "reactive"); }
-          catch (error) {
-            yield { type: "error", error: normalizeProviderError(error) };
-            return;
+          catch {
+            if (request.signal?.aborted) {
+              yield { type: "error", error: { code: "cancelled", message: abortMessage(request.signal) } };
+              return;
+            }
           }
           if (compacted) {
             reactiveRetried = true;

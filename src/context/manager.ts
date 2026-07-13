@@ -58,6 +58,7 @@ export class ContextManager {
   #compact: CompactBoundary | undefined;
   #messages: ModelMessage[] = [];
   #lastRecordedInputTokens: number | undefined;
+  #estimatedTokensAtLastRecordedUsage: number | undefined;
   #consecutiveAutoCompactFailures = 0;
 
   constructor(options: ContextManagerOptions) {
@@ -88,6 +89,7 @@ export class ContextManager {
     this.#messages = [];
     this.#taskState = undefined;
     this.#lastRecordedInputTokens = undefined;
+    this.#estimatedTokensAtLastRecordedUsage = undefined;
     this.#consecutiveAutoCompactFailures = 0;
   }
 
@@ -125,6 +127,7 @@ export class ContextManager {
       ? { ...message, content: truncateToolOutput(message.content, this.#toolOutputChars) }
       : cloneMessage(message));
     this.#lastRecordedInputTokens = undefined;
+    this.#estimatedTokensAtLastRecordedUsage = undefined;
     this.#consecutiveAutoCompactFailures = 0;
   }
 
@@ -151,27 +154,33 @@ export class ContextManager {
   recordModelUsage(inputTokens: number): void {
     if (!Number.isFinite(inputTokens) || inputTokens < 0) return;
     this.#lastRecordedInputTokens = Math.ceil(inputTokens);
+    this.#estimatedTokensAtLastRecordedUsage = this.estimatedTokens();
   }
 
   async prepareForModelCall(signal: AbortSignal = new AbortController().signal): Promise<boolean> {
     signal.throwIfAborted();
     if (!this.needsCompaction()) return false;
-    let changed = false;
+    const originalMessages = this.#messages;
+    const originalRecordedUsage = this.#lastRecordedInputTokens;
+    const originalEstimatedUsage = this.#estimatedTokensAtLastRecordedUsage;
     const microcompact = microcompactMessages(this.#messages, this.#compaction.microcompactKeepRecentToolResults);
     if (microcompact.changed) {
       this.#messages = microcompact.messages;
       this.#lastRecordedInputTokens = undefined;
-      changed = true;
+      this.#estimatedTokensAtLastRecordedUsage = undefined;
     }
-    if (!this.needsCompaction() || this.#consecutiveAutoCompactFailures >= 3) return changed;
+    if (!this.needsCompaction() || this.#consecutiveAutoCompactFailures >= 3) return microcompact.changed;
     try {
       const compacted = await this.#compactConversation(signal);
       if (compacted) this.#consecutiveAutoCompactFailures = 0;
-      return changed || compacted;
+      return microcompact.changed || compacted;
     } catch {
+      this.#messages = originalMessages;
+      this.#lastRecordedInputTokens = originalRecordedUsage;
+      this.#estimatedTokensAtLastRecordedUsage = originalEstimatedUsage;
       signal.throwIfAborted();
       this.#consecutiveAutoCompactFailures += 1;
-      return changed;
+      return false;
     }
   }
 
@@ -226,11 +235,15 @@ export class ContextManager {
     this.#compact = nextCompact;
     this.#messages = nextMessages.map(cloneMessage);
     this.#lastRecordedInputTokens = undefined;
+    this.#estimatedTokensAtLastRecordedUsage = undefined;
     return true;
   }
 
   #currentTokenUsage(): number {
-    return Math.max(this.#lastRecordedInputTokens ?? 0, this.estimatedTokens());
+    const estimated = this.estimatedTokens();
+    if (this.#lastRecordedInputTokens === undefined || this.#estimatedTokensAtLastRecordedUsage === undefined) return estimated;
+    const appendedEstimate = Math.max(0, estimated - this.#estimatedTokensAtLastRecordedUsage);
+    return Math.max(estimated, this.#lastRecordedInputTokens + appendedEstimate);
   }
 
   #pinnedMessages(): ModelMessage[] {

@@ -122,6 +122,31 @@ describe("ContextManager", () => {
     expect(context.snapshot().compact?.summary).toBe("summary from usage");
   });
 
+  it("adds newly appended context to the last provider input usage", () => {
+    const context = new ContextManager({
+      system: "system",
+      toolOutputChars: 1_000,
+      compaction: {
+        windowTokens: 30,
+        reservedOutputTokens: 5,
+        autoCompactBufferTokens: 5,
+        warningBufferTokens: 5,
+        blockingBufferTokens: 2,
+        microcompactKeepRecentToolResults: 1,
+        recentTokens: 1,
+        recentTextMessages: 1,
+        maxRecentTokens: 10,
+      },
+      summarize: async () => "summary",
+      hooks: new HookBus(),
+    });
+    context.append({ role: "user", content: "short" });
+    context.recordModelUsage(15);
+    context.append({ role: "assistant", content: "x".repeat(40) });
+
+    expect(context.needsCompaction()).toBe(true);
+  });
+
   it("microcompacts old tool results before paying for a full summary", async () => {
     let summaries = 0;
     const context = createContext({
@@ -142,6 +167,25 @@ describe("ContextManager", () => {
     expect(summaries).toBe(0);
     expect(context.messagesForModel().find((message) => message.toolCallId === "old")?.content).toContain("cleared");
     expect(context.messagesForModel().find((message) => message.toolCallId === "new")?.content).toBe("y".repeat(400));
+  });
+
+  it("rolls back staged microcompaction when automatic full compaction fails", async () => {
+    const context = createContext({
+      compactAtChars: 1,
+      toolOutputChars: 1_000,
+      recentTurns: 0,
+      compaction: { microcompactKeepRecentToolResults: 1 },
+      summarize: async () => { throw new Error("summary failed"); },
+    });
+    context.append({ role: "assistant", content: "", toolCalls: [{ id: "old", name: "Read", input: {} }] });
+    context.append({ role: "tool", content: "x".repeat(400), toolCallId: "old" });
+    context.append({ role: "assistant", content: "", toolCalls: [{ id: "new", name: "Shell", input: {} }] });
+    context.append({ role: "tool", content: "y".repeat(400), toolCallId: "new" });
+    const before = context.messagesForModel();
+
+    await expect(context.prepareForModelCall()).resolves.toBe(false);
+
+    expect(context.messagesForModel()).toEqual(before);
   });
 
   it("trips automatic compaction after three failures but still permits manual compact", async () => {

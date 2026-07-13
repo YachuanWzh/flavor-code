@@ -117,6 +117,46 @@ describe("AgentLoop", () => {
     expect(events.at(-1)).toEqual({ type: "error", error: { code: "context_overflow", message: "second overflow" } });
   });
 
+  it("preserves the original context overflow when reactive compaction fails", async () => {
+    const requests: ModelRequest[] = [];
+    const fixture = createLoop({
+      adapter: fakeAdapter([
+        [{ type: "error", error: { code: "context_overflow", message: "original overflow" } }],
+      ], requests),
+      recentTurns: 0,
+      summarize: async () => { throw new Error("summary backend failed"); },
+    });
+    fixture.context.append({ role: "user", content: "older work" });
+
+    const events = await collect(fixture.loop.run({ prompt: "continue" }));
+
+    expect(requests).toHaveLength(1);
+    expect(events.at(-1)).toEqual({ type: "error", error: { code: "context_overflow", message: "original overflow" } });
+  });
+
+  it("does not retry context overflow after provider output is already visible", async () => {
+    const requests: ModelRequest[] = [];
+    const fixture = createLoop({
+      adapter: fakeAdapter([
+        [
+          { type: "text", text: "partial answer" },
+          { type: "error", error: { code: "context_overflow", message: "late overflow" } },
+        ],
+        [
+          { type: "text", text: "duplicate answer" },
+          { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+        ],
+      ], requests),
+      recentTurns: 0,
+    });
+
+    const events = await collect(fixture.loop.run({ prompt: "stream safely" }));
+
+    expect(requests).toHaveLength(1);
+    expect(events.filter((event) => event.type === "text").map((event) => event.text)).toEqual(["partial answer"]);
+    expect(events.at(-1)).toEqual({ type: "error", error: { code: "context_overflow", message: "late overflow" } });
+  });
+
   it("stops with a typed error at the iteration limit", async () => {
     const fixture = createLoop({
       adapter: fakeAdapter(Array.from({ length: 2 }, (_, index) => [
@@ -256,6 +296,7 @@ function createLoop(options: {
   execute?: (input: { value: string }, signal: AbortSignal) => Promise<unknown>;
   maxIterations?: number;
   recentTurns?: number;
+  summarize?: () => Promise<string>;
 }) {
   const hooks = new HookBus();
   const tool = {
@@ -277,7 +318,7 @@ function createLoop(options: {
     compactAtChars: 100_000,
     toolOutputChars: 1_000,
     ...(options.recentTurns === undefined ? {} : { recentTurns: options.recentTurns }),
-    summarize: async () => "summary",
+    summarize: options.summarize ?? (async () => "summary"),
     hooks,
   });
   const loopOptions: AgentLoopOptions = {
