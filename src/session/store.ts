@@ -73,7 +73,14 @@ export class SessionStore {
     await this.#assertWorkspace(document.workspace.path);
     await this.#prepareDirectory();
     const target = this.#path(document.sessionId);
-    const body = `${JSON.stringify(document)}\n`;
+    const { conversation: { messages, summary }, ...meta } = document;
+    const metaLine = JSON.stringify({
+      __meta: true,
+      ...meta,
+      ...(summary === undefined ? {} : { summary }),
+    });
+    const lines = [metaLine, ...messages.map((message) => JSON.stringify(message))];
+    const body = `${lines.join("\n")}\n`;
     if (Buffer.byteLength(body) > this.#maxBytes) throw new Error(`Session exceeds maximum size of ${this.#maxBytes} bytes`);
     const temporary = join(this.#sessions, `.${document.sessionId}.${process.pid}.${randomUUID()}.tmp`);
     let handle;
@@ -105,13 +112,50 @@ export class SessionStore {
       throw error;
     }
     let parsed: SessionDocument;
-    try { parsed = SessionDocumentSchema.parse(JSON.parse(raw)); }
+    try { parsed = this.#parseSession(raw); }
     catch (error) {
       const quarantine = await this.#quarantine(path);
       throw new Error(`Session "${sessionId}" is corrupt or incompatible and was quarantined as ${basename(quarantine)}: ${message(error)}`);
     }
     await this.#assertWorkspace(parsed.workspace.path);
     return normalizeAbandonedTasks(parsed);
+  }
+
+  #parseSession(raw: string): SessionDocument {
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) throw new Error("Empty session file");
+    const firstLine = trimmed.split("\n", 1)[0] ?? "";
+    let meta: Record<string, unknown>;
+    let messages: unknown[];
+    const first = JSON.parse(firstLine) as Record<string, unknown>;
+    if (first.__meta === true) {
+      // New multi-line JSONL format
+      meta = first;
+      messages = trimmed
+        .split("\n")
+        .slice(1)
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as unknown);
+    } else {
+      // Old single-line format: entire document is one JSON object
+      const doc = JSON.parse(trimmed) as Record<string, unknown>;
+      const conv = doc.conversation as Record<string, unknown> | undefined;
+      meta = { ...doc };
+      delete meta.conversation;
+      if (conv?.summary !== undefined) meta.summary = conv.summary;
+      messages = (conv?.messages as unknown[]) ?? [];
+    }
+    const summary = meta.summary as { role: "system"; content: string } | undefined;
+    delete meta.__meta;
+    delete meta.summary;
+    const document: SessionDocument = SessionDocumentSchema.parse({
+      ...meta,
+      conversation: {
+        ...(summary === undefined ? {} : { summary }),
+        messages,
+      },
+    });
+    return document;
   }
 
   async list(): Promise<SessionEntry[]> {

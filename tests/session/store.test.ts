@@ -61,6 +61,90 @@ describe("SessionStore", () => {
     expect((await store.load("session-20260712")).tasks.plan).toBeUndefined();
   });
 
+  it("writes each message as a separate JSONL line with a metadata header", async () => {
+    const root = await workspace();
+    const store = new SessionStore({ workspace: root });
+    await store.save(document(root));
+
+    const raw = await readFile(join(root, ".flavor", "sessions", "session-20260712.jsonl"), "utf8");
+    const lines = raw.trim().split("\n").filter((line) => line.length > 0);
+    expect(lines.length).toBe(3); // metadata + 2 messages
+
+    const meta = JSON.parse(lines[0]!) as Record<string, unknown>;
+    expect(meta.__meta).toBe(true);
+    expect(meta.sessionId).toBe("session-20260712");
+    expect(meta).not.toHaveProperty("conversation");
+
+    const msg1 = JSON.parse(lines[1]!) as Record<string, unknown>;
+    expect(msg1).toMatchObject({ role: "user", content: "hello" });
+
+    const msg2 = JSON.parse(lines[2]!) as Record<string, unknown>;
+    expect(msg2).toMatchObject({ role: "assistant", content: "world" });
+
+    // Round-trip
+    const loaded = await store.load("session-20260712");
+    expect(loaded.conversation.messages).toEqual([
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "world" },
+    ]);
+  });
+
+  it("preserves summary in the metadata line", async () => {
+    const root = await workspace();
+    const store = new SessionStore({ workspace: root });
+    const doc = document(root);
+    doc.conversation.summary = { role: "system", content: "Conversation summary\nTest summary." };
+
+    await store.save(doc);
+
+    const raw = await readFile(join(root, ".flavor", "sessions", "session-20260712.jsonl"), "utf8");
+    const meta = JSON.parse(raw.trim().split("\n")[0]!) as Record<string, unknown>;
+    expect(meta.summary).toEqual({ role: "system", content: "Conversation summary\nTest summary." });
+
+    const loaded = await store.load("session-20260712");
+    expect(loaded.conversation.summary).toEqual({ role: "system", content: "Conversation summary\nTest summary." });
+  });
+
+  it("loads old single-line JSON format for backward compatibility", async () => {
+    const root = await workspace();
+    await mkdir(join(root, ".flavor", "sessions"), { recursive: true });
+    const oldDoc = {
+      version: 1,
+      sessionId: "old-format",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T01:00:00.000Z",
+      workspace: { path: root },
+      conversation: {
+        summary: { role: "system", content: "Conversation summary\nOld summary." },
+        messages: [
+          { role: "user", content: "old question" },
+          { role: "assistant", content: "old answer", toolCalls: [{ id: "t1", name: "Read", input: { path: "x" } }] },
+          { role: "tool", toolCallId: "t1", content: "file contents" },
+          { role: "assistant", content: "follow-up" },
+        ],
+      },
+      tasks: { states: {}, results: {} },
+      models: { main: "openai:gpt-5", subagent: "openai:gpt-5-mini" },
+      permissionMode: "workspace",
+    };
+    await writeFile(
+      join(root, ".flavor", "sessions", "old-format.jsonl"),
+      `${JSON.stringify(oldDoc)}\n`,
+      "utf8",
+    );
+
+    const store = new SessionStore({ workspace: root });
+    const loaded = await store.load("old-format");
+    expect(loaded.sessionId).toBe("old-format");
+    expect(loaded.conversation.summary).toEqual({ role: "system", content: "Conversation summary\nOld summary." });
+    expect(loaded.conversation.messages).toHaveLength(4);
+    expect(loaded.conversation.messages[1]).toMatchObject({
+      role: "assistant",
+      content: "old answer",
+      toolCalls: [{ id: "t1", name: "Read", input: { path: "x" } }],
+    });
+  });
+
   it("atomically saves a strict, secret-free document and lists deterministically", async () => {
     const root = await workspace();
     const store = new SessionStore({ workspace: root });
