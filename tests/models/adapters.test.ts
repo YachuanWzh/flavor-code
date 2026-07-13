@@ -212,7 +212,108 @@ describe("AnthropicModelAdapter", () => {
       { type: "done", usage: { inputTokens: 5, outputTokens: 2 } },
     ]);
     expect(stream).toHaveBeenCalledWith(
-      expect.objectContaining({ model: "example-model", max_tokens: 4096 }),
+      expect.objectContaining({ model: "example-model", max_tokens: 32_768 }),
+      { signal },
+    );
+  });
+
+  it("does not emit a truncated tool call when the provider reaches max_tokens", async () => {
+    const client = {
+      messages: {
+        stream: () =>
+          events(
+            { type: "message_start", message: { usage: { input_tokens: 5, output_tokens: 0 } } },
+            {
+              type: "content_block_start",
+              index: 1,
+              content_block: { type: "tool_use", id: "tool_1", name: "weather", input: {} },
+            },
+            {
+              type: "content_block_delta",
+              index: 1,
+              delta: { type: "input_json_delta", partial_json: '{"city":"Par' },
+            },
+            { type: "content_block_stop", index: 1 },
+            {
+              type: "message_delta",
+              delta: { stop_reason: "max_tokens", stop_sequence: null },
+              usage: { output_tokens: 4096 },
+            },
+            { type: "message_stop" },
+          ),
+      },
+    };
+
+    await expect(
+      collect(new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream(request)),
+    ).resolves.toEqual([
+      { type: "usage", inputTokens: 5, outputTokens: 4096 },
+      {
+        type: "error",
+        error: {
+          code: "output_limit",
+          message: "Provider stopped at the 32768-token output limit; incomplete tool calls were discarded",
+        },
+      },
+    ]);
+  });
+
+  it("reports malformed tool-call JSON instead of normalizing it to an empty object", async () => {
+    const client = {
+      messages: {
+        stream: () =>
+          events(
+            { type: "message_start", message: { usage: { input_tokens: 5, output_tokens: 0 } } },
+            {
+              type: "content_block_start",
+              index: 1,
+              content_block: { type: "tool_use", id: "tool_1", name: "weather", input: {} },
+            },
+            {
+              type: "content_block_delta",
+              index: 1,
+              delta: { type: "input_json_delta", partial_json: '{"city":"Par' },
+            },
+            { type: "content_block_stop", index: 1 },
+            {
+              type: "message_delta",
+              delta: { stop_reason: "tool_use", stop_sequence: null },
+              usage: { output_tokens: 12 },
+            },
+            { type: "message_stop" },
+          ),
+      },
+    };
+
+    const output = await collect(
+      new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream(request),
+    );
+
+    expect(output).toHaveLength(2);
+    expect(output[0]).toEqual({ type: "usage", inputTokens: 5, outputTokens: 12 });
+    expect(output[1]).toMatchObject({
+      type: "error",
+      error: {
+        code: "unknown",
+        message: expect.stringContaining('Invalid tool-call input for "weather"'),
+      },
+    });
+    expect(output).not.toContainEqual(expect.objectContaining({ type: "tool-call", input: {} }));
+  });
+
+  it("uses a configured Anthropic output token limit", async () => {
+    const stream = vi.fn(() => events());
+    const client = { messages: { stream } };
+
+    await collect(
+      new AnthropicModelAdapter({
+        client: asAnthropicClient(client),
+        maxOutputTokens: 65_536,
+      }).stream(request),
+    );
+
+    expect(stream).toHaveBeenCalledWith(
+      expect.objectContaining({ max_tokens: 65_536 }),
       { signal },
     );
   });

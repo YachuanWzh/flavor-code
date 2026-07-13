@@ -28,6 +28,7 @@ export type ProviderErrorCode =
   | "authentication"
   | "rate_limit"
   | "context_overflow"
+  | "output_limit"
   | "model_not_found"
   | "network"
   | "cancelled"

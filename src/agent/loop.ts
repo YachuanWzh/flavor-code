@@ -187,7 +187,17 @@ export class AgentLoop {
             await this.#options.hooks.emit({
               version: 1,
               type: "AfterModelCall",
-              payload: { modelId: this.#options.modelId, iteration, completed, providerError: terminalError !== undefined },
+              payload: {
+                modelId: this.#options.modelId,
+                iteration,
+                completed,
+                agent: this.#options.agent,
+                providerError: terminalError !== undefined,
+                ...(terminalError === undefined ? {} : {
+                  errorCode: terminalError.code,
+                  errorMessage: terminalError.message,
+                }),
+              },
             });
           } catch (error) {
             terminalError ??= normalizeProviderError(error);

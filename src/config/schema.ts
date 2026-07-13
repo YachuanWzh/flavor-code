@@ -6,6 +6,7 @@ export const ProviderConfigSchema = z.object({
   apiKey: z.string().optional(),
   defaultModel: z.string().min(1).optional(),
   cheapModel: z.string().min(1).optional(),
+  maxOutputTokens: z.number().int().positive().optional(),
 });
 
 export const FlavorConfigSchema = z.object({

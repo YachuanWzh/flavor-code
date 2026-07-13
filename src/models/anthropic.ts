@@ -28,7 +28,10 @@ export interface AnthropicModelAdapterOptions {
   apiKey?: string;
   baseURL?: string;
   client?: AnthropicClient;
+  maxOutputTokens?: number;
 }
+
+const DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
 
 type AnthropicUsage = Pick<
   Usage | MessageDeltaUsage,
@@ -63,8 +66,14 @@ function updateInputUsage(snapshot: InputUsageSnapshot, usage: AnthropicUsage | 
 
 export class AnthropicModelAdapter implements ModelAdapter {
   private readonly client: AnthropicClient;
+  private readonly maxOutputTokens: number;
 
   constructor(options: AnthropicModelAdapterOptions) {
+    const maxOutputTokens = options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+    if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens <= 0) {
+      throw new Error("maxOutputTokens must be a positive integer");
+    }
+    this.maxOutputTokens = maxOutputTokens;
     this.client =
       options.client ??
       new Anthropic({
@@ -78,8 +87,10 @@ export class AnthropicModelAdapter implements ModelAdapter {
     let outputTokens = 0;
     let hasUsage = false;
     let usageEmitted = false;
+    let stopReason: string | null | undefined;
     const inputUsage = { base: 0, cacheCreation: 0, cacheRead: 0 };
     const pendingTools = new Map<number, PendingToolCall>();
+    const completedTools: PendingToolCall[] = [];
 
     try {
       const system = request.messages
@@ -122,7 +133,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
 
       const body: MessageStreamParams = {
         model: request.model,
-        max_tokens: 4096,
+        max_tokens: this.maxOutputTokens,
         messages,
         ...(system ? { system } : {}),
         tools: request.tools.map((tool) => ({
@@ -162,20 +173,41 @@ export class AnthropicModelAdapter implements ModelAdapter {
         } else if (event.type === "content_block_stop" && event.index !== undefined) {
           const pending = pendingTools.get(event.index);
           if (pending) {
-            yield {
-              type: "tool-call",
-              id: pending.id,
-              name: pending.name,
-              input: normalizeToolCallInput(pending.json || "{}"),
-            };
+            completedTools.push(pending);
             pendingTools.delete(event.index);
           }
         } else if (event.type === "message_delta") {
+          stopReason = event.delta?.stop_reason ?? stopReason;
           hasUsage ||= event.usage !== undefined;
           inputTokens = updateInputUsage(inputUsage, event.usage);
           outputTokens = event.usage?.output_tokens ?? outputTokens;
         } else if (event.type === "message_stop") {
           const usage = { inputTokens, outputTokens };
+          if (stopReason === "max_tokens" || stopReason === "model_context_window_exceeded") {
+            usageEmitted = true;
+            yield { type: "usage", ...usage };
+            yield {
+              type: "error",
+              error: {
+                code: "output_limit",
+                message: `Provider stopped at the ${this.maxOutputTokens}-token output limit; incomplete tool calls were discarded`,
+              },
+            };
+            return;
+          }
+          if (pendingTools.size > 0) {
+            throw new Error(`Provider stopped with ${pendingTools.size} incomplete tool-call block(s)`);
+          }
+          for (const pending of completedTools) {
+            let input: Record<string, unknown>;
+            try {
+              input = normalizeToolCallInput(pending.json || "{}");
+            } catch (error) {
+              const detail = error instanceof Error ? error.message : String(error);
+              throw new Error(`Invalid tool-call input for "${pending.name}": ${detail}`);
+            }
+            yield { type: "tool-call", id: pending.id, name: pending.name, input };
+          }
           usageEmitted = true;
           yield { type: "usage", ...usage };
           yield { type: "done", usage };

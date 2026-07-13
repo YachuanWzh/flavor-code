@@ -57,12 +57,12 @@ export function safeParseJson(input: string): SafeJson {
  * 2. **JSON string** (`'{"path":"x","content":"y"}'`) — normal streaming.
  * 3. **Double-encoded JSON string** (`'"{\\"path\\":...}"'`) — some providers
  *    nest the JSON inside an extra string layer.
- * 4. **Empty string** — model generated no arguments (→ `{}`).
- * 5. **Malformed JSON** — parse failure (→ `{}`, fail-closed).
+ * 4. **Empty string** — treated as `{}` for no-argument tools.
+ * 5. **Malformed JSON** — rejected with the parse failure preserved.
  *
  * This function recursively unwraps nested strings until it reaches an object
- * or exhausts the unwrapping depth, then falls back to an empty object when
- * normalization fails entirely.
+ * or exhausts the unwrapping depth. Invalid input throws instead of silently
+ * becoming `{}`, because that destroys the provider-side failure evidence.
  */
 export function normalizeToolCallInput(
   input: unknown,
@@ -77,16 +77,15 @@ export function normalizeToolCallInput(
   // JSON string.  The string may itself parse to another string (double
   // encoding), so we loop until we hit an object or run out of depth.
   if (typeof input === "string") {
+    if (input.trim().length === 0) return {};
     let current: unknown = input;
     for (let depth = 0; depth < maxDepth; depth++) {
       if (typeof current !== "string" || current.length === 0) break;
       const parsed = safeParseJson(current);
       if (!parsed.ok) {
-        // We managed to parse some earlier layer — return the last good
-        // object if we have one.  Otherwise fail-closed to {}.
-        return typeof current === "object" && current !== null && !Array.isArray(current)
-          ? (current as Record<string, unknown>)
-          : {};
+        throw new Error(
+          `Tool-call input is not valid JSON (${current.length} characters): ${parsed.error}`,
+        );
       }
       if (typeof parsed.value === "object" && parsed.value !== null && !Array.isArray(parsed.value)) {
         return parsed.value as Record<string, unknown>;
@@ -100,6 +99,6 @@ export function normalizeToolCallInput(
     }
   }
 
-  // Anything else (null, number, array, etc.) — fail-closed.
-  return {};
+  const kind = input === null ? "null" : Array.isArray(input) ? "array" : typeof input;
+  throw new Error(`Tool-call input must decode to an object; received ${kind}`);
 }

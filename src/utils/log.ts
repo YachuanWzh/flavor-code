@@ -12,6 +12,7 @@ export interface AuditEntry {
   sessionId: string;
   event: string;
   tool?: string | undefined;
+  model?: string | undefined;
   agent?: string | undefined;
   errorCode?: string | undefined;
   errorMessage?: string | undefined;

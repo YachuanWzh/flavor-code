@@ -125,6 +125,9 @@ OPENAI_API_KEY=sk-你的密钥
 }
 ```
 
+Anthropic 及其兼容提供商默认允许单次生成 `32768` 个输出 token。可在对应 provider 中通过
+`"maxOutputTokens": 65536` 调高或调低；长文档写入会占用工具调用的输出 token，建议不要设回过低的值。
+
 这样主 Agent 用能力强的大模型，子 Agent 用便宜的小模型，兼顾效果和成本。`${OPENAI_API_KEY}` 会自动从环境变量或 `.env` 中取值。
 
 `language` 设为 `"zh-CN"` 后 Flavor 会用简体中文回复（也支持 `en-US`、`ja-JP` 等 BCP47 标签）。`maxIterations` 控制 Agent 每轮对话的最大推理步数：主 Agent 默认 80 步、子 Agent 默认 40 步；在 80% 处发出预警；如果任务进度仍然活跃，到达上限后会自动扩展 20 步（最多扩展 3 次），避免长任务中途断掉。

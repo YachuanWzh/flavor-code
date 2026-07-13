@@ -197,6 +197,27 @@ describe("AgentLoop", () => {
     expect(events.at(-1)).toEqual({ type: "error", error: { code: "context_overflow", message: "incomplete" } });
   });
 
+  it("includes provider error details in AfterModelCall hooks", async () => {
+    const fixture = createLoop({ adapter: fakeAdapter([[
+      { type: "error", error: { code: "output_limit", message: "tool input was truncated" } },
+    ]]) });
+    let payload: Record<string, unknown> | undefined;
+    fixture.hooks.on("AfterModelCall", (event) => {
+      payload = event.payload;
+      return { decision: "allow" };
+    });
+
+    await collect(fixture.loop.run({ prompt: "write a large file" }));
+
+    expect(payload).toMatchObject({
+      modelId: "fake:model",
+      agent: "main",
+      providerError: true,
+      errorCode: "output_limit",
+      errorMessage: "tool input was truncated",
+    });
+  });
+
   it("reports cancellation that occurs while a tool is running", async () => {
     const controller = new AbortController();
     const fixture = createLoop({
@@ -330,7 +351,7 @@ function createLoop(options: {
     tools: [{ name: tool.name, description: tool.description, inputSchema: { type: "object" } }],
     maxIterations: options.maxIterations ?? 4,
   };
-  return { loop: new AgentLoop(loopOptions), runtime, context };
+  return { loop: new AgentLoop(loopOptions), runtime, context, hooks };
 }
 
 function fakeAdapter(streams: ModelEvent[][], requests: ModelRequest[] = []): ModelAdapter {

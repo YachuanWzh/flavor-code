@@ -536,6 +536,7 @@ async function createExampleFlavorConfig(cwd: string): Promise<void> {
         apiKey: "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
         defaultModel: "deepseek-v4-pro",
         cheapModel: "deepseek-v4-flash",
+        maxOutputTokens: 65_536,
       },
     },
     agents: {

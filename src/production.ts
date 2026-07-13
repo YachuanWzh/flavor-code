@@ -401,6 +401,21 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     return { decision: "allow" };
   });
   hooks.on("SessionEnd", async () => { await persist(); return { decision: "allow" }; });
+  hooks.on("AfterModelCall", (event) => {
+    const { modelId, agent, providerError, errorCode, errorMessage } = event.payload as Record<string, unknown>;
+    if (providerError === true) {
+      void auditLogger.append({
+        timestamp: new Date().toISOString(),
+        sessionId,
+        event: "ModelCallFailure",
+        model: typeof modelId === "string" ? modelId : undefined,
+        agent: typeof agent === "string" ? agent : undefined,
+        errorCode: typeof errorCode === "string" ? errorCode : undefined,
+        errorMessage: typeof errorMessage === "string" ? errorMessage : undefined,
+      });
+    }
+    return { decision: "allow" };
+  });
   hooks.on("PostToolUseFailure", (event) => {
     const { tool, input, agent, error } = event.payload as Record<string, unknown>;
     void auditLogger.append({
@@ -459,7 +474,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
           : `Audit log for ${toolFilter} (${filtered.length} entries):`;
         const body = filtered.map((entry) => {
           const time = (entry.timestamp as string ?? "").replace("T", " ").slice(0, 19);
-          return `  ${time}  ${entry.sessionId}  ${entry.tool ?? "-"}  ${entry.errorCode ?? "-"}: ${entry.errorMessage ?? "-"}`;
+          return `  ${time}  ${entry.sessionId}  ${entry.tool ?? entry.model ?? "-"}  ${entry.errorCode ?? "-"}: ${entry.errorMessage ?? "-"}`;
         }).join("\n");
         // Summarise by tool
         const byTool = new Map<string, number>();
@@ -638,6 +653,7 @@ function registerConfiguredAdapters(
       const adapterOptions = {
         apiKey: provider.apiKey ?? "not-required",
         ...(provider.baseURL === undefined ? {} : { baseURL: provider.baseURL }),
+        ...(provider.maxOutputTokens === undefined ? {} : { maxOutputTokens: provider.maxOutputTokens }),
       };
       if (provider.type === "anthropic") adapter = new AnthropicModelAdapter(adapterOptions);
       else if (provider.type === "openai" || provider.type === "openai-compatible") adapter = new OpenAIModelAdapter(adapterOptions);
@@ -655,6 +671,7 @@ interface ProviderRuntimeConfig {
   baseURL?: string | undefined;
   defaultModel?: string | undefined;
   cheapModel?: string | undefined;
+  maxOutputTokens?: number | undefined;
 }
 interface RegisteredProvider extends ProviderRuntimeConfig { name: string }
 
