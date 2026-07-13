@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createProductionRuntime } from "../../src/production.js";
+import { createProductionRuntime, createPromptEnvironment } from "../../src/production.js";
 import { SessionStore } from "../../src/session/store.js";
 import { writeFile, mkdir } from "node:fs/promises";
 
@@ -11,6 +11,67 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("production runtime", () => {
+  it("creates deterministic prompt environment data with explicit fallbacks", () => {
+    expect(createPromptEnvironment({
+      now: new Date("2026-07-13T23:59:00.000Z"),
+      platform: "win32",
+      osVersion: "Windows 11 10.0.26100",
+      shell: "powershell.exe",
+      isGitRepository: true,
+    })).toEqual({
+      date: "2026-07-13",
+      platform: "win32",
+      osVersion: "Windows 11 10.0.26100",
+      shell: "powershell.exe",
+      isGitRepository: true,
+    });
+    expect(createPromptEnvironment({
+      now: new Date("invalid"), platform: " ", osVersion: "", shell: "\n", isGitRepository: "unknown",
+    })).toEqual({
+      date: "unknown", platform: "unknown", osVersion: "unknown", shell: "unknown", isGitRepository: "unknown",
+    });
+  });
+
+  it("does not advertise AskUserQuestion in non-interactive mode", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-")); roots.push(workspace);
+    const pluginRoot = join(workspace, ".flavor", "plugins", "capture-model");
+    await mkdir(pluginRoot, { recursive: true });
+    await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
+      providers: { capture: { type: "plugin", defaultModel: "main", cheapModel: "child" } },
+      agents: { main: { model: "capture:main" }, subagent: { model: "capture:child" } },
+    }));
+    await writeFile(join(pluginRoot, "flavor-plugin.json"), JSON.stringify({
+      name: "capture-model", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
+      contributes: { commands: [], tools: [], hooks: [], skillRoots: [], modelAdapters: [{ name: "capture" }] },
+    }));
+    await writeFile(join(pluginRoot, "index.mjs"), `export function activate(ctx) {
+      ctx.registerModelAdapter("capture", { async *stream(request) {
+        globalThis.__flavorPromptRequests ??= [];
+        globalThis.__flavorPromptRequests.push({
+          tools: request.tools.map((tool) => tool.name),
+          system: request.messages.filter((message) => message.role === "system").map((message) => message.content).join("\\n\\n"),
+        });
+        yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
+      }});
+    }`);
+    const globalState = globalThis as typeof globalThis & { __flavorPromptRequests?: Array<{ tools: string[]; system: string }> };
+    delete globalState.__flavorPromptRequests;
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, approvalPolicy: "deny", output: () => {},
+    });
+
+    await runtime.session.start();
+    await runtime.session.submit("inspect the project");
+
+    const requests = (globalThis as { __flavorPromptRequests?: Array<{ tools: string[]; system: string }> })
+      .__flavorPromptRequests;
+    expect(requests).toHaveLength(1);
+    expect(requests?.[0]?.tools).not.toContain("AskUserQuestion");
+    expect(requests?.[0]?.system).not.toContain("`AskUserQuestion`");
+    await runtime.dispose();
+    delete globalState.__flavorPromptRequests;
+  });
+
   it("restores a main plan and publishes its task snapshot at session start", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-")); roots.push(workspace);
     await mkdir(join(workspace, ".flavor"), { recursive: true });

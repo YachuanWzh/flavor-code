@@ -4,6 +4,27 @@ import { HookBus } from "../../src/hooks/bus.js";
 import { ContextManager, estimateTokens } from "../../src/context/manager.js";
 
 describe("ContextManager", () => {
+  it("pins ordered system sections before project and task context", () => {
+    const context = createContext({ system: ["first section", "second section"] });
+
+    expect(context.messagesForModel().slice(0, 4)).toEqual([
+      { role: "system", content: "first section" },
+      { role: "system", content: "second section" },
+      { role: "system", content: "FLAVOR.md\nproject guidance" },
+      { role: "system", content: "Task state\nin progress" },
+    ]);
+  });
+
+  it("resolves system section factories for every model request", () => {
+    let sections: readonly string[] = ["model one", " "];
+    const context = createContext({ system: () => sections });
+
+    expect(context.messagesForModel()[0]?.content).toBe("model one");
+    sections = ["model two"];
+    expect(context.messagesForModel()[0]?.content).toBe("model two");
+    expect(context.snapshot().messages).toEqual([]);
+  });
+
   it("truncates tool output to head and tail with original length metadata", () => {
     const context = createContext({ toolOutputChars: 10 });
 

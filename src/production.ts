@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
+import { homedir, release as osRelease, version as osVersion } from "node:os";
 import { join, resolve } from "node:path";
 
 import { SubagentResultSchema, SubagentScheduler, type SubagentResult } from "./agent/subagents.js";
@@ -20,6 +20,7 @@ import { OpenAIModelAdapter } from "./models/openai.js";
 import { ModelRegistry, parseModelId } from "./models/registry.js";
 import type { ModelAdapter } from "./models/types.js";
 import type { PermissionRequest } from "./permissions/engine.js";
+import { buildSystemPrompt, type PromptEnvironment } from "./prompts/system.js";
 import type { ApprovalDecision } from "./tools/runtime.js";
 import { PluginHost } from "./plugins/host.js";
 import type { PluginCommandHandler } from "./plugins/types.js";
@@ -38,6 +39,7 @@ import { MVP_COMMANDS } from "./ui/commands.js";
 import { resolveLanguage, languageInstruction } from "./utils/intl.js";
 import { awaitWithSignal } from "./utils/async.js";
 import { message } from "./utils/error.js";
+import { execFileNoThrow } from "./utils/execFileNoThrow.js";
 import { redactSecrets } from "./utils/redact.js";
 import { AuditLogger } from "./utils/log.js";
 
@@ -60,6 +62,25 @@ export interface ProductionRuntime {
   diagnostics: readonly string[];
   sessionId: string;
   dispose(): Promise<void>;
+}
+
+export interface PromptEnvironmentInput {
+  now?: Date;
+  platform?: string;
+  osVersion?: string;
+  shell?: string;
+  isGitRepository?: boolean | "unknown";
+}
+
+export function createPromptEnvironment(input: PromptEnvironmentInput = {}): PromptEnvironment {
+  const now = input.now ?? new Date();
+  return {
+    date: Number.isNaN(now.getTime()) ? "unknown" : now.toISOString().slice(0, 10),
+    platform: promptEnvironmentValue(input.platform ?? process.platform),
+    osVersion: promptEnvironmentValue(input.osVersion ?? `${osVersion()} ${osRelease()}`),
+    shell: promptEnvironmentValue(input.shell ?? process.env.ComSpec ?? process.env.SHELL),
+    isGitRepository: input.isGitRepository ?? "unknown",
+  };
 }
 
 export class ApprovalBridge {
@@ -123,7 +144,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const tools: ToolDefinition<unknown>[] = [
     createReadTool(workspace), createWriteTool(workspace), createEditTool(workspace), createApplyPatchTool(workspace),
     createGlobTool(workspace), createGrepTool(workspace), createShellTool(workspace),
-    createAskUserQuestionTool(askUserQuestionHandler),
+    ...(options.approvalPolicy === "deny" ? [] : [createAskUserQuestionTool(askUserQuestionHandler)]),
     createTaskOutputTool(),
     createTodoWriteTool(),
   ];
@@ -270,7 +291,18 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   };
   tools.push(taskTool);
 
-  const createContext = (agent: "main" | "subagent") => {
+  const promptEnvironment = createPromptEnvironment({
+    now: new Date(),
+    platform: process.platform,
+    osVersion: `${osVersion()} ${osRelease()}`,
+    shell: environment.ComSpec ?? environment.SHELL ?? "unknown",
+    isGitRepository: await detectGitRepository(workspace),
+  });
+  const createContext = (
+    agent: "main" | "subagent",
+    agentTools: readonly ToolDefinition<unknown>[],
+    contextModelId: string,
+  ) => {
     const taskState = serializedTaskState();
     const language = resolveLanguage(config.language);
     const {
@@ -279,18 +311,15 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       ...compaction
     } = config.context;
     return new ContextManager({
-      system: [
-        languageInstruction(language),
-        "You are Flavor, a coding agent running in an interactive terminal. Report conclusions and actions; never expose hidden chain-of-thought.",
-        "Format your replies as plain text intended for a fixed-width terminal. Do not use markdown headings, bullet lists, tables, or **bold**/**italic**; spell things out as ordinary sentences and use indentation for clarity.",
-        "Multi-line code or commands must be wrapped in triple-backtick fences (```) so the terminal can render them readably. Keep prose responses short; the user is reading them in a chat pane.",
-        "Use SkillResource to read resources explicitly referenced by a matched skill; treat scripts as data and never execute them through that tool.",
-        "When a request is ambiguous and multiple valid approaches exist, use AskUserQuestion to present the user with up to 4 clear, numbered questions. Each question must have a short header, a one-sentence body, and 2-4 mutually exclusive options. Do not ask trivial or rhetorical questions. When the user answers, proceed immediately based on their choice.",
-        "Use TodoWrite to track your own implementation progress for non-trivial multi-step work. Keep at most one item in_progress and mark items completed as you finish them. This demonstrates thoroughness and helps you stay organised.",
-        "Use TaskOutput to produce a structured summary when completing a multi-step task — list files changed, commands run, verification results, risks, and suggested next steps.",
-        "For complex work with at least three distinct implementation or verification steps, multiple requested changes, or other non-trivial coordination, call TaskPlan before implementation. Skip planning for informational or straightforward single-step requests.",
-        "Before starting each planned task, call TaskUpdate to mark it in_progress. Mark it completed immediately after successful verification; otherwise use failed, blocked, or cancelled. Only one main task may be in_progress. Include verification as a plan task for multi-step code changes and never claim completion while work or verification is incomplete.",
-      ].join(" "),
+      system: () => buildSystemPrompt({
+        agent,
+        languageInstruction: languageInstruction(language),
+        workspace,
+        model: agent === "main" ? harness.mainModelId : contextModelId,
+        permissionMode: agent === "subagent" ? "workspace" : harness.permissionMode,
+        toolNames: new Set(agentTools.map((tool) => tool.name)),
+        environment: promptEnvironment,
+      }),
       ...(flavor === undefined ? {} : { flavor }),
       ...(taskState === undefined ? {} : { taskState }),
       ...(compactAtChars === undefined ? {} : { compactAtChars }),
@@ -647,6 +676,22 @@ function providerCheapDefault(type: string | undefined): string | undefined {
 }
 function safeProvider(modelId: string): string {
   try { return parseModelId(modelId).provider; } catch { return modelId.split(":", 1)[0] ?? modelId; }
+}
+
+function promptEnvironmentValue(value: string | undefined): string {
+  const normalized = value?.trim();
+  return normalized ? normalized : "unknown";
+}
+
+async function detectGitRepository(workspace: string): Promise<boolean | "unknown"> {
+  const result = await execFileNoThrow(
+    "git",
+    ["-C", workspace, "rev-parse", "--is-inside-work-tree"],
+    { timeout: 2_000, useCwd: false },
+  );
+  if (result.code === 0) return result.stdout.trim() === "true";
+  if (/not a git repository/i.test(`${result.stderr}\n${result.error ?? ""}`)) return false;
+  return "unknown";
 }
 
 async function optionalText(path: string): Promise<string | undefined> {

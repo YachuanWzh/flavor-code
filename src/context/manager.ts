@@ -13,7 +13,7 @@ import {
 } from "./compaction.js";
 
 export interface ContextManagerOptions {
-  system: string;
+  system: SystemPromptSource;
   flavor?: string;
   taskState?: string;
   /** @deprecated Prefer token-based compaction policy. */
@@ -26,6 +26,8 @@ export interface ContextManagerOptions {
   summarize(messages: readonly ModelMessage[], signal: AbortSignal): Promise<string>;
   hooks: HookBus;
 }
+
+export type SystemPromptSource = string | readonly string[] | (() => string | readonly string[]);
 
 export interface ContextSnapshot {
   compact?: CompactBoundary;
@@ -46,7 +48,7 @@ export function estimateTokens(text: string): number {
 }
 
 export class ContextManager {
-  readonly #system: string;
+  readonly #system: SystemPromptSource;
   readonly #flavor: string | undefined;
   readonly #compactAtChars: number;
   readonly #toolOutputChars: number;
@@ -259,11 +261,17 @@ export class ContextManager {
 
   #pinnedMessages(): ModelMessage[] {
     return [
-      { role: "system", content: this.#system },
+      ...resolveSystemSections(this.#system).map((content) => ({ role: "system" as const, content })),
       ...(this.#flavor === undefined ? [] : [{ role: "system" as const, content: `FLAVOR.md\n${this.#flavor}` }]),
       ...(this.#taskState === undefined ? [] : [{ role: "system" as const, content: `Task state\n${this.#taskState}` }]),
     ];
   }
+}
+
+function resolveSystemSections(source: SystemPromptSource): string[] {
+  const resolved = typeof source === "function" ? source() : source;
+  const sections = typeof resolved === "string" ? [resolved] : resolved;
+  return sections.map((section) => section.trim()).filter((section) => section.length > 0);
 }
 
 function recentTurnStart(messages: readonly ModelMessage[], recentTurns: number): number {
