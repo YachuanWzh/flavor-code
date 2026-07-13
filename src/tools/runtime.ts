@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import { z } from "zod";
 
 import type { HookBus } from "../hooks/bus.js";
@@ -56,6 +57,19 @@ export class ToolRuntime {
     if (this.#disposed) return;
     this.#disposed = true;
     for (const dispose of this.#disposeSchemas) dispose();
+  }
+
+  label(call: ToolCall): string | undefined {
+    const tool = this.#tools.get(call.name);
+    if (tool === undefined) return undefined;
+    try {
+      const input = tool.inputSchema.parse(call.input);
+      const paths = tool.paths(input);
+      if (paths.length === 0) return undefined;
+      return paths.map((p) => basename(p)).join(", ");
+    } catch {
+      return undefined;
+    }
   }
 
   async execute(call: ToolCall, context: ToolContext): Promise<ToolResult> {

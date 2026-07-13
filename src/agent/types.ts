@@ -29,8 +29,8 @@ export interface TaskSnapshot {
 
 export type AgentEvent =
   | { type: "text"; text: string }
-  | { type: "tool-start"; id: string; name: string; input: unknown }
-  | { type: "tool-end"; id: string; name: string; result: ToolResult }
+  | { type: "tool-start"; id: string; name: string; input: unknown; label?: string }
+  | { type: "tool-end"; id: string; name: string; result: ToolResult; label?: string }
   | { type: "tasks"; snapshot: TaskSnapshot }
   | { type: "usage"; inputTokens: number; outputTokens: number; totalInputTokens: number; totalOutputTokens: number }
   | { type: "compacted" }

@@ -90,7 +90,7 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
     return { ...state, active: addText(state.active, event.text) };
   }
   if (event.type === "tool-start") return upsertStatus(state, {
-    kind: "status", id: `tool:${event.id}`, state: "running", text: `○ ${event.name}`,
+    kind: "status", id: `tool:${event.id}`, state: "running", text: `○ ${event.name}${event.label ? ` ${event.label}` : ""}`,
   });
   if (event.type === "tool-end") {
     const cancelled = !event.result.ok && event.result.error?.code === "cancelled";
@@ -98,7 +98,7 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
       kind: "status",
       id: `tool:${event.id}`,
       state: event.result.ok ? "completed" : cancelled ? "cancelled" : "failed",
-      text: `${event.result.ok ? "✓" : "×"} ${event.name}`,
+      text: `${event.result.ok ? "✓" : "×"} ${event.name}${event.label ? ` ${event.label}` : ""}`,
     });
   }
   if (event.type === "notice") return upsertStatus(state, {

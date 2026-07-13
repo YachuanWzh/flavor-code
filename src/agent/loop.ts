@@ -154,7 +154,8 @@ export class AgentLoop {
           stageSyntheticResults(toolCalls, index, turnError, stagedMessages);
           break;
         }
-        yield { type: "tool-start", id: call.id, name: call.name, input: call.input };
+        const label = this.#options.runtime.label(call);
+        yield { type: "tool-start", id: call.id, name: call.name, input: call.input, ...(label === undefined ? {} : { label }) };
         const result = await this.#options.runtime.execute(call, { agent: this.#options.agent, ...(request.signal === undefined ? {} : { signal: request.signal }) });
         if (request.signal?.aborted) {
           turnError = { code: "cancelled", message: abortMessage(request.signal) };
@@ -181,7 +182,8 @@ export class AgentLoop {
       };
       this.#options.context.appendMany([assistantMessage, ...stagedMessages]);
       for (const { call, result } of stagedResults) {
-        yield { type: "tool-end", id: call.id, name: call.name, result };
+        const endLabel = this.#options.runtime.label(call);
+        yield { type: "tool-end", id: call.id, name: call.name, result, ...(endLabel === undefined ? {} : { label: endLabel }) };
       }
       if (turnError !== undefined) {
         yield { type: "error", error: turnError };
