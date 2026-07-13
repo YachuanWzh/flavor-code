@@ -22,6 +22,14 @@ export const FlavorConfigSchema = z.object({
     .string()
     .regex(/^[a-z]{2}(-[A-Z]{2})?$/, "language must be a BCP47 tag like zh-CN or en-US")
     .optional(),
+  maxIterations: z
+    .object({
+      main: z.number().int().min(10).max(500).default(80),
+      subagent: z.number().int().min(10).max(200).default(40),
+      softLimitFactor: z.number().min(0.5).max(1.0).default(0.8),
+      extendBy: z.number().int().min(5).max(100).default(20),
+    })
+    .prefault({}),
   context: z
     .object({
       compactAtChars: z.number().int().positive().default(240_000),

@@ -279,9 +279,17 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       hooks,
     });
   };
+  const hasActiveProgress = (): boolean => {
+    if (taskPlan?.tasks.some((task) => task.status === "in_progress")) return true;
+    return Object.values(taskStates).some((state) => state === "running");
+  };
+
   harness = new LocalHarness({
     registry, hooks, workspace, mainModelId: mainModel, subagentModelId: childModel,
     tools, createContext, permissionMode: recovered?.permissionMode ?? config.permissionMode,
+    maxIterationsMain: config.maxIterations.main,
+    maxIterationsSubagent: config.maxIterations.subagent,
+    hasActiveProgress,
     approve: options.approvalPolicy === "deny" ? () => "deny" as ApprovalDecision : (request, signal) => approvals.request(request, signal),
   });
   harnessCreated = true;

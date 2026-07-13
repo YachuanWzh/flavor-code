@@ -21,6 +21,9 @@ export interface LocalHarnessOptions {
   createContext(): ContextManager;
   permissionMode?: PermissionMode;
   approve?: ApprovalCallback;
+  maxIterationsMain?: number;
+  maxIterationsSubagent?: number;
+  hasActiveProgress?(): boolean;
 }
 
 export interface HarnessProfile {
@@ -141,6 +144,7 @@ export class LocalHarness {
     });
     try {
       const tools = definitions.map(toModelTool);
+      const isMain = agent === "main";
       const loop = new AgentLoop({
         registry: this.#options.registry,
         modelId,
@@ -149,6 +153,8 @@ export class LocalHarness {
         hooks: this.#options.hooks,
         tools,
         agent,
+        maxIterations: isMain ? this.#options.maxIterationsMain : this.#options.maxIterationsSubagent,
+        ...(isMain && this.#options.hasActiveProgress !== undefined ? { hasActiveProgress: this.#options.hasActiveProgress } : {}),
       });
       return { get modelId() { return loop.modelId; }, context, runtime, tools, loop };
     } catch (error) {

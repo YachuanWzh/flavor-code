@@ -6,6 +6,16 @@ import type { ToolRuntime } from "../tools/runtime.js";
 import type { ToolResult } from "../tools/types.js";
 import type { AgentEvent, AgentRunRequest } from "./types.js";
 
+const DEFAULT_MAX_ITERATIONS = 40;
+
+function envMaxIterations(): number | undefined {
+  const raw = process.env["FLAVOR_MAX_ITERATIONS"];
+  if (raw === undefined) return undefined;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) return undefined;
+  return parsed;
+}
+
 export interface AgentLoopOptions {
   registry: ModelRegistry;
   modelId: string;
@@ -14,16 +24,34 @@ export interface AgentLoopOptions {
   hooks: HookBus;
   tools: readonly ModelTool[];
   maxIterations?: number;
+  softLimitFactor?: number;
+  extendIterations?: number;
+  maxExtensions?: number;
+  hasActiveProgress?(): boolean;
   agent?: "main" | "subagent";
 }
 
 export class AgentLoop {
-  readonly #options: Required<Pick<AgentLoopOptions, "maxIterations" | "agent">> & Omit<AgentLoopOptions, "maxIterations" | "agent">;
+  readonly #options: Required<Pick<AgentLoopOptions, "maxIterations" | "softLimitFactor" | "extendIterations" | "maxExtensions" | "agent">> & Omit<AgentLoopOptions, "maxIterations" | "softLimitFactor" | "extendIterations" | "maxExtensions" | "agent">;
 
   constructor(options: AgentLoopOptions) {
-    const maxIterations = options.maxIterations ?? 40;
+    const envOverride = envMaxIterations();
+    const maxIterations = envOverride ?? options.maxIterations ?? DEFAULT_MAX_ITERATIONS;
     if (maxIterations <= 0 || !Number.isInteger(maxIterations)) throw new Error("maxIterations must be a positive integer");
-    this.#options = { ...options, maxIterations, agent: options.agent ?? "main" };
+    const softLimitFactor = options.softLimitFactor ?? 0.8;
+    if (softLimitFactor <= 0 || softLimitFactor > 1) throw new Error("softLimitFactor must be in (0, 1]");
+    const extendIterations = options.extendIterations ?? 20;
+    if (extendIterations <= 0 || !Number.isInteger(extendIterations)) throw new Error("extendIterations must be a positive integer");
+    const maxExtensions = options.maxExtensions ?? 3;
+    if (maxExtensions < 0 || !Number.isInteger(maxExtensions)) throw new Error("maxExtensions must be a non-negative integer");
+    this.#options = {
+      ...options,
+      maxIterations,
+      softLimitFactor,
+      extendIterations,
+      maxExtensions,
+      agent: options.agent ?? "main",
+    };
   }
 
   get modelId(): string { return this.#options.modelId; }
@@ -38,11 +66,53 @@ export class AgentLoop {
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
 
-    for (let iteration = 0; iteration < this.#options.maxIterations; iteration += 1) {
+    let maxIterations = this.#options.maxIterations;
+    let extensions = 0;
+    let warned = false;
+
+    let iteration = 0;
+    while (true) {
       if (request.signal?.aborted) {
         yield { type: "error", error: { code: "cancelled", message: abortMessage(request.signal) } };
         return;
       }
+
+      // 方案3: soft limit warning
+      const softLimit = Math.floor(maxIterations * this.#options.softLimitFactor);
+      if (!warned && iteration >= softLimit) {
+        warned = true;
+        const remaining = maxIterations - iteration;
+        yield {
+          type: "warning",
+          message: `Approaching iteration limit: ${iteration}/${maxIterations} rounds used. ${remaining} rounds remaining before automatic circuit breaker.`,
+        };
+      }
+
+      // 方案4+方案3: hard limit with progress-aware auto-extension
+      if (iteration >= maxIterations) {
+        if (this.#options.hasActiveProgress?.() && extensions < this.#options.maxExtensions) {
+          const previous = maxIterations;
+          maxIterations += this.#options.extendIterations;
+          extensions += 1;
+          yield {
+            type: "limit_reached",
+            iteration,
+            maxIterations: previous,
+            extended: true,
+          };
+          yield {
+            type: "warning",
+            message: `Iteration limit ${previous} reached but task progress is active. Auto-extending by ${this.#options.extendIterations} rounds (extension ${extensions}/${this.#options.maxExtensions}).`,
+          };
+          continue;
+        }
+        yield {
+          type: "error",
+          error: { code: "iteration_limit", message: `Agent exceeded the ${maxIterations} iteration limit` },
+        };
+        return;
+      }
+
       try {
         if (await this.#options.context.compact(request.signal)) yield { type: "compacted" };
       } catch (error) {
@@ -189,12 +259,9 @@ export class AgentLoop {
         yield { type: "error", error: turnError };
         return;
       }
-    }
 
-    yield {
-      type: "error",
-      error: { code: "iteration_limit", message: `Agent exceeded the ${this.#options.maxIterations} iteration limit` },
-    };
+      iteration += 1;
+    }
   }
 }
 

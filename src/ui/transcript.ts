@@ -111,6 +111,16 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
   if (event.type === "compacted") return upsertStatus(state, {
     kind: "status", id: `compact:${state.active.blocks.length}`, state: "info", text: "· Context compacted.",
   });
+  if (event.type === "warning") return upsertStatus(state, {
+    kind: "status", id: `warn:${state.active.blocks.length}`, state: "info", text: `⚠ ${event.message}`,
+  });
+  if (event.type === "limit_reached") {
+    const suffix = event.extended ? " — auto-extended" : "";
+    return upsertStatus(state, {
+      kind: "status", id: `limit:${state.active.blocks.length}`, state: event.extended ? "info" : "failed",
+      text: `◆ Iteration limit ${event.maxIterations} reached at round ${event.iteration}${suffix}`,
+    });
+  }
   return state;
 }
 

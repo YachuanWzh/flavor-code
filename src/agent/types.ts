@@ -34,5 +34,7 @@ export type AgentEvent =
   | { type: "tasks"; snapshot: TaskSnapshot }
   | { type: "usage"; inputTokens: number; outputTokens: number; totalInputTokens: number; totalOutputTokens: number }
   | { type: "compacted" }
+  | { type: "warning"; message: string }
+  | { type: "limit_reached"; iteration: number; maxIterations: number; extended: boolean }
   | { type: "done"; usage: { inputTokens: number; outputTokens: number } }
   | { type: "error"; error: AgentError };
