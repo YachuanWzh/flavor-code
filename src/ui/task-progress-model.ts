@@ -28,8 +28,8 @@ export function staticTaskLines(snapshot: TaskSnapshot): string[] {
   });
   for (const node of snapshot.subagents.graph?.nodes ?? []) {
     const status = snapshot.subagents.states[node.id] ?? "pending";
-    const glyph = status === "completed" ? "✓" : status === "failed" || status === "blocked" ? "×" : "·";
-    lines.push(`${glyph} ${node.description} · ${status}`);
+    const glyph = status === "completed" ? "✓" : status === "failed" || status === "blocked" || status === "cancelled" ? "×" : "·";
+    lines.push(`${glyph} ${node.description} / subagent · ${status}`);
   }
   return lines;
 }
@@ -40,13 +40,16 @@ export function statusPresentation(
   interactive: boolean,
 ): StatusPresentation {
   if (block.state === "running" && block.task !== undefined) {
+    const activeForm = block.task.role === "subagent"
+      ? `${block.task.activeForm} / subagent`
+      : block.task.activeForm;
     return interactive ? {
       glyph: activityFrame(elapsedMs),
-      text: `${block.task.activeForm}… (${formatElapsed(elapsedMs)})`,
+      text: `${activeForm}… (${formatElapsed(elapsedMs)})`,
       color: "#d77757",
     } : {
       glyph: "·",
-      text: block.task.activeForm,
+      text: activeForm,
     };
   }
   const duration = block.elapsedMs === undefined ? "" : ` (${formatElapsed(block.elapsedMs)})`;

@@ -61,6 +61,21 @@ describe("SessionStore", () => {
     expect((await store.load("session-20260712")).tasks.plan).toBeUndefined();
   });
 
+  it("round-trips a cancelled subagent state without synthesizing a result", async () => {
+    const root = await workspace();
+    const store = new SessionStore({ workspace: root });
+    const saved = document(root);
+    saved.tasks.states.a = "cancelled";
+    saved.tasks.results = {};
+
+    await store.save(saved);
+
+    expect((await store.load(saved.sessionId)).tasks).toMatchObject({
+      states: { a: "cancelled" },
+      results: {},
+    });
+  });
+
   it("writes each message as a separate JSONL line with a metadata header", async () => {
     const root = await workspace();
     const store = new SessionStore({ workspace: root });

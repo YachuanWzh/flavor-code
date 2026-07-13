@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { activityFrame, formatElapsed, statusPresentation } from "../../src/ui/task-progress-model.js";
+import { activityFrame, formatElapsed, staticTaskLines, statusPresentation } from "../../src/ui/task-progress-model.js";
 import type { TranscriptBlock } from "../../src/ui/transcript.js";
 
 const runningTask: Extract<TranscriptBlock, { kind: "status" }> = {
@@ -33,6 +33,31 @@ describe("task progress presentation", () => {
 
   it("renders a static running marker for non-interactive output", () => {
     expect(statusPresentation(runningTask, 4_900, false)).toMatchObject({ glyph: "·", text: "Inspecting code" });
+  });
+
+  it("identifies a running delegated task with a subagent suffix", () => {
+    expect(statusPresentation({
+      ...runningTask,
+      id: "subagent:inspect",
+      task: { subject: "Inspect worker", activeForm: "Inspecting worker", role: "subagent" },
+    }, 4_900, true)).toMatchObject({ text: "Inspecting worker / subagent… (4s)" });
+  });
+
+  it("identifies static delegated rows without changing main plan labels", () => {
+    expect(staticTaskLines({
+      plan: { tasks: [{
+        id: "main", subject: "Main task", activeForm: "Running main task", status: "pending", dependencies: [],
+      }] },
+      subagents: {
+        graph: { nodes: [{
+          id: "worker", description: "Inspect worker", dependencies: [], expectedOutputs: [], verification: [],
+        }] },
+        states: { worker: "cancelled" },
+      },
+    })).toEqual([
+      "· Main task · pending",
+      "× Inspect worker / subagent · cancelled",
+    ]);
   });
 
   it.each([

@@ -23,7 +23,12 @@ const TaskOutputInput = z.object({
   suggestedNextSteps: z.array(z.string().trim().min(1)),
 });
 
+export const TaskOutputResultSchema = TaskOutputInput.extend({
+  taskCompleted: z.literal(true),
+}).strict();
+
 export type TaskOutputInput = z.infer<typeof TaskOutputInput>;
+export type TaskOutputResult = z.infer<typeof TaskOutputResultSchema>;
 export type CommandRun = z.infer<typeof CommandRunSchema>;
 export type VerificationItem = z.infer<typeof VerificationItemSchema>;
 
@@ -34,8 +39,7 @@ export function createTaskOutputTool(): ToolDefinition<TaskOutputInput> {
       "Produce a structured result that summarises task completion. Use this when a subagent has finished its work to report what was accomplished, what files were changed, which commands were run, verification results, and any risks or next steps. The main agent can also use this to produce a structured completion summary.",
     inputSchema: TaskOutputInput,
     paths: () => [],
-    execute: async (input) => {
-      return {
+    execute: async (input) => TaskOutputResultSchema.parse({
         taskCompleted: true,
         summary: input.summary,
         filesChanged: input.filesChanged,
@@ -44,7 +48,6 @@ export function createTaskOutputTool(): ToolDefinition<TaskOutputInput> {
         artifacts: input.artifacts,
         risks: input.risks,
         suggestedNextSteps: input.suggestedNextSteps,
-      };
-    },
+      }),
   };
 }

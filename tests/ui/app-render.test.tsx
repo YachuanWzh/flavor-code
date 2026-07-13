@@ -201,7 +201,7 @@ describe("TerminalLayout", () => {
     />, { columns: 80 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
 
     expect(output).toContain("Implementing feature");
-    expect(output).toContain("Worker A");
+    expect(output).toContain("Worker A / subagent");
     expect(output).toContain("Worker B");
     expect(output.match(/⠋/gu)).toHaveLength(1);
   });

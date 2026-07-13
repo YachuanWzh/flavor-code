@@ -6,7 +6,12 @@ import { HookBus } from "../../src/hooks/bus.js";
 import { ModelRegistry } from "../../src/models/registry.js";
 import type { ModelAdapter } from "../../src/models/types.js";
 import { LocalHarness } from "../../src/harness/local.js";
-import { SubagentResultSchema, SubagentScheduler } from "../../src/agent/subagents.js";
+import {
+  parseFinalSubagentMessage,
+  subagentResultFromTaskOutput,
+  SubagentResultSchema,
+  SubagentScheduler,
+} from "../../src/agent/subagents.js";
 import { TaskGraphSchema } from "../../src/agent/planner.js";
 import { ToolRuntime } from "../../src/tools/runtime.js";
 import type { ToolDefinition } from "../../src/tools/types.js";
@@ -36,6 +41,39 @@ describe("SubagentResultSchema", () => {
     expect(SubagentResultSchema.parse(result("a"))).toEqual(result("a"));
     expect(() => SubagentResultSchema.parse("finished the task")).toThrow();
     expect(() => SubagentResultSchema.parse({ ...result("a"), transcript: "private" })).toThrow();
+  });
+
+  it("converts a successful TaskOutput handoff into a completed scheduler result", () => {
+    expect(subagentResultFromTaskOutput("inspect", {
+      taskCompleted: true,
+      summary: "Inspected the coordinator",
+      filesChanged: [],
+      commandsRun: [{ command: "Grep coordinator", exitCode: 0, summary: "found files" }],
+      verification: [{ name: "files found", passed: true, details: "21 files" }],
+      artifacts: ["src/coordinator"],
+      risks: [],
+      suggestedNextSteps: [],
+    })).toEqual({
+      taskId: "inspect",
+      status: "completed",
+      summary: "Inspected the coordinator",
+      filesChanged: [],
+      commandsRun: [{ command: "Grep coordinator", exitCode: 0, summary: "found files" }],
+      verification: [{ name: "files found", passed: true, details: "21 files" }],
+      artifacts: ["src/coordinator"],
+      risks: [],
+      suggestedNextSteps: [],
+    });
+  });
+
+  it("parses only the final assistant message for the JSON compatibility path", () => {
+    const completed = result("inspect");
+
+    expect(parseFinalSubagentMessage([
+      { role: "assistant", content: "I will inspect first", toolCalls: [{ id: "grep", name: "Grep", input: {} }] },
+      { role: "tool", content: "found files" },
+      { role: "assistant", content: JSON.stringify(completed) },
+    ])).toEqual(completed);
   });
 });
 
@@ -157,7 +195,10 @@ describe("SubagentScheduler", () => {
     const hooks = new HookBus();
     const events: string[] = [];
     hooks.on("SubagentStart", (event) => { events.push(`${event.type}:${String(event.payload.taskId)}`); return { decision: "allow" }; });
-    hooks.on("SubagentStop", (event) => { events.push(`${event.type}:${String(event.payload.taskId)}`); return { decision: "allow" }; });
+    hooks.on("SubagentStop", (event) => {
+      events.push(`${event.type}:${String(event.payload.taskId)}:${String(event.payload.status)}`);
+      return { decision: "allow" };
+    });
     const scheduler = new SubagentScheduler({
       maxSubagents: 1,
       hooks,
@@ -168,7 +209,7 @@ describe("SubagentScheduler", () => {
     queueMicrotask(() => controller.abort(new Error("cancelled by test")));
 
     await expect(run).rejects.toThrow("cancelled by test");
-    expect(events).toEqual(["SubagentStart:a", "SubagentStop:a"]);
+    expect(events).toEqual(["SubagentStart:a", "SubagentStop:a:cancelled"]);
   });
 
   it("drains every started child through delayed stop hooks before rejecting cancellation", async () => {

@@ -88,9 +88,35 @@ describe("search tools", () => {
     const nodeGlob = await createGlobTool(root, { forceNode: true }).execute(globInput, signal);
     expect(nodeGlob).toEqual(await createGlobTool(root).execute(globInput, signal));
     expect(nodeGlob).toEqual({ matches: ["a.rs", "b.ts"], truncated: false });
-    const grepInput = { pattern: "needle", type: "rust" };
+    const grepInput = { pattern: "needle", fileType: "rust" as const };
     expect(await createGrepTool(root, { forceNode: true }).execute(grepInput, signal))
       .toEqual(await createGrepTool(root).execute(grepInput, signal));
+  });
+
+  it("rejects ambiguous file-type values at the tool boundary", () => {
+    const schema = createGrepTool(fixture()).inputSchema;
+
+    for (const fileType of ["file", "files", "path"]) {
+      expect(schema.safeParse({ pattern: "needle", fileType }).success).toBe(false);
+    }
+    expect(schema.safeParse({ pattern: "needle", fileType: "text" }).success).toBe(true);
+  });
+
+  it("supports the friendly text file type in both search backends", async () => {
+    const root = mkdtempSync(join(tmpdir(), "flavor-search-text-type-"));
+    writeFileSync(join(root, "notes.txt"), "needle text\n");
+    writeFileSync(join(root, "source.ts"), "needle source\n");
+    const input = { pattern: "needle", fileType: "text" as const };
+    const signal = new AbortController().signal;
+
+    const ripgrep = await createGrepTool(root).execute(input, signal);
+    const node = await createGrepTool(root, { forceNode: true }).execute(input, signal);
+
+    expect(ripgrep).toEqual(node);
+    expect(ripgrep).toEqual({
+      matches: [{ path: "notes.txt", line: 1, column: 1, text: "needle text", before: [], after: [] }],
+      truncated: false,
+    });
   });
 
   it("keeps hidden, .ignore, nested rules, and sibling negation in backend parity", async () => {
@@ -115,7 +141,7 @@ describe("search tools", () => {
   it("rejects unsupported Node file types instead of silently disabling the filter", async () => {
     const root = fixture();
     await expect(createGrepTool(root, { forceNode: true }).execute(
-      { pattern: "needle", fileType: "definitely-unknown" }, new AbortController().signal,
+      { pattern: "needle", fileType: "definitely-unknown" } as never, new AbortController().signal,
     )).rejects.toThrow(/unsupported file type/i);
   });
 

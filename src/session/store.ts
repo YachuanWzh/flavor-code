@@ -28,7 +28,7 @@ const CompactBoundarySchema = z.object({
   summary: z.string().min(1).max(DEFAULT_MAX_SESSION_BYTES),
   compactedAt: IsoDateSchema,
 }).strict();
-const StateSchema = z.enum(["pending", "running", "completed", "failed", "blocked"]);
+const StateSchema = z.enum(["pending", "running", "completed", "failed", "blocked", "cancelled"]);
 
 const SessionBaseSchema = z.object({
   sessionId: SessionIdSchema,

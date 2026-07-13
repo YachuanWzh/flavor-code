@@ -163,11 +163,12 @@ function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot, include
   for (const node of snapshot.subagents.graph?.nodes ?? []) {
     const status = snapshot.subagents.states[node.id] ?? "pending";
     const id = `subagent:${node.id}`;
-    const terminal = ["completed", "failed", "blocked"].includes(status);
+    const terminal = ["completed", "failed", "blocked", "cancelled"].includes(status);
     if (!terminal) suppressed.delete(id);
     if ((!includeTerminal || suppressed.has(id)) && terminal) continue;
     const state = status === "running" ? "running"
       : status === "completed" ? "completed"
+      : status === "cancelled" ? "cancelled"
       : status === "failed" || status === "blocked" ? "failed"
       : "info";
     const prior = previous.get(id);
@@ -177,7 +178,7 @@ function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot, include
       kind: "status",
       id,
       state,
-      text: `${state === "completed" ? "✓" : state === "failed" ? "×" : "·"} ${node.description} · ${status}`,
+      text: `${state === "completed" ? "✓" : state === "failed" || state === "cancelled" ? "×" : "·"} ${node.description} / subagent · ${status}`,
       task: { subject: node.description, activeForm: node.description, role: "subagent" },
       ...(startedAt === undefined ? {} : { startedAt }),
       ...(elapsedMs === undefined ? {} : { elapsedMs }),
@@ -211,7 +212,7 @@ function terminalTaskIds(snapshot: TaskSnapshot): string[] {
     .filter((task) => ["completed", "failed", "blocked", "cancelled"].includes(task.status))
     .map((task) => `task:${task.id}`);
   for (const [id, status] of Object.entries(snapshot.subagents.states)) {
-    if (["completed", "failed", "blocked"].includes(status)) ids.push(`subagent:${id}`);
+    if (["completed", "failed", "blocked", "cancelled"].includes(status)) ids.push(`subagent:${id}`);
   }
   return ids;
 }

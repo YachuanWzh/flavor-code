@@ -3,7 +3,13 @@ import { randomUUID } from "node:crypto";
 import { homedir, release as osRelease, version as osVersion } from "node:os";
 import { join, resolve } from "node:path";
 
-import { SubagentResultSchema, SubagentScheduler, type SubagentResult } from "./agent/subagents.js";
+import {
+  parseFinalSubagentMessage,
+  subagentResultFromTaskOutput,
+  SubagentResultSchema,
+  SubagentScheduler,
+  type SubagentResult,
+} from "./agent/subagents.js";
 import { TaskGraphSchema, TaskPlanner, type TaskGraph, type TaskNode } from "./agent/planner.js";
 import { createTaskPlanTools } from "./agent/task-tools.js";
 import { updatePlanTask, type TaskPlan } from "./agent/task-plan.js";
@@ -205,7 +211,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const childModel = recovered?.models.subagent ?? selectedModels.child;
   let taskPlan: TaskPlan | undefined = recovered?.tasks.plan;
   let taskGraph: TaskGraph | undefined = recovered?.tasks.graph;
-  let taskStates: Record<string, "pending" | "running" | "completed" | "failed" | "blocked"> = { ...(recovered?.tasks.states ?? {}) };
+  let taskStates: Record<string, "pending" | "running" | "completed" | "failed" | "blocked" | "cancelled"> = { ...(recovered?.tasks.states ?? {}) };
   let taskResults: Record<string, SubagentResult> = { ...(recovered?.tasks.results ?? {}) };
   let sessionId = recovered?.sessionId ?? `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
   let createdAt = recovered?.createdAt ?? new Date().toISOString();
@@ -363,7 +369,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   hooks.on("SubagentStop", async (event) => {
     const id = String(event.payload.taskId);
     const status = event.payload.status;
-    if (status === "completed" || status === "failed" || status === "blocked") taskStates[id] = status;
+    if (status === "completed" || status === "failed" || status === "blocked" || status === "cancelled") taskStates[id] = status;
     await publishTaskState(); return { decision: "allow" };
   });
   hooks.on("SessionStart", () => {
@@ -571,15 +577,16 @@ async function runChild(
       `Complete task ${task.id}: ${task.description}`,
       `Expected outputs: ${task.expectedOutputs.join("; ")}`,
       `Verification: ${task.verification.join("; ")}`,
-      `Return only JSON matching these fields: ${Object.keys(SubagentResultSchema.shape).join(", ")}.${repair}`,
+      `For completed work, finish by calling TaskOutput. Otherwise return only JSON matching these fields: ${Object.keys(SubagentResultSchema.shape).join(", ")}.${repair}`,
     ].join("\n");
-    let text = "";
     for await (const event of child.loop.run({ prompt, signal: childSignal, ...(additionalContext ? { additionalContext } : {}) })) {
-      if (event.type === "text") text += event.text;
       if (event.type === "error") throw new Error(event.error.message);
+      if (event.type === "tool-end" && event.name === "TaskOutput" && event.result.ok) {
+        const completed = subagentResultFromTaskOutput(task.id, event.result.output);
+        if (completed !== undefined) return completed;
+      }
     }
-    try { return JSON.parse(text.trim()) as unknown; }
-    catch { return text; }
+    return parseFinalSubagentMessage(child.context.snapshot().messages);
   }, signal);
 }
 

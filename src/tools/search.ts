@@ -19,6 +19,23 @@ const DEFAULT_MAX_IGNORE_RULES = 100_000;
 const DEFAULT_MAX_IGNORE_TRAVERSED_DIRECTORIES = 100_000;
 const DEFAULT_MAX_IGNORE_TRAVERSED_ENTRIES = 500_000;
 
+const FILE_TYPES = [
+  "c", "cpp", "cs", "css", "dart", "go", "html", "java", "js", "json", "kotlin", "lua", "md", "php", "py",
+  "ruby", "rust", "sh", "sql", "swift", "text", "toml", "ts", "xml", "yaml",
+  "javascript", "markdown", "python", "typescript",
+] as const;
+type FileType = (typeof FILE_TYPES)[number];
+const FILE_TYPE_EXTENSIONS: Record<FileType, readonly string[]> = {
+  c: [".c", ".h"], cpp: [".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"], cs: [".cs"],
+  css: [".css"], dart: [".dart"], go: [".go"], html: [".htm", ".html"], java: [".java"],
+  js: [".js", ".jsx", ".mjs", ".cjs"], json: [".json", ".jsonc"], kotlin: [".kt", ".kts"], lua: [".lua"],
+  md: [".md", ".markdown", ".mdx"], php: [".php"], py: [".py", ".pyi"], ruby: [".rb"], rust: [".rs"],
+  sh: [".sh", ".bash", ".zsh", ".fish"], sql: [".sql"], swift: [".swift"], text: [".txt"], toml: [".toml"],
+  ts: [".ts", ".tsx", ".mts", ".cts"], xml: [".xml"], yaml: [".yaml", ".yml"],
+  javascript: [".js", ".jsx", ".mjs", ".cjs"], markdown: [".md", ".markdown", ".mdx"],
+  python: [".py", ".pyi"], typescript: [".ts", ".tsx", ".mts", ".cts"],
+};
+
 const GlobInput = z.object({
   pattern: z.string().min(1),
   path: z.string().min(1).nullable().optional(),
@@ -29,7 +46,7 @@ const GrepInput = z.object({
   pattern: z.string().min(1),
   path: z.string().min(1).nullable().optional(),
   glob: z.string().min(1).nullable().optional(),
-  fileType: z.string().min(1).nullable().optional(),
+  fileType: z.enum(FILE_TYPES).nullable().optional(),
   context: z.number().int().nonnegative().max(100).nullable().optional(),
   limit: z.number().int().positive().max(100_000).nullable().optional(),
 });
@@ -127,7 +144,7 @@ export function createGrepTool(
   const resources = searchResources(options);
   return {
     name: "Grep",
-    description: "Search workspace text with a regular expression. Use fileType to filter by language (e.g. js, ts, py, rust, go) — see rg --type-list for all supported types.",
+    description: `Search workspace text with a regular expression. fileType must be one of: ${FILE_TYPES.join(", ")}.`,
     inputSchema: GrepInput,
     paths: (input) => [scope(root, input.path ?? undefined)],
     execute: async (input, signal) => {
@@ -189,9 +206,15 @@ async function rgGrep(
   resources: SearchResources,
   ignoreBudget: IgnoreBudget,
 ): Promise<GrepMatch[]> {
+  const typeExtensions = input.fileType === undefined || input.fileType === null
+    ? undefined
+    : typeExtension(input.fileType);
+  if (input.fileType !== undefined && input.fileType !== null && typeExtensions === undefined) {
+    throw new Error(`Unsupported file type: ${input.fileType}`);
+  }
   const args = ["--json", "--line-number", "--column", "--sort", "path", "--hidden", "--glob", "!.git", "--max-filesize", String(maxFileBytes), "--context", String(context)];
   if (input.glob !== undefined && input.glob !== null) args.push("--glob", input.glob);
-  if (input.fileType !== undefined && input.fileType !== null) args.push("--type", input.fileType);
+  else for (const extension of typeExtensions ?? []) args.push("--glob", `*${extension}`);
   args.push("--regexp", input.pattern, "--", relative(root, start) || ".");
   const matches: GrepMatch[] = [];
   const ignoreLayers = await collectIgnoreLayers(root, start, signal, resources, ignoreBudget);
@@ -206,6 +229,7 @@ async function rgGrep(
     const lineWithEnding = tryDecodeUtf8(lineValue);
     if (decodedPath === undefined || lineWithEnding === undefined) return true;
     const path = normalizePath(decodedPath).replace(/^\.\//, "");
+    if (typeExtensions !== undefined && !typeExtensions.some((extension) => path.endsWith(extension))) return true;
     if (ignored(path, false, ignoreLayers)) return true;
     const text = lineWithEnding.replace(/\r?\n$/, "");
     const startByte = event.data.submatches?.[0]?.start ?? 0;
@@ -517,16 +541,8 @@ function expandBraces(pattern: string): string[] {
   return choices.flatMap((choice) => expandBraces(pattern.slice(0, open) + choice + pattern.slice(close + 1)));
 }
 
-function typeExtension(type: string): string[] | undefined {
-  return ({
-    c: [".c", ".h"], cpp: [".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"], cs: [".cs"],
-    css: [".css"], dart: [".dart"], go: [".go"], html: [".htm", ".html"], java: [".java"], js: [".js", ".jsx", ".mjs", ".cjs"],
-    json: [".json", ".jsonc"], kotlin: [".kt", ".kts"], lua: [".lua"], md: [".md", ".markdown", ".mdx"], php: [".php"], py: [".py", ".pyi"],
-    ruby: [".rb"], rust: [".rs"], sh: [".sh", ".bash", ".zsh", ".fish"], sql: [".sql"], swift: [".swift"],
-    text: [".txt"], toml: [".toml"], ts: [".ts", ".tsx", ".mts", ".cts"], xml: [".xml"], yaml: [".yaml", ".yml"],
-    javascript: [".js", ".jsx", ".mjs", ".cjs"], markdown: [".md", ".markdown", ".mdx"],
-    python: [".py", ".pyi"], typescript: [".ts", ".tsx", ".mts", ".cts"],
-  } as Record<string, string[]>)[type];
+function typeExtension(type: string): readonly string[] | undefined {
+  return FILE_TYPE_EXTENSIONS[type as FileType];
 }
 
 function scope(root: string, path = "."): string {

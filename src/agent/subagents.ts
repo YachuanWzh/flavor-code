@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 import type { HookBus } from "../hooks/bus.js";
+import type { ModelMessage } from "../models/types.js";
+import { TaskOutputResultSchema } from "../tools/task-output.js";
 import { TaskGraphSchema, type TaskGraph, type TaskNode } from "./planner.js";
 import { awaitWithSignal } from "../utils/async.js";
 import { message } from "../utils/error.js";
@@ -26,7 +28,7 @@ export const SubagentResultSchema = z.object({
 }).strict();
 
 export type SubagentResult = z.infer<typeof SubagentResultSchema>;
-export type SubagentState = "pending" | "running" | "completed" | "failed" | "blocked";
+export type SubagentState = "pending" | "running" | "completed" | "failed" | "blocked" | "cancelled";
 
 export interface SubagentExecution {
   attempt: 1 | 2;
@@ -43,6 +45,23 @@ export interface SubagentSchedulerOptions {
 export interface SubagentRunResult {
   states: Record<string, SubagentState>;
   results: Record<string, SubagentResult>;
+}
+
+export function subagentResultFromTaskOutput(taskId: string, output: unknown): SubagentResult | undefined {
+  const parsed = TaskOutputResultSchema.safeParse(output);
+  if (!parsed.success) return undefined;
+  const { taskCompleted: _taskCompleted, ...result } = parsed.data;
+  return SubagentResultSchema.parse({ taskId, status: "completed", ...result });
+}
+
+export function parseFinalSubagentMessage(messages: readonly ModelMessage[]): unknown {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const candidate = messages[index]!;
+    if (candidate.role !== "assistant" || (candidate.toolCalls !== undefined && candidate.toolCalls.length > 0)) continue;
+    try { return JSON.parse(candidate.content.trim()) as unknown; }
+    catch { return candidate.content; }
+  }
+  return "";
 }
 
 interface Completion {
@@ -161,7 +180,7 @@ export class SubagentScheduler {
           type: "SubagentStop",
           payload: {
             taskId: task.id,
-            status: completion?.result.status ?? "failed",
+            status: signal.aborted ? "cancelled" : completion?.result.status ?? "failed",
             ...(failure === undefined ? {} : { error: message(failure) }),
           },
         });

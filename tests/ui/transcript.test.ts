@@ -145,6 +145,43 @@ describe("transcriptReducer", () => {
     })]);
   });
 
+  it("renders an aborted subagent snapshot as cancelled instead of failed", () => {
+    const worker = {
+      id: "worker", description: "Inspect worker", dependencies: [],
+      expectedOutputs: [], verification: [],
+    };
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "inspect" });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "tasks",
+      snapshot: {
+        subagents: { graph: { nodes: [worker] }, states: { worker: "cancelled" } },
+      },
+    } });
+
+    expect(state.active?.blocks).toEqual([
+      expect.objectContaining({
+        id: "subagent:worker", state: "cancelled",
+        text: "× Inspect worker / subagent · cancelled",
+      }),
+    ]);
+  });
+
+  it("labels completed and failed delegated task rows as subagents", () => {
+    const nodes = ["done", "broken"].map((id) => ({
+      id, description: `${id} worker`, dependencies: [], expectedOutputs: [], verification: [],
+    }));
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "workers" });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "tasks",
+      snapshot: { subagents: { graph: { nodes }, states: { done: "completed", broken: "failed" } } },
+    } });
+
+    expect(state.active?.blocks).toEqual([
+      expect.objectContaining({ text: "✓ done worker / subagent · completed" }),
+      expect.objectContaining({ text: "× broken worker / subagent · failed" }),
+    ]);
+  });
+
   it("retains completed task rows when a replacement plan removes them", () => {
     const first = {
       id: "inspect", subject: "Inspect code", activeForm: "Inspecting code",
