@@ -213,6 +213,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   let taskGraph: TaskGraph | undefined = recovered?.tasks.graph;
   let taskStates: Record<string, "pending" | "running" | "completed" | "failed" | "blocked" | "cancelled"> = { ...(recovered?.tasks.states ?? {}) };
   let taskResults: Record<string, SubagentResult> = { ...(recovered?.tasks.results ?? {}) };
+  const subagentStartedAt: Record<string, number> = {};
+  const subagentElapsedMs: Record<string, number> = {};
   let sessionId = recovered?.sessionId ?? `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
   let createdAt = recovered?.createdAt ?? new Date().toISOString();
   let persistTail: Promise<void> = Promise.resolve();
@@ -243,11 +245,17 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
 
   const taskSnapshot = (): TaskSnapshot => {
     const foregroundTaskId = taskPlan?.tasks.find((task) => task.status === "in_progress")?.id;
+    const startedAt = Object.keys(subagentStartedAt).length > 0
+      ? { ...subagentStartedAt } : undefined;
+    const elapsedMs = Object.keys(subagentElapsedMs).length > 0
+      ? { ...subagentElapsedMs } : undefined;
     return {
       ...(taskPlan === undefined ? {} : { plan: taskPlan }),
       subagents: {
         ...(taskGraph === undefined ? {} : { graph: taskGraph }),
         states: { ...taskStates },
+        ...(startedAt === undefined ? {} : { startedAt }),
+        ...(elapsedMs === undefined ? {} : { elapsedMs }),
       },
       ...(foregroundTaskId === undefined ? {} : { foregroundTaskId }),
     };
@@ -375,12 +383,17 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   });
 
   hooks.on("SubagentStart", async (event) => {
-    const id = String(event.payload.taskId); taskStates[id] = "running"; await publishTaskState(); return { decision: "allow" };
+    const id = String(event.payload.taskId); taskStates[id] = "running"; subagentStartedAt[id] = Date.now(); await publishTaskState(); return { decision: "allow" };
   });
   hooks.on("SubagentStop", async (event) => {
     const id = String(event.payload.taskId);
     const status = event.payload.status;
-    if (status === "completed" || status === "failed" || status === "blocked" || status === "cancelled") taskStates[id] = status;
+    if (status === "completed" || status === "failed" || status === "blocked" || status === "cancelled") {
+      taskStates[id] = status;
+      if (subagentStartedAt[id] !== undefined && subagentElapsedMs[id] === undefined) {
+        subagentElapsedMs[id] = Math.max(0, Date.now() - subagentStartedAt[id]!);
+      }
+    }
     await publishTaskState(); return { decision: "allow" };
   });
   hooks.on("SessionStart", () => {
@@ -482,6 +495,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       taskGraph = undefined;
       taskStates = {};
       taskResults = {};
+      for (const key of Object.keys(subagentStartedAt)) delete subagentStartedAt[key];
+      for (const key of Object.keys(subagentElapsedMs)) delete subagentElapsedMs[key];
       sessionId = `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
       createdAt = new Date().toISOString();
       await persist();

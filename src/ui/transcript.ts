@@ -149,7 +149,9 @@ function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot, include
     const suffix = task.status === "completed" ? "done" : task.status.replace("_", " ");
     const prior = previous.get(id);
     const startedAt = state === "running" ? prior?.startedAt ?? now : prior?.startedAt;
-    const elapsedMs = state !== "running" && startedAt !== undefined ? Math.max(0, now - startedAt) : prior?.elapsedMs;
+    const elapsedMs = state !== "running" && startedAt !== undefined
+      ? prior?.elapsedMs ?? Math.max(0, now - startedAt)
+      : prior?.elapsedMs;
     taskBlocks.push({
       kind: "status",
       id,
@@ -172,8 +174,14 @@ function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot, include
       : status === "failed" || status === "blocked" ? "failed"
       : "info";
     const prior = previous.get(id);
-    const startedAt = state === "running" ? prior?.startedAt ?? now : prior?.startedAt;
-    const elapsedMs = state !== "running" && startedAt !== undefined ? Math.max(0, now - startedAt) : prior?.elapsedMs;
+    const snapshotStartedAt = snapshot.subagents.startedAt?.[node.id];
+    const snapshotElapsedMs = snapshot.subagents.elapsedMs?.[node.id];
+    const startedAt = state === "running"
+      ? snapshotStartedAt ?? prior?.startedAt ?? now
+      : prior?.startedAt ?? snapshotStartedAt;
+    const elapsedMs = state !== "running" && startedAt !== undefined
+      ? prior?.elapsedMs ?? snapshotElapsedMs ?? Math.max(0, now - startedAt)
+      : prior?.elapsedMs;
     taskBlocks.push({
       kind: "status",
       id,

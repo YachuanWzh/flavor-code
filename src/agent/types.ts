@@ -23,6 +23,10 @@ export interface TaskSnapshot {
   subagents: {
     graph?: TaskGraph;
     states: Record<string, SubagentState>;
+    /** Unix-ms timestamp captured when each subagent transitioned to "running". */
+    startedAt?: Record<string, number>;
+    /** Frozen elapsed-ms captured when each subagent reached a terminal state. */
+    elapsedMs?: Record<string, number>;
   };
   foregroundTaskId?: string;
 }

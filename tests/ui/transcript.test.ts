@@ -224,6 +224,79 @@ describe("transcriptReducer", () => {
     expect(state.active?.blocks).toEqual([expect.objectContaining({ id: "task:test", elapsedMs: 8_000 })]);
   });
 
+  it("freezes elapsed time of completed subagent when another subagent finishes later", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-13T00:00:00.000Z"));
+    const workerA = {
+      id: "a", description: "Worker A", dependencies: [],
+      expectedOutputs: [], verification: [],
+    };
+    const workerB = {
+      id: "b", description: "Worker B", dependencies: [],
+      expectedOutputs: [], verification: [],
+    };
+    const nodes = [workerA, workerB];
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "work" });
+
+    // Both start running
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "tasks",
+      snapshot: { subagents: { graph: { nodes }, states: { a: "running", b: "running" } } },
+    } });
+
+    // Worker A completes at T=5s
+    vi.setSystemTime(new Date("2026-07-13T00:00:05.000Z"));
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "tasks",
+      snapshot: { subagents: { graph: { nodes }, states: { a: "completed", b: "running" } } },
+    } });
+    expect(state.active?.blocks.find((b) => b.kind === "status" && b.id === "subagent:a")?.elapsedMs).toBe(5_000);
+
+    // Worker B completes at T=12s — worker A's elapsed time must stay frozen at 5s
+    vi.setSystemTime(new Date("2026-07-13T00:00:12.000Z"));
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "tasks",
+      snapshot: { subagents: { graph: { nodes }, states: { a: "completed", b: "completed" } } },
+    } });
+
+    expect(state.active?.blocks.find((b) => b.kind === "status" && b.id === "subagent:a")?.elapsedMs).toBe(5_000);
+    expect(state.active?.blocks.find((b) => b.kind === "status" && b.id === "subagent:b")?.elapsedMs).toBe(12_000);
+  });
+
+  it("uses snapshot-provided startedAt and elapsedMs for subagent blocks", () => {
+    const workerA = {
+      id: "a", description: "Worker A", dependencies: [],
+      expectedOutputs: [], verification: [],
+    };
+    const workerB = {
+      id: "b", description: "Worker B", dependencies: [],
+      expectedOutputs: [], verification: [],
+    };
+    const nodes = [workerA, workerB];
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "work" });
+
+    // Snapshot provides startedAt and elapsedMs from the backend
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "tasks",
+      snapshot: {
+        subagents: {
+          graph: { nodes },
+          states: { a: "completed", b: "running" },
+          startedAt: { a: 1_000, b: 5_000 },
+          elapsedMs: { a: 40_000 },
+        },
+      },
+    } });
+
+    const blockA = state.active?.blocks.find((b) => b.kind === "status" && b.id === "subagent:a");
+    expect(blockA?.startedAt).toBe(1_000);  // from snapshot.startedAt for terminal task with no prior
+    expect(blockA?.elapsedMs).toBe(40_000); // frozen from snapshot.elapsedMs
+
+    const blockB = state.active?.blocks.find((b) => b.kind === "status" && b.id === "subagent:b");
+    expect(blockB?.startedAt).toBe(5_000);  // from snapshot.startedAt
+    expect(blockB?.elapsedMs).toBeUndefined(); // running tasks have no elapsedMs
+  });
+
   it("does not duplicate terminal task rows into a later unrelated turn", () => {
     const completed = {
       plan: { tasks: [{

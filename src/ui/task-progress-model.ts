@@ -35,7 +35,9 @@ export function staticTaskLines(snapshot: TaskSnapshot): string[] {
   for (const node of snapshot.subagents.graph?.nodes ?? []) {
     const status = snapshot.subagents.states[node.id] ?? "pending";
     const glyph = status === "completed" ? "✓" : status === "failed" || status === "blocked" || status === "cancelled" ? "×" : "·";
-    lines.push(`${glyph} subagent: ${node.description} · ${status}`);
+    const duration = ["completed", "failed", "blocked", "cancelled"].includes(status) && snapshot.subagents.elapsedMs?.[node.id] !== undefined
+      ? ` (${formatElapsed(snapshot.subagents.elapsedMs[node.id]!)})` : "";
+    lines.push(`${glyph} subagent: ${node.description} · ${status}${duration}`);
   }
   return lines;
 }

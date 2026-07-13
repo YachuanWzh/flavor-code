@@ -81,6 +81,35 @@ describe("task progress presentation", () => {
     ]);
   });
 
+  it("appends elapsed time from snapshot for terminal subagents", () => {
+    expect(staticTaskLines({
+      subagents: {
+        graph: { nodes: [
+          { id: "a", description: "Worker A", dependencies: [], expectedOutputs: [], verification: [] },
+          { id: "b", description: "Worker B", dependencies: [], expectedOutputs: [], verification: [] },
+        ] },
+        states: { a: "completed", b: "failed" },
+        elapsedMs: { a: 40_000, b: 55_000 },
+      },
+    })).toEqual([
+      "✓ subagent: Worker A · completed (40s)",
+      "× subagent: Worker B · failed (55s)",
+    ]);
+  });
+
+  it("omits elapsed time for terminal subagents when snapshot has no elapsedMs", () => {
+    expect(staticTaskLines({
+      subagents: {
+        graph: { nodes: [{
+          id: "worker", description: "Inspect worker", dependencies: [], expectedOutputs: [], verification: [],
+        }] },
+        states: { worker: "completed" },
+      },
+    })).toEqual([
+      "✓ subagent: Inspect worker · completed",
+    ]);
+  });
+
   it.each([
     ["completed", "✓", "Run tests · done (8s)", "done"],
     ["failed", "×", "Run tests · failed (8s)", "failed"],
