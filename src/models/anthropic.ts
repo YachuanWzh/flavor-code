@@ -13,7 +13,7 @@ import {
   type ModelEvent,
   type ModelRequest,
 } from "./types.js";
-import { parseJson } from "../utils/json.js";
+import { normalizeToolCallInput } from "../utils/json.js";
 
 export interface AnthropicClient {
   messages: {
@@ -166,7 +166,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
               type: "tool-call",
               id: pending.id,
               name: pending.name,
-              input: parseJson(pending.json || "{}"),
+              input: normalizeToolCallInput(pending.json || "{}"),
             };
             pendingTools.delete(event.index);
           }

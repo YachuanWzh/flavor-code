@@ -24,14 +24,34 @@ export function TaskStatusLine({ block, interactive }: TaskStatusLineProps): Rea
     : Math.max(0, Date.now() - block.startedAt);
   const presentation = statusPresentation(block, elapsed, foreground);
 
+  // Split the text so the status word can be colorized independently.
+  const { statusLabel, statusColor, text } = presentation;
+  let before = text;
+  let after = "";
+  if (statusLabel !== undefined) {
+    const marker = ` · ${statusLabel}`;
+    const idx = before.indexOf(marker);
+    if (idx >= 0) {
+      after = before.slice(idx + marker.length);
+      before = before.slice(0, idx);
+    }
+  }
+
   return <Box ref={ref} flexDirection="row">
     <Text {...(presentation.color === undefined ? {} : { color: presentation.color })}>
       {presentation.glyph}{" "}
     </Text>
     {presentation.badge ? <Text color={presentation.badgeColor}>{presentation.badge} </Text> : null}
     <Text {...(presentation.color === undefined ? {} : { color: presentation.color })}>
-      {presentation.text}
+      {before}
     </Text>
+    {statusLabel !== undefined ? (
+      <>
+        <Text {...(presentation.color === undefined ? {} : { color: presentation.color })}> · </Text>
+        <Text color={statusColor ?? presentation.color}>{statusLabel}</Text>
+      </>
+    ) : null}
+    {after ? <Text {...(presentation.color === undefined ? {} : { color: presentation.color })}>{after}</Text> : null}
   </Box>;
 }
 

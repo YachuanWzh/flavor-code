@@ -278,9 +278,20 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     execute: async (input, signal) => {
       if (recovered === undefined && selectedModels.childError !== undefined) throw new Error(selectedModels.childError);
       const graph = await new TaskPlanner({ hooks }).plan(input, signal);
-      taskGraph = graph;
-      taskStates = Object.fromEntries(graph.nodes.map((node) => [node.id, "pending"]));
-      taskResults = {};
+      // Merge new graph nodes into the accumulated task graph so that
+      // sub-agent statuses from prior Task calls are preserved instead of
+      // being overwritten.
+      const priorIds = new Set((taskGraph?.nodes ?? []).map((node) => node.id));
+      const mergedNodes = [...(taskGraph?.nodes ?? [])];
+      for (const node of graph.nodes) {
+        const index = mergedNodes.findIndex((existing) => existing.id === node.id);
+        if (index >= 0) mergedNodes[index] = node;
+        else mergedNodes.push(node);
+      }
+      taskGraph = { nodes: mergedNodes };
+      for (const node of graph.nodes) {
+        taskStates[node.id] = "pending";
+      }
       await publishTaskState();
       const scheduler = new SubagentScheduler({
         hooks,

@@ -11,7 +11,7 @@ import {
   type ModelMessage,
   type ModelRequest,
 } from "./types.js";
-import { parseJson } from "../utils/json.js";
+import { normalizeToolCallInput } from "../utils/json.js";
 
 type OpenAIStreamRequest = Parameters<OpenAI["responses"]["stream"]>[0];
 
@@ -94,7 +94,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
               type: "tool-call",
               id: event.item.call_id,
               name: pending.name,
-              input: parseJson(pending.arguments),
+              input: normalizeToolCallInput(pending.arguments),
             };
             pendingCalls.delete(event.output_index);
           }
@@ -111,7 +111,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
               type: "tool-call",
               id: callId,
               name: event.name,
-              input: parseJson(event.arguments ?? ""),
+              input: normalizeToolCallInput(event.arguments ?? ""),
             };
           } else {
             pendingCalls.set(event.output_index, {

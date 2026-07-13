@@ -48,6 +48,22 @@ describe("task progress presentation", () => {
     });
   });
 
+  it("annotates a non-interactive running subagent row with a colored status label", () => {
+    const result = statusPresentation({
+      ...runningTask,
+      id: "subagent:inspect",
+      task: { subject: "Inspect worker", activeForm: "Inspecting worker", role: "subagent" },
+    }, 0, false);
+    expect(result).toMatchObject({
+      glyph: "·",
+      text: "Inspecting worker · running",
+      badge: "subagent:",
+      badgeColor: "#81c8f2",
+      statusLabel: "running",
+      statusColor: "#d77757",
+    });
+  });
+
   it("identifies static delegated rows without changing main plan labels", () => {
     expect(staticTaskLines({
       plan: { tasks: [{
@@ -66,13 +82,13 @@ describe("task progress presentation", () => {
   });
 
   it.each([
-    ["completed", "✓", "Run tests · done (8s)"],
-    ["failed", "×", "Run tests · failed (8s)"],
-    ["cancelled", "×", "Run tests · cancelled (8s)"],
-  ] as const)("renders %s task duration in the static terminal row", (state, glyph, text) => {
+    ["completed", "✓", "Run tests · done (8s)", "done"],
+    ["failed", "×", "Run tests · failed (8s)", "failed"],
+    ["cancelled", "×", "Run tests · cancelled (8s)", "cancelled"],
+  ] as const)("renders %s task duration in the static terminal row", (state, glyph, text, statusLabel) => {
     expect(statusPresentation({
       kind: "status", id: "task:test", state, text: `${glyph} Run tests · ${state === "completed" ? "done" : state}`,
       task: { subject: "Run tests", activeForm: "Running tests", role: "main" }, elapsedMs: 8_000,
-    }, 0, false)).toEqual({ glyph, text, color: state === "completed" ? "ansi:green" : "#e06c50" });
+    }, 0, false)).toEqual({ glyph, text, color: state === "completed" ? "ansi:green" : "#e06c50", statusLabel, statusColor: undefined });
   });
 });

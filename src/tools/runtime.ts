@@ -89,8 +89,8 @@ export class ToolRuntime {
           const reparsed = JSON.parse(call.input) as unknown;
           input = tool.inputSchema.parse(reparsed);
           console.warn(`[ToolRuntime] Recovered string-wrapped input for tool "${call.name}". Consider upgrading the model.`);
-        } catch {
-          return this.#fail(call.name, call.input, context.agent, "invalid_input", message(primary));
+        } catch (secondary) {
+          return this.#fail(call.name, call.input, context.agent, "invalid_input", message(secondary));
         }
       } else {
         return this.#fail(call.name, call.input, context.agent, "invalid_input", message(primary));
