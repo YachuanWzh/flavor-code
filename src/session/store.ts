@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import { TaskGraphSchema } from "../agent/planner.js";
 import { SubagentResultSchema } from "../agent/subagents.js";
+import { TaskPlanSchema, normalizeAbandonedPlan } from "../agent/task-plan.js";
 import { message } from "../utils/error.js";
 
 export const SESSION_VERSION = 1 as const;
@@ -36,6 +37,7 @@ export const SessionDocumentSchema = z.object({
     messages: z.array(MessageSchema).max(50_000),
   }).strict(),
   tasks: z.object({
+    plan: TaskPlanSchema.optional(),
     graph: TaskGraphSchema.optional(),
     states: z.record(z.string(), StateSchema),
     results: z.record(z.string(), SubagentResultSchema),
@@ -175,6 +177,7 @@ async function boundedRead(path: string, maxBytes: number): Promise<string> {
 }
 
 function normalizeAbandonedTasks(document: SessionDocument): SessionDocument {
+  const plan = document.tasks.plan === undefined ? undefined : normalizeAbandonedPlan(document.tasks.plan);
   const states = { ...document.tasks.states };
   const results = { ...document.tasks.results };
   const nodes = new Map(document.tasks.graph?.nodes.map((node) => [node.id, node]) ?? []);
@@ -188,7 +191,15 @@ function normalizeAbandonedTasks(document: SessionDocument): SessionDocument {
       filesChanged: [], commandsRun: [], verification: [], artifacts: [], risks: ["Execution was abandoned"], suggestedNextSteps: [],
     };
   }
-  return { ...document, tasks: { ...document.tasks, states, results } };
+  return {
+    ...document,
+    tasks: {
+      ...document.tasks,
+      ...(plan === undefined ? {} : { plan }),
+      states,
+      results,
+    },
+  };
 }
 
 async function assertNoSymlink(root: string, target: string): Promise<void> {

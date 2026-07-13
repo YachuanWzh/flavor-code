@@ -33,6 +33,34 @@ function document(root: string): SessionDocument {
 }
 
 describe("SessionStore", () => {
+  it("persists a main plan and cancels abandoned in-progress work on load", async () => {
+    const root = await workspace();
+    const store = new SessionStore({ workspace: root });
+    const saved = document(root);
+    saved.tasks.plan = { tasks: [{
+      id: "inspect",
+      subject: "Inspect code",
+      activeForm: "Inspecting code",
+      status: "in_progress",
+      dependencies: [],
+    }] };
+
+    await store.save(saved);
+
+    expect((await store.load(saved.sessionId)).tasks.plan?.tasks[0]).toMatchObject({
+      status: "cancelled",
+      result: "Execution was abandoned",
+    });
+  });
+
+  it("loads a version-1 document without a main plan", async () => {
+    const root = await workspace();
+    const store = new SessionStore({ workspace: root });
+    await store.save(document(root));
+
+    expect((await store.load("session-20260712")).tasks.plan).toBeUndefined();
+  });
+
   it("atomically saves a strict, secret-free document and lists deterministically", async () => {
     const root = await workspace();
     const store = new SessionStore({ workspace: root });
