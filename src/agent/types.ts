@@ -1,5 +1,8 @@
 import type { ProviderErrorCode } from "../models/types.js";
 import type { ToolResult } from "../tools/types.js";
+import type { TaskGraph } from "./planner.js";
+import type { SubagentState } from "./subagents.js";
+import type { TaskPlan } from "./task-plan.js";
 
 export interface AgentRunRequest {
   prompt: string;
@@ -15,10 +18,20 @@ export interface AgentError {
   message: string;
 }
 
+export interface TaskSnapshot {
+  plan?: TaskPlan;
+  subagents: {
+    graph?: TaskGraph;
+    states: Record<string, SubagentState>;
+  };
+  foregroundTaskId?: string;
+}
+
 export type AgentEvent =
   | { type: "text"; text: string }
   | { type: "tool-start"; id: string; name: string; input: unknown }
   | { type: "tool-end"; id: string; name: string; result: ToolResult }
+  | { type: "tasks"; snapshot: TaskSnapshot }
   | { type: "usage"; inputTokens: number; outputTokens: number; totalInputTokens: number; totalOutputTokens: number }
   | { type: "compacted" }
   | { type: "done"; usage: { inputTokens: number; outputTokens: number } }

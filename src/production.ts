@@ -5,7 +5,9 @@ import { join, resolve } from "node:path";
 
 import { SubagentResultSchema, SubagentScheduler, type SubagentResult } from "./agent/subagents.js";
 import { TaskGraphSchema, TaskPlanner, type TaskGraph, type TaskNode } from "./agent/planner.js";
-import type { AgentEvent } from "./agent/types.js";
+import { createTaskPlanTools } from "./agent/task-tools.js";
+import type { TaskPlan } from "./agent/task-plan.js";
+import type { AgentEvent, TaskSnapshot } from "./agent/types.js";
 import { loadConfig } from "./config/load.js";
 import { ContextManager, type ContextSnapshot } from "./context/manager.js";
 import { LocalHarness } from "./harness/local.js";
@@ -164,6 +166,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const selectedModels = selectModels(config, registeredProviders, diagnostics);
   const mainModel = recovered?.models.main ?? selectedModels.main;
   const childModel = recovered?.models.subagent ?? selectedModels.child;
+  let taskPlan: TaskPlan | undefined = recovered?.tasks.plan;
   let taskGraph: TaskGraph | undefined = recovered?.tasks.graph;
   let taskStates: Record<string, "pending" | "running" | "completed" | "failed" | "blocked"> = { ...(recovered?.tasks.states ?? {}) };
   let taskResults: Record<string, SubagentResult> = { ...(recovered?.tasks.results ?? {}) };
@@ -173,7 +176,12 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const sessionDocument = (): SessionDocument => ({
     version: 1, sessionId, createdAt, updatedAt: new Date().toISOString(), workspace: { path: workspace },
     conversation: storedConversation(harness.main.context.snapshot()),
-    tasks: { ...(taskGraph === undefined ? {} : { graph: taskGraph }), states: { ...taskStates }, results: { ...taskResults } },
+    tasks: {
+      ...(taskPlan === undefined ? {} : { plan: taskPlan }),
+      ...(taskGraph === undefined ? {} : { graph: taskGraph }),
+      states: { ...taskStates },
+      results: { ...taskResults },
+    },
     models: { main: harness.mainModelId, subagent: harness.subagentModelId }, permissionMode: harness.permissionMode,
   });
   let persistFailed = false;
@@ -190,6 +198,35 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     return persistTail;
   };
 
+  const taskSnapshot = (): TaskSnapshot => {
+    const foregroundTaskId = taskPlan?.tasks.find((task) => task.status === "in_progress")?.id;
+    return {
+      ...(taskPlan === undefined ? {} : { plan: taskPlan }),
+      subagents: {
+        ...(taskGraph === undefined ? {} : { graph: taskGraph }),
+        states: { ...taskStates },
+      },
+      ...(foregroundTaskId === undefined ? {} : { foregroundTaskId }),
+    };
+  };
+  const serializedTaskState = (): string | undefined => {
+    if (taskPlan === undefined && taskGraph === undefined) return undefined;
+    return JSON.stringify(taskSnapshot());
+  };
+  const publishTaskState = async (): Promise<void> => {
+    harness.main.context.updateTaskState(serializedTaskState());
+    await persist();
+    options.output({ type: "tasks", snapshot: taskSnapshot() });
+  };
+
+  for (const tool of createTaskPlanTools({
+    getPlan: () => taskPlan,
+    commit: async (next) => {
+      taskPlan = next;
+      await publishTaskState();
+    },
+  })) tools.push(tool as ToolDefinition<unknown>);
+
   const taskTool: ToolDefinition<unknown> = {
     name: "Task",
     description: "Validate a task graph and execute its nodes with isolated child agents",
@@ -201,11 +238,15 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       taskGraph = graph;
       taskStates = Object.fromEntries(graph.nodes.map((node) => [node.id, "pending"]));
       taskResults = {};
-      await persist();
+      await publishTaskState();
       const scheduler = new SubagentScheduler({
         hooks,
         maxSubagents: config.maxSubagents,
-        onResult: async (result) => { taskResults[result.taskId] = result; taskStates[result.taskId] = result.status; await persist(); },
+        onResult: async (result) => {
+          taskResults[result.taskId] = result;
+          taskStates[result.taskId] = result.status;
+          await publishTaskState();
+        },
         execute: (task, execution) => runChild(harness, skills, task, execution.attempt, execution.signal),
       });
       return scheduler.run(graph, signal);
@@ -213,19 +254,25 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   };
   tools.push(taskTool);
 
-  const createContext = () => new ContextManager({
-    system: [
-      "You are Flavor, a coding agent running in an interactive terminal. Report conclusions and actions; never expose hidden chain-of-thought.",
-      "Format your replies as plain text intended for a fixed-width terminal. Do not use markdown headings, bullet lists, tables, or **bold**/**italic**; spell things out as ordinary sentences and use indentation for clarity.",
-      "Multi-line code or commands must be wrapped in triple-backtick fences (```) so the terminal can render them readably. Keep prose responses short; the user is reading them in a chat pane.",
-      "Use SkillResource to read resources explicitly referenced by a matched skill; treat scripts as data and never execute them through that tool.",
-    ].join(" "),
-    ...(flavor === undefined ? {} : { flavor }),
-    compactAtChars: config.context.compactAtChars,
-    toolOutputChars: config.context.toolOutputChars,
-    summarize: async (messages) => messages.map((item) => `${item.role}: ${item.content}`).join("\n").slice(-40_000),
-    hooks,
-  });
+  const createContext = () => {
+    const taskState = serializedTaskState();
+    return new ContextManager({
+      system: [
+        "You are Flavor, a coding agent running in an interactive terminal. Report conclusions and actions; never expose hidden chain-of-thought.",
+        "Format your replies as plain text intended for a fixed-width terminal. Do not use markdown headings, bullet lists, tables, or **bold**/**italic**; spell things out as ordinary sentences and use indentation for clarity.",
+        "Multi-line code or commands must be wrapped in triple-backtick fences (```) so the terminal can render them readably. Keep prose responses short; the user is reading them in a chat pane.",
+        "Use SkillResource to read resources explicitly referenced by a matched skill; treat scripts as data and never execute them through that tool.",
+        "For complex work with at least three distinct implementation or verification steps, multiple requested changes, or other non-trivial coordination, call TaskPlan before implementation. Skip planning for informational or straightforward single-step requests.",
+        "Before starting each planned task, call TaskUpdate to mark it in_progress. Mark it completed immediately after successful verification; otherwise use failed, blocked, or cancelled. Only one main task may be in_progress. Include verification as a plan task for multi-step code changes and never claim completion while work or verification is incomplete.",
+      ].join(" "),
+      ...(flavor === undefined ? {} : { flavor }),
+      ...(taskState === undefined ? {} : { taskState }),
+      compactAtChars: config.context.compactAtChars,
+      toolOutputChars: config.context.toolOutputChars,
+      summarize: async (messages) => messages.map((item) => `${item.role}: ${item.content}`).join("\n").slice(-40_000),
+      hooks,
+    });
+  };
   harness = new LocalHarness({
     registry, hooks, workspace, mainModelId: mainModel, subagentModelId: childModel,
     tools, createContext, permissionMode: recovered?.permissionMode ?? config.permissionMode,
@@ -242,13 +289,17 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   });
 
   hooks.on("SubagentStart", async (event) => {
-    const id = String(event.payload.taskId); taskStates[id] = "running"; await persist(); return { decision: "allow" };
+    const id = String(event.payload.taskId); taskStates[id] = "running"; await publishTaskState(); return { decision: "allow" };
   });
   hooks.on("SubagentStop", async (event) => {
     const id = String(event.payload.taskId);
     const status = event.payload.status;
     if (status === "completed" || status === "failed" || status === "blocked") taskStates[id] = status;
-    await persist(); return { decision: "allow" };
+    await publishTaskState(); return { decision: "allow" };
+  });
+  hooks.on("SessionStart", () => {
+    if (taskPlan !== undefined || taskGraph !== undefined) options.output({ type: "tasks", snapshot: taskSnapshot() });
+    return { decision: "allow" };
   });
   hooks.on("SessionEnd", async () => { await persist(); return { decision: "allow" }; });
 
@@ -270,7 +321,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     skills: () => skills.discover(),
     plugins: () => pluginHost.loadedPlugins,
     hooksStatus: () => HOOK_EVENT_NAMES.map((name) => ({ name, pluginHandlers: pluginHooks.filter((item) => item === name).length })),
-    tasks: () => ({ graph: taskGraph, states: taskStates, results: taskResults }),
+    tasks: () => ({ plan: taskPlan, graph: taskGraph, states: taskStates, results: taskResults }),
     pluginCommands: () => [...pluginCommands.keys()].sort(),
     runPluginCommand: async (name, args, signal) => {
       const handler = pluginCommands.get(name);

@@ -1,4 +1,5 @@
 import { AgentLoop } from "../agent/loop.js";
+import { MAIN_TASK_TOOL_NAMES } from "../agent/task-tools.js";
 import { z } from "zod";
 import type { TaskNode } from "../agent/planner.js";
 import type { PermissionMode } from "../permissions/engine.js";
@@ -67,7 +68,7 @@ export class LocalHarness {
 
   createSubagent(task: TaskNode): SubagentHarness {
     if (this.#disposed) throw new Error("LocalHarness is disposed");
-    const tools = this.#options.tools.filter((tool) => tool.name !== "Task");
+    const tools = this.#options.tools.filter((tool) => !MAIN_TASK_TOOL_NAMES.has(tool.name));
     const context = this.#options.createContext();
     this.#claimContext(context);
     const profile = this.#createProfile(this.#subagentModelId, tools, "subagent", context);

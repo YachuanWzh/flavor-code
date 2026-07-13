@@ -11,6 +11,47 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("production runtime", () => {
+  it("restores a main plan and publishes its task snapshot at session start", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-")); roots.push(workspace);
+    await mkdir(join(workspace, ".flavor"), { recursive: true });
+    await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
+      providers: { local: { type: "openai-compatible", baseURL: "http://127.0.0.1:1/v1", defaultModel: "large", cheapModel: "small" } },
+    }));
+    const store = new SessionStore({ workspace });
+    await store.save({
+      version: 1,
+      sessionId: "planned-session",
+      createdAt: "2026-07-13T01:00:00.000Z",
+      updatedAt: "2026-07-13T01:01:00.000Z",
+      workspace: { path: workspace },
+      conversation: { messages: [] },
+      tasks: {
+        plan: { tasks: [{
+          id: "inspect", subject: "Inspect code", activeForm: "Inspecting code",
+          status: "pending", dependencies: [],
+        }] },
+        states: {},
+        results: {},
+      },
+      models: { main: "local:large", subagent: "local:small" },
+      permissionMode: "workspace",
+    });
+    const outputs: unknown[] = [];
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, resumeSession: "planned-session",
+      output: (event) => outputs.push(event),
+    });
+
+    await runtime.session.start();
+
+    expect(runtime.services.tasks()).toMatchObject({ plan: { tasks: [{ id: "inspect" }] } });
+    expect(outputs).toContainEqual(expect.objectContaining({
+      type: "tasks",
+      snapshot: expect.objectContaining({ plan: { tasks: [expect.objectContaining({ id: "inspect" })] } }),
+    }));
+    await runtime.dispose();
+  });
+
   it("saves lifecycle state and resumes only when explicitly requested", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-")); roots.push(workspace);
     await mkdir(join(workspace, ".flavor"), { recursive: true });

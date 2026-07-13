@@ -256,7 +256,7 @@ describe("LocalHarness", () => {
     const hooks = new HookBus();
     const adapter: ModelAdapter = { async *stream() { yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } }; } };
     const registry = new ModelRegistry().register("fake", adapter);
-    const tools = ["Read", "Task"].map((name) => ({
+    const tools = ["Read", "Task", "TaskPlan", "TaskUpdate"].map((name) => ({
       name,
       description: name,
       inputSchema: z.object({ path: z.string() }),
