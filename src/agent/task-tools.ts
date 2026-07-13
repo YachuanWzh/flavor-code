@@ -7,7 +7,7 @@ import {
 } from "./task-plan.js";
 import type { ToolDefinition } from "../tools/types.js";
 
-export const MAIN_TASK_TOOL_NAMES = new Set(["Task", "TaskPlan", "TaskUpdate"]);
+export const MAIN_TASK_TOOL_NAMES = new Set(["Task", "TaskPlan", "TaskUpdate", "AskUserQuestion"]);
 
 export interface TaskPlanToolOptions {
   getPlan(): TaskPlan | undefined;

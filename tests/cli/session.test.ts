@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import { HookBus } from "../../src/hooks/bus.js";
+import { QuestionBridge } from "../../src/tools/ask-user-question.js";
 import { FlavorSession, type SessionServices } from "../../src/ui/session.js";
 
 function services(events: string[], outputs: string[]): SessionServices {
   const hooks = new HookBus();
+  const questions = new QuestionBridge();
   for (const type of ["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"] as const) {
     hooks.on(type, (event) => { events.push(event.type); return { decision: "allow" }; });
   }
@@ -27,6 +29,7 @@ function services(events: string[], outputs: string[]): SessionServices {
     skills: async () => [], plugins: () => [], hooksStatus: () => [], tasks: () => [], audit: async () => "", cancelActiveTask: async () => {},
     pluginCommands: () => [], runPluginCommand: async () => undefined,
     output: (event) => outputs.push(event.type === "text" ? event.text : event.type === "notice" ? event.message : event.type),
+    questions,
   };
 }
 

@@ -16,6 +16,7 @@ import { createProductionRuntime, type ProductionRuntime } from "../production.j
 import { isDestructiveTool } from "../permissions/engine.js";
 import { AssistantText } from "./assistant-text.js";
 import type { SessionOutput } from "./session.js";
+import type { Question } from "../tools/ask-user-question.js";
 import { createSessionInterruptHandler, installSigintHandler } from "./signals.js";
 import {
   createTranscriptState,
@@ -193,8 +194,9 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   }, [stdout]);
 
   const approval = runtime?.approvals.pending;
+  const questions = runtime?.services.questions.pending;
   const derivedSlashCompletion = deriveSlashCompletion(input, promptCursor, slashCandidates, slashSelection);
-  const slashCompletion = dismissedSlashInput === input || transcript.active !== undefined || approval !== undefined
+  const slashCompletion = dismissedSlashInput === input || transcript.active !== undefined || approval !== undefined || questions !== undefined
     ? null
     : derivedSlashCompletion;
   const completedTokenLength = completedSlashTokenLength(input, slashCandidates, slashCompletion !== null);
@@ -225,6 +227,25 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
           active.approvals.resolve("once");
         } else {
           active.approvals.resolve("always");
+        }
+      }
+      return;
+    }
+    const qs = active?.services.questions.pending;
+    if (qs !== undefined && qs.length > 0) {
+      const questionsService = active!.services.questions;
+      if (key.escape) { questionsService.cancel(); return; }
+      // Single-question: digits 1-4 pick the option directly.
+      if (qs.length === 1) {
+        const question = qs[0]!;
+        const digit = parseInt(character, 10);
+        if (digit >= 1 && digit <= question.options.length) {
+          questionsService.answer({ 0: question.options[digit - 1]!.label });
+        }
+      } else {
+        // Multiple questions: for now, only cancel (multi-question needs a real dialog).
+        if (parseInt(character, 10) >= 1) {
+          questionsService.cancel("Multiple-question UI is not yet supported; please ask questions one at a time.");
         }
       }
       return;
@@ -309,6 +330,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     scrollRef={scrollRef}
     {...(slashCompletion === null ? {} : { completion: slashCompletion })}
     {...(approval === undefined ? {} : { approval })}
+    {...(questions === undefined ? {} : { questions })}
   />;
 }
 
@@ -341,12 +363,13 @@ export interface TerminalLayoutProps {
   completedSlashTokenLength?: number;
   completion?: SlashCompletion;
   approval?: { tool: string; reason?: string };
+  questions?: readonly Question[];
   scrollRef?: React.Ref<ScrollBoxHandle>;
 }
 
 export function TerminalLayout({
   model, workspaceName, completed, active, input, promptCursor, columns, rows = 24, activeSession, approval,
-  completion, completedSlashTokenLength: tokenLength = 0, scrollRef,
+  questions, completion, completedSlashTokenLength: tokenLength = 0, scrollRef,
 }: TerminalLayoutProps): React.JSX.Element {
   const dividerWidth = Math.max(1, columns - 1);
   const menuRows = completion === undefined ? 0 : Math.min(6, completion.items.length - completion.windowStart);
@@ -366,7 +389,11 @@ export function TerminalLayout({
   const taskPanelRows = activeTaskBlocks.length === 0 ? 0
     : 1 + Math.min(activeTaskBlocks.length, MAX_TASK_VISIBLE) + (activeTaskBlocks.length > MAX_TASK_VISIBLE ? 1 : 0);
 
-  const fixedBottomRows = (approval === undefined ? 0 : 3) + menuRows + taskPanelRows + 2;
+  const questionRows = questions === undefined ? 0
+    : questions.length === 1 ? 4 + questions[0]!.options.length
+    : 3 + questions.length * 2;
+
+  const fixedBottomRows = (approval === undefined ? 0 : 3) + questionRows + menuRows + taskPanelRows + 2;
   const bottomMaxRows = Math.min(rows, Math.max(Math.floor(rows / 2), fixedBottomRows + 1));
   const promptMaxLines = Math.max(1, bottomMaxRows - fixedBottomRows);
   return <Box flexGrow={1} width="100%" flexDirection="column" overflow="hidden">
@@ -396,6 +423,9 @@ export function TerminalLayout({
                 : <Text bold color="magenta">└─ Allow? <Text color="green">y</Text>=once / <Text color="yellow">a</Text>=same-type / <Text color="red">n</Text>=deny</Text>
               }
       </Box>}
+      {!questions || questions.length === 0 ? null : (
+        <QuestionCards questions={questions} />
+      )}
       {completion === undefined ? null : <SlashMenu completion={completion} />}
       <Text dimColor>{"─".repeat(dividerWidth)}</Text>
       <PromptLine
@@ -412,6 +442,30 @@ export function TerminalLayout({
           : "↑/↓ select · Tab complete · Esc close"}</Text>
     </Box>
   </Box>;
+}
+
+function QuestionCards({ questions }: { questions: readonly Question[] }): React.JSX.Element {
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      {questions.map((q, qi) => (
+        <Box key={qi} flexDirection="column" marginBottom={qi < questions.length - 1 ? 1 : 0}>
+          <Text bold color="cyan">┌─ {q.header}</Text>
+          <Text wrap="truncate-end" color="cyanBright">│ {q.question}</Text>
+          {q.options.map((opt, oi) => (
+            <Text key={oi} color="cyan">
+              │  <Text bold color="green">{oi + 1}</Text>. {opt.label}
+              <Text dimColor>  {opt.description}</Text>
+            </Text>
+          ))}
+          <Text dimColor color="cyan">{questions.length === 1 ? "└─" : "│"}{" "}
+            {questions.length === 1
+              ? `Press 1-${q.options.length} to choose, Esc to dismiss`
+              : "Esc to dismiss (multi-question not yet supported)"}
+          </Text>
+        </Box>
+      ))}
+    </Box>
+  );
 }
 
 function SlashMenu({ completion }: { completion: SlashCompletion }): React.JSX.Element {

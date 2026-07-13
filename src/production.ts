@@ -28,6 +28,9 @@ import { SessionStore, type SessionDocument } from "./session/store.js";
 import { createApplyPatchTool, createEditTool, createReadTool, createWriteTool } from "./tools/files.js";
 import { createGlobTool, createGrepTool } from "./tools/search.js";
 import { createShellTool } from "./tools/shell.js";
+import { createAskUserQuestionTool, QuestionBridge, type AskUserQuestionHandler } from "./tools/ask-user-question.js";
+import { createTaskOutputTool } from "./tools/task-output.js";
+import { createTodoWriteTool } from "./tools/todo-write.js";
 import type { ToolDefinition } from "./tools/types.js";
 import { FlavorSession, type SessionOutput, type SessionServices } from "./ui/session.js";
 import { MVP_COMMANDS } from "./ui/commands.js";
@@ -111,9 +114,17 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const registry = new ModelRegistry();
   const diagnostics: string[] = [];
   const approvals = new ApprovalBridge(options.onApprovalChange);
+  const questions = new QuestionBridge(options.onApprovalChange);
+  const askUserQuestionHandler: AskUserQuestionHandler = async (qs, signal) => {
+    if (options.approvalPolicy === "deny") throw new Error("AskUserQuestion is not available in non-interactive mode");
+    return questions.ask(qs, signal);
+  };
   const tools: ToolDefinition<unknown>[] = [
     createReadTool(workspace), createWriteTool(workspace), createEditTool(workspace), createApplyPatchTool(workspace),
     createGlobTool(workspace), createGrepTool(workspace), createShellTool(workspace),
+    createAskUserQuestionTool(askUserQuestionHandler),
+    createTaskOutputTool(),
+    createTodoWriteTool(),
   ];
   const pluginSkillRoots: string[] = [];
   const pluginHooks: HookEventName[] = [];
@@ -268,6 +279,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         "Format your replies as plain text intended for a fixed-width terminal. Do not use markdown headings, bullet lists, tables, or **bold**/**italic**; spell things out as ordinary sentences and use indentation for clarity.",
         "Multi-line code or commands must be wrapped in triple-backtick fences (```) so the terminal can render them readably. Keep prose responses short; the user is reading them in a chat pane.",
         "Use SkillResource to read resources explicitly referenced by a matched skill; treat scripts as data and never execute them through that tool.",
+        "When a request is ambiguous and multiple valid approaches exist, use AskUserQuestion to present the user with up to 4 clear, numbered questions. Each question must have a short header, a one-sentence body, and 2-4 mutually exclusive options. Do not ask trivial or rhetorical questions. When the user answers, proceed immediately based on their choice.",
+        "Use TodoWrite to track your own implementation progress for non-trivial multi-step work. Keep at most one item in_progress and mark items completed as you finish them. This demonstrates thoroughness and helps you stay organised.",
+        "Use TaskOutput to produce a structured summary when completing a multi-step task — list files changed, commands run, verification results, risks, and suggested next steps.",
         "For complex work with at least three distinct implementation or verification steps, multiple requested changes, or other non-trivial coordination, call TaskPlan before implementation. Skip planning for informational or straightforward single-step requests.",
         "Before starting each planned task, call TaskUpdate to mark it in_progress. Mark it completed immediately after successful verification; otherwise use failed, blocked, or cancelled. Only one main task may be in_progress. Include verification as a plan task for multi-step code changes and never claim completion while work or verification is incomplete.",
       ].join(" "),
@@ -412,6 +426,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       return awaitWithSignal(Promise.resolve(handler(args, { workspace, signal })), signal);
     },
     output: options.output,
+    questions,
   };
   const session = new FlavorSession(services);
   let disposed = false;
@@ -424,11 +439,11 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       await persist();
       await persistTail;
       auditLogger.close();
-      await cleanupProduction(approvals, pluginHost, harness);
+      await cleanupProduction(approvals, questions, pluginHost, harness);
     },
   };
   } catch (primaryError) {
-    try { await cleanupProduction(approvals, pluginHost, harnessCreated ? harness : undefined); }
+    try { await cleanupProduction(approvals, questions, pluginHost, harnessCreated ? harness : undefined); }
     catch (cleanupError) { attachCleanupError(primaryError, cleanupError); }
     throw primaryError;
   }
@@ -628,11 +643,16 @@ function storedConversation(snapshot: ContextSnapshot): SessionDocument["convers
 }
 
 async function cleanupProduction(
-  approvals: ApprovalBridge, pluginHost: PluginHost, harness: LocalHarness | undefined,
+  approvals: ApprovalBridge, questions: QuestionBridge, pluginHost: PluginHost, harness: LocalHarness | undefined,
 ): Promise<void> {
   let primary: unknown;
   try { approvals.resolve("deny"); }
   catch (error) { primary = error; }
+  try { questions.dispose(); }
+  catch (error) {
+    if (primary === undefined) primary = error;
+    else attachCleanupError(primary, error);
+  }
   try { await pluginHost.unloadAll(); }
   catch (error) {
     if (primary === undefined) primary = error;

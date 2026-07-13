@@ -4,6 +4,7 @@ import type { HookBus } from "../hooks/bus.js";
 import type { PermissionMode } from "../permissions/engine.js";
 import type { SkillMetadata } from "../skills/registry.js";
 import { parseSlashCommand, type ModelRole, type SlashCommand } from "./commands.js";
+import type { QuestionBridge } from "../tools/ask-user-question.js";
 import { message } from "../utils/error.js";
 
 export type SessionOutput = AgentEvent
@@ -33,6 +34,7 @@ export interface SessionServices {
   pluginCommands(): readonly string[];
   runPluginCommand(name: string, args: readonly string[], signal: AbortSignal): Promise<unknown>;
   output(event: SessionOutput): void;
+  questions: QuestionBridge;
 }
 
 const HELP = [
