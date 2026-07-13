@@ -317,6 +317,20 @@ describe("LocalHarness", () => {
     expect(() => childReuse.createSubagent(node("second"))).toThrow("fresh ContextManager");
   });
 
+  it("identifies main and subagent contexts when invoking the factory", () => {
+    const agents: Array<"main" | "subagent"> = [];
+    const harness = harnessFixture((agent) => {
+      agents.push(agent);
+      return contextFixture();
+    });
+
+    const child = harness.createSubagent(node("role-aware"));
+
+    expect(agents).toEqual(["main", "subagent"]);
+    child.dispose();
+    harness.dispose();
+  });
+
   it("disposes child runtimes idempotently and automatically on success or failure", async () => {
     const harness = harnessFixture(() => contextFixture());
     const child = harness.createSubagent(node("manual"));
@@ -411,7 +425,7 @@ function contextFixture(hooks = new HookBus()): ContextManager {
   });
 }
 
-function harnessFixture(createContext: () => ContextManager): LocalHarness {
+function harnessFixture(createContext: (agent: "main" | "subagent") => ContextManager): LocalHarness {
   const hooks = new HookBus();
   const adapter: ModelAdapter = { async *stream() { yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } }; } };
   return new LocalHarness({

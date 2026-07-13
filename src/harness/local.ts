@@ -18,7 +18,7 @@ export interface LocalHarnessOptions {
   mainModelId: string;
   subagentModelId: string;
   tools: readonly ToolDefinition<unknown>[];
-  createContext(): ContextManager;
+  createContext(agent: "main" | "subagent"): ContextManager;
   permissionMode?: PermissionMode;
   approve?: ApprovalCallback;
   maxIterationsMain?: number;
@@ -52,7 +52,7 @@ export class LocalHarness {
   constructor(options: LocalHarnessOptions) {
     this.#options = options;
     this.#subagentModelId = options.subagentModelId;
-    const context = options.createContext();
+    const context = options.createContext("main");
     this.#claimContext(context);
     this.main = this.#createProfile(options.mainModelId, options.tools, "main", context, options.approve);
   }
@@ -72,7 +72,7 @@ export class LocalHarness {
   createSubagent(task: TaskNode): SubagentHarness {
     if (this.#disposed) throw new Error("LocalHarness is disposed");
     const tools = this.#options.tools.filter((tool) => !MAIN_TASK_TOOL_NAMES.has(tool.name));
-    const context = this.#options.createContext();
+    const context = this.#options.createContext("subagent");
     this.#claimContext(context);
     const profile = this.#createProfile(this.#subagentModelId, tools, "subagent", context);
     let disposed = false;
@@ -145,6 +145,7 @@ export class LocalHarness {
     try {
       const tools = definitions.map(toModelTool);
       const isMain = agent === "main";
+      const maxIterations = isMain ? this.#options.maxIterationsMain : this.#options.maxIterationsSubagent;
       const loop = new AgentLoop({
         registry: this.#options.registry,
         modelId,
@@ -153,7 +154,7 @@ export class LocalHarness {
         hooks: this.#options.hooks,
         tools,
         agent,
-        maxIterations: isMain ? this.#options.maxIterationsMain : this.#options.maxIterationsSubagent,
+        ...(maxIterations === undefined ? {} : { maxIterations }),
         ...(isMain && this.#options.hasActiveProgress !== undefined ? { hasActiveProgress: this.#options.hasActiveProgress } : {}),
       });
       return { get modelId() { return loop.modelId; }, context, runtime, tools, loop };
