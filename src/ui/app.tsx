@@ -23,7 +23,7 @@ import {
   type TranscriptTurn,
 } from "./transcript.js";
 import { wrapPromptInput } from "./wrap-prompt.js";
-import { TaskStatusLine } from "./task-progress.js";
+import { TaskProgressPanel, TaskStatusLine } from "./task-progress.js";
 import { COMMAND_DESCRIPTIONS, MVP_COMMANDS } from "./commands.js";
 import {
   buildSlashCandidates,
@@ -343,7 +343,23 @@ export function TerminalLayout({
 }: TerminalLayoutProps): React.JSX.Element {
   const dividerWidth = Math.max(1, columns - 1);
   const menuRows = completion === undefined ? 0 : Math.min(6, completion.items.length - completion.windowStart);
-  const fixedBottomRows = (approval === undefined ? 0 : 3) + menuRows + 2;
+
+  const activeTaskBlocks = active?.blocks.filter(
+    (block): block is Extract<TranscriptBlock, { kind: "status" }> =>
+      block.kind === "status" && block.task !== undefined,
+  ) ?? [];
+  const activeWithoutTasks = active === undefined ? undefined : {
+    ...active,
+    blocks: active.blocks.filter((block) =>
+      !(block.kind === "status" && block.task !== undefined),
+    ),
+  };
+
+  const MAX_TASK_VISIBLE = 6;
+  const taskPanelRows = activeTaskBlocks.length === 0 ? 0
+    : 1 + Math.min(activeTaskBlocks.length, MAX_TASK_VISIBLE) + (activeTaskBlocks.length > MAX_TASK_VISIBLE ? 1 : 0);
+
+  const fixedBottomRows = (approval === undefined ? 0 : 3) + menuRows + taskPanelRows + 2;
   const bottomMaxRows = Math.min(rows, Math.max(Math.floor(rows / 2), fixedBottomRows + 1));
   const promptMaxLines = Math.max(1, bottomMaxRows - fixedBottomRows);
   return <Box flexGrow={1} width="100%" flexDirection="column" overflow="hidden">
@@ -355,13 +371,14 @@ export function TerminalLayout({
           <TurnView turn={turn} interactive={false} />
         </Box>
       ))}
-      {active === undefined ? null : (
+      {activeWithoutTasks === undefined ? null : (
         <Box flexDirection="column">
           {completed.length > 0 ? <TurnSeparator width={columns} /> : null}
-          <TurnView turn={active} interactive={activeSession} />
+          <TurnView turn={activeWithoutTasks} interactive={activeSession} />
         </Box>
       )}
     </ScrollBox>
+    <TaskProgressPanel blocks={activeTaskBlocks} interactive={activeSession} maxVisible={MAX_TASK_VISIBLE} />
     <Box flexDirection="column" flexShrink={0} maxHeight={bottomMaxRows} width="100%" overflowY="hidden">
       {approval === undefined ? null : <Box flexDirection="column" marginBottom={1}>
         <Text color="magenta">┌─ approval · {approval.tool}</Text>

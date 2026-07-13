@@ -30,3 +30,24 @@ export function TaskStatusLine({ block, interactive }: TaskStatusLineProps): Rea
     </Text>
   </Box>;
 }
+
+export type TaskBlock = Extract<TranscriptBlock, { kind: "status" }>;
+
+export interface TaskProgressPanelProps {
+  blocks: TaskBlock[];
+  interactive: boolean;
+  maxVisible?: number;
+}
+
+export function TaskProgressPanel({ blocks, interactive, maxVisible = 8 }: TaskProgressPanelProps): React.JSX.Element | null {
+  if (blocks.length === 0) return null;
+  const visible = blocks.slice(0, maxVisible);
+  const overflow = blocks.length - visible.length;
+  return <Box flexDirection="column" flexShrink={0}>
+    <Text dimColor>── task progress ──</Text>
+    {visible.map((block) => (
+      <TaskStatusLine key={block.id} block={block} interactive={interactive} />
+    ))}
+    {overflow > 0 ? <Text dimColor>  ... and {overflow} more</Text> : null}
+  </Box>;
+}
