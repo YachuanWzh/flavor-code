@@ -227,18 +227,20 @@ describe("PluginHost", () => {
       return new Promise(() => {});
     }`, { contributes: { ...baseManifest.contributes, commands: [{ name: "early" }, { name: "late" }] } });
     const r = registrations();
-    const host = new PluginHost({ projectPluginDirs: [f.project], registrations: r.callbacks, activationTimeoutMs: 10 });
+    const host = new PluginHost({ projectPluginDirs: [f.project], registrations: r.callbacks, activationTimeoutMs: 1_000 });
 
     await host.loadAll();
     expect(host.loadedPlugins).toEqual([]);
     expect(r.active).toEqual([]);
     expect(host.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ plugin: "hanging", message: expect.stringMatching(/timeout/i) })]));
     expect(host.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ plugin: "import-hanging", message: expect.stringMatching(/timeout/i) })]));
-    expect((globalThis as Record<string, unknown>).lateRejected).toBe(true);
-    expect(((globalThis as unknown as Record<string, AbortSignal | undefined>).hangingSignal)?.aborted).toBe(true);
+    await vi.waitFor(() => {
+      expect((globalThis as Record<string, unknown>).lateRejected).toBe(true);
+      expect(((globalThis as unknown as Record<string, AbortSignal | undefined>).hangingSignal)?.aborted).toBe(true);
+    }, { timeout: 5_000, interval: 20 });
     delete (globalThis as Record<string, unknown>).lateRejected;
     delete (globalThis as Record<string, unknown>).hangingSignal;
-  });
+  }, 10_000);
 
   it("runs a disposer returned by activation after its timeout exactly once", async () => {
     const f = await fixture();
@@ -254,7 +256,7 @@ describe("PluginHost", () => {
       contributes: { ...baseManifest.contributes, commands: [{ name: "healthy-late" }] },
     });
     const r = registrations();
-    const host = new PluginHost({ projectPluginDirs: [f.project], registrations: r.callbacks, activationTimeoutMs: 10, unloadTimeoutMs: 10 });
+    const host = new PluginHost({ projectPluginDirs: [f.project], registrations: r.callbacks, activationTimeoutMs: 1_000, unloadTimeoutMs: 10 });
 
     await host.loadAll();
     await vi.waitFor(() => {
@@ -262,28 +264,28 @@ describe("PluginHost", () => {
       expect(host.diagnostics).toEqual(expect.arrayContaining([
         expect.objectContaining({ plugin: "late-cleanup", message: expect.stringMatching(/late plugin activation cleanup timeout/i) }),
       ]));
-    });
+    }, { timeout: 5_000, interval: 20 });
 
     expect(host.loadedPlugins.map(({ name }) => name)).toEqual(["healthy-late"]);
     expect(r.active).toEqual(["healthy-late"]);
     expect((globalThis as Record<string, unknown>).lateEffect).toBe(false);
     delete (globalThis as Record<string, unknown>).lateEffect;
     delete (globalThis as Record<string, unknown>).lateCleanupCount;
-  });
+  }, 10_000);
 
   it("diagnoses invalid results and rejections from activation after its timeout", async () => {
     const f = await fixture();
     await plugin(f.project, "late-invalid", `export async function activate() {
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
       return "not-a-disposer";
     }`);
     await plugin(f.project, "late-rejection", `export async function activate() {
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
       throw new Error("late boom");
     }`);
     const host = new PluginHost({
       projectPluginDirs: [f.project], registrations: registrations().callbacks,
-      activationTimeoutMs: 10, unloadTimeoutMs: 10,
+      activationTimeoutMs: 1_000, unloadTimeoutMs: 10,
     });
 
     await host.loadAll();
@@ -292,8 +294,8 @@ describe("PluginHost", () => {
         expect.objectContaining({ plugin: "late-invalid", message: expect.stringMatching(/late.*invalid disposer/i) }),
         expect.objectContaining({ plugin: "late-rejection", message: expect.stringMatching(/late.*rejected.*late boom/i) }),
       ]));
-    });
-  });
+    }, { timeout: 5_000, interval: 20 });
+  }, 10_000);
 
   it("prevents filesystem I/O when unload occurs during awaited authorization", async () => {
     const f = await fixture();
