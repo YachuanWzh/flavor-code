@@ -312,6 +312,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     subagentModel: () => harness.subagentModelId,
     permissionMode: () => harness.permissionMode,
     run: (prompt, signal) => persistAfter(runMain(harness, skills, prompt, signal, selectedModels.mainError), persist),
+    runSkill: (skill, prompt, signal) => persistAfter(
+      runExplicitSkill(harness, skills, skill, prompt, signal, selectedModels.mainError), persist,
+    ),
     setModel: async (role, id) => { harness.setModel(role, id); await persist(); },
     setPermissionMode: async (mode) => { harness.setPermissionMode(mode); await persist(); },
     compact: async (signal) => { const changed = await harness.main.context.compact(signal); if (changed) await persist(); return changed; },
@@ -388,6 +391,32 @@ async function* runMain(
       ? `${detail}. Configure providers and agents in .flavor/flavor.json or set OPENAI_API_KEY/ANTHROPIC_API_KEY.`
       : detail;
     yield { type: "error", error: { code: "unknown", message: setup } };
+  }
+}
+
+async function* runExplicitSkill(
+  harness: LocalHarness,
+  skills: SkillRegistry,
+  skillName: string,
+  prompt: string,
+  signal: AbortSignal,
+  setupError?: string,
+): AsyncIterable<AgentEvent> {
+  try {
+    if (setupError !== undefined) {
+      yield { type: "error", error: { code: "unknown", message: setupError } };
+      return;
+    }
+    const skill = (await skills.discover()).find(({ name }) => name === skillName);
+    if (skill === undefined) {
+      yield { type: "error", error: { code: "unknown", message: `Unknown skill: ${skillName}` } };
+      return;
+    }
+    const userPrompt = prompt || `Apply the ${skillName} skill.`;
+    const additionalContext = `Matched skill: ${skill.name}\n${await skills.loadBody(skill)}`;
+    yield* harness.main.loop.run({ prompt: userPrompt, signal, additionalContext });
+  } catch (error) {
+    yield { type: "error", error: { code: "unknown", message: message(error) } };
   }
 }
 

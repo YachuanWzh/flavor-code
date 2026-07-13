@@ -20,6 +20,7 @@ function services(events: string[], outputs: string[]): SessionServices {
       yield { type: "text", text: "lo" };
       yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
     },
+    runSkill: async function* () {},
     setModel: () => {}, setPermissionMode: () => {}, compact: async () => false,
     initialize: async () => ({ path: "/work/FLAVOR.md", created: true }),
     config: () => ({ providers: { openai: { apiKey: "top-secret", token: "also-secret" } } }),
@@ -139,5 +140,25 @@ describe("FlavorSession", () => {
     const rendered = outputs.join("\n");
     expect(rendered).not.toContain("top-secret"); expect(rendered).not.toContain("also-secret");
     expect(rendered).toContain("[redacted]");
+  });
+
+  it("runs an explicitly selected skill with its argument text", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const calls: Array<{ skill: string; prompt: string }> = [];
+    base.skills = async () => [{
+      name: "frontend-design", description: "Design interfaces", source: "project", root: "/work/.flavor/skills/frontend-design",
+    }];
+    base.run = async function* () { throw new Error("ordinary run must not be called"); };
+    base.runSkill = async function* (skill, prompt) {
+      calls.push({ skill, prompt });
+      yield { type: "text", text: "done" };
+    };
+
+    const session = new FlavorSession(base);
+    await session.submit("/frontend-design polish footer");
+
+    expect(calls).toEqual([{ skill: "frontend-design", prompt: "polish footer" }]);
+    expect(outputs).toContain("done");
   });
 });

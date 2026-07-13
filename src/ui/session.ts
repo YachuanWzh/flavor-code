@@ -2,6 +2,7 @@ import type { AgentEvent } from "../agent/types.js";
 import { redactConfig } from "../config/load.js";
 import type { HookBus } from "../hooks/bus.js";
 import type { PermissionMode } from "../permissions/engine.js";
+import type { SkillMetadata } from "../skills/registry.js";
 import { parseSlashCommand, type ModelRole, type SlashCommand } from "./commands.js";
 import { message } from "../utils/error.js";
 
@@ -17,12 +18,13 @@ export interface SessionServices {
   subagentModel(): string;
   permissionMode(): PermissionMode;
   run(prompt: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
+  runSkill(skill: string, prompt: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
   setModel(role: ModelRole, modelId: string): void | Promise<void>;
   setPermissionMode(mode: PermissionMode): void | Promise<void>;
   compact(signal?: AbortSignal): Promise<boolean>;
   initialize(): Promise<{ path: string; created: boolean }>;
   config(): unknown;
-  skills(): Promise<readonly unknown[]>;
+  skills(): Promise<readonly SkillMetadata[]>;
   plugins(): readonly unknown[];
   hooksStatus(): readonly unknown[];
   tasks(): unknown;
@@ -87,7 +89,12 @@ export class FlavorSession {
         this.#notice(decision.reason ?? "Prompt denied by hook.");
         return;
       }
-      const command = parseSlashCommand(prompt, this.#services.pluginCommands());
+      let skillNames: string[] = [];
+      if (prompt.startsWith("/")) {
+        try { skillNames = (await this.#services.skills()).map(({ name }) => name); }
+        catch { /* Built-in and plugin commands remain available when skill discovery fails. */ }
+      }
+      const command = parseSlashCommand(prompt, this.#services.pluginCommands(), skillNames);
       if (command !== null) await this.#dispatch(command, controller.signal);
       else for await (const event of this.#services.run(prompt, controller.signal)) this.#services.output(event);
       if (controller.signal.aborted) outcome = "cancelled";
@@ -150,6 +157,8 @@ export class FlavorSession {
       this.#notice(`Main permissions set to ${command.mode}. Child agents remain workspace-limited.`);
     } else if (command.name === "plugin") {
       this.#notice(format(await this.#services.runPluginCommand(command.command, command.args, signal)));
+    } else if (command.name === "skill") {
+      for await (const event of this.#services.runSkill(command.skill, command.prompt, signal)) this.#services.output(event);
     } else if (command.name === "compact") {
       this.#notice(await this.#services.compact(signal) ? "Context compacted." : "Context does not need compaction.");
     } else if (command.name === "init") {

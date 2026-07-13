@@ -32,6 +32,12 @@ describe("parseSlashCommand", () => {
     expect(parseSlashCommand("/ide", ["ide"])).toMatchObject({ name: "unknown" });
   });
 
+  it("parses explicitly discovered skills after built-in and plugin commands", () => {
+    expect(parseSlashCommand("/frontend-design polish footer", [], ["frontend-design"]))
+      .toEqual({ name: "skill", skill: "frontend-design", prompt: "polish footer" });
+    expect(parseSlashCommand("/help", ["help"], ["help"])).toEqual({ name: "help" });
+  });
+
   it("reports invalid arguments without throwing", () => {
     expect(parseSlashCommand("/permissions reckless")).toMatchObject({ name: "invalid", command: "permissions" });
     expect(parseSlashCommand("/model sidekick foo:bar")).toMatchObject({ name: "invalid", command: "model" });
