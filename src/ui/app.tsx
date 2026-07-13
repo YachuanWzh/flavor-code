@@ -29,6 +29,7 @@ import {
   deriveSlashCompletion,
   matchRanges,
   moveSlashSelection,
+  slashCandidatePresentation,
   type SlashCandidate,
   type SlashCompletion,
 } from "./slash-completion.js";
@@ -367,9 +368,10 @@ function SlashMenu({ completion }: { completion: SlashCompletion }): React.JSX.E
   return <Box flexDirection="column" width="100%">
     {visible.map((candidate, visibleIndex) => {
       const index = completion.windowStart + visibleIndex;
-      return <Text key={`${candidate.kind}:${candidate.name}`} inverse={index === completion.selectedIndex} wrap="truncate-end">
-        {index === completion.selectedIndex ? "› " : "  "}
-        <HighlightedName name={candidate.name} query={completion.query} />
+      const presentation = slashCandidatePresentation(index === completion.selectedIndex);
+      return <Text key={`${candidate.kind}:${candidate.name}`} {...presentation.rowStyle} wrap="truncate-end">
+        {presentation.marker}
+        <HighlightedName name={candidate.name} query={completion.query} matchStyle={presentation.matchStyle} />
         <Text dimColor>{`  ${candidate.kind}`}</Text>
         {candidate.description === undefined ? null : <Text dimColor>{`  ${candidate.description}`}</Text>}
       </Text>;
@@ -377,14 +379,20 @@ function SlashMenu({ completion }: { completion: SlashCompletion }): React.JSX.E
   </Box>;
 }
 
-function HighlightedName({ name, query }: { name: string; query: string }): React.JSX.Element {
+function HighlightedName({
+  name, query, matchStyle,
+}: {
+  name: string;
+  query: string;
+  matchStyle: { color: "ansi:cyan"; bold: true };
+}): React.JSX.Element {
   const ranges = matchRanges(name, query);
   if (ranges.length === 0) return <Text>{name}</Text>;
   const parts: React.ReactNode[] = [];
   let cursor = 0;
   for (const [start, end] of ranges) {
     if (start > cursor) parts.push(name.slice(cursor, start));
-    parts.push(<Text key={`${start}:${end}`} color="cyan" bold>{name.slice(start, end)}</Text>);
+    parts.push(<Text key={`${start}:${end}`} {...matchStyle}>{name.slice(start, end)}</Text>);
     cursor = end;
   }
   if (cursor < name.length) parts.push(name.slice(cursor));

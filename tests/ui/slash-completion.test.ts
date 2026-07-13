@@ -6,6 +6,7 @@ import {
   deriveSlashCompletion,
   matchRanges,
   moveSlashSelection,
+  slashCandidatePresentation,
 } from "../../src/ui/slash-completion.js";
 
 describe("slash completion", () => {
@@ -40,5 +41,14 @@ describe("slash completion", () => {
   it("returns case-insensitive highlight ranges", () => {
     expect(matchRanges("Frontend-Design", "de")).toEqual([[9, 11]]);
     expect(matchRanges("help", "")).toEqual([]);
+  });
+
+  it("uses a marker without row background and highlights only matched text", () => {
+    expect(slashCandidatePresentation(true)).toEqual({
+      marker: "› ",
+      rowStyle: {},
+      matchStyle: { color: "ansi:cyan", bold: true },
+    });
+    expect(slashCandidatePresentation(false).marker).toBe("  ");
   });
 });

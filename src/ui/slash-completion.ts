@@ -14,6 +14,20 @@ export interface SlashCompletion {
   windowStart: number;
 }
 
+export interface SlashCandidatePresentation {
+  marker: "› " | "  ";
+  rowStyle: Record<string, never>;
+  matchStyle: { color: "ansi:cyan"; bold: true };
+}
+
+export function slashCandidatePresentation(selected: boolean): SlashCandidatePresentation {
+  return {
+    marker: selected ? "› " : "  ",
+    rowStyle: {},
+    matchStyle: { color: "ansi:cyan", bold: true },
+  };
+}
+
 export function buildSlashCandidates(
   commands: readonly string[],
   plugins: readonly string[],
