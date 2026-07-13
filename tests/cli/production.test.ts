@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createProductionRuntime } from "../../src/production.js";
+import { createProductionRuntime, createPromptEnvironment } from "../../src/production.js";
 import { SessionStore } from "../../src/session/store.js";
 import { writeFile, mkdir } from "node:fs/promises";
 
@@ -11,6 +11,27 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("production runtime", () => {
+  it("creates deterministic prompt environment data with explicit fallbacks", () => {
+    expect(createPromptEnvironment({
+      now: new Date("2026-07-13T23:59:00.000Z"),
+      platform: "win32",
+      osVersion: "Windows 11 10.0.26100",
+      shell: "powershell.exe",
+      isGitRepository: true,
+    })).toEqual({
+      date: "2026-07-13",
+      platform: "win32",
+      osVersion: "Windows 11 10.0.26100",
+      shell: "powershell.exe",
+      isGitRepository: true,
+    });
+    expect(createPromptEnvironment({
+      now: new Date("invalid"), platform: " ", osVersion: "", shell: "\n", isGitRepository: "unknown",
+    })).toEqual({
+      date: "unknown", platform: "unknown", osVersion: "unknown", shell: "unknown", isGitRepository: "unknown",
+    });
+  });
+
   it("restores a main plan and publishes its task snapshot at session start", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-")); roots.push(workspace);
     await mkdir(join(workspace, ".flavor"), { recursive: true });

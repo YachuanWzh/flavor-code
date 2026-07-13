@@ -331,6 +331,40 @@ describe("LocalHarness", () => {
     harness.dispose();
   });
 
+  it("passes each role's exact tool definitions to its context factory", () => {
+    const hooks = new HookBus();
+    const adapter: ModelAdapter = { async *stream() { yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } }; } };
+    const received: Array<{ agent: "main" | "subagent"; tools: string[] }> = [];
+    const definitions: ToolDefinition<unknown>[] = ["Read", "Task"].map((name) => ({
+      name,
+      description: name,
+      inputSchema: z.object({}),
+      paths: () => [],
+      execute: async () => null,
+    }));
+    const harness = new LocalHarness({
+      registry: new ModelRegistry().register("fake", adapter),
+      hooks,
+      workspace: process.cwd(),
+      mainModelId: "fake:main",
+      subagentModelId: "fake:child",
+      tools: definitions,
+      createContext: (agent, ...args: unknown[]) => {
+        const tools = args[0] as readonly ToolDefinition<unknown>[] | undefined;
+        received.push({ agent, tools: tools?.map((tool) => tool.name) ?? [] });
+        return contextFixture(hooks);
+      },
+    });
+
+    harness.createSubagent(node("tool-aware"));
+
+    expect(received).toEqual([
+      { agent: "main", tools: ["Read", "Task"] },
+      { agent: "subagent", tools: ["Read"] },
+    ]);
+    harness.dispose();
+  });
+
   it("disposes child runtimes idempotently and automatically on success or failure", async () => {
     const harness = harnessFixture(() => contextFixture());
     const child = harness.createSubagent(node("manual"));
