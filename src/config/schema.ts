@@ -18,6 +18,10 @@ export const FlavorConfigSchema = z.object({
     .optional(),
   maxSubagents: z.number().int().min(1).max(16).default(3),
   permissionMode: z.enum(["safe", "workspace", "full"]).default("workspace"),
+  language: z
+    .string()
+    .regex(/^[a-z]{2}(-[A-Z]{2})?$/, "language must be a BCP47 tag like zh-CN or en-US")
+    .optional(),
   context: z
     .object({
       compactAtChars: z.number().int().positive().default(240_000),

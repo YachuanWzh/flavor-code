@@ -30,6 +30,7 @@ import { createShellTool } from "./tools/shell.js";
 import type { ToolDefinition } from "./tools/types.js";
 import { FlavorSession, type SessionOutput, type SessionServices } from "./ui/session.js";
 import { MVP_COMMANDS } from "./ui/commands.js";
+import { resolveLanguage, languageInstruction } from "./utils/intl.js";
 import { awaitWithSignal } from "./utils/async.js";
 import { message } from "./utils/error.js";
 import { redactSecrets } from "./utils/redact.js";
@@ -256,8 +257,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
 
   const createContext = () => {
     const taskState = serializedTaskState();
+    const language = resolveLanguage(config.language);
     return new ContextManager({
       system: [
+        languageInstruction(language),
         "You are Flavor, a coding agent running in an interactive terminal. Report conclusions and actions; never expose hidden chain-of-thought.",
         "Format your replies as plain text intended for a fixed-width terminal. Do not use markdown headings, bullet lists, tables, or **bold**/**italic**; spell things out as ordinary sentences and use indentation for clarity.",
         "Multi-line code or commands must be wrapped in triple-backtick fences (```) so the terminal can render them readably. Keep prose responses short; the user is reading them in a chat pane.",
