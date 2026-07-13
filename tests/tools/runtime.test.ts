@@ -287,4 +287,58 @@ describe("ToolRuntime", () => {
       .resolves.toMatchObject({ ok: true });
     expect(approvals).toBe(2);
   });
+
+  describe("hint()", () => {
+    it("returns the tool's summarize output when provided", () => {
+      const f = fixture();
+      const tool: ToolDefinition<{ path: string }> = {
+        ...f.tool,
+        summarize: (input) => `path=${input.path}`,
+      };
+      const runtime = new ToolRuntime({ tools: [tool], hooks: f.hooks, permissions: f.permissions });
+      expect(runtime.hint({ name: "Test", input: { path: join(f.workspace, "x") } })).toBe(`path=${join(f.workspace, "x")}`);
+    });
+
+    it("returns undefined when the tool has no summarize", () => {
+      const f = fixture();
+      const runtime = new ToolRuntime({ tools: [f.tool], hooks: f.hooks, permissions: f.permissions });
+      expect(runtime.hint({ name: "Test", input: { path: join(f.workspace, "x") } })).toBeUndefined();
+    });
+
+    it("returns undefined when summarize throws", () => {
+      const f = fixture();
+      const tool: ToolDefinition<{ path: string }> = {
+        ...f.tool,
+        summarize: () => { throw new Error("boom"); },
+      };
+      const runtime = new ToolRuntime({ tools: [tool], hooks: f.hooks, permissions: f.permissions });
+      expect(runtime.hint({ name: "Test", input: { path: join(f.workspace, "x") } })).toBeUndefined();
+    });
+
+    it("returns undefined when the input fails the tool's inputSchema", () => {
+      const f = fixture();
+      const tool: ToolDefinition<{ path: string }> = {
+        ...f.tool,
+        summarize: (input) => `path=${input.path}`,
+      };
+      const runtime = new ToolRuntime({ tools: [tool], hooks: f.hooks, permissions: f.permissions });
+      expect(runtime.hint({ name: "Test", input: { notPath: 42 } })).toBeUndefined();
+    });
+
+    it("returns undefined when summarize returns an empty string", () => {
+      const f = fixture();
+      const tool: ToolDefinition<{ path: string }> = {
+        ...f.tool,
+        summarize: () => "",
+      };
+      const runtime = new ToolRuntime({ tools: [tool], hooks: f.hooks, permissions: f.permissions });
+      expect(runtime.hint({ name: "Test", input: { path: join(f.workspace, "x") } })).toBeUndefined();
+    });
+
+    it("returns undefined for an unknown tool name", () => {
+      const f = fixture();
+      const runtime = new ToolRuntime({ tools: [f.tool], hooks: f.hooks, permissions: f.permissions });
+      expect(runtime.hint({ name: "NotRegistered", input: { path: "x" } })).toBeUndefined();
+    });
+  });
 });

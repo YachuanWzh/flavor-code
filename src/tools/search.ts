@@ -113,6 +113,9 @@ export function createGlobTool(
     description: "Find workspace files matching a glob",
     inputSchema: GlobInput,
     paths: (input) => [scope(root, input.path ?? undefined)],
+    summarize: (input) => input.path
+      ? `pattern: "${input.pattern}" in ${input.path}`
+      : `pattern: "${input.pattern}"`,
     execute: async (input, signal) => {
       const limit = input.limit ?? options.defaultLimit ?? DEFAULT_RESULT_LIMIT;
       const start = scope(root, input.path ?? undefined);
@@ -147,6 +150,11 @@ export function createGrepTool(
     description: `Search workspace text with a regular expression. fileType must be one of: ${FILE_TYPES.join(", ")}.`,
     inputSchema: GrepInput,
     paths: (input) => [scope(root, input.path ?? undefined)],
+    summarize: (input) => {
+      const where = input.path ? ` in ${input.path}` : "";
+      const kind = input.fileType ? ` [${input.fileType}]` : "";
+      return `pattern: /${input.pattern}/${kind}${where}`;
+    },
     execute: async (input, signal) => {
       // Compile eagerly so both backends report invalid expressions consistently.
       const expression = new RegExp(input.pattern);

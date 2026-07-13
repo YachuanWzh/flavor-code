@@ -94,6 +94,13 @@ export function createAskUserQuestionTool(
       "Ask the user one or more clarifying questions to disambiguate a task before proceeding. Use this when the user's intent is unclear, when multiple valid approaches exist, or when a decision requires user preference. Each question has a header, a question body, and up to 4 options.",
     inputSchema: AskUserQuestionInput,
     paths: () => [],
+    summarize: (input) => {
+      const n = input.questions.length;
+      const opts = input.questions.reduce((s, q) => s + q.options.length, 0);
+      return n === 1
+        ? `${input.questions[0]!.header} · ${opts} options`
+        : `${n} questions · ${opts} options`;
+    },
     execute: async (input, signal) => {
       signal.throwIfAborted();
       return handler(input.questions, signal);

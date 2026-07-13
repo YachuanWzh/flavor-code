@@ -72,6 +72,18 @@ export class ToolRuntime {
     }
   }
 
+  hint(call: ToolCall): string | undefined {
+    const tool = this.#tools.get(call.name);
+    if (tool === undefined || tool.summarize === undefined) return undefined;
+    try {
+      const input = tool.inputSchema.parse(call.input);
+      const value = tool.summarize(input);
+      return value === undefined || value === "" ? undefined : value;
+    } catch {
+      return undefined;
+    }
+  }
+
   async execute(call: ToolCall, context: ToolContext): Promise<ToolResult> {
     const tool = this.#tools.get(call.name);
     if (tool === undefined) return { ok: false, error: { code: "unknown_tool", message: `Unknown tool: ${call.name}` } };

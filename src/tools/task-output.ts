@@ -39,6 +39,7 @@ export function createTaskOutputTool(): ToolDefinition<TaskOutputInput> {
       "Produce a structured result that summarises task completion. Use this when a subagent has finished its work to report what was accomplished, what files were changed, which commands were run, verification results, and any risks or next steps. The main agent can also use this to produce a structured completion summary.",
     inputSchema: TaskOutputInput,
     paths: () => [],
+    summarize: (input) => input.summary,
     execute: async (input) => TaskOutputResultSchema.parse({
         taskCompleted: true,
         summary: input.summary,

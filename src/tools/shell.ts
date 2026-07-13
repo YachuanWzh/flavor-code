@@ -44,6 +44,7 @@ export function createShellTool(
     description: "Run a command with an argument array inside the workspace",
     inputSchema: ShellInput,
     paths: (input) => [workingDirectory(root, input.cwd ?? undefined)],
+    summarize: (input) => [input.command, ...input.args].join(" "),
     permissions: (input) => ({
       paths: [workingDirectory(root, input.cwd ?? undefined)],
       command: input.command,

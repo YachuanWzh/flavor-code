@@ -223,4 +223,93 @@ describe("TerminalLayout", () => {
     expect(output).toContain("Worker B");
     expect(output.match(/⠋/gu)).toHaveLength(1);
   });
+
+  it("renders the hint dimmed in parentheses next to the status text", () => {
+    const turn: TranscriptTurn = {
+      id: 1,
+      prompt: "find",
+      assistantText: "",
+      statusLines: ["✓ Glob flavor-code"],
+      blocks: [{
+        kind: "status",
+        id: "tool:1",
+        state: "completed",
+        text: "✓ Glob flavor-code",
+        hint: "pattern: **/*.ts",
+      }],
+    };
+    const raw = renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[turn]}
+      input=""
+      promptCursor={0}
+      columns={120}
+      activeSession={false}
+    />, { columns: 120 });
+    const plain = raw.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(plain).toContain("✓ Glob flavor-code (pattern: **/*.ts)");
+    // The raw output should differ from the plain output (i.e. ANSI is applied to style the hint differently).
+    expect(raw).not.toBe(plain);
+  });
+
+  it("truncates a long hint with … without wrapping onto a new line", () => {
+    const longHint = `pattern: ${"x".repeat(200)}`;
+    const turn: TranscriptTurn = {
+      id: 1,
+      prompt: "find",
+      assistantText: "",
+      statusLines: ["✓ Glob"],
+      blocks: [{
+        kind: "status",
+        id: "tool:1",
+        state: "completed",
+        text: "✓ Glob",
+        hint: longHint,
+      }],
+    };
+    const output = renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[turn]}
+      input=""
+      promptCursor={0}
+      columns={40}
+      activeSession={false}
+    />, { columns: 40 });
+    const plain = output.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(plain).toContain("…");
+    expect(plain).not.toContain("\n✓ Glob");
+    // The full hint must not be present (truncation happened).
+    expect(plain).not.toContain(longHint);
+  });
+
+  it("omits the hint segment entirely when block.hint is undefined", () => {
+    const turn: TranscriptTurn = {
+      id: 1,
+      prompt: "find",
+      assistantText: "",
+      statusLines: ["✓ Read package.json"],
+      blocks: [{
+        kind: "status",
+        id: "tool:1",
+        state: "completed",
+        text: "✓ Read package.json",
+      }],
+    };
+    const plain = renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[turn]}
+      input=""
+      promptCursor={0}
+      columns={120}
+      activeSession={false}
+    />, { columns: 120 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(plain).toContain("✓ Read package.json");
+    expect(plain).not.toContain("(");
+  });
 });

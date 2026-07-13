@@ -19,6 +19,7 @@ export type TranscriptBlock =
     id: string;
     state: "running" | "completed" | "failed" | "cancelled" | "info";
     text: string;
+    hint?: string;
     task?: { subject: string; activeForm: string; role: "main" | "subagent" };
     presentation?: ToolPresentation;
     startedAt?: number;
@@ -93,6 +94,7 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
   }
   if (event.type === "tool-start") return upsertStatus(state, {
     kind: "status", id: `tool:${event.id}`, state: "running", text: `${event.name}${event.label ? ` ${event.label}` : ""}`,
+    ...(event.hint === undefined ? {} : { hint: event.hint }),
   });
   if (event.type === "tool-end") {
     const cancelled = !event.result.ok && event.result.error?.code === "cancelled";
@@ -101,6 +103,7 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
       id: `tool:${event.id}`,
       state: event.result.ok ? "completed" : cancelled ? "cancelled" : "failed",
       text: `${event.result.ok ? "✓" : "×"} ${event.name}${event.label ? ` ${event.label}` : ""}`,
+      ...(event.hint === undefined ? {} : { hint: event.hint }),
       ...(event.result.ok && event.result.presentation !== undefined
         ? { presentation: event.result.presentation }
         : {}),

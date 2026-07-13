@@ -359,4 +359,43 @@ describe("transcriptReducer", () => {
 
     expect(state).toEqual({ completed: [], nextId: 1 });
   });
+
+  it("stores the hint field on the tool-start block", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "run" });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "tool-start", id: "1", name: "Glob", input: {}, hint: "pattern: **/*.ts",
+    } });
+
+    expect(state.active?.blocks).toEqual([
+      { kind: "status", id: "tool:1", state: "running", text: "Glob", hint: "pattern: **/*.ts" },
+    ]);
+    expect(state.active?.statusLines).toEqual(["Glob"]);
+  });
+
+  it("stores the hint field on the tool-end block without merging into text", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "run" });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "tool-start", id: "1", name: "Glob", input: {}, label: "src", hint: "pattern: **/*.ts",
+    } });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "tool-end", id: "1", name: "Glob", label: "src", result: { ok: true, output: {} }, hint: "pattern: **/*.ts",
+    } });
+
+    expect(state.active?.blocks).toEqual([
+      { kind: "status", id: "tool:1", state: "completed", text: "✓ Glob src", hint: "pattern: **/*.ts" },
+    ]);
+    expect(state.active?.statusLines).toEqual(["✓ Glob src"]);
+  });
+
+  it("omits hint when the event provides none", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "run" });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "tool-end", id: "1", name: "Read", result: { ok: true, output: "x" },
+    } });
+
+    expect(state.active?.blocks).toEqual([
+      { kind: "status", id: "tool:1", state: "completed", text: "✓ Read" },
+    ]);
+    expect("hint" in (state.active!.blocks[0] as object)).toBe(false);
+  });
 });

@@ -29,6 +29,13 @@ export function createTodoWriteTool(): ToolDefinition<TodoWriteInput> {
       "Write and update a structured task list to track your own progress during a complex implementation. Use this to plan sub-steps, mark them in_progress one at a time, and mark them completed as you finish. This helps you stay organised and demonstrates thoroughness. Only one todo may be in_progress at a time. The activeForm field is a present-progressive verb phrase describing the current action (e.g. 'Implementing the cache layer').",
     inputSchema: TodoWriteInput,
     paths: () => [],
+    summarize: (input) => {
+      const total = input.todos.length;
+      const done = input.todos.filter((t) => t.status === "completed").length;
+      const active = input.todos.find((t) => t.status === "in_progress");
+      const head = `${done}/${total} done`;
+      return active === undefined ? head : `${head} · ${active.activeForm}`;
+    },
     execute: async (input) => {
       // Validate at most one in_progress.
       const active = input.todos.filter((t) => t.status === "in_progress");

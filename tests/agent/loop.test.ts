@@ -310,6 +310,44 @@ describe("AgentLoop", () => {
     expect(tools.map((message) => message.toolCallId)).toEqual(["bad", "skipped"]);
     expect(tools.every((message) => message.content.includes("error"))).toBe(true);
   });
+
+  it("surfaces the tool's hint on tool-start and tool-end", async () => {
+    const fixture = createLoop({
+      adapter: fakeAdapter([
+        [
+          { type: "tool-call", id: "call-1", name: "echo", input: { value: "hi" } },
+          { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+        ],
+      ]),
+      toolSummarize: (input) => `echo: ${input.value}`,
+    });
+
+    const events = await collect(fixture.loop.run({ prompt: "do it" }));
+
+    const starts = events.filter((event): event is Extract<AgentEvent, { type: "tool-start" }> => event.type === "tool-start");
+    const ends = events.filter((event): event is Extract<AgentEvent, { type: "tool-end" }> => event.type === "tool-end");
+    expect(starts).toHaveLength(1);
+    expect(starts[0]!.hint).toBe("echo: hi");
+    expect(ends).toHaveLength(1);
+    expect(ends[0]!.hint).toBe("echo: hi");
+  });
+
+  it("omits hint when the tool has no summarize", async () => {
+    const fixture = createLoop({
+      adapter: fakeAdapter([
+        [
+          { type: "tool-call", id: "call-1", name: "echo", input: { value: "hi" } },
+          { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+        ],
+      ]),
+    });
+
+    const events = await collect(fixture.loop.run({ prompt: "do it" }));
+    const starts = events.filter((event): event is Extract<AgentEvent, { type: "tool-start" }> => event.type === "tool-start");
+    const ends = events.filter((event): event is Extract<AgentEvent, { type: "tool-end" }> => event.type === "tool-end");
+    expect(starts[0]!.hint).toBeUndefined();
+    expect(ends[0]!.hint).toBeUndefined();
+  });
 });
 
 function createLoop(options: {
@@ -318,6 +356,7 @@ function createLoop(options: {
   maxIterations?: number;
   recentTurns?: number;
   summarize?: () => Promise<string>;
+  toolSummarize?: (input: { value: string }) => string | undefined;
 }) {
   const hooks = new HookBus();
   const tool = {
@@ -325,6 +364,7 @@ function createLoop(options: {
     description: "echo input",
     inputSchema: z.object({ value: z.string() }),
     paths: () => [],
+    ...(options.toolSummarize === undefined ? {} : { summarize: options.toolSummarize }),
     execute: options.execute ?? (async (input: { value: string }) => input),
   };
   const runtime = new ToolRuntime({

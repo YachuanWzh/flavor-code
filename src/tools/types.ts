@@ -41,6 +41,11 @@ export interface ToolDefinition<T> {
   description: string;
   inputSchema: z.ZodType<T>;
   paths(input: T): string[];
+  /**
+   * Optional short human-readable parameter summary, rendered dimmed next to the tool name.
+   * Must return plain text (no ANSI escapes). Return undefined or an empty string to omit the hint.
+   */
+  summarize?(input: T): string | undefined;
   permissions?(input: T): ToolPermissionMetadata;
   execute(input: T, signal: AbortSignal): Promise<unknown>;
 }

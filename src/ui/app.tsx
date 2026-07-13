@@ -620,6 +620,8 @@ function StatusLine({ block, interactive }: { block: Extract<TranscriptBlock, { 
   const spinner = running && interactive ? frames[Math.floor(Math.max(0, time) / 120) % frames.length] + " " : "";
   return <Box ref={ref} flexDirection="row">
     <Text {...(color === undefined ? { dimColor: true } : { color })}>{spinner}{block.text}</Text>
+    {block.hint === undefined ? null
+      : <Text dimColor wrap="truncate-end"> ({block.hint})</Text>}
   </Box>;
 }
 
