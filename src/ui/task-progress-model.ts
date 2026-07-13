@@ -56,13 +56,26 @@ export function statusPresentation(
     };
   }
   const duration = block.elapsedMs === undefined ? "" : ` (${formatElapsed(block.elapsedMs)})`;
-  if (block.state === "completed") return { glyph: "✓", text: `${withoutGlyph(block.text)}${duration}`, color: "ansi:green" };
-  if (block.state === "failed" || block.state === "cancelled") {
-    return { glyph: "×", text: `${withoutGlyph(block.text)}${duration}`, color: "#e06c50" };
+  const isSubagent = block.task?.role === "subagent";
+  if (block.state === "completed") {
+    return { glyph: "✓", text: `${stripSubagentPrefix(withoutGlyph(block.text), isSubagent)}${duration}`, color: "ansi:green",
+      ...(isSubagent ? { badge: "subagent:", badgeColor: "#81c8f2" as Color } : {}),
+    };
   }
-  return { glyph: "·", text: withoutGlyph(block.text) };
+  if (block.state === "failed" || block.state === "cancelled") {
+    return { glyph: "×", text: `${stripSubagentPrefix(withoutGlyph(block.text), isSubagent)}${duration}`, color: "#e06c50",
+      ...(isSubagent ? { badge: "subagent:", badgeColor: "#81c8f2" as Color } : {}),
+    };
+  }
+  return { glyph: "·", text: stripSubagentPrefix(withoutGlyph(block.text), isSubagent),
+    ...(isSubagent ? { badge: "subagent:", badgeColor: "#81c8f2" as Color } : {}),
+  };
 }
 
 function withoutGlyph(text: string): string {
   return text.replace(/^[✓×○·]\s*/u, "");
+}
+
+function stripSubagentPrefix(text: string, isSubagent: boolean): string {
+  return isSubagent ? text.replace(/^subagent:\s*/u, "") : text;
 }
