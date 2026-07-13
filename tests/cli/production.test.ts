@@ -94,8 +94,8 @@ describe("production runtime", () => {
     const runtime = await createProductionRuntime({ workspace, home: workspace, environment: {}, output: () => {} });
     const pending = runtime.approvals.request({ agent: "main", tool: "Write", paths: [workspace] });
     expect(runtime.approvals.pending?.tool).toBe("Write");
-    runtime.approvals.resolve(true);
-    await expect(pending).resolves.toBe(true);
+    runtime.approvals.resolve("once");
+    await expect(pending).resolves.toBe("once");
     await runtime.dispose();
   });
 
@@ -119,6 +119,13 @@ describe("production runtime", () => {
     const runtime = await createProductionRuntime({ workspace, home: workspace, environment: {}, output: () => {} });
     expect(runtime.services.mainModel()).toBe("local:large");
     expect(runtime.services.subagentModel()).toBe("local:small");
+    expect(runtime.services.config()).toMatchObject({
+      context: {
+        windowTokens: 200_000,
+        reservedOutputTokens: 20_000,
+        autoCompactBufferTokens: 13_000,
+      },
+    });
     await runtime.dispose();
   });
 

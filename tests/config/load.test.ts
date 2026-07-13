@@ -4,10 +4,39 @@ import { dirname, join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { ApiKeyAuthProvider } from "../../src/auth/types.js";
 import { loadConfig, redactConfig } from "../../src/config/load.js";
+import { FlavorConfigSchema } from "../../src/config/schema.js";
 
 afterEach(() => {
   delete process.env.FLAVOR_TEST_KEY;
   delete process.env.CUSTOM_API_KEY;
+});
+
+it("uses Claude-style token compaction defaults and accepts explicit overrides", () => {
+  expect(FlavorConfigSchema.parse({}).context).toMatchObject({
+    windowTokens: 200_000,
+    reservedOutputTokens: 20_000,
+    autoCompactBufferTokens: 13_000,
+    warningBufferTokens: 20_000,
+    blockingBufferTokens: 3_000,
+    microcompactKeepRecentToolResults: 5,
+    recentTokens: 10_000,
+    recentTextMessages: 5,
+    maxRecentTokens: 40_000,
+    toolOutputChars: 30_000,
+  });
+
+  expect(FlavorConfigSchema.parse({ context: {
+    windowTokens: 128_000,
+    reservedOutputTokens: 8_000,
+    autoCompactBufferTokens: 10_000,
+    warningBufferTokens: 12_000,
+    blockingBufferTokens: 2_000,
+    microcompactKeepRecentToolResults: 3,
+    recentTokens: 8_000,
+    recentTextMessages: 4,
+    maxRecentTokens: 24_000,
+    compactAtChars: 4_000,
+  } }).context).toMatchObject({ windowTokens: 128_000, compactAtChars: 4_000 });
 });
 
 it("merges CLI, project, env, global, and defaults in precedence order", async () => {

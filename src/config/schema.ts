@@ -32,8 +32,26 @@ export const FlavorConfigSchema = z.object({
     .prefault({}),
   context: z
     .object({
-      compactAtChars: z.number().int().positive().default(240_000),
+      windowTokens: z.number().int().positive().default(200_000),
+      reservedOutputTokens: z.number().int().nonnegative().default(20_000),
+      autoCompactBufferTokens: z.number().int().nonnegative().default(13_000),
+      warningBufferTokens: z.number().int().nonnegative().default(20_000),
+      blockingBufferTokens: z.number().int().nonnegative().default(3_000),
+      microcompactKeepRecentToolResults: z.number().int().nonnegative().default(5),
+      recentTokens: z.number().int().nonnegative().default(10_000),
+      recentTextMessages: z.number().int().nonnegative().default(5),
+      maxRecentTokens: z.number().int().nonnegative().default(40_000),
+      /** @deprecated Character threshold retained for configuration compatibility. */
+      compactAtChars: z.number().int().positive().optional(),
       toolOutputChars: z.number().int().positive().default(30_000),
+    })
+    .superRefine((context, issue) => {
+      if (context.reservedOutputTokens >= context.windowTokens) issue.addIssue({
+        code: "custom", path: ["reservedOutputTokens"], message: "reservedOutputTokens must be below windowTokens",
+      });
+      if (context.maxRecentTokens < context.recentTokens) issue.addIssue({
+        code: "custom", path: ["maxRecentTokens"], message: "maxRecentTokens must be at least recentTokens",
+      });
     })
     .prefault({}),
 });

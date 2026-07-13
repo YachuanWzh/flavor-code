@@ -10,6 +10,7 @@ import { updatePlanTask, type TaskPlan } from "./agent/task-plan.js";
 import type { AgentEvent, TaskSnapshot } from "./agent/types.js";
 import { loadConfig } from "./config/load.js";
 import { ContextManager, type ContextSnapshot } from "./context/manager.js";
+import { summarizeWithModel } from "./context/summarizer.js";
 import { LocalHarness } from "./harness/local.js";
 import { HookBus } from "./hooks/bus.js";
 import { HOOK_EVENT_NAMES, type HookEventName } from "./hooks/types.js";
@@ -269,9 +270,14 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   };
   tools.push(taskTool);
 
-  const createContext = () => {
+  const createContext = (agent: "main" | "subagent") => {
     const taskState = serializedTaskState();
     const language = resolveLanguage(config.language);
+    const {
+      compactAtChars,
+      toolOutputChars,
+      ...compaction
+    } = config.context;
     return new ContextManager({
       system: [
         languageInstruction(language),
@@ -287,9 +293,15 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       ].join(" "),
       ...(flavor === undefined ? {} : { flavor }),
       ...(taskState === undefined ? {} : { taskState }),
-      compactAtChars: config.context.compactAtChars,
-      toolOutputChars: config.context.toolOutputChars,
-      summarize: async (messages) => messages.map((item) => `${item.role}: ${item.content}`).join("\n").slice(-40_000),
+      ...(compactAtChars === undefined ? {} : { compactAtChars }),
+      toolOutputChars,
+      compaction,
+      summarize: (messages, signal) => summarizeWithModel({
+        registry,
+        modelId: () => agent === "main" ? harness.mainModelId : harness.subagentModelId,
+        messages,
+        signal,
+      }),
       hooks,
     });
   };
