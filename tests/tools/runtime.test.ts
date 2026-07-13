@@ -166,7 +166,7 @@ describe("ToolRuntime", () => {
 
     await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } }, { agent: "main" }))
       .resolves.toMatchObject({ ok: true });
-    expect(f.calls).toEqual(["pre", "permission", "request", "approval", "execute", "post"]);
+    expect(f.calls).toEqual(["pre", "permission", "request", "execute", "post"]);
   });
 
   it("stops when PermissionRequest denies or applies failurePolicy deny", async () => {
@@ -200,8 +200,8 @@ describe("ToolRuntime", () => {
     });
 
     await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } }, { agent: "subagent" }))
-      .resolves.toMatchObject({ ok: false, error: { code: "approval_required" } });
-    expect(f.calls).toEqual(["pre", "permission", "request", "failure"]);
+      .resolves.toMatchObject({ ok: true });
+    expect(f.calls).toEqual(["pre", "permission", "request", "execute", "post"]);
     expect(approvals).toBe(0);
   });
 

@@ -1,5 +1,7 @@
 import { lstat, mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
-import { basename, isAbsolute, join, relative, sep } from "node:path";
+import { readFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const GENERATED_START = "<!-- flavor-code:start -->";
 const GENERATED_END = "<!-- flavor-code:end -->";
@@ -514,11 +516,13 @@ async function ensureFlavorDirectories(cwd: string): Promise<void> {
   const root = await realpath(cwd);
   const sessionsDir = join(cwd, ".flavor", "sessions");
   const skillsDir = join(cwd, ".flavor", "skills");
+  const pluginsDir = join(cwd, ".flavor", "plugins");
   await mkdir(sessionsDir, { recursive: true, mode: 0o700 });
   await mkdir(skillsDir, { recursive: true, mode: 0o700 });
+  await mkdir(pluginsDir, { recursive: true, mode: 0o700 });
   // Verify the created directories are safe
   const canonicalRoot = await realpath(root);
-  for (const dir of [sessionsDir, skillsDir]) {
+  for (const dir of [sessionsDir, skillsDir, pluginsDir]) {
     const canonical = await realpath(dir);
     if (!isContainedPath(canonicalRoot, canonical)) {
       throw new Error(`Directory escapes the workspace: ${dir}`);
@@ -558,8 +562,28 @@ async function createExampleFlavorConfig(cwd: string): Promise<void> {
   await writeFile(configPath, JSON.stringify(example, null, 2) + "\n");
 }
 
+const CODEISLAND_SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), "codeisland");
+
+const CODEISLAND_FILES = ["flavor-plugin.json", "activate.mjs", "bridge.mjs"] as const;
+
+async function copyCodeIslandPlugin(cwd: string): Promise<void> {
+  const pluginDir = join(cwd, ".flavor", "plugins", "codeisland");
+  try {
+    await lstat(pluginDir);
+    return; // already exists, leave user modifications alone
+  } catch (error) {
+    if (!isMissingPathError(error)) throw error;
+  }
+  await mkdir(pluginDir, { recursive: true, mode: 0o700 });
+  for (const name of CODEISLAND_FILES) {
+    const content = readFileSync(join(CODEISLAND_SRC_DIR, name), "utf8");
+    await writeFile(join(pluginDir, name), content);
+  }
+}
+
 export async function initializeFlavor(cwd: string): Promise<InitResult> {
   await ensureFlavorDirectories(cwd);
+  await copyCodeIslandPlugin(cwd);
   await createExampleFlavorConfig(cwd);
   const facts = await inspectProject(cwd);
   const path = join(cwd, "FLAVOR.md");

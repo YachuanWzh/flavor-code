@@ -147,24 +147,35 @@ export class ToolRuntime {
         if (requestDecision.updatedInput !== undefined) {
           return this.#fail(tool.name, input, context.agent, "invalid_input", "PermissionRequest cannot modify an already-authorized tool call");
         }
-        if (context.agent !== "main") {
-          return this.#fail(tool.name, input, context.agent, "approval_required", reason);
-        }
-        if (signal.aborted) throw signal.reason;
 
-        // Check if this tool's category has been always-allowed for this session.
-        const category = getToolCategory(tool.name);
-        if (this.#alwaysAllowed.has(category)) {
-          // Skip the approval callback — already authorized for this tool type.
-        } else if (this.#approve === undefined) {
-          return this.#fail(tool.name, input, context.agent, "permission_denied", reason);
-        } else {
-          const decision = await this.#approve({ ...request, reason }, signal);
-          if (decision === "deny") {
-            return this.#fail(tool.name, input, context.agent, "permission_denied", reason);
+        // When a PermissionRequest hook handler explicitly approves:
+        // - "allow"        → skip the prompt for this call only (like typing "y")
+        // - "allow all"    → persist for the session (like typing "a")
+        if (this.#hooks.hasListeners("PermissionRequest") && requestDecision.decision === "allow") {
+          const ctx = requestDecision.additionalContext ?? "";
+          if (ctx.includes("codeisland:allow-all")) {
+            const category = getToolCategory(tool.name);
+            if (category !== "destructive") this.#alwaysAllowed.add(category);
           }
-          if (decision === "always" && category !== "destructive") {
-            this.#alwaysAllowed.add(category);
+        } else if (context.agent !== "main") {
+          return this.#fail(tool.name, input, context.agent, "approval_required", reason);
+        } else if (signal.aborted) {
+          throw signal.reason;
+        } else {
+          // Check if this tool's category has been always-allowed for this session.
+          const category = getToolCategory(tool.name);
+          if (this.#alwaysAllowed.has(category)) {
+            // Skip the approval callback — already authorized for this tool type.
+          } else if (this.#approve === undefined) {
+            return this.#fail(tool.name, input, context.agent, "permission_denied", reason);
+          } else {
+            const decision = await this.#approve({ ...request, reason }, signal);
+            if (decision === "deny") {
+              return this.#fail(tool.name, input, context.agent, "permission_denied", reason);
+            }
+            if (decision === "always" && category !== "destructive") {
+              this.#alwaysAllowed.add(category);
+            }
           }
         }
       }

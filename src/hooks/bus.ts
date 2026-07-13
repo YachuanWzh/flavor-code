@@ -62,6 +62,11 @@ export class HookBus {
     };
   }
 
+  hasListeners(type: HookEventName): boolean {
+    const handlers = this.#handlers.get(type);
+    return handlers !== undefined && handlers.length > 0;
+  }
+
   async emit(rawEvent: HookEvent, externalSignal?: AbortSignal): Promise<HookDecision> {
     externalSignal?.throwIfAborted();
     let event = HookEventSchema.parse(rawEvent);
