@@ -144,7 +144,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const tools: ToolDefinition<unknown>[] = [
     createReadTool(workspace), createWriteTool(workspace), createEditTool(workspace), createApplyPatchTool(workspace),
     createGlobTool(workspace), createGrepTool(workspace), createShellTool(workspace),
-    createAskUserQuestionTool(askUserQuestionHandler),
+    ...(options.approvalPolicy === "deny" ? [] : [createAskUserQuestionTool(askUserQuestionHandler)]),
     createTaskOutputTool(),
     createTodoWriteTool(),
   ];
@@ -301,6 +301,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const createContext = (
     agent: "main" | "subagent",
     agentTools: readonly ToolDefinition<unknown>[],
+    contextModelId: string,
   ) => {
     const taskState = serializedTaskState();
     const language = resolveLanguage(config.language);
@@ -314,7 +315,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         agent,
         languageInstruction: languageInstruction(language),
         workspace,
-        model: agent === "main" ? harness.mainModelId : harness.subagentModelId,
+        model: agent === "main" ? harness.mainModelId : contextModelId,
         permissionMode: agent === "subagent" ? "workspace" : harness.permissionMode,
         toolNames: new Set(agentTools.map((tool) => tool.name)),
         environment: promptEnvironment,

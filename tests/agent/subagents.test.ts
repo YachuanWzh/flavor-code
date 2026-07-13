@@ -334,7 +334,7 @@ describe("LocalHarness", () => {
   it("passes each role's exact tool definitions to its context factory", () => {
     const hooks = new HookBus();
     const adapter: ModelAdapter = { async *stream() { yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } }; } };
-    const received: Array<{ agent: "main" | "subagent"; tools: string[] }> = [];
+    const received: Array<{ agent: "main" | "subagent"; tools: string[]; model: string | undefined }> = [];
     const definitions: ToolDefinition<unknown>[] = ["Read", "Task"].map((name) => ({
       name,
       description: name,
@@ -351,16 +351,20 @@ describe("LocalHarness", () => {
       tools: definitions,
       createContext: (agent, ...args: unknown[]) => {
         const tools = args[0] as readonly ToolDefinition<unknown>[] | undefined;
-        received.push({ agent, tools: tools?.map((tool) => tool.name) ?? [] });
+        const model = args[1] as string | undefined;
+        received.push({ agent, tools: tools?.map((tool) => tool.name) ?? [], model });
         return contextFixture(hooks);
       },
     });
 
     harness.createSubagent(node("tool-aware"));
+    harness.setModel("subagent", "fake:new-child");
+    harness.createSubagent(node("new-model"));
 
     expect(received).toEqual([
-      { agent: "main", tools: ["Read", "Task"] },
-      { agent: "subagent", tools: ["Read"] },
+      { agent: "main", tools: ["Read", "Task"], model: "fake:main" },
+      { agent: "subagent", tools: ["Read"], model: "fake:child" },
+      { agent: "subagent", tools: ["Read"], model: "fake:new-child" },
     ]);
     harness.dispose();
   });

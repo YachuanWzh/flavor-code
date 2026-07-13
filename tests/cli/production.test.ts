@@ -32,6 +32,46 @@ describe("production runtime", () => {
     });
   });
 
+  it("does not advertise AskUserQuestion in non-interactive mode", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-")); roots.push(workspace);
+    const pluginRoot = join(workspace, ".flavor", "plugins", "capture-model");
+    await mkdir(pluginRoot, { recursive: true });
+    await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
+      providers: { capture: { type: "plugin", defaultModel: "main", cheapModel: "child" } },
+      agents: { main: { model: "capture:main" }, subagent: { model: "capture:child" } },
+    }));
+    await writeFile(join(pluginRoot, "flavor-plugin.json"), JSON.stringify({
+      name: "capture-model", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
+      contributes: { commands: [], tools: [], hooks: [], skillRoots: [], modelAdapters: [{ name: "capture" }] },
+    }));
+    await writeFile(join(pluginRoot, "index.mjs"), `export function activate(ctx) {
+      ctx.registerModelAdapter("capture", { async *stream(request) {
+        globalThis.__flavorPromptRequests ??= [];
+        globalThis.__flavorPromptRequests.push({
+          tools: request.tools.map((tool) => tool.name),
+          system: request.messages.filter((message) => message.role === "system").map((message) => message.content).join("\\n\\n"),
+        });
+        yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
+      }});
+    }`);
+    const globalState = globalThis as typeof globalThis & { __flavorPromptRequests?: Array<{ tools: string[]; system: string }> };
+    delete globalState.__flavorPromptRequests;
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, approvalPolicy: "deny", output: () => {},
+    });
+
+    await runtime.session.start();
+    await runtime.session.submit("inspect the project");
+
+    const requests = (globalThis as { __flavorPromptRequests?: Array<{ tools: string[]; system: string }> })
+      .__flavorPromptRequests;
+    expect(requests).toHaveLength(1);
+    expect(requests?.[0]?.tools).not.toContain("AskUserQuestion");
+    expect(requests?.[0]?.system).not.toContain("`AskUserQuestion`");
+    await runtime.dispose();
+    delete globalState.__flavorPromptRequests;
+  });
+
   it("restores a main plan and publishes its task snapshot at session start", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-")); roots.push(workspace);
     await mkdir(join(workspace, ".flavor"), { recursive: true });

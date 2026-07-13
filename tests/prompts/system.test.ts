@@ -65,6 +65,7 @@ describe("buildSystemPrompt", () => {
     for (const name of ["Shell", "Task", "TodoWrite", "AskUserQuestion"]) {
       expect(readOnly).not.toContain(`\`${name}\``);
     }
+    expect(allTools).not.toMatch(/run .* in parallel/i);
   });
 
   it("gives subagents a self-contained non-delegating handoff contract", () => {

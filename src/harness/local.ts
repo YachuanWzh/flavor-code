@@ -21,6 +21,7 @@ export interface LocalHarnessOptions {
   createContext(
     agent: "main" | "subagent",
     tools: readonly ToolDefinition<unknown>[],
+    modelId: string,
   ): ContextManager;
   permissionMode?: PermissionMode;
   approve?: ApprovalCallback;
@@ -55,7 +56,7 @@ export class LocalHarness {
   constructor(options: LocalHarnessOptions) {
     this.#options = options;
     this.#subagentModelId = options.subagentModelId;
-    const context = options.createContext("main", options.tools);
+    const context = options.createContext("main", options.tools, options.mainModelId);
     this.#claimContext(context);
     this.main = this.#createProfile(options.mainModelId, options.tools, "main", context, options.approve);
   }
@@ -75,7 +76,7 @@ export class LocalHarness {
   createSubagent(task: TaskNode): SubagentHarness {
     if (this.#disposed) throw new Error("LocalHarness is disposed");
     const tools = this.#options.tools.filter((tool) => !MAIN_TASK_TOOL_NAMES.has(tool.name));
-    const context = this.#options.createContext("subagent", tools);
+    const context = this.#options.createContext("subagent", tools, this.#subagentModelId);
     this.#claimContext(context);
     const profile = this.#createProfile(this.#subagentModelId, tools, "subagent", context);
     let disposed = false;

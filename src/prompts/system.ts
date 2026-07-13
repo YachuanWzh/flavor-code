@@ -92,7 +92,7 @@ function toolsSection(toolNames: ReadonlySet<string>): string {
     : rules.map((rule) => `- ${rule}`).join("\n");
   return `# Using available tools
 
-Prefer a dedicated tool over reproducing its operation through the shell. Run independent reads or searches in parallel when possible; keep dependent operations sequential. Tool descriptions and schemas are authoritative.
+Prefer a dedicated tool over reproducing its operation through the shell. You may request multiple independent reads or searches in one response; the runtime executes tool calls in a safe order. Keep dependent operations explicitly ordered. Tool descriptions and schemas are authoritative.
 
 ${availability}`;
 }
