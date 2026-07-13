@@ -20,6 +20,7 @@
 - **主动提问澄清** —— 当需求不明确时，它会列出选项让你选择，而不是自己瞎猜
 - **进度面板** —— 终端里实时显示任务执行状态（哪些完成了、哪些在进行中）
 - **记住上下文** —— 聊到一半退出，下次 `--resume` 回来继续；会话以高效的 JSONL 格式存储
+- **持续完成长任务** —— 接近模型上下文上限时先回收旧工具输出，再生成结构化工作摘要；即使 provider 报告上下文溢出，也会压缩并续接当前任务
 - **插件和 Skill** —— 通过插件扩展功能，通过 Skill（技能包）教它新的工作流
 - **审计日志** —— 所有工具执行失败都会被记录到 `.flavor/audit.jsonl`，方便排查问题
 
@@ -108,6 +109,18 @@ OPENAI_API_KEY=sk-你的密钥
     "subagent": 40,
     "softLimitFactor": 0.8,
     "extendBy": 20
+  },
+  "context": {
+    "windowTokens": 200000,
+    "reservedOutputTokens": 20000,
+    "autoCompactBufferTokens": 13000,
+    "warningBufferTokens": 20000,
+    "blockingBufferTokens": 3000,
+    "microcompactKeepRecentToolResults": 5,
+    "recentTokens": 10000,
+    "recentTextMessages": 5,
+    "maxRecentTokens": 40000,
+    "toolOutputChars": 30000
   }
 }
 ```
@@ -115,6 +128,8 @@ OPENAI_API_KEY=sk-你的密钥
 这样主 Agent 用能力强的大模型，子 Agent 用便宜的小模型，兼顾效果和成本。`${OPENAI_API_KEY}` 会自动从环境变量或 `.env` 中取值。
 
 `language` 设为 `"zh-CN"` 后 Flavor 会用简体中文回复（也支持 `en-US`、`ja-JP` 等 BCP47 标签）。`maxIterations` 控制 Agent 每轮对话的最大推理步数：主 Agent 默认 80 步、子 Agent 默认 40 步；在 80% 处发出预警；如果任务进度仍然活跃，到达上限后会自动扩展 20 步（最多扩展 3 次），避免长任务中途断掉。
+
+`context` 控制长程上下文。默认 200K token 窗口先为输出预留 20K，再留出 13K 自动压缩缓冲，因此约在 167K token 触发完整压缩。`toolOutputChars` 是单次工具结果的头尾截断上限；`microcompactKeepRecentToolResults` 控制微压缩保留的最近工具结果数。旧配置中的 `compactAtChars` 仍可读取，但已弃用，新配置应使用 token 字段。
 
 也支持 Anthropic（`"type": "anthropic"`）和任何兼容 OpenAI 接口的服务（`"type": "openai-compatible"`），比如本地部署的模型。
 
@@ -152,6 +167,19 @@ flavor --resume session-20250101   # 恢复指定 ID 的会话
 flavor --resume -p "继续刚才的工作"  # 恢复后非交互执行
 ```
 
+### 长任务与上下文压缩
+
+Flavor 的压缩是分层执行的：
+
+1. 上下文接近阈值时，先把旧的 Read、Shell、Grep、Glob、Edit、Write 等工具结果替换为清理标记，默认保留最近 5 个结果。
+2. 如果仍然超过阈值，使用当前 Agent 模型发起一次无工具摘要请求，生成包含用户意图、技术决策、文件、错误、待办、当前工作和下一步的九段式摘要。
+3. 摘要只在 `PreCompact`、模型调用和 `PostCompact` 全部成功后提交；失败或取消不会破坏原对话。自动压缩连续失败 3 次后会熔断，避免重复消耗 API。
+4. 正常模型请求如果返回 `context_overflow`，Flavor 会强制压缩并重试同一回合一次，不会重复追加用户消息或重复执行工具。
+
+压缩后 Flavor 会把摘要作为“上一段会话续接”消息注入，并保留当前 system 指令、`FLAVOR.md`、任务状态和近期完整消息。摘要和边界写入 v2 JSONL 会话，因此 `--resume` 后可直接继续。手动输入 `/compact` 会绕过自动熔断并立即尝试完整压缩。
+
+当前没有移植 Claude Code 的服务器 cache editing、后台 Session Memory、文件/Skill 附件恢复和 partial compact UI；这些不影响本次长程任务核心链路。
+
 ---
 
 ## 内置命令
@@ -172,7 +200,7 @@ flavor --resume -p "继续刚才的工作"  # 恢复后非交互执行
 | `/hooks` | 列出 Hook 状态 |
 | `/tasks` | 显示当前任务计划与进度 |
 | `/audit` | 查看工具失败审计日志（可选 `toolFilter`） |
-| `/compact` | 手动触发上下文压缩 |
+| `/compact` | 强制生成结构化摘要并压缩当前上下文 |
 | `/clear` | 清空终端显示 |
 | `/help` | 显示帮助 |
 | `/exit` | 退出 |
@@ -257,7 +285,7 @@ description: Review code for common issues
 Flavor 相关的文件都放在 `.flavor/` 目录下：
 
 - `.flavor/flavor.json` —— 项目级配置
-- `.flavor/sessions/` —— 会话存档（JSONL 格式）
+- `.flavor/sessions/` —— 会话存档（v2 JSONL 格式，兼容读取 v1）
 - `.flavor/audit.jsonl` —— 工具失败审计日志
 - `.flavor/skills/` —— 项目 Skill
 - `.flavor/plugins/` —— 项目插件
@@ -290,4 +318,4 @@ npm run smoke:install  # 验证打包和安装
 
 ## 路线图
 
-后续方向包括 IDE 集成、更细粒度的任务恢复与重放、OAuth 与系统凭据存储、远程 Provider 登录、插件隔离/签名以及跨设备会话。这些是未来规划，不是当前 0.1.0 已交付的能力。
+后续方向包括 `/loop` 与 loop-engineering、后台 Session Memory、更细粒度的任务恢复与重放、IDE 集成、OAuth 与系统凭据存储、远程 Provider 登录、插件隔离/签名以及跨设备会话。这些是未来规划，不是当前 0.1.0 已交付的能力。
