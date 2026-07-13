@@ -1,1 +1,1 @@
-export function isMouseClicksDisabled(): boolean { return true; }
+export function isMouseClicksDisabled(): boolean { return false; }

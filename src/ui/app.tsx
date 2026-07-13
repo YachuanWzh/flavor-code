@@ -11,6 +11,7 @@ import {
   type ScrollBoxHandle,
 } from "../claude-ink/index.js";
 import { useAnimationFrame } from "../claude-ink/hooks/use-animation-frame.js";
+import { useHasSelection, useSelection } from "../claude-ink/hooks/use-selection.js";
 
 import { createProductionRuntime, type ProductionRuntime } from "../production.js";
 import { isDestructiveTool } from "../permissions/engine.js";
@@ -203,6 +204,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     ? null
     : derivedSlashCompletion;
   const completedTokenLength = completedSlashTokenLength(input, slashCandidates, slashCompletion !== null);
+  const selection = useSelection();
 
   useInput((character, key) => {
     const terminalAction = classifyTerminalInput(key);
@@ -221,7 +223,11 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     }
 
     const active = runtimeRef.current;
-    if (key.ctrl && character === "c") { interrupt(); return; }
+    if (key.ctrl && character === "c") {
+      if (selection.hasSelection()) { selection.copySelection(); }
+      else { interrupt(); }
+      return;
+    }
     if (active?.approvals.pending !== undefined) {
       if (character.toLowerCase() === "y") active.approvals.resolve("once");
       if (character.toLowerCase() === "n" || key.escape) active.approvals.resolve("deny");
