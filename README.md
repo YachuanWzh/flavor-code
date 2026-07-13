@@ -2,7 +2,7 @@
 
 `flavor-code` 是一个面向本地代码库的终端编程 Agent MVP：用统一的模型适配层连接 OpenAI、Anthropic 或 OpenAI-compatible 服务，在工作区权限边界内读写文件、搜索、执行命令，并把可拆分工作交给受限的子 Agent。它强调可审计配置、结构化 Hook/任务结果、渐进加载 Skill，以及显式的会话恢复。
 
-当前版本是 `0.1.0`。它已经具备交互界面、非交互打印、工具权限、插件/Skill、任务 DAG、上下文压缩与本地恢复；还不是 IDE 产品，也没有 OAuth 登录、远程会话同步或插件进程沙箱。
+当前版本是 `0.1.0`。它已经具备交互界面、非交互打印、工具权限、插件/Skill、主任务规划、任务 DAG、上下文压缩与本地恢复；还不是 IDE 产品，也没有 OAuth 登录、远程会话同步或插件进程沙箱。
 
 ## 安装与快速开始
 
@@ -78,7 +78,7 @@ flavor
 }
 ```
 
-模型 ID 始终是 `provider:model`。主 Agent 使用 `agents.main.model`；`Task` DAG 的子 Agent 使用 `agents.subagent.model`，且子 Agent 工具列表移除 `Task`，避免递归委派。未显式指定时，官方 provider 可提供默认主/廉价模型；自定义 provider 必须明确给出 `defaultModel` 与 `cheapModel`，系统不会悄悄让子 Agent复用昂贵主模型。
+模型 ID 始终是 `provider:model`。主 Agent 使用 `agents.main.model`；`Task` DAG 的子 Agent 使用 `agents.subagent.model`，且子 Agent 工具列表移除 `Task`、`TaskPlan` 和 `TaskUpdate`，避免递归委派或修改主计划。未显式指定时，官方 provider 可提供默认主/廉价模型；自定义 provider 必须明确给出 `defaultModel` 与 `cheapModel`，系统不会悄悄让子 Agent复用昂贵主模型。
 
 ## 交互命令与 CLI
 
@@ -103,6 +103,14 @@ flavor -p "列出风险最高的三个模块"
 ```
 
 无密钥时进程仍可启动，并给出如何配置 provider 的错误；`--print` 不会等待交互审批，所有需要询问的操作按拒绝处理。
+
+## 任务规划与进度
+
+复杂请求包含至少三个实现或验证步骤、多个独立修改，或需要非平凡协调时，主 Agent 会先通过 `TaskPlan` 创建计划，再用 `TaskUpdate` 即时更新步骤状态。简单问答和单步操作不会为了展示而强制创建计划。
+
+计划状态包括 `pending`、`in_progress`、`completed`、`failed`、`blocked` 和 `cancelled`。同一时间只允许一个主任务处于 `in_progress`；现有 `Task` DAG 仍可并发运行多个子 Agent。交互终端为主任务显示一个带耗时的动态状态行，并在完成、失败或取消时原位替换为静态结果；并行子任务显示在其下方，但不会同时争用前台 spinner。
+
+`/tasks` 会同时显示主计划与子 Agent DAG。计划会随会话保存并注入后续模型上下文；恢复会话时遗留的主 `in_progress` 任务归一为 `cancelled`，遗留的子 Agent `running` 状态继续按依赖归一。执行过程中按 Ctrl+C 会中止当前操作，并把仍在运行的主计划步骤标记为 `cancelled`。
 
 ## 权限模式
 

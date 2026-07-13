@@ -23,7 +23,7 @@ function services(events: string[], outputs: string[]): SessionServices {
     setModel: () => {}, setPermissionMode: () => {}, compact: async () => false,
     initialize: async () => ({ path: "/work/FLAVOR.md", created: true }),
     config: () => ({ providers: { openai: { apiKey: "top-secret", token: "also-secret" } } }),
-    skills: async () => [], plugins: () => [], hooksStatus: () => [], tasks: () => [],
+    skills: async () => [], plugins: () => [], hooksStatus: () => [], tasks: () => [], cancelActiveTask: async () => {},
     pluginCommands: () => [], runPluginCommand: async () => undefined,
     output: (event) => outputs.push(event.type === "text" ? event.text : event.type === "notice" ? event.message : event.type),
   };
@@ -93,6 +93,25 @@ describe("FlavorSession", () => {
     expect(session.interrupt()).toBe("exit");
     await session.close();
     expect(events.filter((event) => event === "Stop")).toHaveLength(1);
+  });
+
+  it("asks services to cancel the active plan task when interrupted", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    let cancelled = 0;
+    base.cancelActiveTask = async () => { cancelled += 1; };
+    base.run = async function* (_prompt, signal) {
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+      yield { type: "error", error: { code: "cancelled", message: "cancelled" } };
+    };
+    const session = new FlavorSession(base); await session.start();
+    const pending = session.submit("complex work");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(session.interrupt()).toBe("cancelled");
+    await pending;
+
+    expect(cancelled).toBe(1);
   });
 
   it("redacts secrets from config output", async () => {

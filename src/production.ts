@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { SubagentResultSchema, SubagentScheduler, type SubagentResult } from "./agent/subagents.js";
 import { TaskGraphSchema, TaskPlanner, type TaskGraph, type TaskNode } from "./agent/planner.js";
 import { createTaskPlanTools } from "./agent/task-tools.js";
-import type { TaskPlan } from "./agent/task-plan.js";
+import { updatePlanTask, type TaskPlan } from "./agent/task-plan.js";
 import type { AgentEvent, TaskSnapshot } from "./agent/types.js";
 import { loadConfig } from "./config/load.js";
 import { ContextManager, type ContextSnapshot } from "./context/manager.js";
@@ -322,6 +322,16 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     plugins: () => pluginHost.loadedPlugins,
     hooksStatus: () => HOOK_EVENT_NAMES.map((name) => ({ name, pluginHandlers: pluginHooks.filter((item) => item === name).length })),
     tasks: () => ({ plan: taskPlan, graph: taskGraph, states: taskStates, results: taskResults }),
+    cancelActiveTask: async () => {
+      const active = taskPlan?.tasks.find((task) => task.status === "in_progress");
+      if (taskPlan === undefined || active === undefined) return;
+      taskPlan = updatePlanTask(taskPlan, {
+        taskId: active.id,
+        status: "cancelled",
+        result: "Cancelled by user",
+      });
+      await publishTaskState();
+    },
     pluginCommands: () => [...pluginCommands.keys()].sort(),
     runPluginCommand: async (name, args, signal) => {
       const handler = pluginCommands.get(name);

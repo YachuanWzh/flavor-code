@@ -42,9 +42,17 @@ describe("updatePlanTask", () => {
   });
 
   it("rejects unknown tasks and completion while dependencies are incomplete", () => {
-    const plan = TaskPlanSchema.parse({ tasks: [task("a"), task("b", "pending", ["a"])] });
+    const plan = TaskPlanSchema.parse({ tasks: [task("a"), task("b", "in_progress", ["a"])] });
     expect(() => updatePlanTask(plan, { taskId: "missing", status: "in_progress" })).toThrow(/unknown task/i);
     expect(() => updatePlanTask(plan, { taskId: "b", status: "completed" })).toThrow(/dependency/i);
+  });
+
+  it("requires work to enter in-progress before completion and keeps terminal states terminal", () => {
+    const pending = TaskPlanSchema.parse({ tasks: [task("a")] });
+    expect(() => updatePlanTask(pending, { taskId: "a", status: "completed" })).toThrow(/transition/i);
+
+    const completed = TaskPlanSchema.parse({ tasks: [task("a", "completed")] });
+    expect(() => updatePlanTask(completed, { taskId: "a", status: "in_progress" })).toThrow(/transition/i);
   });
 
   it("stores a result on terminal transitions", () => {

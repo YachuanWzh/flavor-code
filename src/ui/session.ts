@@ -26,6 +26,7 @@ export interface SessionServices {
   plugins(): readonly unknown[];
   hooksStatus(): readonly unknown[];
   tasks(): unknown;
+  cancelActiveTask(): void | Promise<void>;
   pluginCommands(): readonly string[];
   runPluginCommand(name: string, args: readonly string[], signal: AbortSignal): Promise<unknown>;
   output(event: SessionOutput): void;
@@ -94,6 +95,7 @@ export class FlavorSession {
       outcome = controller.signal.aborted ? "cancelled" : "failed";
       this.#services.output({ type: "error", error: { code: "unknown", message: message(error) } });
     } finally {
+      if (controller.signal.aborted) await this.#services.cancelActiveTask();
       this.#active = undefined;
       await this.#services.hooks.emit({ version: 1, type: "Stop", payload: { outcome } });
     }

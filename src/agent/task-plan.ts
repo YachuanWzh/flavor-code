@@ -71,6 +71,11 @@ export function updatePlanTask(plan: TaskPlan, input: TaskUpdateInput): TaskPlan
   const index = current.tasks.findIndex((task) => task.id === update.taskId);
   if (index < 0) throw new Error(`Unknown task: ${update.taskId}`);
 
+  const previousStatus = current.tasks[index]!.status;
+  if (!isValidTransition(previousStatus, update.status)) {
+    throw new Error(`Invalid task transition for ${update.taskId}: ${previousStatus} -> ${update.status}`);
+  }
+
   if (update.status === "completed") {
     const incomplete = current.tasks[index]!.dependencies.find((dependency) =>
       current.tasks.find((task) => task.id === dependency)?.status !== "completed");
@@ -84,6 +89,15 @@ export function updatePlanTask(plan: TaskPlan, input: TaskUpdateInput): TaskPlan
       ...(update.result === undefined ? {} : { result: update.result }),
     } : { ...task }),
   });
+}
+
+function isValidTransition(from: PlanTaskStatus, to: PlanTaskStatus): boolean {
+  if (from === to) return true;
+  if (from === "pending") return to === "in_progress" || to === "blocked" || to === "cancelled";
+  if (from === "in_progress") {
+    return to === "completed" || to === "failed" || to === "blocked" || to === "cancelled";
+  }
+  return false;
 }
 
 export function normalizeAbandonedPlan(plan: TaskPlan): TaskPlan {
