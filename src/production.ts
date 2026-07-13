@@ -25,7 +25,7 @@ import { PluginHost } from "./plugins/host.js";
 import type { PluginCommandHandler } from "./plugins/types.js";
 import { SkillRegistry } from "./skills/registry.js";
 import { createSkillResourceTool } from "./skills/tool.js";
-import { SessionStore, type SessionDocument } from "./session/store.js";
+import { SESSION_VERSION, SessionStore, type SessionDocument } from "./session/store.js";
 import { createApplyPatchTool, createEditTool, createReadTool, createWriteTool } from "./tools/files.js";
 import { createGlobTool, createGrepTool } from "./tools/search.js";
 import { createShellTool } from "./tools/shell.js";
@@ -190,7 +190,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   let createdAt = recovered?.createdAt ?? new Date().toISOString();
   let persistTail: Promise<void> = Promise.resolve();
   const sessionDocument = (): SessionDocument => ({
-    version: 1, sessionId, createdAt, updatedAt: new Date().toISOString(), workspace: { path: workspace },
+    version: SESSION_VERSION, sessionId, createdAt, updatedAt: new Date().toISOString(), workspace: { path: workspace },
     conversation: storedConversation(harness.main.context.snapshot()),
     tasks: {
       ...(taskPlan === undefined ? {} : { plan: taskPlan }),
@@ -320,7 +320,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   });
   harnessCreated = true;
   if (recovered !== undefined) harness.main.context.restore({
-    ...(recovered.conversation.summary === undefined ? {} : { summary: recovered.conversation.summary }),
+    ...(recovered.conversation.compact === undefined ? {} : { compact: recovered.conversation.compact }),
     messages: recovered.conversation.messages.map((message) => ({
       role: message.role, content: message.content,
       ...(message.toolCallId === undefined ? {} : { toolCallId: message.toolCallId }),
@@ -657,7 +657,7 @@ async function optionalText(path: string): Promise<string | undefined> {
 function remove<T>(items: T[], item: T): void { const index = items.indexOf(item); if (index >= 0) items.splice(index, 1); }
 function storedConversation(snapshot: ContextSnapshot): SessionDocument["conversation"] {
   return {
-    ...(snapshot.summary === undefined ? {} : { summary: snapshot.summary }),
+    ...(snapshot.compact === undefined ? {} : { compact: snapshot.compact }),
     messages: snapshot.messages.filter((message) => message.role !== "system").map((message) => ({
       role: message.role as "user" | "assistant" | "tool", content: message.content,
       ...(message.toolCallId === undefined ? {} : { toolCallId: message.toolCallId }),

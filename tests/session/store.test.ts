@@ -16,7 +16,7 @@ async function workspace(): Promise<string> {
 
 function document(root: string): SessionDocument {
   return {
-    version: 1,
+    version: 2,
     sessionId: "session-20260712",
     createdAt: "2026-07-12T01:00:00.000Z",
     updatedAt: "2026-07-12T02:00:00.000Z",
@@ -53,7 +53,7 @@ describe("SessionStore", () => {
     });
   });
 
-  it("loads a version-1 document without a main plan", async () => {
+  it("loads a version-2 document without a main plan", async () => {
     const root = await workspace();
     const store = new SessionStore({ workspace: root });
     await store.save(document(root));
@@ -72,6 +72,7 @@ describe("SessionStore", () => {
 
     const meta = JSON.parse(lines[0]!) as Record<string, unknown>;
     expect(meta.__meta).toBe(true);
+    expect(meta.version).toBe(2);
     expect(meta.sessionId).toBe("session-20260712");
     expect(meta).not.toHaveProperty("conversation");
 
@@ -89,20 +90,21 @@ describe("SessionStore", () => {
     ]);
   });
 
-  it("preserves summary in the metadata line", async () => {
+  it("preserves the compact boundary in the metadata line", async () => {
     const root = await workspace();
     const store = new SessionStore({ workspace: root });
     const doc = document(root);
-    doc.conversation.summary = { role: "system", content: "Conversation summary\nTest summary." };
+    doc.conversation.compact = { summary: "Test summary.", compactedAt: "2026-07-12T01:30:00.000Z" };
 
     await store.save(doc);
 
     const raw = await readFile(join(root, ".flavor", "sessions", "session-20260712.jsonl"), "utf8");
     const meta = JSON.parse(raw.trim().split("\n")[0]!) as Record<string, unknown>;
-    expect(meta.summary).toEqual({ role: "system", content: "Conversation summary\nTest summary." });
+    expect(meta.compact).toEqual({ summary: "Test summary.", compactedAt: "2026-07-12T01:30:00.000Z" });
+    expect(meta).not.toHaveProperty("summary");
 
     const loaded = await store.load("session-20260712");
-    expect(loaded.conversation.summary).toEqual({ role: "system", content: "Conversation summary\nTest summary." });
+    expect(loaded.conversation.compact).toEqual({ summary: "Test summary.", compactedAt: "2026-07-12T01:30:00.000Z" });
   });
 
   it("loads old single-line JSON format for backward compatibility", async () => {
@@ -136,13 +138,42 @@ describe("SessionStore", () => {
     const store = new SessionStore({ workspace: root });
     const loaded = await store.load("old-format");
     expect(loaded.sessionId).toBe("old-format");
-    expect(loaded.conversation.summary).toEqual({ role: "system", content: "Conversation summary\nOld summary." });
+    expect(loaded.version).toBe(2);
+    expect(loaded.conversation.compact).toEqual({ summary: "Old summary.", compactedAt: "2026-01-01T01:00:00.000Z" });
     expect(loaded.conversation.messages).toHaveLength(4);
     expect(loaded.conversation.messages[1]).toMatchObject({
       role: "assistant",
       content: "old answer",
       toolCalls: [{ id: "t1", name: "Read", input: { path: "x" } }],
     });
+  });
+
+  it("migrates version-1 JSONL summary metadata to a compact boundary", async () => {
+    const root = await workspace();
+    await mkdir(join(root, ".flavor", "sessions"), { recursive: true });
+    const meta = {
+      __meta: true,
+      version: 1,
+      sessionId: "old-jsonl",
+      createdAt: "2026-02-01T00:00:00.000Z",
+      updatedAt: "2026-02-01T01:00:00.000Z",
+      workspace: { path: root },
+      tasks: { states: {}, results: {} },
+      models: { main: "openai:gpt-5", subagent: "openai:gpt-5-mini" },
+      permissionMode: "workspace",
+      summary: { role: "system", content: "Conversation summary\nJSONL summary." },
+    };
+    await writeFile(join(root, ".flavor", "sessions", "old-jsonl.jsonl"), [
+      JSON.stringify(meta),
+      JSON.stringify({ role: "user", content: "continue" }),
+      "",
+    ].join("\n"));
+
+    const loaded = await new SessionStore({ workspace: root }).load("old-jsonl");
+
+    expect(loaded.version).toBe(2);
+    expect(loaded.conversation.compact).toEqual({ summary: "JSONL summary.", compactedAt: "2026-02-01T01:00:00.000Z" });
+    expect(loaded.conversation.messages).toEqual([{ role: "user", content: "continue" }]);
   });
 
   it("atomically saves a strict, secret-free document and lists deterministically", async () => {

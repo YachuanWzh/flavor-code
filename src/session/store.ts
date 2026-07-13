@@ -9,7 +9,7 @@ import { SubagentResultSchema } from "../agent/subagents.js";
 import { TaskPlanSchema, normalizeAbandonedPlan } from "../agent/task-plan.js";
 import { message } from "../utils/error.js";
 
-export const SESSION_VERSION = 1 as const;
+export const SESSION_VERSION = 2 as const;
 export const DEFAULT_MAX_SESSION_BYTES = 5 * 1024 * 1024;
 
 const SessionIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/, "Invalid session id");
@@ -23,19 +23,18 @@ const MessageSchema = z.object({
   toolCallId: z.string().min(1).max(256).optional(),
   toolCalls: z.array(ToolCallSchema).max(1_000).optional(),
 }).strict();
-const SummarySchema = z.object({ role: z.literal("system"), content: z.string().max(DEFAULT_MAX_SESSION_BYTES) }).strict();
+const LegacySummarySchema = z.object({ role: z.literal("system"), content: z.string().max(DEFAULT_MAX_SESSION_BYTES) }).strict();
+const CompactBoundarySchema = z.object({
+  summary: z.string().min(1).max(DEFAULT_MAX_SESSION_BYTES),
+  compactedAt: IsoDateSchema,
+}).strict();
 const StateSchema = z.enum(["pending", "running", "completed", "failed", "blocked"]);
 
-export const SessionDocumentSchema = z.object({
-  version: z.literal(SESSION_VERSION),
+const SessionBaseSchema = z.object({
   sessionId: SessionIdSchema,
   createdAt: IsoDateSchema,
   updatedAt: IsoDateSchema,
   workspace: z.object({ path: z.string().min(1).max(32_768) }).strict(),
-  conversation: z.object({
-    summary: SummarySchema.optional(),
-    messages: z.array(MessageSchema).max(50_000),
-  }).strict(),
   tasks: z.object({
     plan: TaskPlanSchema.optional(),
     graph: TaskGraphSchema.optional(),
@@ -44,6 +43,22 @@ export const SessionDocumentSchema = z.object({
   }).strict(),
   models: z.object({ main: z.string().min(1).max(1_024), subagent: z.string().min(1).max(1_024) }).strict(),
   permissionMode: z.enum(["safe", "workspace", "full"]),
+}).strict();
+
+const SessionDocumentV1Schema = SessionBaseSchema.extend({
+  version: z.literal(1),
+  conversation: z.object({
+    summary: LegacySummarySchema.optional(),
+    messages: z.array(MessageSchema).max(50_000),
+  }).strict(),
+}).strict();
+
+export const SessionDocumentSchema = SessionBaseSchema.extend({
+  version: z.literal(SESSION_VERSION),
+  conversation: z.object({
+    compact: CompactBoundarySchema.optional(),
+    messages: z.array(MessageSchema).max(50_000),
+  }).strict(),
 }).strict();
 
 export type SessionDocument = z.infer<typeof SessionDocumentSchema>;
@@ -73,11 +88,11 @@ export class SessionStore {
     await this.#assertWorkspace(document.workspace.path);
     await this.#prepareDirectory();
     const target = this.#path(document.sessionId);
-    const { conversation: { messages, summary }, ...meta } = document;
+    const { conversation: { messages, compact }, ...meta } = document;
     const metaLine = JSON.stringify({
       __meta: true,
       ...meta,
-      ...(summary === undefined ? {} : { summary }),
+      ...(compact === undefined ? {} : { compact }),
     });
     const lines = [metaLine, ...messages.map((message) => JSON.stringify(message))];
     const body = `${lines.join("\n")}\n`;
@@ -125,37 +140,32 @@ export class SessionStore {
     const trimmed = raw.trim();
     if (trimmed.length === 0) throw new Error("Empty session file");
     const firstLine = trimmed.split("\n", 1)[0] ?? "";
-    let meta: Record<string, unknown>;
-    let messages: unknown[];
+    let candidate: unknown;
     const first = JSON.parse(firstLine) as Record<string, unknown>;
     if (first.__meta === true) {
-      // New multi-line JSONL format
-      meta = first;
-      messages = trimmed
+      const meta = { ...first };
+      const messages = trimmed
         .split("\n")
         .slice(1)
         .filter((line) => line.length > 0)
         .map((line) => JSON.parse(line) as unknown);
+      const summary = meta.summary;
+      const compact = meta.compact;
+      delete meta.__meta;
+      delete meta.summary;
+      delete meta.compact;
+      candidate = {
+        ...meta,
+        conversation: {
+          ...(meta.version === 1 && summary !== undefined ? { summary } : {}),
+          ...(meta.version === SESSION_VERSION && compact !== undefined ? { compact } : {}),
+          messages,
+        },
+      };
     } else {
-      // Old single-line format: entire document is one JSON object
-      const doc = JSON.parse(trimmed) as Record<string, unknown>;
-      const conv = doc.conversation as Record<string, unknown> | undefined;
-      meta = { ...doc };
-      delete meta.conversation;
-      if (conv?.summary !== undefined) meta.summary = conv.summary;
-      messages = (conv?.messages as unknown[]) ?? [];
+      candidate = JSON.parse(trimmed) as unknown;
     }
-    const summary = meta.summary as { role: "system"; content: string } | undefined;
-    delete meta.__meta;
-    delete meta.summary;
-    const document: SessionDocument = SessionDocumentSchema.parse({
-      ...meta,
-      conversation: {
-        ...(summary === undefined ? {} : { summary }),
-        messages,
-      },
-    });
-    return document;
+    return parseAndMigrateSession(candidate);
   }
 
   async list(): Promise<SessionEntry[]> {
@@ -244,6 +254,28 @@ function normalizeAbandonedTasks(document: SessionDocument): SessionDocument {
       results,
     },
   };
+}
+
+function parseAndMigrateSession(input: unknown): SessionDocument {
+  if (typeof input !== "object" || input === null || !("version" in input)) throw new Error("Session version is missing");
+  if (input.version === SESSION_VERSION) return SessionDocumentSchema.parse(input);
+  if (input.version !== 1) throw new Error(`Unsupported session version: ${String(input.version)}`);
+  const legacy = SessionDocumentV1Schema.parse(input);
+  const { conversation, ...metadata } = legacy;
+  const prefix = "Conversation summary\n";
+  const summary = conversation.summary?.content.startsWith(prefix)
+    ? conversation.summary.content.slice(prefix.length).trim()
+    : undefined;
+  return SessionDocumentSchema.parse({
+    ...metadata,
+    version: SESSION_VERSION,
+    conversation: {
+      ...(summary === undefined || summary.length === 0 ? {} : {
+        compact: { summary, compactedAt: legacy.updatedAt },
+      }),
+      messages: conversation.messages,
+    },
+  });
 }
 
 async function assertNoSymlink(root: string, target: string): Promise<void> {

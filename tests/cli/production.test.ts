@@ -19,7 +19,7 @@ describe("production runtime", () => {
     }));
     const store = new SessionStore({ workspace });
     await store.save({
-      version: 1,
+      version: 2,
       sessionId: "planned-session",
       createdAt: "2026-07-13T01:00:00.000Z",
       updatedAt: "2026-07-13T01:01:00.000Z",
