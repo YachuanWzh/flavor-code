@@ -8,6 +8,8 @@ export interface StatusPresentation {
   glyph: string;
   text: string;
   color?: Color;
+  badge?: string;
+  badgeColor?: Color;
 }
 
 export function activityFrame(elapsedMs: number): string {
@@ -29,7 +31,7 @@ export function staticTaskLines(snapshot: TaskSnapshot): string[] {
   for (const node of snapshot.subagents.graph?.nodes ?? []) {
     const status = snapshot.subagents.states[node.id] ?? "pending";
     const glyph = status === "completed" ? "✓" : status === "failed" || status === "blocked" || status === "cancelled" ? "×" : "·";
-    lines.push(`${glyph} ${node.description} / subagent · ${status}`);
+    lines.push(`${glyph} subagent: ${node.description} · ${status}`);
   }
   return lines;
 }
@@ -40,16 +42,17 @@ export function statusPresentation(
   interactive: boolean,
 ): StatusPresentation {
   if (block.state === "running" && block.task !== undefined) {
-    const activeForm = block.task.role === "subagent"
-      ? `${block.task.activeForm} / subagent`
-      : block.task.activeForm;
+    const isSubagent = block.task.role === "subagent";
+    const activeForm = block.task.activeForm;
     return interactive ? {
       glyph: activityFrame(elapsedMs),
       text: `${activeForm}… (${formatElapsed(elapsedMs)})`,
       color: "#d77757",
+      ...(isSubagent ? { badge: "subagent:", badgeColor: "#81c8f2" as Color } : {}),
     } : {
       glyph: "·",
       text: activeForm,
+      ...(isSubagent ? { badge: "subagent:", badgeColor: "#81c8f2" as Color } : {}),
     };
   }
   const duration = block.elapsedMs === undefined ? "" : ` (${formatElapsed(block.elapsedMs)})`;

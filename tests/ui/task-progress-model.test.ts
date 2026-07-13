@@ -35,12 +35,17 @@ describe("task progress presentation", () => {
     expect(statusPresentation(runningTask, 4_900, false)).toMatchObject({ glyph: "·", text: "Inspecting code" });
   });
 
-  it("identifies a running delegated task with a subagent suffix", () => {
-    expect(statusPresentation({
+  it("identifies a running delegated task with a subagent badge", () => {
+    const result = statusPresentation({
       ...runningTask,
       id: "subagent:inspect",
       task: { subject: "Inspect worker", activeForm: "Inspecting worker", role: "subagent" },
-    }, 4_900, true)).toMatchObject({ text: "Inspecting worker / subagent… (4s)" });
+    }, 4_900, true);
+    expect(result).toMatchObject({
+      text: "Inspecting worker… (4s)",
+      badge: "subagent:",
+      badgeColor: "#81c8f2",
+    });
   });
 
   it("identifies static delegated rows without changing main plan labels", () => {
@@ -56,7 +61,7 @@ describe("task progress presentation", () => {
       },
     })).toEqual([
       "· Main task · pending",
-      "× Inspect worker / subagent · cancelled",
+      "× subagent: Inspect worker · cancelled",
     ]);
   });
 

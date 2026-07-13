@@ -26,7 +26,11 @@ export function TaskStatusLine({ block, interactive }: TaskStatusLineProps): Rea
 
   return <Box ref={ref} flexDirection="row">
     <Text {...(presentation.color === undefined ? {} : { color: presentation.color })}>
-      {presentation.glyph} {presentation.text}
+      {presentation.glyph}{" "}
+    </Text>
+    {presentation.badge ? <Text color={presentation.badgeColor}>{presentation.badge} </Text> : null}
+    <Text {...(presentation.color === undefined ? {} : { color: presentation.color })}>
+      {presentation.text}
     </Text>
   </Box>;
 }

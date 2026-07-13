@@ -178,7 +178,7 @@ function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot, include
       kind: "status",
       id,
       state,
-      text: `${state === "completed" ? "✓" : state === "failed" || state === "cancelled" ? "×" : "·"} ${node.description} / subagent · ${status}`,
+      text: `${state === "completed" ? "✓" : state === "failed" || state === "cancelled" ? "×" : "·"} subagent: ${node.description} · ${status}`,
       task: { subject: node.description, activeForm: node.description, role: "subagent" },
       ...(startedAt === undefined ? {} : { startedAt }),
       ...(elapsedMs === undefined ? {} : { elapsedMs }),

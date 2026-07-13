@@ -161,7 +161,7 @@ describe("transcriptReducer", () => {
     expect(state.active?.blocks).toEqual([
       expect.objectContaining({
         id: "subagent:worker", state: "cancelled",
-        text: "× Inspect worker / subagent · cancelled",
+        text: "× subagent: Inspect worker · cancelled",
       }),
     ]);
   });
@@ -177,8 +177,8 @@ describe("transcriptReducer", () => {
     } });
 
     expect(state.active?.blocks).toEqual([
-      expect.objectContaining({ text: "✓ done worker / subagent · completed" }),
-      expect.objectContaining({ text: "× broken worker / subagent · failed" }),
+      expect.objectContaining({ text: "✓ subagent: done worker · completed" }),
+      expect.objectContaining({ text: "× subagent: broken worker · failed" }),
     ]);
   });
 
