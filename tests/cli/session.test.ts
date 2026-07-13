@@ -148,6 +148,7 @@ describe("FlavorSession", () => {
     const calls: Array<{ skill: string; prompt: string }> = [];
     base.skills = async () => [{
       name: "frontend-design", description: "Design interfaces", source: "project", root: "/work/.flavor/skills/frontend-design",
+      disableModelInvocation: false,
     }];
     base.run = async function* () { throw new Error("ordinary run must not be called"); };
     base.runSkill = async function* (skill, prompt) {

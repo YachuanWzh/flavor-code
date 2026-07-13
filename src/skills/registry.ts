@@ -14,6 +14,7 @@ export interface SkillMetadata {
   readonly description: string;
   readonly source: SkillSource;
   readonly root: string;
+  readonly disableModelInvocation: boolean;
 }
 
 export interface SkillDiagnostic {
@@ -61,6 +62,7 @@ interface SkillRecord {
 interface ParsedFrontmatter {
   name: string;
   description: string;
+  disableModelInvocation: boolean;
   bodyOffset: number;
 }
 
@@ -136,6 +138,7 @@ export class SkillRegistry {
     const queryTerms = terms(query);
     if (queryTerms.size === 0) return undefined;
     const candidates = this.#sortedMetadata()
+      .filter(({ disableModelInvocation }) => !disableModelInvocation)
       .map((metadata) => ({ metadata, score: score(metadata, queryTerms) }))
       .filter(({ score: value }) => value > 0)
       .sort((left, right) => right.score - left.score || compareCodePoints(left.metadata.name, right.metadata.name))
@@ -159,7 +162,8 @@ export class SkillRegistry {
     const file = await openVerifiedFile(record.skillFile, record.metadata.root, "Skill file", this.#options.openFile);
     try {
       const parsed = await readFrontmatter(file.handle, this.#options.maxMetadataBytes);
-      if (parsed.name !== record.metadata.name || parsed.description !== record.metadata.description) {
+      if (parsed.name !== record.metadata.name || parsed.description !== record.metadata.description
+        || parsed.disableModelInvocation !== record.metadata.disableModelInvocation) {
         throw new Error(`Skill frontmatter changed after discovery: ${record.metadata.name}`);
       }
       const expectedBytes = Number(file.snapshot.size) - parsed.bodyOffset;
@@ -268,7 +272,13 @@ export class SkillRegistry {
           if (!SKILL_NAME.test(parsed.name)) throw new Error(`Invalid skill name: ${parsed.name}`);
           if (entry.name !== parsed.name) throw new Error("Skill folder must exactly match frontmatter name");
           found.push({
-            metadata: Object.freeze({ name: parsed.name, description: parsed.description, source, root: physicalRoot }),
+            metadata: Object.freeze({
+              name: parsed.name,
+              description: parsed.description,
+              source,
+              root: physicalRoot,
+              disableModelInvocation: parsed.disableModelInvocation,
+            }),
             skillFile,
           });
         } catch (error) {
@@ -351,14 +361,19 @@ async function readFrontmatter(handle: FileHandle, maxBytes: number): Promise<Pa
           throw new Error("YAML aliases are not allowed", { cause: error });
         }
         if (!isPlainRecord(metadata)) throw new Error("Skill frontmatter must be a mapping");
-        const keys = Object.keys(metadata).sort();
-        if (keys.length !== 2 || keys[0] !== "description" || keys[1] !== "name") {
-          throw new Error("Skill frontmatter must contain exactly name and description");
-        }
         if (typeof metadata.name !== "string" || typeof metadata.description !== "string" || metadata.description.trim() === "") {
           throw new Error("Skill name and description must be non-empty strings");
         }
-        return { name: metadata.name, description: metadata.description, bodyOffset: offset };
+        const manualOnly = metadata["disable-model-invocation"];
+        if (manualOnly !== undefined && typeof manualOnly !== "boolean") {
+          throw new Error("Skill disable-model-invocation must be a boolean");
+        }
+        return {
+          name: metadata.name,
+          description: metadata.description,
+          disableModelInvocation: manualOnly ?? false,
+          bodyOffset: offset,
+        };
       }
       yamlLines.push(line.bytes);
     }

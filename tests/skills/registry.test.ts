@@ -35,9 +35,42 @@ describe("SkillRegistry", () => {
 
     expect(discovered).toEqual([
       expect.objectContaining({ name: "code-review", description: "Project review rules", source: "project" }),
+      expect.objectContaining({ name: "extra-key", description: "invalid metadata", source: "project" }),
     ]);
     expect(discovered[0]).not.toHaveProperty("body");
-    expect(registry.diagnostics).toHaveLength(3);
+    expect(registry.diagnostics).toHaveLength(2);
+  });
+
+  it("accepts extension fields and keeps manual-only skills out of automatic matching", async () => {
+    const f = await fixture();
+    await skill(f.projectRoot, "manual-skill", [
+      "name: manual-skill",
+      "description: Manual workflow",
+      "disable-model-invocation: true",
+      "argument-hint: '[topic]'",
+      "vendor-field: preserved-for-compatibility",
+    ].join("\n"));
+    await skill(f.projectRoot, "automatic-skill", [
+      "name: automatic-skill",
+      "description: Automatic workflow",
+      "argument-hint: '[topic]'",
+    ].join("\n"));
+    await skill(f.projectRoot, "invalid-manual-flag", [
+      "name: invalid-manual-flag",
+      "description: Invalid flag",
+      "disable-model-invocation: yes",
+    ].join("\n"));
+    const registry = new SkillRegistry({ projectRoots: [f.projectRoot] });
+
+    expect(await registry.discover()).toEqual([
+      expect.objectContaining({ name: "automatic-skill", disableModelInvocation: false }),
+      expect.objectContaining({ name: "manual-skill", disableModelInvocation: true }),
+    ]);
+    expect(await registry.match("manual")).toBeUndefined();
+    expect((await registry.match("automatic workflow"))?.name).toBe("automatic-skill");
+    expect(registry.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: expect.stringContaining("invalid-manual-flag"), message: expect.stringMatching(/boolean/i) }),
+    ]));
   });
 
   it("loads a body lazily only when explicitly requested after deterministic matching", async () => {
