@@ -1,4 +1,5 @@
 import type { SessionOutput } from "./session.js";
+import type { TaskSnapshot } from "../agent/types.js";
 
 export interface TranscriptTurn {
   id: number;
@@ -6,14 +7,18 @@ export interface TranscriptTurn {
   assistantText: string;
   statusLines: string[];
   blocks: TranscriptBlock[];
+  taskSnapshot?: TaskSnapshot;
 }
 
-export type TranscriptBlock = { kind: "text" | "status"; text: string };
+export type TranscriptBlock =
+  | { kind: "text"; text: string }
+  | { kind: "status"; id: string; state: "running" | "completed" | "failed" | "cancelled" | "info"; text: string };
 
 export interface TranscriptState {
   completed: TranscriptTurn[];
   active?: TranscriptTurn;
   nextId: number;
+  taskSnapshot?: TaskSnapshot;
 }
 
 export type TranscriptAction =
@@ -38,6 +43,7 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
         assistantText: "",
         statusLines: [],
         blocks: [],
+        ...(state.taskSnapshot === undefined ? {} : { taskSnapshot: state.taskSnapshot }),
       },
       nextId: state.nextId + 1,
     };
@@ -53,37 +59,65 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
 
   const event = action.event;
   if (event.type === "clear") return createTranscriptState();
+  if (event.type === "tasks") {
+    return {
+      ...state,
+      taskSnapshot: event.snapshot,
+      ...(state.active === undefined ? {} : { active: { ...state.active, taskSnapshot: event.snapshot } }),
+    };
+  }
   if (event.type === "exit" || state.active === undefined) return state;
   if (event.type === "done") {
-    const withUsage = addStatus(state, `· ${event.usage.inputTokens} in · ${event.usage.outputTokens} out`);
+    const withUsage = upsertStatus(state, {
+      kind: "status", id: `usage:${state.active.id}`, state: "info",
+      text: `· ${event.usage.inputTokens} in · ${event.usage.outputTokens} out`,
+    });
     return finishActive(withUsage);
   }
   if (event.type === "text") {
     return { ...state, active: addText(state.active, event.text) };
   }
-  if (event.type === "tool-start") return addStatus(state, `└ ${event.name} · running`);
-  if (event.type === "tool-end") return addStatus(state, `${event.result.ok ? "✦" : "×"} ${event.name} · ${event.result.ok ? "done" : "failed"}`);
-  if (event.type === "notice") return addStatus(state, `› ${event.message}`);
+  if (event.type === "tool-start") return upsertStatus(state, {
+    kind: "status", id: `tool:${event.id}`, state: "running", text: `└ ${event.name} · running`,
+  });
+  if (event.type === "tool-end") return upsertStatus(state, {
+    kind: "status", id: `tool:${event.id}`, state: event.result.ok ? "completed" : "failed",
+    text: `${event.result.ok ? "✦" : "×"} ${event.name} · ${event.result.ok ? "done" : "failed"}`,
+  });
+  if (event.type === "notice") return upsertStatus(state, {
+    kind: "status", id: `notice:${state.active.blocks.length}`, state: "info", text: `› ${event.message}`,
+  });
   if (event.type === "error") {
     return { ...state, active: addText(state.active, `◆ ${event.error.code}: ${event.error.message}`, true) };
   }
   if (event.type === "usage") return state;
-  if (event.type === "compacted") return addStatus(state, "· Context compacted.");
+  if (event.type === "compacted") return upsertStatus(state, {
+    kind: "status", id: `compact:${state.active.blocks.length}`, state: "info", text: "· Context compacted.",
+  });
   return state;
 }
 
-function addStatus(state: TranscriptState, line: string): TranscriptState {
+function upsertStatus(state: TranscriptState, block: Extract<TranscriptBlock, { kind: "status" }>): TranscriptState {
   if (state.active === undefined) return state;
+  const blocks = [...state.active.blocks];
+  const index = blocks.findIndex((item) => item.kind === "status" && item.id === block.id);
+  if (index < 0) blocks.push(block);
+  else blocks[index] = block;
   return { ...state, active: {
     ...state.active,
-    statusLines: [...state.active.statusLines, line],
-    blocks: [...state.active.blocks, { kind: "status", text: line }],
+    statusLines: blocks.filter((item): item is Extract<TranscriptBlock, { kind: "status" }> => item.kind === "status")
+      .map((item) => item.text),
+    blocks,
   } };
 }
 
 function finishActive(state: TranscriptState): TranscriptState {
   if (state.active === undefined) return state;
-  return { completed: [...state.completed, state.active], nextId: state.nextId };
+  return {
+    completed: [...state.completed, state.active],
+    nextId: state.nextId,
+    ...(state.taskSnapshot === undefined ? {} : { taskSnapshot: state.taskSnapshot }),
+  };
 }
 
 function appendLine(text: string, line: string): string {

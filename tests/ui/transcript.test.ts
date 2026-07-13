@@ -38,12 +38,36 @@ describe("transcriptReducer", () => {
     expect(state.completed[0]).toMatchObject({ prompt: "keep me", assistantText: "◆ safe error" });
   });
 
-  it("formats tool state as terminal status lines", () => {
+  it("updates a tool status in place by call id", () => {
     let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "run" });
     state = transcriptReducer(state, { type: "session", event: { type: "tool-start", id: "1", name: "Read", input: {} } });
     state = transcriptReducer(state, { type: "session", event: { type: "tool-end", id: "1", name: "Read", result: { ok: true, output: "ok" } } });
 
-    expect(state.active?.statusLines).toEqual(["└ Read · running", "✦ Read · done"]);
+    expect(state.active?.statusLines).toEqual(["✦ Read · done"]);
+    expect(state.active?.blocks).toEqual([
+      { kind: "status", id: "tool:1", state: "completed", text: "✦ Read · done" },
+    ]);
+  });
+
+  it("stores task snapshots before and during an active turn", () => {
+    const snapshot = {
+      plan: { tasks: [{
+        id: "inspect", subject: "Inspect code", activeForm: "Inspecting code",
+        status: "in_progress" as const, dependencies: [],
+      }] },
+      subagents: { states: {} },
+      foregroundTaskId: "inspect",
+    };
+    let state = transcriptReducer(createTranscriptState(), { type: "session", event: { type: "tasks", snapshot } });
+    expect(state.taskSnapshot).toEqual(snapshot);
+
+    state = transcriptReducer(state, { type: "submit", prompt: "plan" });
+    expect(state.active?.taskSnapshot).toEqual(snapshot);
+
+    const completed = { ...snapshot, plan: { tasks: [{ ...snapshot.plan.tasks[0]!, status: "completed" as const }] } };
+    state = transcriptReducer(state, { type: "session", event: { type: "tasks", snapshot: completed } });
+    expect(state.active?.taskSnapshot).toEqual(completed);
+    expect(state.taskSnapshot).toEqual(completed);
   });
 
   it("preserves the chronological order of prose and tool status blocks", () => {
@@ -54,7 +78,7 @@ describe("transcriptReducer", () => {
 
     expect(state.active?.blocks).toEqual([
       { kind: "text", text: "before" },
-      { kind: "status", text: "└ Read · running" },
+      { kind: "status", id: "tool:1", state: "running", text: "└ Read · running" },
       { kind: "text", text: "after" },
     ]);
   });
