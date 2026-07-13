@@ -31,6 +31,7 @@ export interface SessionServices {
   tasks(): unknown;
   audit(toolFilter?: string): string | Promise<string>;
   cancelActiveTask(): void | Promise<void>;
+  clearContext(): void | Promise<void>;
   pluginCommands(): readonly string[];
   runPluginCommand(name: string, args: readonly string[], signal: AbortSignal): Promise<unknown>;
   output(event: SessionOutput): void;
@@ -173,7 +174,10 @@ export class FlavorSession {
     else if (command.name === "hooks") this.#notice(format(this.#services.hooksStatus()));
     else if (command.name === "tasks") this.#notice(format(this.#services.tasks()));
     else if (command.name === "audit") this.#notice(await this.#services.audit(command.toolFilter));
-    else if (command.name === "clear") this.#services.output({ type: "clear" });
+    else if (command.name === "clear") {
+      await this.#services.clearContext();
+      this.#services.output({ type: "clear" });
+    }
     else if (command.name === "help") this.#notice(HELP);
     else if (command.name === "exit") this.#services.output({ type: "exit" });
   }

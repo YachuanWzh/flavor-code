@@ -185,8 +185,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   let taskGraph: TaskGraph | undefined = recovered?.tasks.graph;
   let taskStates: Record<string, "pending" | "running" | "completed" | "failed" | "blocked"> = { ...(recovered?.tasks.states ?? {}) };
   let taskResults: Record<string, SubagentResult> = { ...(recovered?.tasks.results ?? {}) };
-  const sessionId = recovered?.sessionId ?? `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
-  const createdAt = recovered?.createdAt ?? new Date().toISOString();
+  let sessionId = recovered?.sessionId ?? `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
+  let createdAt = recovered?.createdAt ?? new Date().toISOString();
   let persistTail: Promise<void> = Promise.resolve();
   const sessionDocument = (): SessionDocument => ({
     version: 1, sessionId, createdAt, updatedAt: new Date().toISOString(), workspace: { path: workspace },
@@ -418,6 +418,17 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       });
       await publishTaskState();
     },
+    clearContext: async () => {
+      harness.main.context.clear();
+      taskPlan = undefined;
+      taskGraph = undefined;
+      taskStates = {};
+      taskResults = {};
+      sessionId = `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
+      createdAt = new Date().toISOString();
+      await persist();
+      options.output({ type: "tasks", snapshot: { subagents: { states: {} } } });
+    },
     pluginCommands: () => [...pluginCommands.keys()].sort(),
     runPluginCommand: async (name, args, signal) => {
       const handler = pluginCommands.get(name);
@@ -431,7 +442,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const session = new FlavorSession(services);
   let disposed = false;
   return {
-    session, services, approvals, sessionId,
+    session, services, approvals,
+    get sessionId() { return sessionId; },
     get diagnostics() { return diagnostics.map((item) => redactSecrets(item, secrets)); },
     async dispose() {
       if (disposed) return;

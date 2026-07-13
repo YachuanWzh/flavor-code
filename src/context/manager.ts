@@ -51,6 +51,12 @@ export class ContextManager {
     this.#hooks = options.hooks;
   }
 
+  clear(): void {
+    this.#summary = undefined;
+    this.#messages = [];
+    this.#taskState = undefined;
+  }
+
   append(message: ModelMessage): void {
     this.appendMany([message]);
   }
