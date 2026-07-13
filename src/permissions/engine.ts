@@ -22,12 +22,31 @@ export interface PermissionEngineOptions {
 
 const CONTROL_TOOLS = new Set(["TaskPlan", "TaskUpdate"]);
 const READ_TOOLS = new Set(["Read", "Glob", "Grep", "Search", "List", "SkillResource"]);
-const WRITE_TOOLS = new Set(["Write", "Edit", "ApplyPatch", "Delete", "Move", "Copy", "Mkdir"]);
+const WRITE_TOOLS = new Set(["Write", "Edit", "ApplyPatch", "Copy", "Mkdir"]);
+const DESTRUCTIVE_TOOLS = new Set(["Delete", "Move"]);
 const SHELL_TOOLS = new Set(["Shell", "Bash", "Command", "Exec"]);
 const NETWORK_TOOLS = new Set(["WebFetch", "WebSearch", "Fetch", "Network"]);
 const PATH_REQUIRED_TOOLS = new Set([
   "Read", "Write", "Edit", "ApplyPatch", "Glob", "Grep", "Delete", "Move", "Copy", "Mkdir",
 ]);
+
+export type ToolCategory = "control" | "read" | "write" | "destructive" | "shell" | "network" | "unknown";
+
+const CATEGORY_MAP: Record<string, ToolCategory> = {};
+for (const name of CONTROL_TOOLS) CATEGORY_MAP[name] = "control";
+for (const name of READ_TOOLS) CATEGORY_MAP[name] = "read";
+for (const name of WRITE_TOOLS) CATEGORY_MAP[name] = "write";
+for (const name of DESTRUCTIVE_TOOLS) CATEGORY_MAP[name] = "destructive";
+for (const name of SHELL_TOOLS) CATEGORY_MAP[name] = "shell";
+for (const name of NETWORK_TOOLS) CATEGORY_MAP[name] = "network";
+
+export function getToolCategory(name: string): ToolCategory {
+  return CATEGORY_MAP[name] ?? "unknown";
+}
+
+export function isDestructiveTool(name: string): boolean {
+  return DESTRUCTIVE_TOOLS.has(name);
+}
 
 export class PermissionEngine {
   readonly #workspace: string;
@@ -68,9 +87,13 @@ export class PermissionEngine {
       if (this.#mode === "safe" || this.#mode === "full" || inside) return { decision: "allow" };
       return { decision: "ask", reason: "Read is outside the workspace" };
     }
+    if (DESTRUCTIVE_TOOLS.has(request.tool)) {
+      return { decision: "ask", reason: "Destructive operation requires approval" };
+    }
     if (WRITE_TOOLS.has(request.tool)) {
       if (this.#mode === "safe") return { decision: "ask", reason: "Safe mode requires approval for writes" };
-      if (this.#mode === "full" || inside) return { decision: "allow" };
+      if (this.#mode === "full") return { decision: "allow" };
+      if (inside) return { decision: "ask", reason: "Write requires approval" };
       return { decision: "ask", reason: "Write is outside the workspace" };
     }
     if (SHELL_TOOLS.has(request.tool)) return this.#shellDecision(request);

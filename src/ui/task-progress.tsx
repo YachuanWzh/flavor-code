@@ -43,7 +43,7 @@ export function TaskProgressPanel({ blocks, interactive, maxVisible = 8 }: TaskP
   if (blocks.length === 0) return null;
   const visible = blocks.slice(0, maxVisible);
   const overflow = blocks.length - visible.length;
-  return <Box flexDirection="column" flexShrink={0}>
+  return <Box flexDirection="column" flexShrink={0} marginTop={1}>
     <Text dimColor>── task progress ──</Text>
     {visible.map((block) => (
       <TaskStatusLine key={block.id} block={block} interactive={interactive} />

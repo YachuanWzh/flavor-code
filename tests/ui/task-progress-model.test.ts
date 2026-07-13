@@ -27,7 +27,7 @@ describe("task progress presentation", () => {
     expect(statusPresentation(runningTask, 4_900, true)).toEqual({
       glyph: activityFrame(4_900),
       text: "Inspecting code… (4s)",
-      color: "yellow",
+      color: "#d77757",
     });
   });
 
@@ -43,6 +43,6 @@ describe("task progress presentation", () => {
     expect(statusPresentation({
       kind: "status", id: "task:test", state, text: `${glyph} Run tests · ${state === "completed" ? "done" : state}`,
       task: { subject: "Run tests", activeForm: "Running tests", role: "main" }, elapsedMs: 8_000,
-    }, 0, false)).toEqual({ glyph, text, color: state === "completed" ? "green" : "red" });
+    }, 0, false)).toEqual({ glyph, text, color: state === "completed" ? "ansi:green" : "#e06c50" });
   });
 });

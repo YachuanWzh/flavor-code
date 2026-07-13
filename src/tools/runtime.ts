@@ -2,7 +2,7 @@ import { basename } from "node:path";
 import { z } from "zod";
 
 import type { HookBus } from "../hooks/bus.js";
-import type { PermissionEngine, PermissionRequest } from "../permissions/engine.js";
+import { type PermissionEngine, type PermissionRequest, getToolCategory } from "../permissions/engine.js";
 import type { ToolCall, ToolContext, ToolDefinition, ToolResult } from "./types.js";
 import { message } from "../utils/error.js";
 
@@ -140,8 +140,9 @@ export class ToolRuntime {
         }
         if (signal.aborted) throw signal.reason;
 
-        // Check if this tool has been always-allowed for this session.
-        if (this.#alwaysAllowed.has(tool.name)) {
+        // Check if this tool's category has been always-allowed for this session.
+        const category = getToolCategory(tool.name);
+        if (this.#alwaysAllowed.has(category)) {
           // Skip the approval callback — already authorized for this tool type.
         } else if (this.#approve === undefined) {
           return this.#fail(tool.name, input, context.agent, "permission_denied", reason);
@@ -150,8 +151,8 @@ export class ToolRuntime {
           if (decision === "deny") {
             return this.#fail(tool.name, input, context.agent, "permission_denied", reason);
           }
-          if (decision === "always") {
-            this.#alwaysAllowed.add(tool.name);
+          if (decision === "always" && category !== "destructive") {
+            this.#alwaysAllowed.add(category);
           }
         }
       }

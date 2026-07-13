@@ -208,7 +208,7 @@ describe("transcriptReducer", () => {
 
     expect(state.active?.blocks).toEqual([
       { kind: "text", text: "before" },
-      { kind: "status", id: "tool:1", state: "running", text: "○ Read" },
+      { kind: "status", id: "tool:1", state: "running", text: "Read" },
       { kind: "text", text: "after" },
     ]);
   });

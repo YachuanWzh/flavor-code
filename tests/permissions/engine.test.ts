@@ -48,7 +48,7 @@ describe("PermissionEngine", () => {
     const outside = mkdtempSync(join(tmpdir(), "flavor-outside-"));
     expect(new PermissionEngine({ workspace, mode: "safe" }).decide({ agent: "main", tool: "Read", paths: [join(outside, "x")] }).decision).toBe("allow");
     expect(new PermissionEngine({ workspace, mode: "safe" }).decide({ agent: "main", tool: "Write", paths: [join(workspace, "x")] }).decision).toBe("ask");
-    expect(new PermissionEngine({ workspace, mode: "workspace" }).decide({ agent: "main", tool: "Write", paths: [join(workspace, "x")] }).decision).toBe("allow");
+    expect(new PermissionEngine({ workspace, mode: "workspace" }).decide({ agent: "main", tool: "Write", paths: [join(workspace, "x")] }).decision).toBe("ask");
     expect(new PermissionEngine({ workspace, mode: "workspace" }).decide({ agent: "main", tool: "Write", paths: [join(outside, "x")] }).decision).toBe("ask");
     expect(new PermissionEngine({ workspace, mode: "full" }).decide({ agent: "main", tool: "Write", paths: [join(outside, "x")] }).decision).toBe("allow");
   });
@@ -157,7 +157,7 @@ describe("PermissionEngine", () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-workspace-"));
     const outside = mkdtempSync(join(tmpdir(), "flavor-outside-"));
     const engine = new PermissionEngine({ workspace });
-    expect(engine.decide({ agent: "main", tool: "Write", paths: [join(workspace, "x")] }).decision).toBe("allow");
+    expect(engine.decide({ agent: "main", tool: "Write", paths: [join(workspace, "x")] }).decision).toBe("ask");
     expect(engine.decide({ agent: "main", tool: "Write", paths: [join(outside, "x")] }).decision).toBe("ask");
   });
 });

@@ -1,12 +1,13 @@
 import type { TranscriptBlock } from "./transcript.js";
 import type { TaskSnapshot } from "../agent/types.js";
+import type { Color } from "../claude-ink/styles.js";
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 
 export interface StatusPresentation {
   glyph: string;
   text: string;
-  color?: "yellow" | "green" | "red";
+  color?: Color;
 }
 
 export function activityFrame(elapsedMs: number): string {
@@ -42,16 +43,16 @@ export function statusPresentation(
     return interactive ? {
       glyph: activityFrame(elapsedMs),
       text: `${block.task.activeForm}… (${formatElapsed(elapsedMs)})`,
-      color: "yellow",
+      color: "#d77757",
     } : {
       glyph: "·",
       text: block.task.activeForm,
     };
   }
   const duration = block.elapsedMs === undefined ? "" : ` (${formatElapsed(block.elapsedMs)})`;
-  if (block.state === "completed") return { glyph: "✓", text: `${withoutGlyph(block.text)}${duration}`, color: "green" };
+  if (block.state === "completed") return { glyph: "✓", text: `${withoutGlyph(block.text)}${duration}`, color: "ansi:green" };
   if (block.state === "failed" || block.state === "cancelled") {
-    return { glyph: "×", text: `${withoutGlyph(block.text)}${duration}`, color: "red" };
+    return { glyph: "×", text: `${withoutGlyph(block.text)}${duration}`, color: "#e06c50" };
   }
   return { glyph: "·", text: withoutGlyph(block.text) };
 }

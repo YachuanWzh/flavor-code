@@ -13,6 +13,7 @@ import {
 import { useAnimationFrame } from "../claude-ink/hooks/use-animation-frame.js";
 
 import { createProductionRuntime, type ProductionRuntime } from "../production.js";
+import { isDestructiveTool } from "../permissions/engine.js";
 import { AssistantText } from "./assistant-text.js";
 import type { SessionOutput } from "./session.js";
 import { createSessionInterruptHandler, installSigintHandler } from "./signals.js";
@@ -219,7 +220,13 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     if (active?.approvals.pending !== undefined) {
       if (character.toLowerCase() === "y") active.approvals.resolve("once");
       if (character.toLowerCase() === "n" || key.escape) active.approvals.resolve("deny");
-      if (character.toLowerCase() === "a") active.approvals.resolve("always");
+      if (character.toLowerCase() === "a") {
+        if (isDestructiveTool(active.approvals.pending.tool)) {
+          active.approvals.resolve("once");
+        } else {
+          active.approvals.resolve("always");
+        }
+      }
       return;
     }
     const menuAction = slashKeyAction(key, slashCompletion);
@@ -364,7 +371,8 @@ export function TerminalLayout({
   const promptMaxLines = Math.max(1, bottomMaxRows - fixedBottomRows);
   return <Box flexGrow={1} width="100%" flexDirection="column" overflow="hidden">
     <ScrollBox {...(scrollRef === undefined ? {} : { ref: scrollRef })} flexGrow={1} flexDirection="column" stickyScroll>
-      <Text dimColor>flavor · {model} · {workspaceName}</Text>
+      <Text dimColor>{"flavor · "}{model}{" · "}{workspaceName}</Text>
+      <Box height={1} />
       {completed.map((turn, index) => (
         <Box key={turn.id} flexDirection="column">
           {index > 0 ? <TurnSeparator width={columns} /> : null}
@@ -383,7 +391,10 @@ export function TerminalLayout({
       {approval === undefined ? null : <Box flexDirection="column" marginBottom={1}>
         <Text color="magenta">┌─ approval · {approval.tool}</Text>
         <Text wrap="truncate-end" color="magentaBright">│ {approval.reason ?? "This action needs permission."}</Text>
-        <Text bold color="magenta">└─ Allow? <Text color="green">y</Text>=once / <Text color="yellow">a</Text>=same-type / <Text color="red">n</Text>=deny</Text>
+        {isDestructiveTool(approval.tool)
+                ? <Text bold color="magenta">└─ Allow? <Text color="green">y</Text>=once / <Text color="red">n</Text>=deny</Text>
+                : <Text bold color="magenta">└─ Allow? <Text color="green">y</Text>=once / <Text color="yellow">a</Text>=same-type / <Text color="red">n</Text>=deny</Text>
+              }
       </Box>}
       {completion === undefined ? null : <SlashMenu completion={completion} />}
       <Text dimColor>{"─".repeat(dividerWidth)}</Text>
@@ -466,18 +477,18 @@ function TurnSeparator({ width }: { width: number }): React.JSX.Element {
 
 function TurnView({ turn, interactive }: { turn: TranscriptTurn; interactive: boolean }): React.JSX.Element {
   return <Box flexDirection="column" marginBottom={1}>
-    {/* User prompt: left-aligned with yellow chevron */}
-    <Box flexDirection="row">
-      <Text color="yellow" bold>❯ </Text>
-      <Text bold>{turn.prompt}</Text>
+    {/* User prompt: left-aligned with white chevron, light gray background */}
+    <Box flexDirection="row" backgroundColor="ansi:white" paddingX={1} paddingY={0}>
+      <Text color="white" bold backgroundColor="ansi:white">❯ </Text>
+      <Text color="white" bold backgroundColor="ansi:white">{turn.prompt}</Text>
     </Box>
     {/* Model output: indented to create clear visual hierarchy */}
-    <Box flexDirection="column" paddingLeft={2}>
+    <Box flexDirection="column" paddingLeft={2} marginTop={1}>
       {turn.blocks.map((block, index) => block.kind === "status"
         ? block.task === undefined
-          ? <StatusLine key={block.id} block={block} interactive={interactive} />
-          : <TaskStatusLine key={block.id} block={block} interactive={interactive} />
-        : <AssistantText key={`${turn.id}-text-${index}`} text={block.text} />)}
+          ? <Box key={block.id}><StatusLine block={block} interactive={interactive} /></Box>
+          : <Box key={block.id}><TaskStatusLine block={block} interactive={interactive} /></Box>
+        : <Box key={`${turn.id}-text-${index}`} marginBottom={1}><AssistantText text={block.text} /></Box>)}
     </Box>
   </Box>;
 }
@@ -485,9 +496,9 @@ function TurnView({ turn, interactive }: { turn: TranscriptTurn; interactive: bo
 function StatusLine({ block, interactive }: { block: Extract<TranscriptBlock, { kind: "status" }>; interactive: boolean }): React.JSX.Element {
   const running = block.state === "running";
   const [ref, time] = useAnimationFrame(running && interactive ? 120 : null);
-  const color = running ? "yellow"
-    : block.state === "completed" ? "green"
-    : block.state === "failed" || block.state === "cancelled" ? "red"
+  const color = running ? "#d77757"
+    : block.state === "completed" ? "ansi:green"
+    : block.state === "failed" || block.state === "cancelled" ? "#e06c50"
     : undefined;
   const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   const spinner = running && interactive ? frames[Math.floor(Math.max(0, time) / 120) % frames.length] + " " : "";
@@ -522,7 +533,7 @@ function PromptLine({
     lineStarts.push(nextLineStart);
     nextLineStart += [...line].length;
   }
-  return <Box width="100%" flexDirection="column">
+  return <Box width="100%" flexDirection="column" paddingX={1}>
     {visibleLines.map((line, visibleIndex) => {
       const lineIndex = windowStart + visibleIndex;
       const isCursorLine = lineIndex === wrap.cursor.line;
