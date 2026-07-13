@@ -1,5 +1,5 @@
 import React, { useMemo, useRef } from "react";
-import { Box, Text, useStdout } from "ink";
+import { Box, Text, useStdout } from "../claude-ink/index.js";
 import chalk from "chalk";
 import { marked } from "marked";
 import type { Token, Tokens } from "marked";
@@ -24,136 +24,47 @@ export interface MarkdownViewProps { text: string }
  * React reconciliation cost.
  */
 function MarkdownViewInner({ text }: MarkdownViewProps): React.JSX.Element {
-  // Claude Code's StreamingMarkdown algorithm: split at the last complete
-  // block boundary.  The stable prefix is memoized (never re-parses), only
-  // the final growing block re-parses per delta.
+  // Claude Code's StreamingMarkdown algorithm: the last top-level block is
+  // allowed to grow while the completed prefix is kept as a stable subtree.
   const stablePrefixRef = useRef("");
+  if (!text.startsWith(stablePrefixRef.current)) stablePrefixRef.current = "";
 
-  // Reset if text was replaced (new turn, cleared, etc.)
-  if (!text.startsWith(stablePrefixRef.current)) {
-    stablePrefixRef.current = "";
-  }
-
-  // Lex only from current boundary — O(unstable length), not O(full text)
   const boundary = stablePrefixRef.current.length;
   const suffixTokens = useMemo(() => {
-    const suffix = text.substring(boundary);
-    if (suffix.length > 50_000) return null;
     try {
-      return marked.lexer(suffix, { gfm: true, async: false });
+      return marked.lexer(text.substring(boundary), { gfm: true, async: false });
     } catch {
-      return null;
+      return [];
     }
   }, [text, boundary]);
 
-  // Find last non-space token — that's the growing block; everything before is final
-  if (suffixTokens && suffixTokens.length > 0) {
-    let lastContentIdx = suffixTokens.length - 1;
-    while (lastContentIdx >= 0 && suffixTokens[lastContentIdx]!.type === "space") {
-      lastContentIdx--;
-    }
-    let advance = 0;
-    for (let i = 0; i < lastContentIdx; i++) {
-      advance += suffixTokens[i]!.raw.length;
-    }
-    if (advance > 0) {
-      stablePrefixRef.current = text.substring(0, boundary + advance);
-    }
-  }
+  let lastContentIndex = suffixTokens.length - 1;
+  while (lastContentIndex >= 0 && suffixTokens[lastContentIndex]?.type === "space") lastContentIndex--;
+  let advance = 0;
+  for (let index = 0; index < lastContentIndex; index++) advance += suffixTokens[index]?.raw.length ?? 0;
+  if (advance > 0) stablePrefixRef.current = text.substring(0, boundary + advance);
 
   const stablePrefix = stablePrefixRef.current;
   const unstableSuffix = text.substring(stablePrefix.length);
 
   return (
     <Box flexDirection="column" width="100%">
-      {stablePrefix.length > 0 && <StableMarkdown text={stablePrefix} />}
-      {unstableSuffix.length > 0 && <StreamingTail text={unstableSuffix} />}
+      {stablePrefix.length > 0 ? <MarkdownSegment text={stablePrefix} /> : null}
+      {unstableSuffix.length > 0 ? <MarkdownSegment text={unstableSuffix} /> : null}
     </Box>
   );
 }
 
-// Memoized: identical text → zero re-render (Ink sees no changes at all)
-const StableMarkdown = React.memo(function StableMarkdown({ text }: { text: string }): React.JSX.Element {
-  const prevRef = useRef<Token[]>([]);
-
+const MarkdownSegment = React.memo(function MarkdownSegment({ text }: { text: string }): React.JSX.Element {
   const tokens = useMemo(() => {
-    if (text.length === 0) return [];
     try {
-      const fresh = marked.lexer(text, { gfm: true, async: false });
-      const prev = prevRef.current;
-      for (let i = 0; i < fresh.length && i < prev.length; i++) {
-        const a = fresh[i]!;
-        const b = prev[i]!;
-        if (a.type === b.type && tokenText(a) === tokenText(b)) {
-          fresh[i] = b;
-        }
-      }
-      prevRef.current = fresh;
-      return fresh;
+      return marked.lexer(text, { gfm: true, async: false });
     } catch {
-      if (prevRef.current.length > 0) return prevRef.current;
       return [];
     }
   }, [text]);
-
-  return (
-    <>
-      {tokens.map((token, i) => (
-        <BlockToken key={i} token={token} />
-      ))}
-    </>
-  );
+  return <>{tokens.map((token, index) => <BlockToken key={index} token={token} />)}</>;
 });
-
-// Not memoized — re-renders every delta (single growing block)
-function StreamingTail({ text }: { text: string }): React.JSX.Element {
-  const prevRef = useRef<Token[]>([]);
-
-  const tokens = useMemo(() => {
-    if (text.length === 0) return [];
-    try {
-      const fresh = marked.lexer(text, { gfm: true, async: false });
-      const prev = prevRef.current;
-      for (let i = 0; i < fresh.length && i < prev.length; i++) {
-        const a = fresh[i]!;
-        const b = prev[i]!;
-        if (a.type === b.type && tokenText(a) === tokenText(b)) {
-          fresh[i] = b;
-        }
-      }
-      prevRef.current = fresh;
-      return fresh;
-    } catch {
-      if (prevRef.current.length > 0) return prevRef.current;
-      return [];
-    }
-  }, [text]);
-
-  return (
-    <>
-      {tokens.map((token, i) => (
-        <BlockToken key={i} token={token} />
-      ))}
-    </>
-  );
-}
-
-/** Extract the canonical text payload from a token for comparison. */
-function tokenText(token: Token): string {
-  if ("text" in token) return (token as { text: string }).text;
-  if (token.type === "list") {
-    return (token as Tokens.List).items.map((item) => item.text).join("\n");
-  }
-  if (token.type === "table") {
-    const table = token as Tokens.Table;
-    const header = table.header.map((cell) => cell.text).join("|");
-    const body = table.rows.map((row) => row.map((cell) => cell.text).join("|")).join("\n");
-    return `${header}\n${body}`;
-  }
-  if (token.type === "hr") return "---";
-  if (token.type === "space") return "";
-  return "";
-}
 
 export const MarkdownView = React.memo(MarkdownViewInner);
 
@@ -161,7 +72,7 @@ export const MarkdownView = React.memo(MarkdownViewInner);
 /*  Block-level renderer                                               */
 /* ------------------------------------------------------------------ */
 
-function BlockToken({ token }: { token: Token }): React.JSX.Element | null {
+const BlockToken = React.memo(function BlockToken({ token }: { token: Token }): React.JSX.Element | null {
   switch (token.type) {
     case "space":
       return <Box height={1} />;
@@ -191,7 +102,7 @@ function BlockToken({ token }: { token: Token }): React.JSX.Element | null {
       }
       return null;
   }
-}
+});
 
 /* ------------------------------------------------------------------ */
 /*  Block views                                                        */
@@ -311,7 +222,10 @@ function ListItemView({
           if (child.type === "paragraph") {
             return <InlineTokens key={i} tokens={(child as Tokens.Paragraph).tokens ?? []} />;
           }
-          return <Text key={i}>{child.text}</Text>;
+          const tokens = (child as Tokens.Text).tokens ?? [];
+          return tokens.length > 0
+            ? <InlineTokens key={i} tokens={tokens} />
+            : <Text key={i}>{child.text}</Text>;
         })}
       </Text>
       {blockTokens.map((child, i) => (

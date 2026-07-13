@@ -6,6 +6,9 @@ export default defineConfig({
   clean: true,
   sourcemap: true,
   banner: {
-    js: "#!/usr/bin/env node",
+    // Claude Code's Ink fork includes CommonJS React internals such as
+    // react-reconciler and react/compiler-runtime. The application bundle is
+    // ESM, so expose Node's require bridge to every generated chunk.
+    js: "#!/usr/bin/env node\nimport { createRequire } from \"node:module\"; const require = createRequire(import.meta.url);",
   },
 });

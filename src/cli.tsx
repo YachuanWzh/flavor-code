@@ -25,19 +25,13 @@ export function createProgram(): Command {
         process.exitCode = 2;
         return;
       }
-      const [{ render }, { createElement }, { App }] = await Promise.all([
-        import("ink"), import("react"), import("./ui/app.js"),
+      const [{ render, AlternateScreen }, { createElement }, { App }] = await Promise.all([
+        import("./claude-ink/index.js"), import("react"), import("./ui/app.js"),
       ]);
-      const instance = render(createElement(App, {
-        workspace: process.cwd(), home: homedir(), ...(resumeSession === undefined ? {} : { resumeSession }),
-      }), {
-        exitOnCtrlC: false,
-        incrementalRendering: true,
-        maxFps: 10,
-        // Use the alternate screen so that on exit Ink restores whatever the
-        // shell had on screen, leaving no stale prompt fragments behind.
-        alternateScreen: true,
-      });
+      const instance = await render(createElement(AlternateScreen, { mouseTracking: true },
+        createElement(App, {
+          workspace: process.cwd(), home: homedir(), ...(resumeSession === undefined ? {} : { resumeSession }),
+        })), { exitOnCtrlC: false });
       await instance.waitUntilExit();
     });
 }

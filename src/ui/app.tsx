@@ -1,6 +1,15 @@
 import { basename } from "node:path";
-import React, { useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { Box, Static, Text, useApp, useInput, useStdout } from "ink";
+import React, { useEffect, useReducer, useRef, useState } from "react";
+import {
+  Box,
+  ScrollBox,
+  Text,
+  useApp,
+  useInput,
+  useStdout,
+  type Key,
+  type ScrollBoxHandle,
+} from "../claude-ink/index.js";
 
 import { createProductionRuntime, type ProductionRuntime } from "../production.js";
 import { AssistantText } from "./assistant-text.js";
@@ -17,6 +26,21 @@ import { redactErrorText } from "../utils/redact.js";
 
 export const HISTORY_CAP = 200;
 
+export type TerminalInputAction =
+  | { type: "scroll"; rows: number }
+  | { type: "page"; fraction: number }
+  | { type: "history"; direction: "up" | "down" };
+
+export function classifyTerminalInput(key: Pick<Key, "wheelUp" | "wheelDown" | "pageUp" | "pageDown" | "upArrow" | "downArrow">): TerminalInputAction | null {
+  if (key.wheelUp) return { type: "scroll", rows: -3 };
+  if (key.wheelDown) return { type: "scroll", rows: 3 };
+  if (key.pageUp) return { type: "page", fraction: -0.5 };
+  if (key.pageDown) return { type: "page", fraction: 0.5 };
+  if (key.upArrow) return { type: "history", direction: "up" };
+  if (key.downArrow) return { type: "history", direction: "down" };
+  return null;
+}
+
 export interface FlavorAppProps { workspace: string; home?: string; resumeSession?: string | true }
 
 export function App({ workspace, home, resumeSession }: FlavorAppProps): React.JSX.Element {
@@ -31,6 +55,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   const [columns, setColumns] = useState(stdout?.columns ?? 80);
   const [rows, setRows] = useState(stdout?.rows ?? 24);
   const [transcript, dispatch] = useReducer(transcriptReducer, undefined, createTranscriptState);
+  const scrollRef = useRef<ScrollBoxHandle>(null);
   const runtimeRef = useRef<ProductionRuntime | undefined>(undefined);
   const closing = useRef(false);
   const textBuf = useRef<{ pending: string; timer: ReturnType<typeof setTimeout> | null }>({ pending: "", timer: null });
@@ -119,6 +144,21 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   }, [stdout]);
 
   useInput((character, key) => {
+    const terminalAction = classifyTerminalInput(key);
+    if (terminalAction?.type === "scroll") {
+      const scroll = scrollRef.current;
+      if (scroll !== null) {
+        if (terminalAction.rows < 0) scrollUp(scroll, -terminalAction.rows);
+        else scrollDown(scroll, terminalAction.rows);
+      }
+      return;
+    }
+    if (terminalAction?.type === "page") {
+      const scroll = scrollRef.current;
+      if (scroll !== null) jumpScroll(scroll, Math.floor(scroll.getViewportHeight() * terminalAction.fraction));
+      return;
+    }
+
     const active = runtimeRef.current;
     if (key.ctrl && character === "c") { interrupt(); return; }
     if (active?.approvals.pending !== undefined) {
@@ -129,6 +169,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     if (key.return) {
       const prompt = input.trim();
       if (!prompt || active === undefined || transcript.active !== undefined) return;
+      scrollRef.current?.scrollToBottom();
       dispatch({ type: "submit", prompt });
       setHistory((current) => [...current, prompt].slice(-HISTORY_CAP));
       setHistoryCursor(history.length + 1);
@@ -143,11 +184,10 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     else if (key.delete) updatePrompt({ type: "delete" }, input, promptCursor, setInput, setPromptCursor);
     else if (key.leftArrow) setPromptCursor((value) => Math.max(0, value - 1));
     else if (key.rightArrow) setPromptCursor((value) => Math.min([...input].length, value + 1));
-    else if (key.pageUp || key.pageDown) return;
-    else if (key.upArrow && history.length) {
+    else if (terminalAction?.type === "history" && terminalAction.direction === "up" && history.length) {
       const next = navigateHistory({ history, cursor: historyCursor }, "up");
       setHistoryCursor(next.cursor); setInput(next.input); setPromptCursor(next.promptCursor);
-    } else if (key.downArrow && history.length) {
+    } else if (terminalAction?.type === "history" && terminalAction.direction === "down" && history.length) {
       const next = navigateHistory({ history, cursor: historyCursor }, "down");
       setHistoryCursor(next.cursor); setInput(next.input); setPromptCursor(next.promptCursor);
     } else if (!key.ctrl && !key.meta && character) {
@@ -174,6 +214,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     columns={columns}
     rows={rows}
     activeSession={transcript.active !== undefined}
+    scrollRef={scrollRef}
     {...(approval === undefined ? {} : { approval })}
   />;
 }
@@ -205,39 +246,59 @@ export interface TerminalLayoutProps {
   rows?: number;
   activeSession: boolean;
   approval?: { tool: string; reason?: string };
+  scrollRef?: React.Ref<ScrollBoxHandle>;
 }
 
 export function TerminalLayout({
   model, workspaceName, completed, active, input, promptCursor, columns, rows = 24, activeSession, approval,
+  scrollRef,
 }: TerminalLayoutProps): React.JSX.Element {
   const dividerWidth = Math.max(1, columns - 1);
-  const staticRows = useMemo<StaticRow[]>(() => [
-    { kind: "header", model, workspaceName },
-    ...completed.map((turn) => ({ kind: "turn" as const, turn })),
-  ], [model, workspaceName, completed]);
-  return <>
-    <Static items={staticRows}>{(row) => row.kind === "header"
-      ? <Text key="header" dimColor>flavor · {row.model} · {row.workspaceName}</Text>
-      : <TurnView key={row.turn.id} turn={row.turn} />}
-    </Static>
-    <Box flexDirection="column" flexGrow={1}>
+  const fixedBottomRows = (approval === undefined ? 0 : 3) + 2;
+  const bottomMaxRows = Math.min(rows, Math.max(Math.floor(rows / 2), fixedBottomRows + 1));
+  const promptMaxLines = Math.max(1, bottomMaxRows - fixedBottomRows);
+  return <Box flexGrow={1} width="100%" flexDirection="column" overflow="hidden">
+    <ScrollBox {...(scrollRef === undefined ? {} : { ref: scrollRef })} flexGrow={1} flexDirection="column" stickyScroll>
+      <Text dimColor>flavor · {model} · {workspaceName}</Text>
+      {completed.map((turn) => (
+        <TurnView key={turn.id} turn={turn} />
+      ))}
       {active === undefined ? null : <TurnView turn={active} />}
-      <Box flexGrow={1} />
+    </ScrollBox>
+    <Box flexDirection="column" flexShrink={0} maxHeight={bottomMaxRows} width="100%" overflowY="hidden">
       {approval === undefined ? null : <Box flexDirection="column">
         <Text color="magenta">┌ approval · {approval.tool}</Text>
-        <Text>{approval.reason ?? "This action needs permission."}</Text>
+        <Text wrap="truncate-end">{approval.reason ?? "This action needs permission."}</Text>
         <Text bold>Allow? y / n</Text>
       </Box>}
       <Text dimColor>{"─".repeat(dividerWidth)}</Text>
-      <PromptLine input={input} cursor={promptCursor} columns={columns} />
-      <Text dimColor>{activeSession ? "Ctrl+C cancel · Ctrl+C again exit" : "Enter send · ↑↓ history · Ctrl+C exit"}</Text>
+      <PromptLine input={input} cursor={promptCursor} columns={columns} maxVisibleLines={promptMaxLines} />
+      <Text dimColor wrap="truncate-end">{activeSession ? "Ctrl+C cancel · Ctrl+C again exit" : "Enter send · ↑↓ history · Ctrl+C exit"}</Text>
     </Box>
-  </>;
+  </Box>;
 }
 
-type StaticRow =
-  | { kind: "header"; model: string; workspaceName: string }
-  | { kind: "turn"; turn: TranscriptTurn };
+function jumpScroll(scroll: ScrollBoxHandle, delta: number): void {
+  const maximum = Math.max(0, scroll.getScrollHeight() - scroll.getViewportHeight());
+  const target = scroll.getScrollTop() + scroll.getPendingDelta() + delta;
+  if (target >= maximum) {
+    scroll.scrollTo(maximum);
+    scroll.scrollToBottom();
+  } else {
+    scroll.scrollTo(Math.max(0, target));
+  }
+}
+
+function scrollDown(scroll: ScrollBoxHandle, amount: number): void {
+  const maximum = Math.max(0, scroll.getScrollHeight() - scroll.getViewportHeight());
+  if (scroll.getScrollTop() + scroll.getPendingDelta() + amount >= maximum) scroll.scrollToBottom();
+  else scroll.scrollBy(amount);
+}
+
+function scrollUp(scroll: ScrollBoxHandle, amount: number): void {
+  if (scroll.getScrollTop() + scroll.getPendingDelta() - amount <= 0) scroll.scrollTo(0);
+  else scroll.scrollBy(-amount);
+}
 
 function TurnView({ turn }: { turn: TranscriptTurn }): React.JSX.Element {
   return <Box flexDirection="column" marginBottom={1}>
@@ -248,10 +309,27 @@ function TurnView({ turn }: { turn: TranscriptTurn }): React.JSX.Element {
   </Box>;
 }
 
-function PromptLine({ input, cursor, columns }: { input: string; cursor: number; columns: number }): React.JSX.Element {
+function PromptLine({
+  input,
+  cursor,
+  columns,
+  maxVisibleLines,
+}: {
+  input: string;
+  cursor: number;
+  columns: number;
+  maxVisibleLines?: number;
+}): React.JSX.Element {
   const wrap = wrapPromptInput(input, cursor, { columns, indent: 2 });
+  const visibleCount = Math.max(1, maxVisibleLines ?? wrap.lines.length);
+  const windowStart = Math.min(
+    Math.max(0, wrap.cursor.line - visibleCount + 1),
+    Math.max(0, wrap.lines.length - visibleCount),
+  );
+  const visibleLines = wrap.lines.slice(windowStart, windowStart + visibleCount);
   return <Box width="100%" flexDirection="column">
-    {wrap.lines.map((line, lineIndex) => {
+    {visibleLines.map((line, visibleIndex) => {
+      const lineIndex = windowStart + visibleIndex;
       const isCursorLine = lineIndex === wrap.cursor.line;
       const points = [...line];
       const cursorCol = wrap.cursor.column;
@@ -333,7 +411,6 @@ export async function closeAndDisposeRuntime(
 function safeUiError(error: unknown): string {
   return redactErrorText(message(error)).slice(0, 2_000);
 }
-function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function safeReport(report: (message: string) => void, value: string): void {
   try { report(value); } catch { /* Cleanup and exit must not depend on diagnostics. */ }
 }

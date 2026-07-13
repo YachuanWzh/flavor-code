@@ -176,8 +176,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     tasks: { ...(taskGraph === undefined ? {} : { graph: taskGraph }), states: { ...taskStates }, results: { ...taskResults } },
     models: { main: harness.mainModelId, subagent: harness.subagentModelId }, permissionMode: harness.permissionMode,
   });
-  const persist = (): Promise<void> => {
-    let persistFailed = false;
+  let persistFailed = false;
   const persist = (): Promise<void> => {
     persistTail = persistTail.catch(() => undefined).then(
       () => sessionStore.save(sessionDocument()),
@@ -188,8 +187,6 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         catch { /* Output may be unavailable during shutdown */ }
       }
     });
-    return persistTail;
-  };
     return persistTail;
   };
 
@@ -287,7 +284,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   let disposed = false;
   return {
     session, services, approvals, sessionId,
-    get diagnostics() { return diagnostics.map((item) => redactDiagnostic(item, secrets)); },
+    get diagnostics() { return diagnostics.map((item) => redactSecrets(item, secrets)); },
     async dispose() {
       if (disposed) return;
       disposed = true;
