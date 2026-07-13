@@ -8,6 +8,7 @@ export interface TranscriptTurn {
   statusLines: string[];
   blocks: TranscriptBlock[];
   taskSnapshot?: TaskSnapshot;
+  suppressedTaskIds?: string[];
 }
 
 export type TranscriptBlock =
@@ -50,6 +51,7 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
       statusLines: [],
       blocks: [],
       ...(state.taskSnapshot === undefined ? {} : { taskSnapshot: state.taskSnapshot }),
+      ...(state.taskSnapshot === undefined ? {} : { suppressedTaskIds: terminalTaskIds(state.taskSnapshot) }),
     };
     return {
       ...state,
@@ -118,20 +120,24 @@ function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot, include
     .filter((block): block is Extract<TranscriptBlock, { kind: "status" }> => block.kind === "status")
     .map((block) => [block.id, block]));
   const now = Date.now();
+  const suppressed = new Set(turn.suppressedTaskIds ?? []);
   for (const task of snapshot.plan?.tasks ?? []) {
-    if (!includeTerminal && ["completed", "failed", "blocked", "cancelled"].includes(task.status)) continue;
+    const id = `task:${task.id}`;
+    const terminal = ["completed", "failed", "blocked", "cancelled"].includes(task.status);
+    if (!terminal) suppressed.delete(id);
+    if ((!includeTerminal || suppressed.has(id)) && terminal) continue;
     const state = task.status === "in_progress" ? "running"
       : task.status === "completed" ? "completed"
       : task.status === "cancelled" ? "cancelled"
       : task.status === "failed" || task.status === "blocked" ? "failed"
       : "info";
     const suffix = task.status === "completed" ? "done" : task.status.replace("_", " ");
-    const prior = previous.get(`task:${task.id}`);
+    const prior = previous.get(id);
     const startedAt = state === "running" ? prior?.startedAt ?? now : prior?.startedAt;
     const elapsedMs = state !== "running" && startedAt !== undefined ? Math.max(0, now - startedAt) : prior?.elapsedMs;
     taskBlocks.push({
       kind: "status",
-      id: `task:${task.id}`,
+      id,
       state,
       text: `${state === "completed" ? "✓" : state === "failed" || state === "cancelled" ? "×" : "·"} ${task.subject} · ${suffix}`,
       task: { subject: task.subject, activeForm: task.activeForm, role: "main" },
@@ -141,17 +147,20 @@ function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot, include
   }
   for (const node of snapshot.subagents.graph?.nodes ?? []) {
     const status = snapshot.subagents.states[node.id] ?? "pending";
-    if (!includeTerminal && ["completed", "failed", "blocked"].includes(status)) continue;
+    const id = `subagent:${node.id}`;
+    const terminal = ["completed", "failed", "blocked"].includes(status);
+    if (!terminal) suppressed.delete(id);
+    if ((!includeTerminal || suppressed.has(id)) && terminal) continue;
     const state = status === "running" ? "running"
       : status === "completed" ? "completed"
       : status === "failed" || status === "blocked" ? "failed"
       : "info";
-    const prior = previous.get(`subagent:${node.id}`);
+    const prior = previous.get(id);
     const startedAt = state === "running" ? prior?.startedAt ?? now : prior?.startedAt;
     const elapsedMs = state !== "running" && startedAt !== undefined ? Math.max(0, now - startedAt) : prior?.elapsedMs;
     taskBlocks.push({
       kind: "status",
-      id: `subagent:${node.id}`,
+      id,
       state,
       text: `${state === "completed" ? "✓" : state === "failed" ? "×" : "·"} ${node.description} · ${status}`,
       task: { subject: node.description, activeForm: node.description, role: "subagent" },
@@ -175,10 +184,21 @@ function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot, include
   return {
     ...turn,
     taskSnapshot: snapshot,
+    suppressedTaskIds: [...suppressed],
     blocks,
     statusLines: blocks.filter((block): block is Extract<TranscriptBlock, { kind: "status" }> => block.kind === "status")
       .map((block) => block.text),
   };
+}
+
+function terminalTaskIds(snapshot: TaskSnapshot): string[] {
+  const ids = (snapshot.plan?.tasks ?? [])
+    .filter((task) => ["completed", "failed", "blocked", "cancelled"].includes(task.status))
+    .map((task) => `task:${task.id}`);
+  for (const [id, status] of Object.entries(snapshot.subagents.states)) {
+    if (["completed", "failed", "blocked"].includes(status)) ids.push(`subagent:${id}`);
+  }
+  return ids;
 }
 
 function upsertStatus(state: TranscriptState, block: Extract<TranscriptBlock, { kind: "status" }>): TranscriptState {

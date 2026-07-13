@@ -175,6 +175,31 @@ describe("transcriptReducer", () => {
     expect(state.active?.blocks).toEqual([]);
   });
 
+  it("does not replay an inherited completed row when a pending sibling starts in a new turn", () => {
+    const inspect = {
+      id: "inspect", subject: "Inspect code", activeForm: "Inspecting code",
+      status: "completed" as const, dependencies: [],
+    };
+    const implement = {
+      id: "implement", subject: "Implement change", activeForm: "Implementing change",
+      status: "pending" as const, dependencies: ["inspect"],
+    };
+    const snapshot = { plan: { tasks: [inspect, implement] }, subagents: { states: {} } };
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "first" });
+    state = transcriptReducer(state, { type: "session", event: { type: "tasks", snapshot } });
+    state = transcriptReducer(state, { type: "finish" });
+    state = transcriptReducer(state, { type: "submit", prompt: "continue" });
+    state = transcriptReducer(state, { type: "session", event: { type: "tasks", snapshot: {
+      ...snapshot,
+      plan: { tasks: [inspect, { ...implement, status: "in_progress" as const }] },
+      foregroundTaskId: "implement",
+    } } });
+
+    expect(state.active?.blocks).toEqual([
+      expect.objectContaining({ id: "task:implement", state: "running" }),
+    ]);
+  });
+
   it("preserves the chronological order of prose and tool status blocks", () => {
     let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "ordered" });
     state = transcriptReducer(state, { type: "session", event: { type: "text", text: "before" } });
