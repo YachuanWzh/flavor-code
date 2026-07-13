@@ -22,10 +22,12 @@ import {
 } from "./transcript.js";
 import { wrapPromptInput } from "./wrap-prompt.js";
 import { TaskStatusLine } from "./task-progress.js";
-import { MVP_COMMANDS } from "./commands.js";
+import { COMMAND_DESCRIPTIONS, MVP_COMMANDS } from "./commands.js";
 import {
   buildSlashCandidates,
   completeSlashSelection,
+  completedSlashTokenLength,
+  completedSlashTokenPresentation,
   deriveSlashCompletion,
   matchRanges,
   moveSlashSelection,
@@ -37,6 +39,7 @@ import { message } from "../utils/error.js";
 import { redactErrorText } from "../utils/redact.js";
 
 export const HISTORY_CAP = 200;
+const BUILTIN_SLASH_CANDIDATES = MVP_COMMANDS.map((name) => ({ name, description: COMMAND_DESCRIPTIONS[name] }));
 
 export type TerminalInputAction =
   | { type: "scroll"; rows: number }
@@ -81,7 +84,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   const [historyCursor, setHistoryCursor] = useState(0);
   const [promptCursor, setPromptCursor] = useState(0);
   const [slashCandidates, setSlashCandidates] = useState<SlashCandidate[]>(
-    () => buildSlashCandidates(MVP_COMMANDS, [], []),
+    () => buildSlashCandidates(BUILTIN_SLASH_CANDIDATES, [], []),
   );
   const [slashSelection, setSlashSelection] = useState(0);
   const [dismissedSlashInput, setDismissedSlashInput] = useState<string>();
@@ -151,13 +154,13 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     }).then(async (created) => {
       if (disposed) { await created.dispose(); return; }
       runtimeRef.current = created;
-      setSlashCandidates(buildSlashCandidates(MVP_COMMANDS, created.services.pluginCommands(), []));
+      setSlashCandidates(buildSlashCandidates(BUILTIN_SLASH_CANDIDATES, created.services.pluginCommands(), []));
       setRuntime(created);
       await created.session.start();
       try {
         const skills = await created.services.skills();
         if (!disposed) {
-          setSlashCandidates(buildSlashCandidates(MVP_COMMANDS, created.services.pluginCommands(), skills));
+          setSlashCandidates(buildSlashCandidates(BUILTIN_SLASH_CANDIDATES, created.services.pluginCommands(), skills));
         }
       } catch {
         // Invalid skill files are reported by runtime diagnostics; static candidates remain usable.
@@ -191,6 +194,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   const slashCompletion = dismissedSlashInput === input || transcript.active !== undefined || approval !== undefined
     ? null
     : derivedSlashCompletion;
+  const completedTokenLength = completedSlashTokenLength(input, slashCandidates, slashCompletion !== null);
 
   useInput((character, key) => {
     const terminalAction = classifyTerminalInput(key);
@@ -291,6 +295,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     columns={columns}
     rows={rows}
     activeSession={transcript.active !== undefined}
+    completedSlashTokenLength={completedTokenLength}
     scrollRef={scrollRef}
     {...(slashCompletion === null ? {} : { completion: slashCompletion })}
     {...(approval === undefined ? {} : { approval })}
@@ -323,6 +328,7 @@ export interface TerminalLayoutProps {
   columns: number;
   rows?: number;
   activeSession: boolean;
+  completedSlashTokenLength?: number;
   completion?: SlashCompletion;
   approval?: { tool: string; reason?: string };
   scrollRef?: React.Ref<ScrollBoxHandle>;
@@ -330,7 +336,7 @@ export interface TerminalLayoutProps {
 
 export function TerminalLayout({
   model, workspaceName, completed, active, input, promptCursor, columns, rows = 24, activeSession, approval,
-  completion, scrollRef,
+  completion, completedSlashTokenLength: tokenLength = 0, scrollRef,
 }: TerminalLayoutProps): React.JSX.Element {
   const dividerWidth = Math.max(1, columns - 1);
   const menuRows = completion === undefined ? 0 : Math.min(6, completion.items.length - completion.windowStart);
@@ -353,7 +359,13 @@ export function TerminalLayout({
       </Box>}
       {completion === undefined ? null : <SlashMenu completion={completion} />}
       <Text dimColor>{"─".repeat(dividerWidth)}</Text>
-      <PromptLine input={input} cursor={promptCursor} columns={columns} maxVisibleLines={promptMaxLines} />
+      <PromptLine
+        input={input}
+        cursor={promptCursor}
+        columns={columns}
+        maxVisibleLines={promptMaxLines}
+        completedSlashTokenLength={tokenLength}
+      />
       <Text dimColor wrap="truncate-end">{activeSession
         ? "Ctrl+C cancel · Ctrl+C again exit"
         : completion === undefined
@@ -372,7 +384,6 @@ function SlashMenu({ completion }: { completion: SlashCompletion }): React.JSX.E
       return <Text key={`${candidate.kind}:${candidate.name}`} {...presentation.rowStyle} wrap="truncate-end">
         {presentation.marker}
         <HighlightedName name={candidate.name} query={completion.query} matchStyle={presentation.matchStyle} />
-        <Text dimColor>{`  ${candidate.kind}`}</Text>
         {candidate.description === undefined ? null : <Text dimColor>{`  ${candidate.description}`}</Text>}
       </Text>;
     })}
@@ -437,11 +448,13 @@ function PromptLine({
   cursor,
   columns,
   maxVisibleLines,
+  completedSlashTokenLength: tokenLength = 0,
 }: {
   input: string;
   cursor: number;
   columns: number;
   maxVisibleLines?: number;
+  completedSlashTokenLength?: number;
 }): React.JSX.Element {
   const wrap = wrapPromptInput(input, cursor, { columns, indent: 2 });
   const visibleCount = Math.max(1, maxVisibleLines ?? wrap.lines.length);
@@ -450,21 +463,48 @@ function PromptLine({
     Math.max(0, wrap.lines.length - visibleCount),
   );
   const visibleLines = wrap.lines.slice(windowStart, windowStart + visibleCount);
+  const lineStarts: number[] = [];
+  let nextLineStart = 0;
+  for (const line of wrap.lines) {
+    lineStarts.push(nextLineStart);
+    nextLineStart += [...line].length;
+  }
   return <Box width="100%" flexDirection="column">
     {visibleLines.map((line, visibleIndex) => {
       const lineIndex = windowStart + visibleIndex;
       const isCursorLine = lineIndex === wrap.cursor.line;
       const points = [...line];
       const cursorCol = wrap.cursor.column;
-      const before = points.slice(0, cursorCol).join("");
-      const at = points[cursorCol] ?? "";
-      const after = points.slice(cursorCol + 1).join("");
+      const styledCount = Math.max(0, Math.min(points.length, tokenLength - (lineStarts[lineIndex] ?? 0)));
       return <Box key={lineIndex}>
         <Text color="yellow" bold>{lineIndex === 0 ? "❯ " : "  "}</Text>
-        <Text>{before}{isCursorLine ? <Text inverse>{at || " "}</Text> : null}{after}</Text>
+        <PromptLineContent points={points} cursor={cursorCol} cursorVisible={isCursorLine} styledCount={styledCount} />
       </Box>;
     })}
   </Box>;
+}
+
+function PromptLineContent({
+  points, cursor, cursorVisible, styledCount,
+}: {
+  points: string[];
+  cursor: number;
+  cursorVisible: boolean;
+  styledCount: number;
+}): React.JSX.Element {
+  const tokenStyle = completedSlashTokenPresentation();
+  return <Text>
+    {points.map((point, index) => {
+      const styled = index < styledCount;
+      const caret = cursorVisible && index === cursor;
+      return <Text
+        key={index}
+        {...(styled ? tokenStyle : {})}
+        {...(caret ? { inverse: true } : {})}
+      >{point}</Text>;
+    })}
+    {cursorVisible && cursor >= points.length ? <Text inverse>{" "}</Text> : null}
+  </Text>;
 }
 
 export interface PromptEditState { text: string; cursor: number }

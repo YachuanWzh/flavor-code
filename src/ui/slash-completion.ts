@@ -29,12 +29,14 @@ export function slashCandidatePresentation(selected: boolean): SlashCandidatePre
 }
 
 export function buildSlashCandidates(
-  commands: readonly string[],
+  commands: readonly { name: string; description: string }[],
   plugins: readonly string[],
   skills: readonly { name: string; description: string; source: string }[],
 ): SlashCandidate[] {
   const candidates = new Map<string, SlashCandidate>();
-  for (const name of commands) candidates.set(name, { name, kind: "command" });
+  for (const command of commands) {
+    candidates.set(command.name, { name: command.name, kind: "command", description: command.description });
+  }
   for (const name of plugins) {
     if (!candidates.has(name)) candidates.set(name, { name, kind: "plugin" });
   }
@@ -49,6 +51,24 @@ export function buildSlashCandidates(
     }
   }
   return [...candidates.values()];
+}
+
+export function completedSlashTokenLength(
+  input: string,
+  candidates: readonly SlashCandidate[],
+  menuOpen: boolean,
+): number {
+  if (menuOpen) return 0;
+  const points = [...input];
+  if (points[0] !== "/") return 0;
+  const whitespace = points.findIndex((point) => /\s/u.test(point));
+  const tokenEnd = whitespace < 0 ? points.length : whitespace;
+  const name = points.slice(1, tokenEnd).join("");
+  return candidates.some((candidate) => candidate.name === name) ? tokenEnd : 0;
+}
+
+export function completedSlashTokenPresentation(): { color: "rgb(120,155,255)"; bold: true } {
+  return { color: "rgb(120,155,255)", bold: true };
 }
 
 export function deriveSlashCompletion(

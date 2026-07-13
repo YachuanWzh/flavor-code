@@ -38,10 +38,10 @@ describe("TerminalLayout", () => {
     const output = raw.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
 
     expect(output).toContain("deploy");
-    expect(output).toContain("command");
     expect(output).toContain("frontend-design");
-    expect(output).toContain("skill");
     expect(output).toContain("Design interfaces");
+    expect(output).not.toContain("  command");
+    expect(output).not.toContain("  skill");
     expect(output).toContain("↑/↓ select · Tab complete · Esc close");
     expect(output).toContain("› frontend-design");
   });

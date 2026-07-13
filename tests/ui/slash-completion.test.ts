@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildSlashCandidates,
+  completedSlashTokenLength,
+  completedSlashTokenPresentation,
   completeSlashSelection,
   deriveSlashCompletion,
   matchRanges,
@@ -11,7 +13,10 @@ import {
 
 describe("slash completion", () => {
   const candidates = buildSlashCandidates(
-    ["deploy", "help"],
+    [
+      { name: "deploy", description: "Deploy the current project" },
+      { name: "help", description: "Show available commands" },
+    ],
     ["deploy", "doctor"],
     [{ name: "frontend-design", description: "Design interfaces", source: "project" }],
   );
@@ -23,6 +28,7 @@ describe("slash completion", () => {
       ["doctor", "plugin"],
       ["frontend-design", "skill"],
     ]);
+    expect(candidates[0]?.description).toBe("Deploy the current project");
   });
 
   it("activates only inside the leading slash token and ranks prefixes first", () => {
@@ -50,5 +56,13 @@ describe("slash completion", () => {
       matchStyle: { color: "ansi:cyan", bold: true },
     });
     expect(slashCandidatePresentation(false).marker).toBe("  ");
+  });
+
+  it("styles only an exact completed slash token after the menu closes", () => {
+    expect(completedSlashTokenLength("/deploy ", candidates, false)).toBe(7);
+    expect(completedSlashTokenLength("/deploy production --clear", candidates, false)).toBe(7);
+    expect(completedSlashTokenLength("/de", candidates, true)).toBe(0);
+    expect(completedSlashTokenLength("/unknown value", candidates, false)).toBe(0);
+    expect(completedSlashTokenPresentation()).toEqual({ color: "rgb(120,155,255)", bold: true });
   });
 });

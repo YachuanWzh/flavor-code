@@ -3,6 +3,21 @@ export const MVP_COMMANDS = [
   "tasks", "compact", "clear", "help", "exit",
 ] as const;
 
+export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string> = {
+  model: "Switch the active model",
+  init: "Initialize Flavor project files",
+  config: "Show the resolved configuration",
+  permissions: "Change the tool permission mode",
+  skills: "List discovered skills",
+  plugins: "List loaded plugins",
+  hooks: "Show plugin hook status",
+  tasks: "Show task planning status",
+  compact: "Compact the conversation context",
+  clear: "Clear the transcript",
+  help: "Show available commands",
+  exit: "Exit Flavor",
+};
+
 export type PermissionCommandMode = "safe" | "workspace" | "full";
 export type ModelRole = "main" | "subagent";
 
