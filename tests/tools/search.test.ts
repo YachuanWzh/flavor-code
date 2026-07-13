@@ -115,7 +115,7 @@ describe("search tools", () => {
   it("rejects unsupported Node file types instead of silently disabling the filter", async () => {
     const root = fixture();
     await expect(createGrepTool(root, { forceNode: true }).execute(
-      { pattern: "needle", type: "definitely-unknown" }, new AbortController().signal,
+      { pattern: "needle", fileType: "definitely-unknown" }, new AbortController().signal,
     )).rejects.toThrow(/unsupported file type/i);
   });
 
