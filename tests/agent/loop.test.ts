@@ -73,6 +73,48 @@ describe("AgentLoop", () => {
     }));
     expect(requests[1]?.messages).toContainEqual(expect.objectContaining({ role: "tool", toolCallId: "call-1" }));
     expect(requests[1]?.messages.find((message) => message.role === "tool")?.content).toContain("\"value\":\"hi\"");
+    expect(fixture.context.lastRecordedInputTokens).toBe(12);
+  });
+
+  it("reactively compacts and retries the same model iteration once after context overflow", async () => {
+    const requests: ModelRequest[] = [];
+    const fixture = createLoop({
+      adapter: fakeAdapter([
+        [{ type: "error", error: { code: "context_overflow", message: "prompt too long" } }],
+        [
+          { type: "text", text: "recovered" },
+          { type: "done", usage: { inputTokens: 8, outputTokens: 2 } },
+        ],
+      ], requests),
+      recentTurns: 0,
+    });
+    fixture.context.append({ role: "user", content: "older work" });
+    fixture.context.append({ role: "assistant", content: "older result" });
+
+    const events = await collect(fixture.loop.run({ prompt: "continue exactly once" }));
+
+    expect(requests).toHaveLength(2);
+    expect(requests.flatMap((request) => request.messages).filter((message) => message.content === "continue exactly once")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "compacted")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "text").map((event) => event.text)).toEqual(["recovered"]);
+    expect(events.at(-1)?.type).toBe("done");
+  });
+
+  it("returns a second context overflow instead of retrying forever", async () => {
+    const requests: ModelRequest[] = [];
+    const fixture = createLoop({
+      adapter: fakeAdapter([
+        [{ type: "error", error: { code: "context_overflow", message: "first overflow" } }],
+        [{ type: "error", error: { code: "context_overflow", message: "second overflow" } }],
+      ], requests),
+      recentTurns: 0,
+    });
+
+    const events = await collect(fixture.loop.run({ prompt: "long task" }));
+
+    expect(requests).toHaveLength(2);
+    expect(events.filter((event) => event.type === "compacted")).toHaveLength(1);
+    expect(events.at(-1)).toEqual({ type: "error", error: { code: "context_overflow", message: "second overflow" } });
   });
 
   it("stops with a typed error at the iteration limit", async () => {
@@ -213,6 +255,7 @@ function createLoop(options: {
   adapter: ModelAdapter;
   execute?: (input: { value: string }, signal: AbortSignal) => Promise<unknown>;
   maxIterations?: number;
+  recentTurns?: number;
 }) {
   const hooks = new HookBus();
   const tool = {
@@ -233,6 +276,7 @@ function createLoop(options: {
     system: "system",
     compactAtChars: 100_000,
     toolOutputChars: 1_000,
+    ...(options.recentTurns === undefined ? {} : { recentTurns: options.recentTurns }),
     summarize: async () => "summary",
     hooks,
   });

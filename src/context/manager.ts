@@ -169,6 +169,7 @@ export class ContextManager {
       if (compacted) this.#consecutiveAutoCompactFailures = 0;
       return changed || compacted;
     } catch {
+      signal.throwIfAborted();
       this.#consecutiveAutoCompactFailures += 1;
       return changed;
     }

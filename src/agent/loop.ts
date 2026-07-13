@@ -114,93 +114,114 @@ export class AgentLoop {
       }
 
       try {
-        if (await this.#options.context.compact(request.signal)) yield { type: "compacted" };
+        if (await this.#options.context.prepareForModelCall(request.signal)) yield { type: "compacted" };
       } catch (error) {
         yield { type: "error", error: normalizeProviderError(error) };
-        return;
-      }
-
-      let resolved: ReturnType<ModelRegistry["get"]>;
-      try { resolved = this.#options.registry.get(this.#options.modelId); }
-      catch (error) {
-        yield { type: "error", error: normalizeProviderError(error) };
-        return;
-      }
-      const { adapter, model } = resolved;
-      const modelRequest = {
-        model,
-        messages: [
-          ...this.#options.context.messagesForModel(),
-          ...(request.additionalContext ? [{ role: "system" as const, content: request.additionalContext }] : []),
-        ],
-        tools: [...this.#options.tools],
-        ...(request.signal === undefined ? {} : { signal: request.signal }),
-      };
-      let before;
-      try {
-        before = await this.#options.hooks.emit({
-          version: 1,
-          type: "BeforeModelCall",
-          payload: { modelId: this.#options.modelId, iteration, messageCount: modelRequest.messages.length },
-        });
-      } catch (error) {
-        yield { type: "error", error: normalizeProviderError(error) };
-        return;
-      }
-      if (before.decision === "deny") {
-        yield { type: "error", error: { code: "cancelled", message: before.reason ?? "Model call denied by hook" } };
         return;
       }
 
       let assistantText = "";
       const toolCalls: Array<{ id: string; name: string; input: unknown }> = [];
       let completed = false;
-      let terminalError: ReturnType<typeof normalizeProviderError> | undefined;
-      let usage: { inputTokens: number; outputTokens: number } | undefined;
-      try {
-        for await (const event of adapter.stream(modelRequest)) {
-          if (event.type === "text") {
-            assistantText += event.text;
-            yield event;
-          } else if (event.type === "tool-call") {
-            toolCalls.push(event);
-          } else if (event.type === "usage") {
-            usage = { inputTokens: event.inputTokens, outputTokens: event.outputTokens };
-          } else if (event.type === "error") {
-            terminalError = event.error;
-            break;
-          } else {
-            completed = true;
-            usage = event.usage;
-            break;
-          }
+      let reactiveRetried = false;
+      while (true) {
+        let resolved: ReturnType<ModelRegistry["get"]>;
+        try { resolved = this.#options.registry.get(this.#options.modelId); }
+        catch (error) {
+          yield { type: "error", error: normalizeProviderError(error) };
+          return;
         }
-      } catch (error) {
-        terminalError = normalizeProviderError(error);
-      } finally {
+        const { adapter, model } = resolved;
+        const modelRequest = {
+          model,
+          messages: [
+            ...this.#options.context.messagesForModel(),
+            ...(request.additionalContext ? [{ role: "system" as const, content: request.additionalContext }] : []),
+          ],
+          tools: [...this.#options.tools],
+          ...(request.signal === undefined ? {} : { signal: request.signal }),
+        };
+        let before;
         try {
-          await this.#options.hooks.emit({
+          before = await this.#options.hooks.emit({
             version: 1,
-            type: "AfterModelCall",
-            payload: { modelId: this.#options.modelId, iteration, completed, providerError: terminalError !== undefined },
+            type: "BeforeModelCall",
+            payload: { modelId: this.#options.modelId, iteration, messageCount: modelRequest.messages.length },
           });
         } catch (error) {
-          terminalError ??= normalizeProviderError(error);
+          yield { type: "error", error: normalizeProviderError(error) };
+          return;
         }
-      }
+        if (before.decision === "deny") {
+          yield { type: "error", error: { code: "cancelled", message: before.reason ?? "Model call denied by hook" } };
+          return;
+        }
 
-      if (usage !== undefined) {
-        totalInputTokens += usage.inputTokens;
-        totalOutputTokens += usage.outputTokens;
-        yield { type: "usage", ...usage, totalInputTokens, totalOutputTokens };
-      }
-      if (terminalError !== undefined) {
-        yield { type: "error", error: terminalError };
-        return;
-      }
-      if (!completed) {
-        yield { type: "error", error: { code: "incomplete_stream", message: "Provider stream ended without a done or error event" } };
-        return;
+        assistantText = "";
+        toolCalls.length = 0;
+        completed = false;
+        let terminalError: ReturnType<typeof normalizeProviderError> | undefined;
+        let usage: { inputTokens: number; outputTokens: number } | undefined;
+        try {
+          for await (const event of adapter.stream(modelRequest)) {
+            if (event.type === "text") {
+              assistantText += event.text;
+              yield event;
+            } else if (event.type === "tool-call") {
+              toolCalls.push(event);
+            } else if (event.type === "usage") {
+              usage = { inputTokens: event.inputTokens, outputTokens: event.outputTokens };
+            } else if (event.type === "error") {
+              terminalError = event.error;
+              break;
+            } else {
+              completed = true;
+              usage = event.usage;
+              break;
+            }
+          }
+        } catch (error) {
+          terminalError = normalizeProviderError(error);
+        } finally {
+          try {
+            await this.#options.hooks.emit({
+              version: 1,
+              type: "AfterModelCall",
+              payload: { modelId: this.#options.modelId, iteration, completed, providerError: terminalError !== undefined },
+            });
+          } catch (error) {
+            terminalError ??= normalizeProviderError(error);
+          }
+        }
+
+        if (usage !== undefined) {
+          this.#options.context.recordModelUsage(usage.inputTokens);
+          totalInputTokens += usage.inputTokens;
+          totalOutputTokens += usage.outputTokens;
+          yield { type: "usage", ...usage, totalInputTokens, totalOutputTokens };
+        }
+        if (terminalError?.code === "context_overflow" && !reactiveRetried) {
+          let compacted = false;
+          try { compacted = await this.#options.context.compact(request.signal, "reactive"); }
+          catch (error) {
+            yield { type: "error", error: normalizeProviderError(error) };
+            return;
+          }
+          if (compacted) {
+            reactiveRetried = true;
+            yield { type: "compacted" };
+            continue;
+          }
+        }
+        if (terminalError !== undefined) {
+          yield { type: "error", error: terminalError };
+          return;
+        }
+        if (!completed) {
+          yield { type: "error", error: { code: "incomplete_stream", message: "Provider stream ended without a done or error event" } };
+          return;
+        }
+        break;
       }
 
       if (toolCalls.length === 0 && assistantText) {
