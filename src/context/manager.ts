@@ -163,21 +163,32 @@ export class ContextManager {
     const originalMessages = this.#messages;
     const originalRecordedUsage = this.#lastRecordedInputTokens;
     const originalEstimatedUsage = this.#estimatedTokensAtLastRecordedUsage;
+    const rollbackMicrocompact = () => {
+      this.#messages = originalMessages;
+      this.#lastRecordedInputTokens = originalRecordedUsage;
+      this.#estimatedTokensAtLastRecordedUsage = originalEstimatedUsage;
+    };
     const microcompact = microcompactMessages(this.#messages, this.#compaction.microcompactKeepRecentToolResults);
     if (microcompact.changed) {
       this.#messages = microcompact.messages;
       this.#lastRecordedInputTokens = undefined;
       this.#estimatedTokensAtLastRecordedUsage = undefined;
     }
-    if (!this.needsCompaction() || this.#consecutiveAutoCompactFailures >= 3) return microcompact.changed;
+    if (!this.needsCompaction()) return microcompact.changed;
+    if (this.#consecutiveAutoCompactFailures >= 3) {
+      rollbackMicrocompact();
+      return false;
+    }
     try {
       const compacted = await this.#compactConversation(signal);
-      if (compacted) this.#consecutiveAutoCompactFailures = 0;
-      return microcompact.changed || compacted;
+      if (compacted) {
+        this.#consecutiveAutoCompactFailures = 0;
+        return true;
+      }
+      rollbackMicrocompact();
+      return false;
     } catch {
-      this.#messages = originalMessages;
-      this.#lastRecordedInputTokens = originalRecordedUsage;
-      this.#estimatedTokensAtLastRecordedUsage = originalEstimatedUsage;
+      rollbackMicrocompact();
       signal.throwIfAborted();
       this.#consecutiveAutoCompactFailures += 1;
       return false;

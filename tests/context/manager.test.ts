@@ -150,7 +150,7 @@ describe("ContextManager", () => {
   it("microcompacts old tool results before paying for a full summary", async () => {
     let summaries = 0;
     const context = createContext({
-      compactAtChars: 500,
+      compactAtChars: 700,
       toolOutputChars: 1_000,
       summarize: async () => { summaries += 1; return "not needed"; },
       compaction: {
@@ -176,6 +176,27 @@ describe("ContextManager", () => {
       recentTurns: 0,
       compaction: { microcompactKeepRecentToolResults: 1 },
       summarize: async () => { throw new Error("summary failed"); },
+    });
+    context.append({ role: "assistant", content: "", toolCalls: [{ id: "old", name: "Read", input: {} }] });
+    context.append({ role: "tool", content: "x".repeat(400), toolCallId: "old" });
+    context.append({ role: "assistant", content: "", toolCalls: [{ id: "new", name: "Shell", input: {} }] });
+    context.append({ role: "tool", content: "y".repeat(400), toolCallId: "new" });
+    const before = context.messagesForModel();
+
+    await expect(context.prepareForModelCall()).resolves.toBe(false);
+
+    expect(context.messagesForModel()).toEqual(before);
+  });
+
+  it("rolls back staged microcompaction when PreCompact denies full compaction", async () => {
+    const hooks = new HookBus();
+    hooks.on("PreCompact", () => ({ decision: "deny", reason: "keep history" }));
+    const context = createContext({
+      hooks,
+      compactAtChars: 1,
+      toolOutputChars: 1_000,
+      recentTurns: 0,
+      compaction: { microcompactKeepRecentToolResults: 1 },
     });
     context.append({ role: "assistant", content: "", toolCalls: [{ id: "old", name: "Read", input: {} }] });
     context.append({ role: "tool", content: "x".repeat(400), toolCallId: "old" });
