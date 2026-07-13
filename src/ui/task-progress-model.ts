@@ -57,5 +57,5 @@ export function statusPresentation(
 }
 
 function withoutGlyph(text: string): string {
-  return text.replace(/^[✓×✦└·›]\s*/u, "");
+  return text.replace(/^[✓×○·]\s*/u, "");
 }

@@ -45,9 +45,9 @@ describe("transcriptReducer", () => {
     state = transcriptReducer(state, { type: "session", event: { type: "tool-start", id: "1", name: "Read", input: {} } });
     state = transcriptReducer(state, { type: "session", event: { type: "tool-end", id: "1", name: "Read", result: { ok: true, output: "ok" } } });
 
-    expect(state.active?.statusLines).toEqual(["✦ Read · done"]);
+    expect(state.active?.statusLines).toEqual(["✓ Read"]);
     expect(state.active?.blocks).toEqual([
-      { kind: "status", id: "tool:1", state: "completed", text: "✦ Read · done" },
+      { kind: "status", id: "tool:1", state: "completed", text: "✓ Read" },
     ]);
   });
 
@@ -59,7 +59,7 @@ describe("transcriptReducer", () => {
       result: { ok: false, error: { code: "cancelled", message: "stop" } },
     } });
     expect(state.active?.blocks).toEqual([
-      { kind: "status", id: "tool:1", state: "cancelled", text: "× Shell · cancelled" },
+      { kind: "status", id: "tool:1", state: "cancelled", text: "× Shell" },
     ]);
   });
 
@@ -208,7 +208,7 @@ describe("transcriptReducer", () => {
 
     expect(state.active?.blocks).toEqual([
       { kind: "text", text: "before" },
-      { kind: "status", id: "tool:1", state: "running", text: "└ Read · running" },
+      { kind: "status", id: "tool:1", state: "running", text: "○ Read" },
       { kind: "text", text: "after" },
     ]);
   });

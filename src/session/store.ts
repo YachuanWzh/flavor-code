@@ -73,7 +73,7 @@ export class SessionStore {
     await this.#assertWorkspace(document.workspace.path);
     await this.#prepareDirectory();
     const target = this.#path(document.sessionId);
-    const body = `${JSON.stringify(document, null, 2)}\n`;
+    const body = `${JSON.stringify(document)}\n`;
     if (Buffer.byteLength(body) > this.#maxBytes) throw new Error(`Session exceeds maximum size of ${this.#maxBytes} bytes`);
     const temporary = join(this.#sessions, `.${document.sessionId}.${process.pid}.${randomUUID()}.tmp`);
     let handle;
@@ -117,10 +117,10 @@ export class SessionStore {
   async list(): Promise<SessionEntry[]> {
     try { await this.#assertSafeExistingDirectory(); }
     catch (error) { if (isCode(error, "ENOENT")) return []; throw error; }
-    const names = (await readdir(this.#sessions)).filter((name) => name.endsWith(".json")).sort();
+    const names = (await readdir(this.#sessions)).filter((name) => name.endsWith(".jsonl")).sort();
     const entries: SessionEntry[] = [];
     for (const name of names) {
-      const id = name.slice(0, -5);
+      const id = name.slice(0, -6);
       if (!SessionIdSchema.safeParse(id).success) continue;
       try {
         const document = await this.load(id);
@@ -134,7 +134,7 @@ export class SessionStore {
 
   #path(sessionId: string): string {
     SessionIdSchema.parse(sessionId);
-    const path = resolve(this.#sessions, `${sessionId}.json`);
+    const path = resolve(this.#sessions, `${sessionId}.jsonl`);
     if (!isWithin(this.#sessions, path)) throw new Error("Invalid session id");
     return path;
   }

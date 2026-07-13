@@ -65,12 +65,19 @@ async function executeShell(
   const stderr = new BoundedOutput(maxBytes);
   return new Promise((resolvePromise, reject) => {
     if (cancellation.aborted) { reject(cancellation.reason); return; }
-    const command = process.platform === "win32" && !input.command.includes(".")
-      ? `${input.command}.cmd`
-      : input.command;
-    const child = spawn(command, input.args, {
+    // On Windows, .cmd/.bat files cannot be spawned directly by CreateProcess
+    // (they are batch scripts, not executables). shell:true runs via cmd.exe
+    // which resolves PATHEXT automatically — no .cmd suffix needed.
+    // On Node ≥24, passing an args array with shell:true is deprecated; we
+    // build a single command-line string with shell-safe quoting.
+    const quoteArg = (s: string) => s.includes(" ") ? `"${s.replace(/"/g, '""')}"` : s;
+    const quoted = input.args.map(quoteArg).join(" ");
+    const commandLine = quoted.length > 0
+      ? `${quoteArg(input.command)} ${quoted}`
+      : quoteArg(input.command);
+    const child = spawn(commandLine, {
       cwd,
-      shell: false,
+      shell: true,
       windowsHide: true,
       detached: process.platform !== "win32",
     });

@@ -10,6 +10,7 @@ import {
   type Key,
   type ScrollBoxHandle,
 } from "../claude-ink/index.js";
+import { useAnimationFrame } from "../claude-ink/hooks/use-animation-frame.js";
 
 import { createProductionRuntime, type ProductionRuntime } from "../production.js";
 import { AssistantText } from "./assistant-text.js";
@@ -18,6 +19,7 @@ import { createSessionInterruptHandler, installSigintHandler } from "./signals.j
 import {
   createTranscriptState,
   transcriptReducer,
+  type TranscriptBlock,
   type TranscriptTurn,
 } from "./transcript.js";
 import { wrapPromptInput } from "./wrap-prompt.js";
@@ -347,16 +349,24 @@ export function TerminalLayout({
   return <Box flexGrow={1} width="100%" flexDirection="column" overflow="hidden">
     <ScrollBox {...(scrollRef === undefined ? {} : { ref: scrollRef })} flexGrow={1} flexDirection="column" stickyScroll>
       <Text dimColor>flavor · {model} · {workspaceName}</Text>
-      {completed.map((turn) => (
-        <TurnView key={turn.id} turn={turn} interactive={false} />
+      {completed.map((turn, index) => (
+        <Box key={turn.id} flexDirection="column">
+          {index > 0 ? <TurnSeparator width={columns} /> : null}
+          <TurnView turn={turn} interactive={false} />
+        </Box>
       ))}
-      {active === undefined ? null : <TurnView turn={active} interactive={activeSession} />}
+      {active === undefined ? null : (
+        <Box flexDirection="column">
+          {completed.length > 0 ? <TurnSeparator width={columns} /> : null}
+          <TurnView turn={active} interactive={activeSession} />
+        </Box>
+      )}
     </ScrollBox>
     <Box flexDirection="column" flexShrink={0} maxHeight={bottomMaxRows} width="100%" overflowY="hidden">
-      {approval === undefined ? null : <Box flexDirection="column">
-        <Text color="magenta">┌ approval · {approval.tool}</Text>
-        <Text wrap="truncate-end">{approval.reason ?? "This action needs permission."}</Text>
-        <Text bold>Allow? y=once / a=same-type / n=deny</Text>
+      {approval === undefined ? null : <Box flexDirection="column" marginBottom={1}>
+        <Text color="magenta">┌─ approval · {approval.tool}</Text>
+        <Text wrap="truncate-end" color="magentaBright">│ {approval.reason ?? "This action needs permission."}</Text>
+        <Text bold color="magenta">└─ Allow? <Text color="green">y</Text>=once / <Text color="yellow">a</Text>=same-type / <Text color="red">n</Text>=deny</Text>
       </Box>}
       {completion === undefined ? null : <SlashMenu completion={completion} />}
       <Text dimColor>{"─".repeat(dividerWidth)}</Text>
@@ -433,14 +443,39 @@ function scrollUp(scroll: ScrollBoxHandle, amount: number): void {
   else scroll.scrollBy(-amount);
 }
 
+function TurnSeparator({ width }: { width: number }): React.JSX.Element {
+  return <Text dimColor>{"─".repeat(Math.max(1, width - 1))}</Text>;
+}
+
 function TurnView({ turn, interactive }: { turn: TranscriptTurn; interactive: boolean }): React.JSX.Element {
   return <Box flexDirection="column" marginBottom={1}>
-    <Text><Text color="yellow" bold>❯ </Text>{turn.prompt}</Text>
-    {turn.blocks.map((block, index) => block.kind === "status"
-      ? block.task === undefined
-        ? <Text key={block.id} dimColor>{block.text}</Text>
-        : <TaskStatusLine key={block.id} block={block} interactive={interactive} />
-      : <AssistantText key={`${turn.id}-text-${index}`} text={block.text} />)}
+    {/* User prompt: left-aligned with yellow chevron */}
+    <Box flexDirection="row">
+      <Text color="yellow" bold>❯ </Text>
+      <Text bold>{turn.prompt}</Text>
+    </Box>
+    {/* Model output: indented to create clear visual hierarchy */}
+    <Box flexDirection="column" paddingLeft={2}>
+      {turn.blocks.map((block, index) => block.kind === "status"
+        ? block.task === undefined
+          ? <StatusLine key={block.id} block={block} interactive={interactive} />
+          : <TaskStatusLine key={block.id} block={block} interactive={interactive} />
+        : <AssistantText key={`${turn.id}-text-${index}`} text={block.text} />)}
+    </Box>
+  </Box>;
+}
+
+function StatusLine({ block, interactive }: { block: Extract<TranscriptBlock, { kind: "status" }>; interactive: boolean }): React.JSX.Element {
+  const running = block.state === "running";
+  const [ref, time] = useAnimationFrame(running && interactive ? 120 : null);
+  const color = running ? "yellow"
+    : block.state === "completed" ? "green"
+    : block.state === "failed" || block.state === "cancelled" ? "red"
+    : undefined;
+  const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  const spinner = running && interactive ? frames[Math.floor(Math.max(0, time) / 120) % frames.length] + " " : "";
+  return <Box ref={ref} flexDirection="row">
+    <Text {...(color === undefined ? { dimColor: true } : { color })}>{spinner}{block.text}</Text>
   </Box>;
 }
 

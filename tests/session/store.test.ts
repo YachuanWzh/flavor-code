@@ -73,9 +73,9 @@ describe("SessionStore", () => {
     await store.save(older);
 
     const entries = await readdir(join(root, ".flavor", "sessions"));
-    expect(entries).toEqual(expect.arrayContaining(["session-20260712.json", "older.json"]));
+    expect(entries).toEqual(expect.arrayContaining(["session-20260712.jsonl", "older.jsonl"]));
     expect(entries.every((entry) => !entry.includes(".tmp"))).toBe(true);
-    const stored = await readFile(join(root, ".flavor", "sessions", "session-20260712.json"), "utf8");
+    const stored = await readFile(join(root, ".flavor", "sessions", "session-20260712.jsonl"), "utf8");
     expect(stored).not.toMatch(/apiKey|authorization|sk-secret|hidden-token/i);
     expect(await store.list()).toEqual([
       expect.objectContaining({ sessionId: "session-20260712" }),
@@ -88,18 +88,18 @@ describe("SessionStore", () => {
     const root = await workspace();
     const store = new SessionStore({ workspace: root });
     await store.save(document(root));
-    await writeFile(join(root, ".flavor", "sessions", "broken.json"), "{not json", "utf8");
+    await writeFile(join(root, ".flavor", "sessions", "broken.jsonl"), "{not json", "utf8");
 
     await expect(store.load("broken")).rejects.toThrow(/corrupt|quarantined/i);
     await expect(store.load()).resolves.toMatchObject({ sessionId: "session-20260712" });
-    expect((await readdir(join(root, ".flavor", "sessions"))).some((name) => name.startsWith("broken.json.corrupt-"))).toBe(true);
+    expect((await readdir(join(root, ".flavor", "sessions"))).some((name) => name.startsWith("broken.jsonl.corrupt-"))).toBe(true);
   });
 
   it("rejects oversized reads, traversal ids, incompatible versions, workspaces, and symlink session roots", async () => {
     const root = await workspace();
     const store = new SessionStore({ workspace: root, maxBytes: 256 });
     await mkdir(join(root, ".flavor", "sessions"), { recursive: true });
-    await writeFile(join(root, ".flavor", "sessions", "huge.json"), "x".repeat(257));
+    await writeFile(join(root, ".flavor", "sessions", "huge.jsonl"), "x".repeat(257));
     await expect(store.load("huge")).rejects.toThrow(/size/i);
     await expect(store.load("../outside")).rejects.toThrow(/session id/i);
 
