@@ -174,6 +174,24 @@ describe("TerminalLayout", () => {
     expect(output).not.toMatch(/\x1B\[\d+;\d+H/);
   });
 
+  it("wraps prompt text within its padded inner width without a phantom row", () => {
+    const output = renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[]}
+      input="abcdefghijklmnopqr"
+      promptCursor={18}
+      columns={20}
+      activeSession={false}
+    />, { columns: 20 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+    const lines = output.split("\n");
+    const firstPromptLine = lines.findIndex((line) => line.includes("❯ abcdefghijklmnop"));
+
+    expect(firstPromptLine).toBeGreaterThanOrEqual(0);
+    expect(lines[firstPromptLine + 1]).toContain("  qr");
+    expect(lines[firstPromptLine + 2]).toContain("Enter send");
+  });
+
   it("animates only the foreground task while parallel subagents stay static", () => {
     const active: TranscriptTurn = {
       id: 1,

@@ -46,6 +46,7 @@ import { redactErrorText } from "../utils/redact.js";
 
 export const HISTORY_CAP = 200;
 const BUILTIN_SLASH_CANDIDATES = MVP_COMMANDS.map((name) => ({ name, description: COMMAND_DESCRIPTIONS[name] }));
+const PROMPT_HORIZONTAL_PADDING = 1;
 
 export type TerminalInputAction =
   | { type: "scroll"; rows: number }
@@ -635,7 +636,11 @@ function PromptLine({
   maxVisibleLines?: number;
   completedSlashTokenLength?: number;
 }): React.JSX.Element {
-  const wrap = wrapPromptInput(input, cursor, { columns, indent: 2 });
+  // The prompt container consumes one column of padding on each side. Feed
+  // only its inner width to the wrapper so Yoga does not wrap the Text a
+  // second time and leave a phantom row between prompt lines.
+  const innerColumns = Math.max(1, columns - PROMPT_HORIZONTAL_PADDING * 2);
+  const wrap = wrapPromptInput(input, cursor, { columns: innerColumns, indent: 2 });
   const visibleCount = Math.max(1, maxVisibleLines ?? wrap.lines.length);
   const windowStart = Math.min(
     Math.max(0, wrap.cursor.line - visibleCount + 1),
@@ -648,7 +653,7 @@ function PromptLine({
     lineStarts.push(nextLineStart);
     nextLineStart += [...line].length;
   }
-  return <Box width="100%" flexDirection="column" paddingX={1}>
+  return <Box width="100%" flexDirection="column" paddingX={PROMPT_HORIZONTAL_PADDING}>
     {visibleLines.map((line, visibleIndex) => {
       const lineIndex = windowStart + visibleIndex;
       const isCursorLine = lineIndex === wrap.cursor.line;
