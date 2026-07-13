@@ -21,7 +21,7 @@ export class AgentLoop {
   readonly #options: Required<Pick<AgentLoopOptions, "maxIterations" | "agent">> & Omit<AgentLoopOptions, "maxIterations" | "agent">;
 
   constructor(options: AgentLoopOptions) {
-    const maxIterations = options.maxIterations ?? 20;
+    const maxIterations = options.maxIterations ?? 40;
     if (maxIterations <= 0 || !Number.isInteger(maxIterations)) throw new Error("maxIterations must be a positive integer");
     this.#options = { ...options, maxIterations, agent: options.agent ?? "main" };
   }
