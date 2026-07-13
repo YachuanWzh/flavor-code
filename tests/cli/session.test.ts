@@ -27,6 +27,7 @@ function services(events: string[], outputs: string[]): SessionServices {
     initialize: async () => ({ path: "/work/FLAVOR.md", created: true }),
     config: () => ({ providers: { openai: { apiKey: "top-secret", token: "also-secret" } } }),
     skills: async () => [], plugins: () => [], hooksStatus: () => [], tasks: () => [], audit: async () => "", cancelActiveTask: async () => {},
+    clearContext: async () => {},
     pluginCommands: () => [], runPluginCommand: async () => undefined,
     output: (event) => outputs.push(event.type === "text" ? event.text : event.type === "notice" ? event.message : event.type),
     questions,

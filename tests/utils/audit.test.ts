@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { AuditLogger } from "../../src/utils/log.js";
 
 describe("AuditLogger end-to-end", () => {
   it("writes structured JSON-lines and supports read-back", async () => {
-    const logger = new AuditLogger(process.cwd());
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-audit-"));
+    const logger = new AuditLogger(workspace);
 
     await logger.append({
       timestamp: new Date().toISOString(),
@@ -63,6 +66,6 @@ describe("AuditLogger end-to-end", () => {
     expect(grepEntry!.errorMessage).toContain("ripgrep");
 
     // Cleanup.
-    await rm(logger.path, { force: true });
+    await rm(workspace, { recursive: true, force: true });
   });
 });

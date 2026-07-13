@@ -126,7 +126,7 @@ describe("ToolRuntime", () => {
     let approvals = 0;
     const runtime = new ToolRuntime({
       tools: [main.tool], hooks: main.hooks, permissions: main.permissions,
-      approve: async () => { approvals += 1; return "once"; },
+      approve: async () => { approvals += 1; return "once" as const; },
     });
     expect((await runtime.execute({ name: "Test", input: { path: join(main.workspace, "x") } }, { agent: "main" })).ok).toBe(true);
     expect(approvals).toBe(1);
@@ -134,7 +134,7 @@ describe("ToolRuntime", () => {
     const sub = fixture("ask");
     const subRuntime = new ToolRuntime({
       tools: [sub.tool], hooks: sub.hooks, permissions: sub.permissions,
-      approve: async () => { approvals += 1; return "once"; },
+      approve: async () => { approvals += 1; return "once" as const; },
     });
     await expect(subRuntime.execute({ name: "Test", input: { path: join(sub.workspace, "x") } }, { agent: "subagent" }))
       .resolves.toMatchObject({ ok: false, error: { code: "approval_required" } });
@@ -161,7 +161,7 @@ describe("ToolRuntime", () => {
     f.hooks.on("PermissionRequest", () => { f.calls.push("request"); return { decision: "allow" }; });
     const runtime = new ToolRuntime({
       tools: [f.tool], hooks: f.hooks, permissions: f.permissions,
-      approve: async () => { f.calls.push("approval"); return "once"; },
+      approve: async () => { f.calls.push("approval"); return "once" as const; },
     });
 
     await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } }, { agent: "main" }))
@@ -180,7 +180,7 @@ describe("ToolRuntime", () => {
       let approvals = 0;
       const runtime = new ToolRuntime({
         tools: [f.tool], hooks: f.hooks, permissions: f.permissions,
-        approve: async () => { approvals += 1; return "once"; },
+        approve: async () => { approvals += 1; return "once" as const; },
       });
 
       await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } }, { agent: "main" }))
@@ -196,7 +196,7 @@ describe("ToolRuntime", () => {
     let approvals = 0;
     const runtime = new ToolRuntime({
       tools: [f.tool], hooks: f.hooks, permissions: f.permissions,
-      approve: async () => { approvals += 1; return "once"; },
+      approve: async () => { approvals += 1; return "once" as const; },
     });
 
     await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } }, { agent: "subagent" }))
@@ -257,7 +257,7 @@ describe("ToolRuntime", () => {
     let approvals = 0;
     const runtime = new ToolRuntime({
       tools: [f.tool], hooks: f.hooks, permissions: f.permissions,
-      approve: async () => { approvals += 1; return "always"; },
+      approve: async () => { approvals += 1; return "always" as const; },
     });
     // First call: approval asked, user says "always"
     await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } }, { agent: "main" }))
@@ -275,7 +275,7 @@ describe("ToolRuntime", () => {
     let approvals = 0;
     const runtime = new ToolRuntime({
       tools: [f.tool], hooks: f.hooks, permissions: f.permissions,
-      approve: async () => { approvals += 1; return "once"; },
+      approve: async () => { approvals += 1; return "once" as const; },
     });
     // First call: approval asked, user says "once"
     await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } }, { agent: "main" }))
