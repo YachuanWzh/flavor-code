@@ -48,4 +48,36 @@ describe("TerminalLayout", () => {
     expect(output).not.toMatch(/\x1B\[\d+;\d+r/);
     expect(output).not.toMatch(/\x1B\[\d+;\d+H/);
   });
+
+  it("animates only the foreground task while parallel subagents stay static", () => {
+    const active: TranscriptTurn = {
+      id: 1,
+      prompt: "implement",
+      assistantText: "",
+      statusLines: [],
+      blocks: [
+        { kind: "status", id: "task:main", state: "running", text: "· Main · in progress",
+          task: { subject: "Main", activeForm: "Implementing feature", role: "main" } },
+        { kind: "status", id: "subagent:a", state: "running", text: "· Worker A · running",
+          task: { subject: "Worker A", activeForm: "Worker A", role: "subagent" } },
+        { kind: "status", id: "subagent:b", state: "running", text: "· Worker B · running",
+          task: { subject: "Worker B", activeForm: "Worker B", role: "subagent" } },
+      ],
+    };
+    const output = renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[]}
+      active={active}
+      input=""
+      promptCursor={0}
+      columns={80}
+      activeSession
+    />, { columns: 80 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(output).toContain("Implementing feature");
+    expect(output).toContain("Worker A");
+    expect(output).toContain("Worker B");
+    expect(output.match(/⠋/gu)).toHaveLength(1);
+  });
 });

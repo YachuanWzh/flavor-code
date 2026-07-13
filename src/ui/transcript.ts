@@ -12,7 +12,13 @@ export interface TranscriptTurn {
 
 export type TranscriptBlock =
   | { kind: "text"; text: string }
-  | { kind: "status"; id: string; state: "running" | "completed" | "failed" | "cancelled" | "info"; text: string };
+  | {
+    kind: "status";
+    id: string;
+    state: "running" | "completed" | "failed" | "cancelled" | "info";
+    text: string;
+    task?: { subject: string; activeForm: string; role: "main" | "subagent" };
+  };
 
 export interface TranscriptState {
   completed: TranscriptTurn[];
@@ -60,10 +66,11 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
   const event = action.event;
   if (event.type === "clear") return createTranscriptState();
   if (event.type === "tasks") {
+    const active = state.active === undefined ? undefined : applyTaskSnapshot(state.active, event.snapshot);
     return {
       ...state,
       taskSnapshot: event.snapshot,
-      ...(state.active === undefined ? {} : { active: { ...state.active, taskSnapshot: event.snapshot } }),
+      ...(active === undefined ? {} : { active }),
     };
   }
   if (event.type === "exit" || state.active === undefined) return state;
@@ -95,6 +102,56 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
     kind: "status", id: `compact:${state.active.blocks.length}`, state: "info", text: "· Context compacted.",
   });
   return state;
+}
+
+function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot): TranscriptTurn {
+  const taskBlocks: Array<Extract<TranscriptBlock, { kind: "status" }>> = [];
+  for (const task of snapshot.plan?.tasks ?? []) {
+    const state = task.status === "in_progress" ? "running"
+      : task.status === "completed" ? "completed"
+      : task.status === "cancelled" ? "cancelled"
+      : task.status === "failed" || task.status === "blocked" ? "failed"
+      : "info";
+    const suffix = task.status === "completed" ? "done" : task.status.replace("_", " ");
+    taskBlocks.push({
+      kind: "status",
+      id: `task:${task.id}`,
+      state,
+      text: `${state === "completed" ? "✓" : state === "failed" || state === "cancelled" ? "×" : "·"} ${task.subject} · ${suffix}`,
+      task: { subject: task.subject, activeForm: task.activeForm, role: "main" },
+    });
+  }
+  for (const node of snapshot.subagents.graph?.nodes ?? []) {
+    const status = snapshot.subagents.states[node.id] ?? "pending";
+    const state = status === "running" ? "running"
+      : status === "completed" ? "completed"
+      : status === "failed" || status === "blocked" ? "failed"
+      : "info";
+    taskBlocks.push({
+      kind: "status",
+      id: `subagent:${node.id}`,
+      state,
+      text: `${state === "completed" ? "✓" : state === "failed" ? "×" : "·"} ${node.description} · ${status}`,
+      task: { subject: node.description, activeForm: node.description, role: "subagent" },
+    });
+  }
+
+  const ids = new Set(taskBlocks.map((block) => block.id));
+  const blocks = turn.blocks.filter((block) => block.kind !== "status"
+    || (!block.id.startsWith("task:") && !block.id.startsWith("subagent:"))
+    || ids.has(block.id));
+  for (const block of taskBlocks) {
+    const index = blocks.findIndex((current) => current.kind === "status" && current.id === block.id);
+    if (index < 0) blocks.push(block);
+    else blocks[index] = block;
+  }
+  return {
+    ...turn,
+    taskSnapshot: snapshot,
+    blocks,
+    statusLines: blocks.filter((block): block is Extract<TranscriptBlock, { kind: "status" }> => block.kind === "status")
+      .map((block) => block.text),
+  };
 }
 
 function upsertStatus(state: TranscriptState, block: Extract<TranscriptBlock, { kind: "status" }>): TranscriptState {

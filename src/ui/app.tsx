@@ -21,6 +21,7 @@ import {
   type TranscriptTurn,
 } from "./transcript.js";
 import { wrapPromptInput } from "./wrap-prompt.js";
+import { TaskStatusLine } from "./task-progress.js";
 import { message } from "../utils/error.js";
 import { redactErrorText } from "../utils/redact.js";
 
@@ -261,9 +262,9 @@ export function TerminalLayout({
     <ScrollBox {...(scrollRef === undefined ? {} : { ref: scrollRef })} flexGrow={1} flexDirection="column" stickyScroll>
       <Text dimColor>flavor · {model} · {workspaceName}</Text>
       {completed.map((turn) => (
-        <TurnView key={turn.id} turn={turn} />
+        <TurnView key={turn.id} turn={turn} interactive={false} />
       ))}
-      {active === undefined ? null : <TurnView turn={active} />}
+      {active === undefined ? null : <TurnView turn={active} interactive={activeSession} />}
     </ScrollBox>
     <Box flexDirection="column" flexShrink={0} maxHeight={bottomMaxRows} width="100%" overflowY="hidden">
       {approval === undefined ? null : <Box flexDirection="column">
@@ -300,12 +301,14 @@ function scrollUp(scroll: ScrollBoxHandle, amount: number): void {
   else scroll.scrollBy(-amount);
 }
 
-function TurnView({ turn }: { turn: TranscriptTurn }): React.JSX.Element {
+function TurnView({ turn, interactive }: { turn: TranscriptTurn; interactive: boolean }): React.JSX.Element {
   return <Box flexDirection="column" marginBottom={1}>
     <Text><Text color="yellow" bold>❯ </Text>{turn.prompt}</Text>
     {turn.blocks.map((block, index) => block.kind === "status"
-      ? <Text key={`${turn.id}-block-${index}`} dimColor>{block.text}</Text>
-      : <AssistantText key={`${turn.id}-block-${index}`} text={block.text} />)}
+      ? block.task === undefined
+        ? <Text key={block.id} dimColor>{block.text}</Text>
+        : <TaskStatusLine key={block.id} block={block} interactive={interactive} />
+      : <AssistantText key={`${turn.id}-text-${index}`} text={block.text} />)}
   </Box>;
 }
 

@@ -70,6 +70,37 @@ describe("transcriptReducer", () => {
     expect(state.taskSnapshot).toEqual(completed);
   });
 
+  it("updates planned task rows in place by task id", () => {
+    const planTask = {
+      id: "inspect", subject: "Inspect code", activeForm: "Inspecting code",
+      status: "pending" as const, dependencies: [],
+    };
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "plan" });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "tasks", snapshot: { plan: { tasks: [planTask] }, subagents: { states: {} } },
+    } });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "tasks", snapshot: {
+        plan: { tasks: [{ ...planTask, status: "in_progress" }] },
+        subagents: { states: {} }, foregroundTaskId: "inspect",
+      },
+    } });
+
+    expect(state.active?.blocks).toEqual([expect.objectContaining({
+      kind: "status", id: "task:inspect", state: "running",
+      task: { subject: "Inspect code", activeForm: "Inspecting code", role: "main" },
+    })]);
+
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "tasks", snapshot: {
+        plan: { tasks: [{ ...planTask, status: "completed" }] }, subagents: { states: {} },
+      },
+    } });
+    expect(state.active?.blocks).toEqual([expect.objectContaining({
+      kind: "status", id: "task:inspect", state: "completed", text: "✓ Inspect code · done",
+    })]);
+  });
+
   it("preserves the chronological order of prose and tool status blocks", () => {
     let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "ordered" });
     state = transcriptReducer(state, { type: "session", event: { type: "text", text: "before" } });
