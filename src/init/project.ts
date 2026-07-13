@@ -1,4 +1,4 @@
-import { lstat, readdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, sep } from "node:path";
 
 const GENERATED_START = "<!-- flavor-code:start -->";
@@ -502,7 +502,56 @@ async function assertSafeManagedPath(path: string, root: string): Promise<void> 
   }
 }
 
+async function ensureFlavorDirectories(cwd: string): Promise<void> {
+  const root = await realpath(cwd);
+  const sessionsDir = join(cwd, ".flavor", "sessions");
+  const skillsDir = join(cwd, ".flavor", "skills");
+  await mkdir(sessionsDir, { recursive: true, mode: 0o700 });
+  await mkdir(skillsDir, { recursive: true, mode: 0o700 });
+  // Verify the created directories are safe
+  const canonicalRoot = await realpath(root);
+  for (const dir of [sessionsDir, skillsDir]) {
+    const canonical = await realpath(dir);
+    if (!isContainedPath(canonicalRoot, canonical)) {
+      throw new Error(`Directory escapes the workspace: ${dir}`);
+    }
+  }
+}
+
+async function createExampleFlavorConfig(cwd: string): Promise<void> {
+  const configPath = join(cwd, ".flavor", "flavor.json");
+  const root = await realpath(cwd);
+  await assertSafeManagedPath(configPath, root);
+  try {
+    await lstat(configPath);
+    return; // Already exists, do not overwrite
+  } catch (error) {
+    if (!isMissingPathError(error)) throw error;
+  }
+  const example = {
+    providers: {
+      deepseek: {
+        type: "anthropic",
+        baseURL: "https://api.deepseek.com/anthropic",
+        apiKey: "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        defaultModel: "deepseek-v4-pro",
+        cheapModel: "deepseek-v4-flash",
+      },
+    },
+    agents: {
+      main: { model: "deepseek:deepseek-v4-pro" },
+      subagent: { model: "deepseek:deepseek-v4-flash" },
+    },
+    maxSubagents: 3,
+    permissionMode: "workspace",
+    language: "zh-CN",
+  };
+  await writeFile(configPath, JSON.stringify(example, null, 2) + "\n");
+}
+
 export async function initializeFlavor(cwd: string): Promise<InitResult> {
+  await ensureFlavorDirectories(cwd);
+  await createExampleFlavorConfig(cwd);
   const facts = await inspectProject(cwd);
   const path = join(cwd, "FLAVOR.md");
   const root = await realpath(cwd);

@@ -1,6 +1,6 @@
 export const MVP_COMMANDS = [
   "model", "init", "config", "permissions", "skills", "plugins", "hooks",
-  "tasks", "compact", "clear", "help", "exit",
+  "tasks", "compact", "clear", "help", "exit", "audit",
 ] as const;
 
 export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string> = {
@@ -16,6 +16,7 @@ export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string>
   clear: "Clear the transcript",
   help: "Show available commands",
   exit: "Exit Flavor",
+  audit: "Query tool failure audit log",
 };
 
 export type PermissionCommandMode = "safe" | "workspace" | "full";
@@ -26,7 +27,8 @@ export type SlashCommand =
   | { name: "permissions"; mode: PermissionCommandMode }
   | { name: "plugin"; command: string; args: string[] }
   | { name: "skill"; skill: string; prompt: string }
-  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions"> }
+  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit"> }
+  | { name: "audit"; toolFilter?: string | undefined }
   | { name: "unknown"; input: string; suggestions: string[] }
   | { name: "invalid"; command: string; message: string };
 
@@ -61,6 +63,10 @@ export function parseSlashCommand(
       return { name: "invalid", command: name, message: "Use /permissions <safe|workspace|full>." };
     }
     return { name, mode };
+  }
+  if (name === "audit") {
+    const toolFilter = args.length > 0 ? args.join(" ") : undefined;
+    return { name, toolFilter };
   }
   if (args.length > 0) return { name: "invalid", command: name, message: `/${name} does not accept arguments.` };
   return { name } as SlashCommand;

@@ -35,6 +35,7 @@ import { resolveLanguage, languageInstruction } from "./utils/intl.js";
 import { awaitWithSignal } from "./utils/async.js";
 import { message } from "./utils/error.js";
 import { redactSecrets } from "./utils/redact.js";
+import { AuditLogger } from "./utils/log.js";
 
 export interface ProductionRuntimeOptions {
   workspace?: string;
@@ -98,6 +99,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const loaded = await loadConfig({ cwd: workspace, home, environment });
   const config = loaded.config;
   const sessionStore = new SessionStore({ workspace });
+  const auditLogger = new AuditLogger(workspace);
   const recovered = options.resumeSession === undefined
     ? undefined
     : await sessionStore.load(options.resumeSession === true ? undefined : options.resumeSession);
@@ -306,6 +308,20 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     return { decision: "allow" };
   });
   hooks.on("SessionEnd", async () => { await persist(); return { decision: "allow" }; });
+  hooks.on("PostToolUseFailure", (event) => {
+    const { tool, input, agent, error } = event.payload as Record<string, unknown>;
+    void auditLogger.append({
+      timestamp: new Date().toISOString(),
+      sessionId,
+      event: "PostToolUseFailure",
+      tool: typeof tool === "string" ? tool : undefined,
+      agent: typeof agent === "string" ? agent : undefined,
+      errorCode: typeof error === "object" && error !== null ? (error as Record<string, unknown>).code as string | undefined : undefined,
+      errorMessage: typeof error === "object" && error !== null ? (error as Record<string, unknown>).message as string | undefined : undefined,
+      input,
+    });
+    return { decision: "allow" };
+  });
 
   const services: SessionServices = {
     hooks, workspace,
@@ -329,6 +345,47 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     plugins: () => pluginHost.loadedPlugins,
     hooksStatus: () => HOOK_EVENT_NAMES.map((name) => ({ name, pluginHandlers: pluginHooks.filter((item) => item === name).length })),
     tasks: () => ({ plan: taskPlan, graph: taskGraph, states: taskStates, results: taskResults }),
+    audit: async (toolFilter?: string) => {
+      try {
+        const raw = await readFile(auditLogger.path, "utf8");
+        const lines = raw.trim().split("\n").filter((line) => line.length > 0);
+        const entries = lines.map((line) => {
+          try { return JSON.parse(line) as Record<string, unknown>; }
+          catch { return undefined; }
+        }).filter((entry): entry is Record<string, unknown> => entry !== undefined);
+        const filtered = toolFilter === undefined
+          ? entries
+          : entries.filter((entry) => entry.tool === toolFilter);
+        if (filtered.length === 0) {
+          return toolFilter === undefined
+            ? "No tool failures recorded."
+            : `No failures recorded for tool "${toolFilter}".`;
+        }
+        const header = toolFilter === undefined
+          ? `Audit log (${filtered.length} entries):`
+          : `Audit log for ${toolFilter} (${filtered.length} entries):`;
+        const body = filtered.map((entry) => {
+          const time = (entry.timestamp as string ?? "").replace("T", " ").slice(0, 19);
+          return `  ${time}  ${entry.sessionId}  ${entry.tool ?? "-"}  ${entry.errorCode ?? "-"}: ${entry.errorMessage ?? "-"}`;
+        }).join("\n");
+        // Summarise by tool
+        const byTool = new Map<string, number>();
+        for (const entry of filtered) {
+          const tool = (entry.tool as string) ?? "unknown";
+          byTool.set(tool, (byTool.get(tool) ?? 0) + 1);
+        }
+        const summary = [...byTool.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .map(([tool, count]) => `  ${tool}: ${count}`)
+          .join("\n");
+        return `${header}\n\n${body}\n\nBy tool:\n${summary}`;
+      } catch (error) {
+        if (typeof error === "object" && error !== null && "code" in error && (error as Record<string, unknown>).code === "ENOENT") {
+          return "No audit log exists yet. Tool failures will be recorded here as they occur.";
+        }
+        return `Failed to read audit log: ${message(error)}`;
+      }
+    },
     cancelActiveTask: async () => {
       const active = taskPlan?.tasks.find((task) => task.status === "in_progress");
       if (taskPlan === undefined || active === undefined) return;
@@ -358,6 +415,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       disposed = true;
       await persist();
       await persistTail;
+      auditLogger.close();
       await cleanupProduction(approvals, pluginHost, harness);
     },
   };

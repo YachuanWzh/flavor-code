@@ -41,11 +41,14 @@ export function createReadTool(workspace: string, options: ReadToolOptions = {})
       if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > MAX_READ_BYTES) {
         throw new Error(`maxBytes must be a positive integer no greater than ${MAX_READ_BYTES}`);
       }
-      if (info.size > maxBytes) throw new Error(`File exceeds the ${maxBytes} byte read limit`);
       const contents = await readBounded(path, maxBytes, signal, openFile);
-      if (contents.length > maxBytes) throw new Error(`File exceeds the ${maxBytes} byte read limit`);
       if (isBinary(contents)) throw new Error("Cannot read binary file as text");
-      return contents.toString("utf8");
+      const text = contents.toString("utf8");
+      if (text.length > maxBytes) {
+        const truncated = text.slice(0, maxBytes);
+        return `[Truncated to ${maxBytes} bytes. File is ${info.size} bytes total. Request a higher maxBytes or read a specific range.]\n\n${truncated}`;
+      }
+      return text;
     },
   };
 }
@@ -77,10 +80,19 @@ export function createEditTool(workspace: string): ToolDefinition<z.infer<typeof
       abortIfNeeded(signal);
       const path = await guard.existing(input.path);
       const contents = await readText(path);
-      const first = contents.indexOf(input.oldText);
-      const second = first < 0 ? -1 : contents.indexOf(input.oldText, first + input.oldText.length);
-      if (first < 0 || second >= 0) throw new Error("oldText must match exactly once");
-      const updated = contents.slice(0, first) + input.newText + contents.slice(first + input.oldText.length);
+      const hasCRLF = contents.includes("\r\n");
+      const norm = (s: string): string => hasCRLF ? s.replace(/\r\n/g, "\n") : s;
+      const contentsLF = norm(contents);
+      const oldTextLF = norm(input.oldText);
+      const newTextLF = norm(input.newText);
+      const first = contentsLF.indexOf(oldTextLF);
+      const second = first < 0 ? -1 : contentsLF.indexOf(oldTextLF, first + oldTextLF.length);
+      if (first < 0 || second >= 0) {
+        const diagnosis = buildEditDiagnosis(contentsLF, oldTextLF, first, second);
+        throw new Error(diagnosis);
+      }
+      const updatedLF = contentsLF.slice(0, first) + newTextLF + contentsLF.slice(first + oldTextLF.length);
+      const updated = hasCRLF ? updatedLF.replace(/\n/g, "\r\n") : updatedLF;
       await atomicWrite(path, updated, signal);
       return { path, replacements: 1 };
     },
@@ -295,8 +307,48 @@ function patchPath(header: string): string {
   return raw.startsWith("a/") || raw.startsWith("b/") ? raw.slice(2) : raw;
 }
 
+function buildEditDiagnosis(contentsLF: string, oldTextLF: string, first: number, second: number): string {
+  let diagnosis = "oldText must match exactly once";
+  if (second >= 0) {
+    const count = contentsLF.split(oldTextLF).length - 1;
+    diagnosis += ` — matched ${count} times in the file`;
+    return diagnosis;
+  }
+  // Find the best partial match: longest line in oldText that appears in the file.
+  const oldLines = oldTextLF.split("\n");
+  const fileLines = contentsLF.split("\n");
+  let bestScore = 0;
+  let bestLine = 0;
+  let bestMatch = "";
+  for (const oldLine of oldLines) {
+    const trimmed = oldLine.trim();
+    if (trimmed.length < 3) continue;
+    for (let i = 0; i < fileLines.length; i++) {
+      if (fileLines[i] === oldLine && oldLine.length > bestScore) {
+        bestScore = oldLine.length;
+        bestLine = i + 1;
+        bestMatch = oldLine;
+      }
+    }
+  }
+  if (bestScore > 0) {
+    const ctxStart = Math.max(0, bestLine - 3);
+    const ctxEnd = Math.min(fileLines.length, bestLine + 2);
+    const ctx = fileLines.slice(ctxStart, ctxEnd)
+      .map((l, i) => `  ${String(ctxStart + i + 1).padStart(4)}: ${l.length > 100 ? l.slice(0, 100) + "…" : l}`).join("\n");
+    diagnosis += `\nBest partial match at line ${bestLine}: "${bestMatch.length > 60 ? bestMatch.slice(0, 60) + "…" : bestMatch}"\nNearby context:\n${ctx}`;
+  } else {
+    // Show first few lines of oldText and file for comparison
+    const snippet = oldLines.slice(0, 3).map((l) => `  old: ${l.length > 80 ? l.slice(0, 80) + "…" : l}`).join("\n");
+    const fileSnippet = fileLines.slice(0, 5).map((l, i) => `  ${String(i + 1).padStart(4)}: ${l.length > 80 ? l.slice(0, 80) + "…" : l}`).join("\n");
+    diagnosis += `\nCould not locate oldText. First lines of oldText:\n${snippet}\nFirst lines of file:\n${fileSnippet}`;
+  }
+  return diagnosis;
+}
+
 function applyHunks(original: string, hunks: readonly PatchHunk[]): string {
-  const source = original.split("\n");
+  const hasCRLF = original.includes("\r\n");
+  const source = original.replace(/\r\n/g, "\n").split("\n");
   if (source.at(-1) === "") source.pop();
   const output: string[] = [];
   let cursor = 0;
@@ -316,5 +368,6 @@ function applyHunks(original: string, hunks: readonly PatchHunk[]): string {
     }
   }
   output.push(...source.slice(cursor));
-  return `${output.join("\n")}\n`;
+  const result = `${output.join("\n")}\n`;
+  return hasCRLF ? result.replace(/\n/g, "\r\n") : result;
 }

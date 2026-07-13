@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { open, opendir } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { open, opendir, stat } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { rgPath as bundledRgPath } from "@vscode/ripgrep";
 import createIgnore from "ignore";
 import { z } from "zod";
@@ -135,7 +135,7 @@ export function createGrepTool(
       const expression = new RegExp(input.pattern);
       const limit = input.limit ?? options.defaultLimit ?? DEFAULT_RESULT_LIMIT;
       const context = input.context ?? 0;
-      const start = scope(root, input.path);
+      const start = await resolveGrepPath(root, input.path);
       const ignoreBudget = createIgnoreBudget(resources);
       let matches: GrepMatch[];
       if (options.forceNode === true) {
@@ -533,6 +533,15 @@ function scope(root: string, path = "."): string {
   const candidate = resolve(root, path);
   const delta = relative(root, candidate);
   if (delta === ".." || delta.startsWith(`..${sep}`) || isAbsolute(delta)) throw new Error("Path is outside the workspace");
+  return candidate;
+}
+
+async function resolveGrepPath(root: string, path = "."): Promise<string> {
+  const candidate = scope(root, path);
+  try {
+    const info = await stat(candidate);
+    if (info.isFile()) return dirname(candidate);
+  } catch { /* path does not exist yet; keep as-is */ }
   return candidate;
 }
 

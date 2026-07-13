@@ -65,7 +65,10 @@ async function executeShell(
   const stderr = new BoundedOutput(maxBytes);
   return new Promise((resolvePromise, reject) => {
     if (cancellation.aborted) { reject(cancellation.reason); return; }
-    const child = spawn(input.command, input.args, {
+    const command = process.platform === "win32" && !input.command.includes(".")
+      ? `${input.command}.cmd`
+      : input.command;
+    const child = spawn(command, input.args, {
       cwd,
       shell: false,
       windowsHide: true,

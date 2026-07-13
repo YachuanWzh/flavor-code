@@ -35,7 +35,7 @@ describe("file tools", () => {
     }
   });
 
-  it("Read requests at most maxBytes plus one across partial reads", async () => {
+  it("Read truncates instead of rejecting when file exceeds maxBytes", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
     const path = join(workspace, "growing.txt");
     writeFileSync(path, "a");
@@ -54,7 +54,9 @@ describe("file tools", () => {
       close: async () => { closed = true; },
     }) });
 
-    await expect(tool.execute({ path, maxBytes: 3 }, new AbortController().signal)).rejects.toThrow(/limit/i);
+    const result = await tool.execute({ path, maxBytes: 3 }, new AbortController().signal);
+    expect(result).toContain("[Truncated to 3 bytes");
+    expect(result).toContain("abc");
     expect(requested).toEqual([4, 2]);
     expect(position).toBe(4);
     expect(closed).toBe(true);
