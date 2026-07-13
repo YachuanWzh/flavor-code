@@ -30,6 +30,12 @@ describe("TaskPlanSchema", () => {
   it("rejects more than one in-progress task", () => {
     expect(() => TaskPlanSchema.parse({ tasks: [task("a", "in_progress"), task("b", "in_progress")] })).toThrow(/one task/i);
   });
+
+  it("rejects a completed task whose dependency is incomplete in a replacement plan", () => {
+    expect(() => TaskPlanSchema.parse({
+      tasks: [task("a"), task("b", "completed", ["a"])],
+    })).toThrow(/incomplete dependency/i);
+  });
 });
 
 describe("updatePlanTask", () => {

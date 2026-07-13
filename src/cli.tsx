@@ -6,6 +6,7 @@ import { Command } from "commander";
 import { createProductionRuntime, type ProductionRuntime } from "./production.js";
 import { message } from "./utils/error.js";
 import { redactErrorText } from "./utils/redact.js";
+import { staticTaskLines } from "./ui/task-progress-model.js";
 
 export function createProgram(): Command {
   return new Command()
@@ -54,6 +55,9 @@ export async function runPrint(prompt: string, dependencies: PrintDependencies =
       output(event) {
         if (event.type === "text") stdout(event.text);
         else if (event.type === "notice") stdout(`${event.message}\n`);
+        else if (event.type === "tasks") {
+          for (const line of staticTaskLines(event.snapshot)) stdout(`${line}\n`);
+        }
         else if (event.type === "error") { stderr(`${event.error.code}: ${event.error.message}\n`); code = 1; }
       },
     });

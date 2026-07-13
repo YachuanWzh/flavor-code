@@ -18,6 +18,8 @@ export type TranscriptBlock =
     state: "running" | "completed" | "failed" | "cancelled" | "info";
     text: string;
     task?: { subject: string; activeForm: string; role: "main" | "subagent" };
+    startedAt?: number;
+    elapsedMs?: number;
   };
 
 export interface TranscriptState {
@@ -41,16 +43,17 @@ export function createTranscriptState(): TranscriptState {
 export function transcriptReducer(state: TranscriptState, action: TranscriptAction): TranscriptState {
   if (action.type === "clear") return createTranscriptState();
   if (action.type === "submit") {
+    const active: TranscriptTurn = {
+      id: state.nextId,
+      prompt: action.prompt,
+      assistantText: "",
+      statusLines: [],
+      blocks: [],
+      ...(state.taskSnapshot === undefined ? {} : { taskSnapshot: state.taskSnapshot }),
+    };
     return {
       ...state,
-      active: {
-        id: state.nextId,
-        prompt: action.prompt,
-        assistantText: "",
-        statusLines: [],
-        blocks: [],
-        ...(state.taskSnapshot === undefined ? {} : { taskSnapshot: state.taskSnapshot }),
-      },
+      active: state.taskSnapshot === undefined ? active : applyTaskSnapshot(active, state.taskSnapshot),
       nextId: state.nextId + 1,
     };
   }
@@ -87,10 +90,15 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
   if (event.type === "tool-start") return upsertStatus(state, {
     kind: "status", id: `tool:${event.id}`, state: "running", text: `└ ${event.name} · running`,
   });
-  if (event.type === "tool-end") return upsertStatus(state, {
-    kind: "status", id: `tool:${event.id}`, state: event.result.ok ? "completed" : "failed",
-    text: `${event.result.ok ? "✦" : "×"} ${event.name} · ${event.result.ok ? "done" : "failed"}`,
-  });
+  if (event.type === "tool-end") {
+    const cancelled = !event.result.ok && event.result.error?.code === "cancelled";
+    return upsertStatus(state, {
+      kind: "status",
+      id: `tool:${event.id}`,
+      state: event.result.ok ? "completed" : cancelled ? "cancelled" : "failed",
+      text: `${event.result.ok ? "✦" : "×"} ${event.name} · ${event.result.ok ? "done" : cancelled ? "cancelled" : "failed"}`,
+    });
+  }
   if (event.type === "notice") return upsertStatus(state, {
     kind: "status", id: `notice:${state.active.blocks.length}`, state: "info", text: `› ${event.message}`,
   });
@@ -106,6 +114,10 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
 
 function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot): TranscriptTurn {
   const taskBlocks: Array<Extract<TranscriptBlock, { kind: "status" }>> = [];
+  const previous = new Map(turn.blocks
+    .filter((block): block is Extract<TranscriptBlock, { kind: "status" }> => block.kind === "status")
+    .map((block) => [block.id, block]));
+  const now = Date.now();
   for (const task of snapshot.plan?.tasks ?? []) {
     const state = task.status === "in_progress" ? "running"
       : task.status === "completed" ? "completed"
@@ -113,12 +125,17 @@ function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot): Transc
       : task.status === "failed" || task.status === "blocked" ? "failed"
       : "info";
     const suffix = task.status === "completed" ? "done" : task.status.replace("_", " ");
+    const prior = previous.get(`task:${task.id}`);
+    const startedAt = state === "running" ? prior?.startedAt ?? now : prior?.startedAt;
+    const elapsedMs = state !== "running" && startedAt !== undefined ? Math.max(0, now - startedAt) : prior?.elapsedMs;
     taskBlocks.push({
       kind: "status",
       id: `task:${task.id}`,
       state,
       text: `${state === "completed" ? "✓" : state === "failed" || state === "cancelled" ? "×" : "·"} ${task.subject} · ${suffix}`,
       task: { subject: task.subject, activeForm: task.activeForm, role: "main" },
+      ...(startedAt === undefined ? {} : { startedAt }),
+      ...(elapsedMs === undefined ? {} : { elapsedMs }),
     });
   }
   for (const node of snapshot.subagents.graph?.nodes ?? []) {
@@ -127,19 +144,27 @@ function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot): Transc
       : status === "completed" ? "completed"
       : status === "failed" || status === "blocked" ? "failed"
       : "info";
+    const prior = previous.get(`subagent:${node.id}`);
+    const startedAt = state === "running" ? prior?.startedAt ?? now : prior?.startedAt;
+    const elapsedMs = state !== "running" && startedAt !== undefined ? Math.max(0, now - startedAt) : prior?.elapsedMs;
     taskBlocks.push({
       kind: "status",
       id: `subagent:${node.id}`,
       state,
       text: `${state === "completed" ? "✓" : state === "failed" ? "×" : "·"} ${node.description} · ${status}`,
       task: { subject: node.description, activeForm: node.description, role: "subagent" },
+      ...(startedAt === undefined ? {} : { startedAt }),
+      ...(elapsedMs === undefined ? {} : { elapsedMs }),
     });
   }
 
   const ids = new Set(taskBlocks.map((block) => block.id));
-  const blocks = turn.blocks.filter((block) => block.kind !== "status"
-    || (!block.id.startsWith("task:") && !block.id.startsWith("subagent:"))
-    || ids.has(block.id));
+  const blocks = turn.blocks.filter((block) => {
+    if (block.kind !== "status") return true;
+    if (!block.id.startsWith("task:") && !block.id.startsWith("subagent:")) return true;
+    if (ids.has(block.id)) return true;
+    return block.state === "completed" || block.state === "failed" || block.state === "cancelled";
+  });
   for (const block of taskBlocks) {
     const index = blocks.findIndex((current) => current.kind === "status" && current.id === block.id);
     if (index < 0) blocks.push(block);

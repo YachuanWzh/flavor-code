@@ -47,6 +47,17 @@ export const TaskPlanSchema = z.object({
       }
       dependencies.add(dependency);
     }
+    if (task.status === "completed") {
+      const incomplete = task.dependencies.find((dependency) =>
+        plan.tasks.find((candidate) => candidate.id === dependency)?.status !== "completed");
+      if (incomplete !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["tasks", index, "status"],
+          message: `Task ${task.id} has an incomplete dependency: ${incomplete}`,
+        });
+      }
+    }
   }
 
   if (ids.size === plan.tasks.length && hasCycle(plan.tasks)) {

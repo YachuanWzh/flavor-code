@@ -158,6 +158,7 @@ export class AgentLoop {
         const result = await this.#options.runtime.execute(call, { agent: this.#options.agent, ...(request.signal === undefined ? {} : { signal: request.signal }) });
         if (request.signal?.aborted) {
           turnError = { code: "cancelled", message: abortMessage(request.signal) };
+          stagedResults.push({ call, result: { ok: false, error: turnError } });
           stageSyntheticResults(toolCalls, index, turnError, stagedMessages);
           break;
         }

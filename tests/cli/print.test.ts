@@ -1,6 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { runPrint } from "../../src/cli.js";
 import type { ProductionRuntime } from "../../src/production.js";
+import type { ProductionRuntimeOptions } from "../../src/production.js";
 
 it("returns 2 only for startup failure and redacts credential-shaped errors", async () => {
   const errors: string[] = [];
@@ -18,4 +19,31 @@ it("returns 1 for prompt/Stop failure and always closes and disposes", async () 
   } as unknown as ProductionRuntime;
   const code = await runPrint("hello", { createRuntime: async () => runtime, stdout: () => {}, stderr: () => {} });
   expect(code).toBe(1); expect(close).toHaveBeenCalledOnce(); expect(dispose).toHaveBeenCalledOnce();
+});
+
+it("prints task snapshots as static progress without animation", async () => {
+  const output: string[] = [];
+  const createRuntime = async (options: ProductionRuntimeOptions) => ({
+    session: {
+      start: async () => {},
+      submit: async () => {
+        options.output({ type: "tasks", snapshot: {
+          plan: { tasks: [{
+            id: "test", subject: "Run tests", activeForm: "Running tests",
+            status: "in_progress", dependencies: [],
+          }] },
+          subagents: { states: {} },
+          foregroundTaskId: "test",
+        } });
+      },
+      close: async () => {},
+    },
+    dispose: async () => {},
+  } as unknown as ProductionRuntime);
+
+  const code = await runPrint("test", { createRuntime, stdout: (text) => output.push(text), stderr: () => {} });
+
+  expect(code).toBe(0);
+  expect(output.join("")).toContain("· Running tests · running");
+  expect(output.join("")).not.toMatch(/[⠋⠙⠹⠸]/u);
 });

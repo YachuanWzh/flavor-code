@@ -34,4 +34,15 @@ describe("task progress presentation", () => {
   it("renders a static running marker for non-interactive output", () => {
     expect(statusPresentation(runningTask, 4_900, false)).toMatchObject({ glyph: "·", text: "Inspecting code" });
   });
+
+  it.each([
+    ["completed", "✓", "Run tests · done (8s)"],
+    ["failed", "×", "Run tests · failed (8s)"],
+    ["cancelled", "×", "Run tests · cancelled (8s)"],
+  ] as const)("renders %s task duration in the static terminal row", (state, glyph, text) => {
+    expect(statusPresentation({
+      kind: "status", id: "task:test", state, text: `${glyph} Run tests · ${state === "completed" ? "done" : state}`,
+      task: { subject: "Run tests", activeForm: "Running tests", role: "main" }, elapsedMs: 8_000,
+    }, 0, false)).toEqual({ glyph, text, color: state === "completed" ? "green" : "red" });
+  });
 });

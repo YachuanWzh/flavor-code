@@ -19,7 +19,9 @@ export function TaskStatusLine({ block, interactive }: TaskStatusLineProps): Rea
   if (running && (startedAt.current === undefined || previousState.current !== "running")) startedAt.current = time;
   if (!running) startedAt.current = undefined;
   previousState.current = block.state;
-  const elapsed = startedAt.current === undefined ? 0 : Math.max(0, time - startedAt.current);
+  const elapsed = block.startedAt === undefined
+    ? startedAt.current === undefined ? 0 : Math.max(0, time - startedAt.current)
+    : Math.max(0, Date.now() - block.startedAt);
   const presentation = statusPresentation(block, elapsed, foreground);
 
   return <Box ref={ref} flexDirection="row">

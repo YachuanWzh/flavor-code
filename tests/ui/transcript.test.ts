@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createTranscriptState, transcriptReducer } from "../../src/ui/transcript.js";
+
+afterEach(() => vi.useRealTimers());
 
 describe("transcriptReducer", () => {
   it("shows a submitted prompt immediately and accumulates streamed text", () => {
@@ -49,6 +51,18 @@ describe("transcriptReducer", () => {
     ]);
   });
 
+  it("marks a cancelled tool row cancelled instead of leaving it running", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "run" });
+    state = transcriptReducer(state, { type: "session", event: { type: "tool-start", id: "1", name: "Shell", input: {} } });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "tool-end", id: "1", name: "Shell",
+      result: { ok: false, error: { code: "cancelled", message: "stop" } },
+    } });
+    expect(state.active?.blocks).toEqual([
+      { kind: "status", id: "tool:1", state: "cancelled", text: "× Shell · cancelled" },
+    ]);
+  });
+
   it("stores task snapshots before and during an active turn", () => {
     const snapshot = {
       plan: { tasks: [{
@@ -63,6 +77,7 @@ describe("transcriptReducer", () => {
 
     state = transcriptReducer(state, { type: "submit", prompt: "plan" });
     expect(state.active?.taskSnapshot).toEqual(snapshot);
+    expect(state.active?.blocks).toEqual([expect.objectContaining({ id: "task:inspect", state: "running" })]);
 
     const completed = { ...snapshot, plan: { tasks: [{ ...snapshot.plan.tasks[0]!, status: "completed" as const }] } };
     state = transcriptReducer(state, { type: "session", event: { type: "tasks", snapshot: completed } });
@@ -99,6 +114,48 @@ describe("transcriptReducer", () => {
     expect(state.active?.blocks).toEqual([expect.objectContaining({
       kind: "status", id: "task:inspect", state: "completed", text: "✓ Inspect code · done",
     })]);
+  });
+
+  it("retains completed task rows when a replacement plan removes them", () => {
+    const first = {
+      id: "inspect", subject: "Inspect code", activeForm: "Inspecting code",
+      status: "completed" as const, dependencies: [],
+    };
+    const second = {
+      id: "implement", subject: "Implement change", activeForm: "Implementing change",
+      status: "pending" as const, dependencies: [],
+    };
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "work" });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "tasks", snapshot: { plan: { tasks: [first] }, subagents: { states: {} } },
+    } });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "tasks", snapshot: { plan: { tasks: [second] }, subagents: { states: {} } },
+    } });
+
+    expect(state.active?.blocks).toEqual([
+      expect.objectContaining({ id: "task:inspect", state: "completed" }),
+      expect.objectContaining({ id: "task:implement", state: "info" }),
+    ]);
+  });
+
+  it("retains elapsed time when a running task becomes terminal", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-13T00:00:00.000Z"));
+    const task = {
+      id: "test", subject: "Run tests", activeForm: "Running tests",
+      status: "in_progress" as const, dependencies: [],
+    };
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "test" });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "tasks", snapshot: { plan: { tasks: [task] }, subagents: { states: {} }, foregroundTaskId: "test" },
+    } });
+    vi.setSystemTime(new Date("2026-07-13T00:00:08.000Z"));
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "tasks", snapshot: { plan: { tasks: [{ ...task, status: "completed" }] }, subagents: { states: {} } },
+    } });
+
+    expect(state.active?.blocks).toEqual([expect.objectContaining({ id: "task:test", elapsedMs: 8_000 })]);
   });
 
   it("preserves the chronological order of prose and tool status blocks", () => {

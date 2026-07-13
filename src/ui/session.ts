@@ -95,9 +95,19 @@ export class FlavorSession {
       outcome = controller.signal.aborted ? "cancelled" : "failed";
       this.#services.output({ type: "error", error: { code: "unknown", message: message(error) } });
     } finally {
-      if (controller.signal.aborted) await this.#services.cancelActiveTask();
-      this.#active = undefined;
-      await this.#services.hooks.emit({ version: 1, type: "Stop", payload: { outcome } });
+      try {
+        if (controller.signal.aborted) {
+          try { await this.#services.cancelActiveTask(); }
+          catch (error) {
+            outcome = "failed";
+            try { this.#services.output({ type: "error", error: { code: "unknown", message: message(error) } }); }
+            catch { /* Cleanup must still clear active state and emit Stop. */ }
+          }
+        }
+      } finally {
+        this.#active = undefined;
+        await this.#services.hooks.emit({ version: 1, type: "Stop", payload: { outcome } });
+      }
     }
   }
 

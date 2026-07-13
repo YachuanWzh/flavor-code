@@ -75,7 +75,7 @@ export class SubagentScheduler {
     try {
       while (statesHaveWork(states)) {
         signal.throwIfAborted();
-        this.#blockDescendants(graph, states, results);
+        await this.#blockDescendants(graph, states, results);
         for (const task of graph.nodes) {
           if (running.size >= this.#options.maxSubagents) break;
           if (states.get(task.id) !== "pending" || !isReady(task, states)) continue;
@@ -86,7 +86,7 @@ export class SubagentScheduler {
         }
 
         if (running.size === 0) {
-          this.#blockDescendants(graph, states, results);
+          await this.#blockDescendants(graph, states, results);
           if (statesHaveWork(states)) throw new Error("Scheduler reached an invalid state with no runnable tasks");
           break;
         }
@@ -105,7 +105,11 @@ export class SubagentScheduler {
     }
   }
 
-  #blockDescendants(graph: TaskGraph, states: Map<string, SubagentState>, results: Map<string, SubagentResult>): void {
+  async #blockDescendants(
+    graph: TaskGraph,
+    states: Map<string, SubagentState>,
+    results: Map<string, SubagentResult>,
+  ): Promise<void> {
     let changed = true;
     while (changed) {
       changed = false;
@@ -113,7 +117,9 @@ export class SubagentScheduler {
         if (states.get(task.id) !== "pending") continue;
         if (!task.dependencies.some((id) => ["failed", "blocked"].includes(states.get(id) ?? "pending"))) continue;
         states.set(task.id, "blocked");
-        results.set(task.id, syntheticResult(task, "blocked", "Blocked by a failed dependency"));
+        const result = syntheticResult(task, "blocked", "Blocked by a failed dependency");
+        results.set(task.id, result);
+        await this.#options.onResult?.(result);
         changed = true;
       }
     }

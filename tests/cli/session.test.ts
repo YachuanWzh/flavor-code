@@ -114,6 +114,24 @@ describe("FlavorSession", () => {
     expect(cancelled).toBe(1);
   });
 
+  it("clears the active run and emits Stop when task cancellation publication fails", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    base.cancelActiveTask = async () => { throw new Error("task state unavailable"); };
+    base.run = async function* (_prompt, signal) {
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    };
+    const session = new FlavorSession(base); await session.start();
+    const pending = session.submit("complex work");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    session.interrupt();
+
+    await expect(pending).resolves.toBeUndefined();
+    expect(session.active).toBe(false);
+    expect(events.at(-1)).toBe("Stop");
+    expect(outputs).toContain("error");
+  });
+
   it("redacts secrets from config output", async () => {
     const events: string[] = []; const outputs: string[] = [];
     const session = new FlavorSession(services(events, outputs)); await session.start();

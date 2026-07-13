@@ -94,10 +94,12 @@ describe("SubagentScheduler", () => {
     const graph = TaskGraphSchema.parse({ nodes: [
       node("root"), node("child", ["root"]), node("grandchild", ["child"]), node("sibling"),
     ] });
+    const delivered: string[] = [];
     const scheduler = new SubagentScheduler({
       maxSubagents: 2,
       hooks: new HookBus(),
       execute: async (task) => task.id === "root" ? result(task.id, "failed") : result(task.id),
+      onResult: (item) => { delivered.push(`${item.taskId}:${item.status}`); },
     });
 
     const outcome = await scheduler.run(graph);
@@ -105,6 +107,9 @@ describe("SubagentScheduler", () => {
     expect(outcome.states).toEqual({ root: "failed", child: "blocked", grandchild: "blocked", sibling: "completed" });
     expect(outcome.results.sibling).toEqual(result("sibling"));
     expect(outcome.results.child?.status).toBe("blocked");
+    expect(delivered).toEqual(expect.arrayContaining([
+      "root:failed", "child:blocked", "grandchild:blocked", "sibling:completed",
+    ]));
   });
 
   it("retries one invalid structured result and passes only parsed data onward", async () => {

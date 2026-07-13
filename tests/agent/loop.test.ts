@@ -131,7 +131,12 @@ describe("AgentLoop", () => {
     const events = await collect(fixture.loop.run({ prompt: "go", signal: controller.signal }));
 
     expect(events.at(-1)).toEqual({ type: "error", error: { code: "cancelled", message: "stop now" } });
-    expect(events.some((event) => event.type === "tool-end")).toBe(false);
+    expect(events).toContainEqual({
+      type: "tool-end",
+      id: "call",
+      name: "echo",
+      result: { ok: false, error: { code: "cancelled", message: "stop now" } },
+    });
   });
 
   it("turns non-serializable tool output into a typed terminal error", async () => {
