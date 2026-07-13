@@ -158,6 +158,23 @@ describe("transcriptReducer", () => {
     expect(state.active?.blocks).toEqual([expect.objectContaining({ id: "task:test", elapsedMs: 8_000 })]);
   });
 
+  it("does not duplicate terminal task rows into a later unrelated turn", () => {
+    const completed = {
+      plan: { tasks: [{
+        id: "inspect", subject: "Inspect code", activeForm: "Inspecting code",
+        status: "completed" as const, dependencies: [],
+      }] },
+      subagents: { states: {} },
+    };
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "first" });
+    state = transcriptReducer(state, { type: "session", event: { type: "tasks", snapshot: completed } });
+    state = transcriptReducer(state, { type: "finish" });
+    state = transcriptReducer(state, { type: "submit", prompt: "unrelated" });
+
+    expect(state.completed[0]?.blocks).toEqual([expect.objectContaining({ id: "task:inspect", state: "completed" })]);
+    expect(state.active?.blocks).toEqual([]);
+  });
+
   it("preserves the chronological order of prose and tool status blocks", () => {
     let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "ordered" });
     state = transcriptReducer(state, { type: "session", event: { type: "text", text: "before" } });

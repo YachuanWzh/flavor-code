@@ -53,7 +53,7 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
     };
     return {
       ...state,
-      active: state.taskSnapshot === undefined ? active : applyTaskSnapshot(active, state.taskSnapshot),
+      active: state.taskSnapshot === undefined ? active : applyTaskSnapshot(active, state.taskSnapshot, false),
       nextId: state.nextId + 1,
     };
   }
@@ -112,13 +112,14 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
   return state;
 }
 
-function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot): TranscriptTurn {
+function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot, includeTerminal = true): TranscriptTurn {
   const taskBlocks: Array<Extract<TranscriptBlock, { kind: "status" }>> = [];
   const previous = new Map(turn.blocks
     .filter((block): block is Extract<TranscriptBlock, { kind: "status" }> => block.kind === "status")
     .map((block) => [block.id, block]));
   const now = Date.now();
   for (const task of snapshot.plan?.tasks ?? []) {
+    if (!includeTerminal && ["completed", "failed", "blocked", "cancelled"].includes(task.status)) continue;
     const state = task.status === "in_progress" ? "running"
       : task.status === "completed" ? "completed"
       : task.status === "cancelled" ? "cancelled"
@@ -140,6 +141,7 @@ function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot): Transc
   }
   for (const node of snapshot.subagents.graph?.nodes ?? []) {
     const status = snapshot.subagents.states[node.id] ?? "pending";
+    if (!includeTerminal && ["completed", "failed", "blocked"].includes(status)) continue;
     const state = status === "running" ? "running"
       : status === "completed" ? "completed"
       : status === "failed" || status === "blocked" ? "failed"
