@@ -158,6 +158,32 @@ export class LocalHarness {
   }
 }
 
+function ensureStrictSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  if (schema.type !== "object" || typeof schema.properties !== "object" || schema.properties === null) {
+    return schema;
+  }
+  const required: string[] = Array.isArray(schema.required) ? (schema.required as string[]) : [];
+  const requiredSet = new Set(required);
+  const properties: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema.properties)) {
+    const child =
+      typeof value === "object" && value !== null
+        ? ensureStrictSchema(value as Record<string, unknown>)
+        : value;
+    if (requiredSet.has(key)) {
+      properties[key] = child;
+    } else {
+      // Strict mode requires every property to be in "required".  Wrap optional
+      // fields so the model can send null instead of omitting them.
+      properties[key] = { anyOf: [child, { type: "null" }] };
+      requiredSet.add(key);
+    }
+  }
+  return { ...schema, additionalProperties: false, required: [...requiredSet], properties };
+}
+
 function toModelTool(tool: ToolDefinition<unknown>): ModelTool {
-  return { name: tool.name, description: tool.description, inputSchema: { ...z.toJSONSchema(tool.inputSchema) } };
+  const raw = z.toJSONSchema(tool.inputSchema);
+  const schema = ensureStrictSchema(raw as Record<string, unknown>);
+  return { name: tool.name, description: tool.description, inputSchema: schema };
 }

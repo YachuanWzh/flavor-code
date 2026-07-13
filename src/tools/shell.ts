@@ -12,8 +12,8 @@ const TERMINATION_FAILURE_MS = 5_000;
 const ShellInput = z.object({
   command: z.string().min(1),
   args: z.array(z.string()),
-  cwd: z.string().min(1).optional(),
-  timeoutMs: z.number().int().positive().max(86_400_000).optional(),
+  cwd: z.string().min(1).nullable().optional(),
+  timeoutMs: z.number().int().positive().max(86_400_000).nullable().optional(),
 });
 
 export interface ShellToolOptions { maxOutputBytes?: number }
@@ -43,12 +43,12 @@ export function createShellTool(
     name: "Shell",
     description: "Run a command with an argument array inside the workspace",
     inputSchema: ShellInput,
-    paths: (input) => [workingDirectory(root, input.cwd)],
+    paths: (input) => [workingDirectory(root, input.cwd ?? undefined)],
     permissions: (input) => ({
-      paths: [workingDirectory(root, input.cwd)],
+      paths: [workingDirectory(root, input.cwd ?? undefined)],
       command: input.command,
       args: input.args,
-      cwd: workingDirectory(root, input.cwd),
+      cwd: workingDirectory(root, input.cwd ?? undefined),
     }),
     execute: (input, signal) => executeShell(root, input, signal, maxBytes),
   };
@@ -60,7 +60,7 @@ async function executeShell(
   cancellation: AbortSignal,
   maxBytes: number,
 ): Promise<ShellResult> {
-  const cwd = workingDirectory(root, input.cwd);
+  const cwd = workingDirectory(root, input.cwd ?? undefined);
   const stdout = new BoundedOutput(maxBytes);
   const stderr = new BoundedOutput(maxBytes);
   return new Promise((resolvePromise, reject) => {
@@ -93,7 +93,8 @@ async function executeShell(
       terminalTimer = setTimeout(() => finishReject(new Error(`Process did not close after ${reason} termination`)), TERMINATION_FAILURE_MS);
       terminalTimer.unref();
     };
-    const timer = input.timeoutMs === undefined ? undefined : setTimeout(() => terminate("timeout"), input.timeoutMs);
+    const timeoutMs = input.timeoutMs ?? undefined;
+    const timer = timeoutMs === undefined ? undefined : setTimeout(() => terminate("timeout"), timeoutMs);
     timer?.unref();
     const onCancel = () => terminate("cancelled");
     cancellation.addEventListener("abort", onCancel, { once: true });

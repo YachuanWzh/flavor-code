@@ -167,7 +167,7 @@ describe("OpenAIModelAdapter", () => {
             name: "weather",
             description: "Get weather",
             parameters: request.tools[0]?.inputSchema,
-            strict: false,
+            strict: true,
           },
         ],
       },
