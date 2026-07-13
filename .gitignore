@@ -14,3 +14,4 @@ coverage/
 Thumbs.db
 .worktrees/
 .flavor
+FLAVOR.md

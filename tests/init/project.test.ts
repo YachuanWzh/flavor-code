@@ -271,7 +271,7 @@ it("replaces the last valid marker pair while preserving a later unmatched start
   expect(first.match(/<!-- flavor-code:end -->/g)).toHaveLength(1);
 });
 
-it("adds the sessions directory to .gitignore exactly once without erasing content", async () => {
+it("adds .flavor and FLAVOR.md to .gitignore exactly once without erasing content", async () => {
   const cwd = await createRepository();
   await writeFile(join(cwd, ".gitignore"), "dist/\r\n# local\r\n");
 
@@ -279,7 +279,7 @@ it("adds the sessions directory to .gitignore exactly once without erasing conte
   await initializeFlavor(cwd);
   const gitignore = await readFile(join(cwd, ".gitignore"), "utf8");
 
-  expect(gitignore).toBe("dist/\r\n# local\r\n.flavor/sessions/\r\n");
+  expect(gitignore).toBe("dist/\r\n# local\r\n.flavor\r\nFLAVOR.md\r\n");
 });
 
 it("handles malformed manifests safely and reports a caution", async () => {

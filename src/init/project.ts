@@ -466,6 +466,15 @@ function mergeGeneratedSection(existing: string | undefined, generated: string):
   return `${existing}${separator}${generated}${newline}`;
 }
 
+const GITIGNORE_ENTRIES = [".flavor", "FLAVOR.md"] as const;
+
+function isEntryIgnored(lines: string[], entry: string): boolean {
+  return lines.some((line) => {
+    const normalized = line.trim().replace(/^\//, "").replace(/\/$/, "");
+    return normalized === entry;
+  });
+}
+
 async function addSessionsToGitignore(cwd: string): Promise<void> {
   const path = join(cwd, ".gitignore");
   const root = await realpath(cwd);
@@ -477,14 +486,13 @@ async function addSessionsToGitignore(cwd: string): Promise<void> {
     if (!isMissingPathError(error)) throw error;
     existing = "";
   }
-  const alreadyIgnored = existing.split(/\r?\n/).some((line) => {
-    const normalized = line.trim().replace(/^\//, "").replace(/\/$/, "");
-    return normalized === ".flavor/sessions";
-  });
-  if (alreadyIgnored) return;
+  const lines = existing.split(/\r?\n/);
   const newline = detectNewline(existing);
+  const missing = GITIGNORE_ENTRIES.filter((entry) => !isEntryIgnored(lines, entry));
+  if (missing.length === 0) return;
   const separator = existing === "" || existing.endsWith("\n") ? "" : newline;
-  await writeFile(path, `${existing}${separator}.flavor/sessions/${newline}`);
+  const append = missing.map((entry) => entry).join(newline);
+  await writeFile(path, `${existing}${separator}${append}${newline}`);
 }
 
 async function assertSafeManagedPath(path: string, root: string): Promise<void> {
