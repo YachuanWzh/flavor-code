@@ -15,3 +15,5 @@ Thumbs.db
 .worktrees/
 .flavor
 FLAVOR.md
+# superharness brainstorm mind-map session state (transient)
+.superharness/
