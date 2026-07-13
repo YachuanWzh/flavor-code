@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 import { EventEmitter } from "node:events";
-import { editPrompt, navigateHistory } from "../../src/ui/app.js";
+import { editPrompt, navigateHistory, slashKeyAction } from "../../src/ui/app.js";
+import type { SlashCompletion } from "../../src/ui/slash-completion.js";
 import { installSigintHandler } from "../../src/ui/signals.js";
 
 it("edits prompts by Unicode code point with a movable cursor", () => {
@@ -29,4 +30,22 @@ it("uses only up and down navigation to recall submitted queries", () => {
 
   const cleared = navigateHistory({ history, cursor: older.cursor }, "down");
   expect(cleared).toEqual({ cursor: 1, input: "two", promptCursor: 3 });
+});
+
+it("routes selection keys to an open slash menu only", () => {
+  const completion: SlashCompletion = {
+    query: "",
+    items: [{ name: "help", kind: "command" }],
+    selectedIndex: 0,
+    windowStart: 0,
+  };
+  expect(slashKeyAction({ upArrow: true, downArrow: false, tab: false, escape: false }, completion))
+    .toEqual({ type: "select", delta: -1 });
+  expect(slashKeyAction({ upArrow: false, downArrow: true, tab: false, escape: false }, completion))
+    .toEqual({ type: "select", delta: 1 });
+  expect(slashKeyAction({ upArrow: false, downArrow: false, tab: true, escape: false }, completion))
+    .toEqual({ type: "complete" });
+  expect(slashKeyAction({ upArrow: false, downArrow: false, tab: false, escape: true }, completion))
+    .toEqual({ type: "dismiss" });
+  expect(slashKeyAction({ upArrow: true, downArrow: false, tab: false, escape: false }, null)).toBeNull();
 });

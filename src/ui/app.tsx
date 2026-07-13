@@ -22,6 +22,16 @@ import {
 } from "./transcript.js";
 import { wrapPromptInput } from "./wrap-prompt.js";
 import { TaskStatusLine } from "./task-progress.js";
+import { MVP_COMMANDS } from "./commands.js";
+import {
+  buildSlashCandidates,
+  completeSlashSelection,
+  deriveSlashCompletion,
+  matchRanges,
+  moveSlashSelection,
+  type SlashCandidate,
+  type SlashCompletion,
+} from "./slash-completion.js";
 import { message } from "../utils/error.js";
 import { redactErrorText } from "../utils/redact.js";
 
@@ -42,6 +52,23 @@ export function classifyTerminalInput(key: Pick<Key, "wheelUp" | "wheelDown" | "
   return null;
 }
 
+export type SlashKeyAction =
+  | { type: "select"; delta: -1 | 1 }
+  | { type: "complete" }
+  | { type: "dismiss" };
+
+export function slashKeyAction(
+  key: Pick<Key, "upArrow" | "downArrow" | "tab" | "escape">,
+  completion: SlashCompletion | null,
+): SlashKeyAction | null {
+  if (completion === null) return null;
+  if (key.upArrow) return { type: "select", delta: -1 };
+  if (key.downArrow) return { type: "select", delta: 1 };
+  if (key.tab) return { type: "complete" };
+  if (key.escape) return { type: "dismiss" };
+  return null;
+}
+
 export interface FlavorAppProps { workspace: string; home?: string; resumeSession?: string | true }
 
 export function App({ workspace, home, resumeSession }: FlavorAppProps): React.JSX.Element {
@@ -52,6 +79,11 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   const [history, setHistory] = useState<string[]>([]);
   const [historyCursor, setHistoryCursor] = useState(0);
   const [promptCursor, setPromptCursor] = useState(0);
+  const [slashCandidates, setSlashCandidates] = useState<SlashCandidate[]>(
+    () => buildSlashCandidates(MVP_COMMANDS, [], []),
+  );
+  const [slashSelection, setSlashSelection] = useState(0);
+  const [dismissedSlashInput, setDismissedSlashInput] = useState<string>();
   const [revision, setRevision] = useState(0);
   const [columns, setColumns] = useState(stdout?.columns ?? 80);
   const [rows, setRows] = useState(stdout?.rows ?? 24);
@@ -118,8 +150,17 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     }).then(async (created) => {
       if (disposed) { await created.dispose(); return; }
       runtimeRef.current = created;
+      setSlashCandidates(buildSlashCandidates(MVP_COMMANDS, created.services.pluginCommands(), []));
       setRuntime(created);
       await created.session.start();
+      try {
+        const skills = await created.services.skills();
+        if (!disposed) {
+          setSlashCandidates(buildSlashCandidates(MVP_COMMANDS, created.services.pluginCommands(), skills));
+        }
+      } catch {
+        // Invalid skill files are reported by runtime diagnostics; static candidates remain usable.
+      }
     }).catch((error: unknown) => {
       dispatch({ type: "submit", prompt: "startup" });
       dispatch({ type: "submit-error", message: safeUiError(error) });
@@ -144,6 +185,12 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     return (): void => { stdout.off("resize", onResize); };
   }, [stdout]);
 
+  const approval = runtime?.approvals.pending;
+  const derivedSlashCompletion = deriveSlashCompletion(input, promptCursor, slashCandidates, slashSelection);
+  const slashCompletion = dismissedSlashInput === input || transcript.active !== undefined || approval !== undefined
+    ? null
+    : derivedSlashCompletion;
+
   useInput((character, key) => {
     const terminalAction = classifyTerminalInput(key);
     if (terminalAction?.type === "scroll") {
@@ -167,6 +214,25 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
       if (character.toLowerCase() === "n" || key.escape) active.approvals.resolve(false);
       return;
     }
+    const menuAction = slashKeyAction(key, slashCompletion);
+    if (menuAction?.type === "select" && slashCompletion !== null) {
+      setSlashSelection((value) => moveSlashSelection(value, menuAction.delta, slashCompletion.items.length));
+      return;
+    }
+    if (menuAction?.type === "complete" && slashCompletion !== null) {
+      const selected = slashCompletion.items[slashCompletion.selectedIndex];
+      if (selected !== undefined) {
+        const next = completeSlashSelection(input, promptCursor, selected.name);
+        setInput(next.text);
+        setPromptCursor(next.cursor);
+        setDismissedSlashInput(next.text);
+      }
+      return;
+    }
+    if (menuAction?.type === "dismiss") {
+      setDismissedSlashInput(input);
+      return;
+    }
     if (key.return) {
       const prompt = input.trim();
       if (!prompt || active === undefined || transcript.active !== undefined) return;
@@ -176,27 +242,36 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
       setHistoryCursor(history.length + 1);
       setInput("");
       setPromptCursor(0);
+      setSlashSelection(0);
+      setDismissedSlashInput(undefined);
       void submitSafely(active.session, prompt, (error) => {
         dispatch({ type: "submit-error", message: error });
       }).finally(() => dispatch({ type: "finish" }));
       return;
     }
-    if (key.backspace) updatePrompt({ type: "backspace" }, input, promptCursor, setInput, setPromptCursor);
-    else if (key.delete) updatePrompt({ type: "delete" }, input, promptCursor, setInput, setPromptCursor);
+    if (key.backspace) {
+      updatePrompt({ type: "backspace" }, input, promptCursor, setInput, setPromptCursor);
+      setSlashSelection(0); setDismissedSlashInput(undefined);
+    } else if (key.delete) {
+      updatePrompt({ type: "delete" }, input, promptCursor, setInput, setPromptCursor);
+      setSlashSelection(0); setDismissedSlashInput(undefined);
+    }
     else if (key.leftArrow) setPromptCursor((value) => Math.max(0, value - 1));
     else if (key.rightArrow) setPromptCursor((value) => Math.min([...input].length, value + 1));
     else if (terminalAction?.type === "history" && terminalAction.direction === "up" && history.length) {
       const next = navigateHistory({ history, cursor: historyCursor }, "up");
       setHistoryCursor(next.cursor); setInput(next.input); setPromptCursor(next.promptCursor);
+      setSlashSelection(0); setDismissedSlashInput(undefined);
     } else if (terminalAction?.type === "history" && terminalAction.direction === "down" && history.length) {
       const next = navigateHistory({ history, cursor: historyCursor }, "down");
       setHistoryCursor(next.cursor); setInput(next.input); setPromptCursor(next.promptCursor);
+      setSlashSelection(0); setDismissedSlashInput(undefined);
     } else if (!key.ctrl && !key.meta && character) {
       updatePrompt({ type: "insert", value: character }, input, promptCursor, setInput, setPromptCursor);
+      setSlashSelection(0); setDismissedSlashInput(undefined);
     }
   });
 
-  const approval = runtime?.approvals.pending;
   void revision;
   if (runtime === undefined) return <StartingLayout
     workspaceName={basename(workspace)}
@@ -216,6 +291,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     rows={rows}
     activeSession={transcript.active !== undefined}
     scrollRef={scrollRef}
+    {...(slashCompletion === null ? {} : { completion: slashCompletion })}
     {...(approval === undefined ? {} : { approval })}
   />;
 }
@@ -246,16 +322,18 @@ export interface TerminalLayoutProps {
   columns: number;
   rows?: number;
   activeSession: boolean;
+  completion?: SlashCompletion;
   approval?: { tool: string; reason?: string };
   scrollRef?: React.Ref<ScrollBoxHandle>;
 }
 
 export function TerminalLayout({
   model, workspaceName, completed, active, input, promptCursor, columns, rows = 24, activeSession, approval,
-  scrollRef,
+  completion, scrollRef,
 }: TerminalLayoutProps): React.JSX.Element {
   const dividerWidth = Math.max(1, columns - 1);
-  const fixedBottomRows = (approval === undefined ? 0 : 3) + 2;
+  const menuRows = completion === undefined ? 0 : Math.min(6, completion.items.length - completion.windowStart);
+  const fixedBottomRows = (approval === undefined ? 0 : 3) + menuRows + 2;
   const bottomMaxRows = Math.min(rows, Math.max(Math.floor(rows / 2), fixedBottomRows + 1));
   const promptMaxLines = Math.max(1, bottomMaxRows - fixedBottomRows);
   return <Box flexGrow={1} width="100%" flexDirection="column" overflow="hidden">
@@ -272,11 +350,45 @@ export function TerminalLayout({
         <Text wrap="truncate-end">{approval.reason ?? "This action needs permission."}</Text>
         <Text bold>Allow? y / n</Text>
       </Box>}
+      {completion === undefined ? null : <SlashMenu completion={completion} />}
       <Text dimColor>{"─".repeat(dividerWidth)}</Text>
       <PromptLine input={input} cursor={promptCursor} columns={columns} maxVisibleLines={promptMaxLines} />
-      <Text dimColor wrap="truncate-end">{activeSession ? "Ctrl+C cancel · Ctrl+C again exit" : "Enter send · ↑↓ history · Ctrl+C exit"}</Text>
+      <Text dimColor wrap="truncate-end">{activeSession
+        ? "Ctrl+C cancel · Ctrl+C again exit"
+        : completion === undefined
+          ? "Enter send · ↑↓ history · Ctrl+C exit"
+          : "↑/↓ select · Tab complete · Esc close"}</Text>
     </Box>
   </Box>;
+}
+
+function SlashMenu({ completion }: { completion: SlashCompletion }): React.JSX.Element {
+  const visible = completion.items.slice(completion.windowStart, completion.windowStart + 6);
+  return <Box flexDirection="column" width="100%">
+    {visible.map((candidate, visibleIndex) => {
+      const index = completion.windowStart + visibleIndex;
+      return <Text key={`${candidate.kind}:${candidate.name}`} inverse={index === completion.selectedIndex} wrap="truncate-end">
+        {index === completion.selectedIndex ? "› " : "  "}
+        <HighlightedName name={candidate.name} query={completion.query} />
+        <Text dimColor>{`  ${candidate.kind}`}</Text>
+        {candidate.description === undefined ? null : <Text dimColor>{`  ${candidate.description}`}</Text>}
+      </Text>;
+    })}
+  </Box>;
+}
+
+function HighlightedName({ name, query }: { name: string; query: string }): React.JSX.Element {
+  const ranges = matchRanges(name, query);
+  if (ranges.length === 0) return <Text>{name}</Text>;
+  const parts: React.ReactNode[] = [];
+  let cursor = 0;
+  for (const [start, end] of ranges) {
+    if (start > cursor) parts.push(name.slice(cursor, start));
+    parts.push(<Text key={`${start}:${end}`} color="cyan" bold>{name.slice(start, end)}</Text>);
+    cursor = end;
+  }
+  if (cursor < name.length) parts.push(name.slice(cursor));
+  return <Text>{parts}</Text>;
 }
 
 function jumpScroll(scroll: ScrollBoxHandle, delta: number): void {

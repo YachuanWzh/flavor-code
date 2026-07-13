@@ -3,6 +3,7 @@ import { renderToString } from "ink";
 import { describe, expect, it } from "vitest";
 
 import { TerminalLayout } from "../../src/ui/app.js";
+import type { SlashCompletion } from "../../src/ui/slash-completion.js";
 import type { TranscriptTurn } from "../../src/ui/transcript.js";
 
 const turn = (id: number, prompt: string, assistantText: string): TranscriptTurn => ({
@@ -14,6 +15,37 @@ const turn = (id: number, prompt: string, assistantText: string): TranscriptTurn
 });
 
 describe("TerminalLayout", () => {
+  it("renders a selected slash candidate with highlighted matches and menu hints", () => {
+    const completion: SlashCompletion = {
+      query: "de",
+      items: [
+        { name: "deploy", kind: "command" },
+        { name: "frontend-design", kind: "skill", description: "Design interfaces", source: "project" },
+      ],
+      selectedIndex: 1,
+      windowStart: 0,
+    };
+    const raw = renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[]}
+      input="/de"
+      promptCursor={3}
+      columns={80}
+      activeSession={false}
+      completion={completion}
+    />, { columns: 80 });
+    const output = raw.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(output).toContain("deploy");
+    expect(output).toContain("command");
+    expect(output).toContain("frontend-design");
+    expect(output).toContain("skill");
+    expect(output).toContain("Design interfaces");
+    expect(output).toContain("↑/↓ select · Tab complete · Esc close");
+    expect(output).toContain("› frontend-design");
+  });
+
   it("renders completed turns and the active SSE turn in append-only order above the prompt", () => {
     const output = renderToString(<TerminalLayout
       model="deepseek:v4"
