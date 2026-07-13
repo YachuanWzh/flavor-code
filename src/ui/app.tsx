@@ -26,6 +26,8 @@ import {
 } from "./transcript.js";
 import { wrapPromptInput } from "./wrap-prompt.js";
 import { TaskProgressPanel, TaskStatusLine } from "./task-progress.js";
+import type { FileChangePresentation, FileDiffLine } from "../tools/types.js";
+import { fileDiffLineStyle } from "./file-diff-style.js";
 import { COMMAND_DESCRIPTIONS, MVP_COMMANDS } from "./commands.js";
 import {
   buildSlashCandidates,
@@ -540,11 +542,70 @@ function TurnView({ turn, interactive }: { turn: TranscriptTurn; interactive: bo
     <Box flexDirection="column" paddingLeft={2} marginTop={1}>
       {turn.blocks.map((block, index) => block.kind === "status"
         ? block.task === undefined
-          ? <Box key={block.id}><StatusLine block={block} interactive={interactive} /></Box>
+          ? block.state === "completed" && block.presentation !== undefined
+            ? <FileDiffView key={block.id} presentation={block.presentation} />
+            : <Box key={block.id}><StatusLine block={block} interactive={interactive} /></Box>
           : <Box key={block.id}><TaskStatusLine block={block} interactive={interactive} /></Box>
         : <Box key={`${turn.id}-text-${index}`} marginBottom={1}><AssistantText text={block.text} /></Box>)}
     </Box>
   </Box>;
+}
+
+const DIFF_CONTENT = fileDiffLineStyle("context").contentColor;
+const DIFF_REMOVED_MARKER = fileDiffLineStyle("removed").markerColor;
+const DIFF_ADDED_MARKER = fileDiffLineStyle("added").markerColor;
+
+function FileDiffView({ presentation }: { presentation: FileChangePresentation }): React.JSX.Element {
+  const operation = presentation.operation === "create" ? "Create"
+    : presentation.operation === "delete" ? "Delete"
+    : "Update";
+  if (presentation.operation === "delete") {
+    return <Box flexDirection="row">
+      <Text color={DIFF_REMOVED_MARKER}>●</Text>
+      <Text color={DIFF_CONTENT}> <Text bold>{operation}</Text>({basename(presentation.path)})</Text>
+    </Box>;
+  }
+  const lineWidth = Math.max(1, ...presentation.lines.map((line) => Math.max(line.oldLine ?? 0, line.newLine ?? 0)))
+    .toString().length;
+  return <Box flexDirection="column" width="100%">
+    <Box flexDirection="row">
+      <Text color={DIFF_ADDED_MARKER}>●</Text>
+      <Text color={DIFF_CONTENT}> <Text bold>{operation}</Text>({basename(presentation.path)})</Text>
+    </Box>
+    <Text color={DIFF_CONTENT}>  └ Added {lineCount(presentation.added)}, removed {lineCount(presentation.removed)}</Text>
+    {presentation.lines.map((line, index) => (
+      <FileDiffRow key={`${line.kind}:${line.oldLine ?? ""}:${line.newLine ?? ""}:${index}`} line={line} lineWidth={lineWidth} />
+    ))}
+  </Box>;
+}
+
+function FileDiffRow({ line, lineWidth }: { line: FileDiffLine; lineWidth: number }): React.JSX.Element {
+  if (line.kind === "omitted") {
+    return <Text color={DIFF_CONTENT} dimColor>{" ".repeat(lineWidth + 4)}{line.text}</Text>;
+  }
+  const number = line.newLine ?? line.oldLine;
+  const marker = line.kind === "removed" ? "-" : line.kind === "added" ? "+" : " ";
+  const { backgroundColor, markerColor, contentColor } = fileDiffLineStyle(line.kind);
+  const prefix = `${String(number ?? "").padStart(lineWidth)} ${marker}| `;
+  return <Box
+    flexDirection="row"
+    width="100%"
+    {...(backgroundColor === undefined ? {} : { backgroundColor })}
+  >
+    <Text
+      color={markerColor}
+      {...(line.kind === "context" ? { dimColor: true } : {})}
+      {...(backgroundColor === undefined ? {} : { backgroundColor })}
+    >{prefix}</Text>
+    <Text
+      color={contentColor}
+      {...(backgroundColor === undefined ? {} : { backgroundColor })}
+    >{line.text}</Text>
+  </Box>;
+}
+
+function lineCount(count: number): string {
+  return `${count} ${count === 1 ? "line" : "lines"}`;
 }
 
 function StatusLine({ block, interactive }: { block: Extract<TranscriptBlock, { kind: "status" }>; interactive: boolean }): React.JSX.Element {

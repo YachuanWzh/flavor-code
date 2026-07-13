@@ -15,6 +15,99 @@ const turn = (id: number, prompt: string, assistantText: string): TranscriptTurn
 });
 
 describe("TerminalLayout", () => {
+  it("renders a completed update with numbered colored rows and white content", async () => {
+    const changed: TranscriptTurn = {
+      id: 1,
+      prompt: "update notes",
+      assistantText: "",
+      statusLines: ["✓ Edit notes.md"],
+      blocks: [{
+        kind: "status",
+        id: "tool:1",
+        state: "completed",
+        text: "✓ Edit notes.md",
+        presentation: {
+          kind: "file-change",
+          operation: "update",
+          path: "C:/workspace/notes.md",
+          added: 1,
+          removed: 1,
+          lines: [
+            { kind: "context", oldLine: 3, newLine: 3, text: "before" },
+            { kind: "removed", oldLine: 4, text: "old" },
+            { kind: "added", newLine: 4, text: "new" },
+            { kind: "context", oldLine: 5, newLine: 5, text: "after" },
+          ],
+        },
+      }],
+    };
+
+    const raw = renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[changed]}
+      input=""
+      promptCursor={0}
+      columns={80}
+      activeSession={false}
+    />, { columns: 80 });
+    const plain = raw.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(plain).toContain("● Update(notes.md)");
+    expect(plain).toContain("└ Added 1 line, removed 1 line");
+    expect(plain).toContain("3  | before");
+    expect(plain).toContain("4 -| old");
+    expect(plain).toContain("4 +| new");
+    expect(raw).toContain("\x1b[48;2;61;1;0m");
+    expect(raw).toContain("\x1b[48;2;2;40;0m");
+    const stylePath = "../../src/ui/file-diff-style.js";
+    const styles = await import(stylePath).catch(() => ({})) as Record<string, unknown>;
+    expect(typeof styles["fileDiffLineStyle"]).toBe("function");
+    if (typeof styles["fileDiffLineStyle"] !== "function") return;
+    const lineStyle = styles["fileDiffLineStyle"] as (kind: string) => Record<string, unknown>;
+    expect(lineStyle("removed")).toEqual({
+      backgroundColor: "#3d0100", markerColor: "#ff5f56", contentColor: "#f8f8f2",
+    });
+    expect(lineStyle("added")).toEqual({
+      backgroundColor: "#022800", markerColor: "#50c878", contentColor: "#f8f8f2",
+    });
+  });
+
+  it("labels a new file Create and renders its added rows", () => {
+    const created: TranscriptTurn = {
+      id: 1, prompt: "create", assistantText: "", statusLines: [],
+      blocks: [{ kind: "status", id: "tool:1", state: "completed", text: "✓ Write new.txt", presentation: {
+        kind: "file-change", operation: "create", path: "new.txt", added: 1, removed: 0,
+        lines: [{ kind: "added", newLine: 1, text: "hello" }],
+      } }],
+    };
+    const output = renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={[created]} input="" promptCursor={0}
+      columns={80} activeSession={false}
+    />, { columns: 80 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(output).toContain("● Create(new.txt)");
+    expect(output).toContain("└ Added 1 line, removed 0 lines");
+    expect(output).toContain("1 +| hello");
+  });
+
+  it("renders deletion as only its operation and file name", () => {
+    const deleted: TranscriptTurn = {
+      id: 1, prompt: "delete", assistantText: "", statusLines: [],
+      blocks: [{ kind: "status", id: "tool:1", state: "completed", text: "✓ Delete old.txt", presentation: {
+        kind: "file-change", operation: "delete", path: "old.txt", added: 0, removed: 8, lines: [],
+      } }],
+    };
+    const output = renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={[deleted]} input="" promptCursor={0}
+      columns={80} activeSession={false}
+    />, { columns: 80 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(output).toContain("● Delete(old.txt)");
+    expect(output).not.toContain("Added");
+    expect(output).not.toContain("removed");
+  });
+
   it("renders a selected slash candidate with highlighted matches and menu hints", () => {
     const completion: SlashCompletion = {
       query: "de",

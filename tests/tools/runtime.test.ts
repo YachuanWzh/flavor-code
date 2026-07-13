@@ -7,7 +7,7 @@ import { z } from "zod";
 import { HookBus } from "../../src/hooks/bus.js";
 import { PermissionEngine } from "../../src/permissions/engine.js";
 import { ToolRuntime } from "../../src/tools/runtime.js";
-import type { ToolDefinition } from "../../src/tools/types.js";
+import { withToolPresentation, type ToolDefinition } from "../../src/tools/types.js";
 import { createShellTool } from "../../src/tools/shell.js";
 
 class RecordingPermissions extends PermissionEngine {
@@ -39,6 +39,31 @@ function fixture(decision: "allow" | "deny" | "ask" = "allow") {
 }
 
 describe("ToolRuntime", () => {
+  it("exposes presentation metadata without adding it to serialized tool output", async () => {
+    const f = fixture();
+    const presentation = {
+      kind: "file-change" as const,
+      operation: "update" as const,
+      path: join(f.workspace, "notes.md"),
+      added: 1,
+      removed: 1,
+      lines: [],
+    };
+    const tool = {
+      ...f.tool,
+      execute: async () => withToolPresentation({ path: presentation.path, replacements: 1 }, presentation),
+    };
+    const runtime = new ToolRuntime({ tools: [tool], hooks: f.hooks, permissions: f.permissions });
+
+    const result = await runtime.execute(
+      { name: "Test", input: { path: presentation.path } },
+      { agent: "main" },
+    );
+
+    expect(result.presentation).toEqual(presentation);
+    expect(JSON.stringify(result.output)).toBe(JSON.stringify({ path: presentation.path, replacements: 1 }));
+  });
+
   it("denies a destructive shell call using command and argument metadata", async () => {
     const f = fixture();
     const runtime = new ToolRuntime({

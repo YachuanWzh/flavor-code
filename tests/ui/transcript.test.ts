@@ -51,6 +51,35 @@ describe("transcriptReducer", () => {
     ]);
   });
 
+  it("stores successful file-change presentation on the completed tool block", () => {
+    const presentation = {
+      kind: "file-change" as const,
+      operation: "update" as const,
+      path: "notes.md",
+      added: 1,
+      removed: 1,
+      lines: [
+        { kind: "removed" as const, oldLine: 4, text: "old" },
+        { kind: "added" as const, newLine: 4, text: "new" },
+      ],
+    };
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "run" });
+    state = transcriptReducer(state, { type: "session", event: { type: "text", text: "before" } });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "tool-start", id: "1", name: "Edit", input: {}, label: "notes.md",
+    } });
+    state = transcriptReducer(state, { type: "session", event: { type: "tool-end", id: "1", name: "Edit",
+      label: "notes.md", result: { ok: true, output: { path: "notes.md" }, presentation },
+    } });
+    state = transcriptReducer(state, { type: "session", event: { type: "text", text: "after" } });
+
+    expect(state.active?.blocks).toEqual([
+      { kind: "text", text: "before" },
+      { kind: "status", id: "tool:1", state: "completed", text: "✓ Edit notes.md", presentation },
+      { kind: "text", text: "after" },
+    ]);
+  });
+
   it("marks a cancelled tool row cancelled instead of leaving it running", () => {
     let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "run" });
     state = transcriptReducer(state, { type: "session", event: { type: "tool-start", id: "1", name: "Shell", input: {} } });

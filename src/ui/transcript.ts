@@ -1,5 +1,6 @@
 import type { SessionOutput } from "./session.js";
 import type { TaskSnapshot } from "../agent/types.js";
+import type { ToolPresentation } from "../tools/types.js";
 
 export interface TranscriptTurn {
   id: number;
@@ -19,6 +20,7 @@ export type TranscriptBlock =
     state: "running" | "completed" | "failed" | "cancelled" | "info";
     text: string;
     task?: { subject: string; activeForm: string; role: "main" | "subagent" };
+    presentation?: ToolPresentation;
     startedAt?: number;
     elapsedMs?: number;
   };
@@ -99,6 +101,9 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
       id: `tool:${event.id}`,
       state: event.result.ok ? "completed" : cancelled ? "cancelled" : "failed",
       text: `${event.result.ok ? "✓" : "×"} ${event.name}${event.label ? ` ${event.label}` : ""}`,
+      ...(event.result.ok && event.result.presentation !== undefined
+        ? { presentation: event.result.presentation }
+        : {}),
     });
   }
   if (event.type === "notice") return upsertStatus(state, {

@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import type { HookBus } from "../hooks/bus.js";
 import { type PermissionEngine, type PermissionRequest, getToolCategory } from "../permissions/engine.js";
-import type { ToolCall, ToolContext, ToolDefinition, ToolResult } from "./types.js";
+import { getToolPresentation, type ToolCall, type ToolContext, type ToolDefinition, type ToolResult } from "./types.js";
 import { message } from "../utils/error.js";
 
 export type ApprovalDecision = "once" | "always" | "deny";
@@ -162,7 +162,8 @@ export class ToolRuntime {
       await this.#hooks.emit({
         version: 1, type: "PostToolUse", payload: { tool: tool.name, input, agent: context.agent, output },
       });
-      return { ok: true, output };
+      const presentation = getToolPresentation(output);
+      return { ok: true, output, ...(presentation === undefined ? {} : { presentation }) };
     } catch (error) {
       return this.#fail(tool.name, input, context.agent, "tool_error", message(error));
     }

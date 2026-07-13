@@ -4,7 +4,8 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
-import type { ToolDefinition } from "./types.js";
+import { buildFileChangePresentation, buildPatchPresentation } from "./file-diff.js";
+import { withToolPresentation, type ToolDefinition } from "./types.js";
 
 export const MAX_READ_BYTES = 1_048_576;
 
@@ -63,8 +64,16 @@ export function createWriteTool(workspace: string): ToolDefinition<z.infer<typeo
     execute: async (input, signal) => {
       abortIfNeeded(signal);
       const path = await guard.destination(input.path);
+      const previous = await readOptionalPresentationText(path);
       await atomicWrite(path, input.content, signal);
-      return { path, bytes: Buffer.byteLength(input.content) };
+      const output = { path, bytes: Buffer.byteLength(input.content) };
+      if (previous.exists && previous.text === undefined) return output;
+      return withToolPresentation(output, buildFileChangePresentation(
+        path,
+        previous.text ?? "",
+        input.content,
+        previous.exists ? "update" : "create",
+      ));
     },
   };
 }
@@ -94,7 +103,10 @@ export function createEditTool(workspace: string): ToolDefinition<z.infer<typeof
       const updatedLF = contentsLF.slice(0, first) + newTextLF + contentsLF.slice(first + oldTextLF.length);
       const updated = hasCRLF ? updatedLF.replace(/\n/g, "\r\n") : updatedLF;
       await atomicWrite(path, updated, signal);
-      return { path, replacements: 1 };
+      return withToolPresentation(
+        { path, replacements: 1 },
+        buildFileChangePresentation(path, contents, updated, "update"),
+      );
     },
   };
 }
@@ -109,16 +121,20 @@ export function createApplyPatchTool(workspace: string): ToolDefinition<z.infer<
     execute: async (input, signal) => {
       abortIfNeeded(signal);
       const changes = parsePatch(input.patch);
-      const prepared: Array<{ path: string; content: string }> = [];
+      const prepared: Array<{ path: string; content: string; change: PatchFile }> = [];
       for (const change of changes) {
         const path = await guard.destination(change.path);
         const original = change.created
           ? await requireAbsent(guard, change.path)
           : await readText(await guard.existing(change.path));
-        prepared.push({ path, content: applyHunks(original, change.hunks) });
+        prepared.push({ path, content: applyHunks(original, change.hunks), change });
       }
       for (const change of prepared) await atomicWrite(change.path, change.content, signal);
-      return { files: prepared.map((change) => change.path) };
+      const first = prepared[0]!;
+      return withToolPresentation(
+        { files: prepared.map((change) => change.path) },
+        buildPatchPresentation(first.path, first.change.created, first.change.hunks),
+      );
     },
   };
 }
@@ -191,6 +207,15 @@ async function readText(path: string): Promise<string> {
   return contents.toString("utf8");
 }
 
+async function readOptionalPresentationText(path: string): Promise<{ exists: boolean; text?: string }> {
+  try {
+    const contents = await readFile(path);
+    return isBinary(contents) ? { exists: true } : { exists: true, text: contents.toString("utf8") };
+  } catch (error) {
+    return isMissing(error) ? { exists: false } : { exists: true };
+  }
+}
+
 function isBinary(contents: Buffer): boolean {
   if (contents.includes(0)) return true;
   try {
@@ -238,7 +263,7 @@ function isMissing(error: unknown): boolean {
 }
 
 interface PatchFile { path: string; created: boolean; hunks: PatchHunk[] }
-interface PatchHunk { oldStart: number; lines: string[] }
+interface PatchHunk { oldStart: number; newStart: number; lines: string[] }
 
 function parsePatch(patch: string): PatchFile[] {
   const lines = patch.replaceAll("\r\n", "\n").split("\n");
@@ -264,7 +289,7 @@ function parsePatch(patch: string): PatchFile[] {
       if (lines[index] === "") { index += 1; continue; }
       const header = lines[index]?.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
       if (!header) throw new Error(`Unsupported unified diff metadata or line: ${lines[index]}`);
-      const hunk: PatchHunk = { oldStart: Number(header[1]), lines: [] };
+      const hunk: PatchHunk = { oldStart: Number(header[1]), newStart: Number(header[3]), lines: [] };
       const expectedOld = header[2] === undefined ? 1 : Number(header[2]);
       const expectedNew = header[4] === undefined ? 1 : Number(header[4]);
       index += 1;

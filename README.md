@@ -17,8 +17,11 @@
 - **搜索代码库** —— "项目里哪些地方调用了这个函数"，它用 ripgrep 帮你搜
 - **运行命令** —— 在受控范围内执行 shell 命令，比如跑测试、装依赖
 - **拆分复杂任务** —— 如果一个需求需要改好几个文件，它会先列出计划，然后按步骤推进，甚至并行执行独立的子任务
-- **记住上下文** —— 聊到一半退出，下次 `--resume` 回来继续
+- **主动提问澄清** —— 当需求不明确时，它会列出选项让你选择，而不是自己瞎猜
+- **进度面板** —— 终端里实时显示任务执行状态（哪些完成了、哪些在进行中）
+- **记住上下文** —— 聊到一半退出，下次 `--resume` 回来继续；会话以高效的 JSONL 格式存储
 - **插件和 Skill** —— 通过插件扩展功能，通过 Skill（技能包）教它新的工作流
+- **审计日志** —— 所有工具执行失败都会被记录到 `.flavor/audit.jsonl`，方便排查问题
 
 ---
 
@@ -98,11 +101,20 @@ OPENAI_API_KEY=sk-你的密钥
     "subagent": { "model": "openai:gpt-5-mini" }
   },
   "maxSubagents": 3,
-  "permissionMode": "workspace"
+  "permissionMode": "workspace",
+  "language": "zh-CN",
+  "maxIterations": {
+    "main": 80,
+    "subagent": 40,
+    "softLimitFactor": 0.8,
+    "extendBy": 20
+  }
 }
 ```
 
 这样主 Agent 用能力强的大模型，子 Agent 用便宜的小模型，兼顾效果和成本。`${OPENAI_API_KEY}` 会自动从环境变量或 `.env` 中取值。
+
+`language` 设为 `"zh-CN"` 后 Flavor 会用简体中文回复（也支持 `en-US`、`ja-JP` 等 BCP47 标签）。`maxIterations` 控制 Agent 每轮对话的最大推理步数：主 Agent 默认 80 步、子 Agent 默认 40 步；在 80% 处发出预警；如果任务进度仍然活跃，到达上限后会自动扩展 20 步（最多扩展 3 次），避免长任务中途断掉。
 
 也支持 Anthropic（`"type": "anthropic"`）和任何兼容 OpenAI 接口的服务（`"type": "openai-compatible"`），比如本地部署的模型。
 
@@ -158,11 +170,14 @@ flavor --resume -p "继续刚才的工作"  # 恢复后非交互执行
 | `/skills` | 列出已发现的 Skill |
 | `/plugins` | 列出已加载的插件 |
 | `/hooks` | 列出 Hook 状态 |
-| `/tasks` | 显示当前任务计划 |
+| `/tasks` | 显示当前任务计划与进度 |
+| `/audit` | 查看工具失败审计日志（可选 `toolFilter`） |
 | `/compact` | 手动触发上下文压缩 |
 | `/clear` | 清空终端显示 |
 | `/help` | 显示帮助 |
 | `/exit` | 退出 |
+
+输入 `/` 后 Flavor 会弹出交互式菜单，列出所有可用命令（内置命令、插件命令、已安装的 Skill），输入关键词即时过滤。你还可以直接输入 `/<skill-name>` 来调用某个 Skill，或 `/<plugin-command>` 执行插件命令。
 
 ---
 
@@ -180,16 +195,23 @@ flavor --resume -p "继续刚才的工作"  # 恢复后非交互执行
 
 ## 和它协作的方式
 
-### 计划模式
+### 计划与进度面板
 
-当你提出一个涉及多个步骤的复杂需求时，Flavor 会先制定一个任务计划，然后逐个推进。你会在终端看到类似这样的进度：
+当你提出一个涉及多个步骤的复杂需求时，Flavor 会先制定一个任务计划（`TaskPlan`），然后逐个推进。终端会显示实时任务进度面板：
 
 ```
-[1/4] ✓ 分析项目结构
-[2/4] ⟳ 重构配置加载模块
-[3/4] ○ 更新测试用例
-[4/4] ○ 更新文档
+── task progress ──
+✓ 分析项目结构
+⟳ 重构配置加载模块 (1.2s)
+○ 更新测试用例
+○ 更新文档
 ```
+
+左侧图标随状态变化：○ 待执行、⟳ 执行中（计时）、✓ 完成、✗ 失败、⛔ 阻塞。Flavor 的迭代上限在检测到活跃进度时会自动扩展（最多 3 次），避免长任务中途中断。
+
+### 主动提问
+
+当你的需求有歧义或多条路可走时，Flavor 不会自己瞎猜——它会弹出结构化的选择题让你决定方向。这在非交互模式（`--print`）下会直接拒绝，避免悬挂。
 
 ### 子 Agent 并行
 
@@ -216,11 +238,15 @@ description: Review code for common issues
 参考 `references/checklist.md` 中的详细清单。
 ```
 
-当你提问时，Flavor 会自动匹配相关的 Skill 并加载其中的指导。
+当你提问时，Flavor 会自动匹配相关的 Skill 并加载其中的指导。你也可以直接输入 `/code-review` 来显式调用。
 
 ### 插件
 
-插件放在 `.flavor/plugins/` 下，可以注册自定义命令、工具、Hook 等。插件是进程内运行的 Node.js 代码，所以只加载你信任的插件。
+插件放在 `.flavor/plugins/` 下，可以注册自定义命令、工具、Hook 等。插件命令也可以直接通过 `/command-name` 调用。插件是进程内运行的 Node.js 代码，所以只加载你信任的插件。
+
+### 审计日志
+
+每次工具执行失败都会被记录到 `.flavor/audit.jsonl`，包含时间戳、会话 ID、工具名、Agent 角色和错误信息。输入 `/audit` 查看汇总，`/audit Shell` 按工具名过滤。
 
 ---
 
@@ -231,7 +257,8 @@ description: Review code for common issues
 Flavor 相关的文件都放在 `.flavor/` 目录下：
 
 - `.flavor/flavor.json` —— 项目级配置
-- `.flavor/sessions/` —— 会话存档
+- `.flavor/sessions/` —— 会话存档（JSONL 格式）
+- `.flavor/audit.jsonl` —— 工具失败审计日志
 - `.flavor/skills/` —— 项目 Skill
 - `.flavor/plugins/` —— 项目插件
 

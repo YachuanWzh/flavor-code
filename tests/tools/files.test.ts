@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { createApplyPatchTool, createEditTool, createReadTool, createWriteTool } from "../../src/tools/files.js";
+import { getToolPresentation } from "../../src/tools/types.js";
 
 describe("file tools", () => {
   it("Read rejects binary files", async () => {
@@ -111,10 +112,48 @@ describe("file tools", () => {
     const path = join(workspace, "file.txt");
     writeFileSync(path, "old");
 
-    await createWriteTool(workspace).execute({ path, content: "new" }, new AbortController().signal);
+    const output = await createWriteTool(workspace).execute({ path, content: "new" }, new AbortController().signal);
 
     expect(readFileSync(path, "utf8")).toBe("new");
     expect(readdirSync(workspace).filter((name) => name.startsWith("file.txt.") && name.endsWith(".tmp"))).toEqual([]);
+    expect(getToolPresentation(output)).toMatchObject({
+      kind: "file-change", operation: "update", path, added: 1, removed: 1,
+    });
+  });
+
+  it("Write presents a missing destination as a new all-added file", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "new.txt");
+
+    const output = await createWriteTool(workspace).execute(
+      { path, content: "alpha\nbeta\n" },
+      new AbortController().signal,
+    );
+
+    expect(getToolPresentation(output)).toMatchObject({
+      kind: "file-change", operation: "create", path, added: 2, removed: 0,
+      lines: [
+        { kind: "added", newLine: 1, text: "alpha" },
+        { kind: "added", newLine: 2, text: "beta" },
+      ],
+    });
+  });
+
+  it("Edit attaches the exact changed line and surrounding context", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "one\ntwo\nthree\nold\nfive\nsix\nseven\n");
+
+    const output = await createEditTool(workspace).execute(
+      { path, oldText: "old", newText: "new" },
+      new AbortController().signal,
+    );
+
+    expect(getToolPresentation(output)).toMatchObject({
+      operation: "update", path, added: 1, removed: 1,
+    });
+    expect(getToolPresentation(output)?.lines).toContainEqual({ kind: "removed", oldLine: 4, text: "old" });
+    expect(getToolPresentation(output)?.lines).toContainEqual({ kind: "added", newLine: 4, text: "new" });
   });
 
   it("normalizes paths and prevents symlink escape", async () => {
@@ -144,9 +183,16 @@ describe("file tools", () => {
     writeFileSync(path, "old\n");
     const patch = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n";
 
-    await createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal);
+    const output = await createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal);
 
     expect(readFileSync(path, "utf8")).toBe("new\n");
+    expect(getToolPresentation(output)).toMatchObject({
+      operation: "update", path, added: 1, removed: 1,
+      lines: [
+        { kind: "removed", oldLine: 1, text: "old" },
+        { kind: "added", newLine: 1, text: "new" },
+      ],
+    });
   });
 
   it("ApplyPatch creation refuses to overwrite an existing binary file", async () => {
