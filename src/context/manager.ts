@@ -1,13 +1,25 @@
 import type { HookBus } from "../hooks/bus.js";
 import type { ModelMessage } from "../models/types.js";
 import { awaitWithSignal } from "../utils/async.js";
+import {
+  DEFAULT_COMPACTION_POLICY,
+  calculateContextPressure,
+  compactContinuationMessage,
+  estimateMessageTokens,
+  formatCompactSummary,
+  microcompactMessages,
+  selectRecentStart,
+  type CompactionPolicy,
+} from "./compaction.js";
 
 export interface ContextManagerOptions {
   system: string;
   flavor?: string;
   taskState?: string;
-  compactAtChars: number;
+  /** @deprecated Prefer token-based compaction policy. */
+  compactAtChars?: number;
   toolOutputChars: number;
+  compaction?: Partial<CompactionPolicy>;
   recentTurns?: number;
   /** @deprecated Prefer recentTurns. */
   recentMessages?: number;
@@ -16,9 +28,18 @@ export interface ContextManagerOptions {
 }
 
 export interface ContextSnapshot {
+  compact?: CompactBoundary;
+  /** @deprecated Version 1 session compatibility. */
   summary?: { role: "system"; content: string };
   messages: ModelMessage[];
 }
+
+export interface CompactBoundary {
+  summary: string;
+  compactedAt: string;
+}
+
+export type CompactReason = "manual" | "reactive";
 
 export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
@@ -29,32 +50,45 @@ export class ContextManager {
   readonly #flavor: string | undefined;
   readonly #compactAtChars: number;
   readonly #toolOutputChars: number;
-  readonly #recentTurns: number;
+  readonly #recentTurns: number | undefined;
+  readonly #compaction: CompactionPolicy;
   readonly #summarize: ContextManagerOptions["summarize"];
   readonly #hooks: HookBus;
   #taskState: string | undefined;
-  #summary: ModelMessage | undefined;
+  #compact: CompactBoundary | undefined;
   #messages: ModelMessage[] = [];
+  #lastRecordedInputTokens: number | undefined;
+  #consecutiveAutoCompactFailures = 0;
 
   constructor(options: ContextManagerOptions) {
-    if (options.compactAtChars <= 0) throw new Error("compactAtChars must be positive");
+    if (options.compactAtChars !== undefined && options.compactAtChars <= 0) throw new Error("compactAtChars must be positive");
     if (options.toolOutputChars <= 0) throw new Error("toolOutputChars must be positive");
-    const recentTurns = options.recentTurns ?? options.recentMessages ?? 3;
-    if (recentTurns < 0) throw new Error("recentTurns must not be negative");
+    const recentTurns = options.recentTurns ?? options.recentMessages;
+    if (recentTurns !== undefined && recentTurns < 0) throw new Error("recentTurns must not be negative");
+    const compaction = { ...DEFAULT_COMPACTION_POLICY, ...options.compaction };
+    for (const [name, value] of Object.entries(compaction)) {
+      if (!Number.isInteger(value) || value < 0) throw new Error(`compaction.${name} must be a non-negative integer`);
+    }
+    if (compaction.windowTokens <= 0) throw new Error("compaction.windowTokens must be positive");
+    if (compaction.reservedOutputTokens >= compaction.windowTokens) throw new Error("compaction.reservedOutputTokens must be below windowTokens");
+    if (compaction.maxRecentTokens < compaction.recentTokens) throw new Error("compaction.maxRecentTokens must be at least recentTokens");
     this.#system = options.system;
     this.#flavor = options.flavor;
     this.#taskState = options.taskState;
-    this.#compactAtChars = options.compactAtChars;
+    this.#compactAtChars = options.compactAtChars ?? Number.POSITIVE_INFINITY;
     this.#toolOutputChars = options.toolOutputChars;
     this.#recentTurns = recentTurns;
+    this.#compaction = compaction;
     this.#summarize = options.summarize;
     this.#hooks = options.hooks;
   }
 
   clear(): void {
-    this.#summary = undefined;
+    this.#compact = undefined;
     this.#messages = [];
     this.#taskState = undefined;
+    this.#lastRecordedInputTokens = undefined;
+    this.#consecutiveAutoCompactFailures = 0;
   }
 
   append(message: ModelMessage): void {
@@ -74,40 +108,92 @@ export class ContextManager {
 
   snapshot(): ContextSnapshot {
     return {
-      ...(this.#summary === undefined ? {} : { summary: { role: "system" as const, content: this.#summary.content } }),
+      ...(this.#compact === undefined ? {} : { compact: { ...this.#compact } }),
       messages: providerValidMessages(this.#messages),
     };
   }
 
   restore(snapshot: ContextSnapshot): void {
     const messages = providerValidMessages(snapshot.messages);
-    this.#summary = snapshot.summary?.role === "system" && snapshot.summary.content.startsWith("Conversation summary\n")
-      ? { role: "system", content: snapshot.summary.content }
+    const legacySummary = snapshot.summary?.role === "system" && snapshot.summary.content.startsWith("Conversation summary\n")
+      ? snapshot.summary.content.slice("Conversation summary\n".length)
       : undefined;
+    this.#compact = snapshot.compact === undefined
+      ? (legacySummary === undefined ? undefined : { summary: legacySummary, compactedAt: new Date(0).toISOString() })
+      : { ...snapshot.compact };
     this.#messages = messages.map((message) => message.role === "tool"
       ? { ...message, content: truncateToolOutput(message.content, this.#toolOutputChars) }
       : cloneMessage(message));
+    this.#lastRecordedInputTokens = undefined;
+    this.#consecutiveAutoCompactFailures = 0;
   }
 
   messagesForModel(): ModelMessage[] {
-    return [...this.#pinnedMessages(), ...(this.#summary ? [{ ...this.#summary }] : []), ...this.#messages.map((message) => ({ ...message }))];
+    return [
+      ...this.#pinnedMessages(),
+      ...(this.#compact === undefined ? [] : [{ role: "user" as const, content: compactContinuationMessage(this.#compact.summary) }]),
+      ...this.#messages.map(cloneMessage),
+    ];
   }
 
   estimatedTokens(): number {
-    return estimateTokens(modelVisibleText(this.messagesForModel()));
+    return estimateMessageTokens(this.messagesForModel());
   }
 
   needsCompaction(): boolean {
-    return modelVisibleText(this.messagesForModel()).length >= this.#compactAtChars;
+    if (modelVisibleText(this.messagesForModel()).length >= this.#compactAtChars) return true;
+    return calculateContextPressure(this.#currentTokenUsage(), this.#compaction).shouldAutoCompact;
   }
 
-  async compact(signal: AbortSignal = new AbortController().signal): Promise<boolean> {
+  get lastRecordedInputTokens(): number | undefined { return this.#lastRecordedInputTokens; }
+  get consecutiveAutoCompactFailures(): number { return this.#consecutiveAutoCompactFailures; }
+
+  recordModelUsage(inputTokens: number): void {
+    if (!Number.isFinite(inputTokens) || inputTokens < 0) return;
+    this.#lastRecordedInputTokens = Math.ceil(inputTokens);
+  }
+
+  async prepareForModelCall(signal: AbortSignal = new AbortController().signal): Promise<boolean> {
     signal.throwIfAborted();
     if (!this.needsCompaction()) return false;
-    const splitAt = recentTurnStart(this.#messages, this.#recentTurns);
+    let changed = false;
+    const microcompact = microcompactMessages(this.#messages, this.#compaction.microcompactKeepRecentToolResults);
+    if (microcompact.changed) {
+      this.#messages = microcompact.messages;
+      this.#lastRecordedInputTokens = undefined;
+      changed = true;
+    }
+    if (!this.needsCompaction() || this.#consecutiveAutoCompactFailures >= 3) return changed;
+    try {
+      const compacted = await this.#compactConversation(signal);
+      if (compacted) this.#consecutiveAutoCompactFailures = 0;
+      return changed || compacted;
+    } catch {
+      this.#consecutiveAutoCompactFailures += 1;
+      return changed;
+    }
+  }
+
+  async compact(
+    signal: AbortSignal = new AbortController().signal,
+    _reason: CompactReason = "manual",
+  ): Promise<boolean> {
+    const compacted = await this.#compactConversation(signal);
+    if (compacted) this.#consecutiveAutoCompactFailures = 0;
+    return compacted;
+  }
+
+  async #compactConversation(signal: AbortSignal): Promise<boolean> {
+    signal.throwIfAborted();
+    const splitAt = this.#recentTurns === undefined
+      ? selectRecentStart(this.#messages, this.#compaction)
+      : recentTurnStart(this.#messages, this.#recentTurns);
     const older = this.#messages.slice(0, splitAt);
     if (older.length === 0) return false;
-    const inputs = [...(this.#summary ? [this.#summary] : []), ...older];
+    const inputs: ModelMessage[] = [
+      ...(this.#compact === undefined ? [] : [{ role: "user", content: compactContinuationMessage(this.#compact.summary) } as const]),
+      ...older,
+    ];
     const before = await this.#hooks.emit({
       version: 1,
       type: "PreCompact",
@@ -116,24 +202,34 @@ export class ContextManager {
     signal.throwIfAborted();
     if (before.decision === "deny") return false;
 
-    const summary = await awaitWithSignal(
+    const rawSummary = await awaitWithSignal(
       this.#summarize(inputs.map((message) => ({ ...message })), signal),
       signal,
     );
     signal.throwIfAborted();
-    const nextSummary: ModelMessage = { role: "system", content: `Conversation summary\n${summary}` };
+    const summary = formatCompactSummary(rawSummary);
+    const nextCompact: CompactBoundary = { summary, compactedAt: new Date().toISOString() };
     const nextMessages = this.#messages.slice(splitAt);
-    const nextVisible = [...this.#pinnedMessages(), nextSummary, ...nextMessages];
+    const nextVisible: ModelMessage[] = [
+      ...this.#pinnedMessages(),
+      { role: "user", content: compactContinuationMessage(nextCompact.summary) },
+      ...nextMessages,
+    ];
 
     await this.#hooks.emit({
       version: 1,
       type: "PostCompact",
-      payload: { messageCount: inputs.length, estimatedTokens: estimateTokens(modelVisibleText(nextVisible)) },
+      payload: { messageCount: inputs.length, estimatedTokens: estimateMessageTokens(nextVisible) },
     }, signal);
     signal.throwIfAborted();
-    this.#summary = nextSummary;
-    this.#messages = nextMessages;
+    this.#compact = nextCompact;
+    this.#messages = nextMessages.map(cloneMessage);
+    this.#lastRecordedInputTokens = undefined;
     return true;
+  }
+
+  #currentTokenUsage(): number {
+    return Math.max(this.#lastRecordedInputTokens ?? 0, this.estimatedTokens());
   }
 
   #pinnedMessages(): ModelMessage[] {
@@ -161,10 +257,6 @@ function truncateToolOutput(content: string, limit: number): string {
   const headLength = Math.ceil(limit / 2);
   const tailLength = Math.floor(limit / 2);
   return `${content.slice(0, headLength)}\n...[truncated; original length: ${content.length} characters]...\n${content.slice(content.length - tailLength)}`;
-}
-
-function estimateMessageTokens(messages: readonly ModelMessage[]): number {
-  return estimateTokens(modelVisibleText(messages));
 }
 
 function modelVisibleText(messages: readonly ModelMessage[]): string {

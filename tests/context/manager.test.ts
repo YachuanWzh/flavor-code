@@ -44,10 +44,12 @@ describe("ContextManager", () => {
       "system instructions",
       "FLAVOR.md\nproject guidance",
       "Task state\nin progress",
-      "Conversation summary\nstructured summary",
+      expect.stringContaining("continued from a previous conversation"),
       "recent question",
       "recent answer",
     ]);
+    expect(context.messagesForModel()[3]?.role).toBe("user");
+    expect(context.snapshot().compact).toMatchObject({ summary: "structured summary" });
   });
 
   it("keeps the latest tool exchange as one recent turn", async () => {
@@ -90,6 +92,81 @@ describe("ContextManager", () => {
     context.append({ role: "user", content: "b" });
     expect(context.estimatedTokens()).toBe(1);
     expect(context.needsCompaction()).toBe(true);
+  });
+
+  it("uses the last provider input usage for automatic token pressure", async () => {
+    const context = new ContextManager({
+      system: "system",
+      toolOutputChars: 100,
+      compaction: {
+        windowTokens: 30,
+        reservedOutputTokens: 5,
+        autoCompactBufferTokens: 5,
+        warningBufferTokens: 5,
+        blockingBufferTokens: 2,
+        microcompactKeepRecentToolResults: 1,
+        recentTokens: 1,
+        recentTextMessages: 1,
+        maxRecentTokens: 10,
+      },
+      summarize: async () => "summary from usage",
+      hooks: new HookBus(),
+    });
+    context.append({ role: "user", content: "old" });
+    context.append({ role: "assistant", content: "old reply" });
+    context.append({ role: "user", content: "recent" });
+    context.recordModelUsage(20);
+
+    expect(context.lastRecordedInputTokens).toBe(20);
+    expect(await context.prepareForModelCall()).toBe(true);
+    expect(context.snapshot().compact?.summary).toBe("summary from usage");
+  });
+
+  it("microcompacts old tool results before paying for a full summary", async () => {
+    let summaries = 0;
+    const context = createContext({
+      compactAtChars: 500,
+      toolOutputChars: 1_000,
+      summarize: async () => { summaries += 1; return "not needed"; },
+      compaction: {
+        microcompactKeepRecentToolResults: 1,
+      },
+    });
+    context.append({ role: "assistant", content: "", toolCalls: [{ id: "old", name: "Read", input: {} }] });
+    context.append({ role: "tool", content: "x".repeat(400), toolCallId: "old" });
+    context.append({ role: "assistant", content: "", toolCalls: [{ id: "new", name: "Shell", input: {} }] });
+    context.append({ role: "tool", content: "y".repeat(400), toolCallId: "new" });
+
+    expect(await context.prepareForModelCall()).toBe(true);
+
+    expect(summaries).toBe(0);
+    expect(context.messagesForModel().find((message) => message.toolCallId === "old")?.content).toContain("cleared");
+    expect(context.messagesForModel().find((message) => message.toolCallId === "new")?.content).toBe("y".repeat(400));
+  });
+
+  it("trips automatic compaction after three failures but still permits manual compact", async () => {
+    let attempts = 0;
+    const context = createContext({
+      compactAtChars: 1,
+      recentTurns: 0,
+      summarize: async () => {
+        attempts += 1;
+        if (attempts <= 3) throw new Error("summary failed");
+        return "manual recovery";
+      },
+    });
+    context.append({ role: "user", content: "old" });
+
+    await expect(context.prepareForModelCall()).resolves.toBe(false);
+    await expect(context.prepareForModelCall()).resolves.toBe(false);
+    await expect(context.prepareForModelCall()).resolves.toBe(false);
+    await expect(context.prepareForModelCall()).resolves.toBe(false);
+    expect(attempts).toBe(3);
+    expect(context.consecutiveAutoCompactFailures).toBe(3);
+
+    await expect(context.compact(undefined, "manual")).resolves.toBe(true);
+    expect(attempts).toBe(4);
+    expect(context.snapshot().compact?.summary).toBe("manual recovery");
   });
 
   it("aborts summarization promptly without allowing a late result to mutate context", async () => {
