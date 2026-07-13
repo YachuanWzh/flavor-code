@@ -478,9 +478,9 @@ function TurnSeparator({ width }: { width: number }): React.JSX.Element {
 function TurnView({ turn, interactive }: { turn: TranscriptTurn; interactive: boolean }): React.JSX.Element {
   return <Box flexDirection="column" marginBottom={1}>
     {/* User prompt: left-aligned with white chevron, light gray background */}
-    <Box flexDirection="row" backgroundColor="ansi:white" paddingX={1} paddingY={0}>
-      <Text color="white" bold backgroundColor="ansi:white">❯ </Text>
-      <Text color="white" bold backgroundColor="ansi:white">{turn.prompt}</Text>
+    <Box flexDirection="row" backgroundColor="#3a3a3a" paddingX={1} paddingY={0}>
+      <Text color="ansi:whiteBright" bold backgroundColor="#3a3a3a">❯ </Text>
+      <Text color="ansi:whiteBright" bold backgroundColor="#3a3a3a">{turn.prompt}</Text>
     </Box>
     {/* Model output: indented to create clear visual hierarchy */}
     <Box flexDirection="column" paddingLeft={2} marginTop={1}>
