@@ -1,40 +1,59 @@
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Command } from "commander";
 
 import { createProductionRuntime, type ProductionRuntime } from "./production.js";
+import { initializeFlavor } from "./init/project.js";
 import { message } from "./utils/error.js";
 import { redactErrorText } from "./utils/redact.js";
 import { staticTaskLines } from "./ui/task-progress-model.js";
 
 export function createProgram(): Command {
-  return new Command()
+  const program = new Command()
     .name("flavor")
     .description("Interactive coding agent")
     .version("0.1.0")
     .option("-p, --print <prompt>", "run one prompt without the interactive UI")
-    .option("--resume [session-id]", "resume a saved session (latest when id is omitted)")
-    .action(async (options: { print?: string; resume?: string | boolean }) => {
-      const resumeSession = options.resume === true ? true : typeof options.resume === "string" ? options.resume : undefined;
-      if (options.print !== undefined) {
-        process.exitCode = await runPrint(options.print, {}, resumeSession);
-        return;
+    .option("--resume [session-id]", "resume a saved session (latest when id is omitted)");
+
+  program
+    .command("init [directory]")
+    .description("Initialize Flavor project files in a directory (defaults to cwd)")
+    .action(async (directory?: string) => {
+      const cwd = directory ? resolve(directory) : process.cwd();
+      try {
+        const result = await initializeFlavor(cwd);
+        process.stdout.write(`${result.created ? "Created" : "Updated"} ${result.path}\n`);
+      } catch (error) {
+        process.stderr.write(`init: ${safeError(error)}\n`);
+        process.exitCode = 1;
       }
-      if (!process.stdin.isTTY) {
-        process.stderr.write("Interactive mode needs a TTY. Use --print <prompt> for scripts.\n");
-        process.exitCode = 2;
-        return;
-      }
-      const [{ render, AlternateScreen }, { createElement }, { App }] = await Promise.all([
-        import("./claude-ink/index.js"), import("react"), import("./ui/app.js"),
-      ]);
-      const instance = await render(createElement(AlternateScreen, { mouseTracking: true },
-        createElement(App, {
-          workspace: process.cwd(), home: homedir(), ...(resumeSession === undefined ? {} : { resumeSession }),
-        })), { exitOnCtrlC: false });
-      await instance.waitUntilExit();
     });
+
+  program.action(async (options: { print?: string; resume?: string | boolean }) => {
+    const resumeSession = options.resume === true ? true : typeof options.resume === "string" ? options.resume : undefined;
+    if (options.print !== undefined) {
+      process.exitCode = await runPrint(options.print, {}, resumeSession);
+      return;
+    }
+    if (!process.stdin.isTTY) {
+      process.stderr.write("Interactive mode needs a TTY. Use --print <prompt> for scripts.\n");
+      process.exitCode = 2;
+      return;
+    }
+    const [{ render, AlternateScreen }, { createElement }, { App }] = await Promise.all([
+      import("./claude-ink/index.js"), import("react"), import("./ui/app.js"),
+    ]);
+    const instance = await render(createElement(AlternateScreen, { mouseTracking: true },
+      createElement(App, {
+        workspace: process.cwd(), home: homedir(), ...(resumeSession === undefined ? {} : { resumeSession }),
+      })), { exitOnCtrlC: false });
+    await instance.waitUntilExit();
+  });
+
+  return program;
 }
 
 export interface PrintDependencies {
