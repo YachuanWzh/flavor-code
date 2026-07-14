@@ -36,11 +36,13 @@ export interface SessionServices {
   runPluginCommand(name: string, args: readonly string[], signal: AbortSignal): Promise<unknown>;
   output(event: SessionOutput): void;
   questions: QuestionBridge;
+  login(): Promise<string>;
 }
 
 const HELP = [
   "/model <main|subagent> <provider:model>  switch a model",
   "/permissions <safe|workspace|full>      set main tool permissions",
+  "/login                                  authenticate via OAuth PKCE",
   "/init  /config  /skills  /plugins  /hooks  /tasks",
   "/compact  /clear  /help  /exit",
 ].join("\n");
@@ -177,6 +179,10 @@ export class FlavorSession {
     else if (command.name === "clear") {
       await this.#services.clearContext();
       this.#services.output({ type: "clear" });
+    }
+    else if (command.name === "login") {
+      this.#notice("Opening browser for authentication...");
+      this.#notice(await this.#services.login());
     }
     else if (command.name === "help") this.#notice(HELP);
     else if (command.name === "exit") this.#services.output({ type: "exit" });

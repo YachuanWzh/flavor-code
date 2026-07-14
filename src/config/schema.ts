@@ -7,6 +7,12 @@ export const ProviderConfigSchema = z.object({
   defaultModel: z.string().min(1).optional(),
   cheapModel: z.string().min(1).optional(),
   maxOutputTokens: z.number().int().positive().optional(),
+  // OAuth PKCE fields
+  apiType: z.enum(["openai", "anthropic"]).optional(),
+  authorizationUrl: z.string().url().optional(),
+  tokenUrl: z.string().url().optional(),
+  clientId: z.string().min(1).optional(),
+  scope: z.string().optional(),
 });
 
 export const FlavorConfigSchema = z.object({

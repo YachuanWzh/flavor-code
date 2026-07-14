@@ -100,6 +100,14 @@ export async function loadConfig(options: LoadConfigOptions): Promise<LoadedConf
   const projectEnvironment = envText === undefined ? {} : parse(envText);
   if (envText !== undefined) sources.push(envPath);
 
+  // Populate process.env with .env values so they are visible to module-level
+  // consumers (OAUTH_DEFAULTS, etc.). Never override an already-set env var.
+  for (const [key, value] of Object.entries(projectEnvironment)) {
+    if (value !== undefined && process.env[key] === undefined) {
+      process.env[key] = value;
+    }
+  }
+
   const projectConfig = await readJsonIfPresent(projectPath);
   if (projectConfig) sources.push(projectPath);
 

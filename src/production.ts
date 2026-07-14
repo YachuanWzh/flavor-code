@@ -25,6 +25,8 @@ import { AnthropicModelAdapter } from "./models/anthropic.js";
 import { OpenAIModelAdapter } from "./models/openai.js";
 import { ModelRegistry, parseModelId } from "./models/registry.js";
 import type { ModelAdapter } from "./models/types.js";
+import { OAuthCallbackAuthProvider } from "./auth/oauth.js";
+import { createFileTokenStore } from "./auth/store.js";
 import type { PermissionRequest } from "./permissions/engine.js";
 import { buildSystemPrompt, type PromptEnvironment } from "./prompts/system.js";
 import type { ApprovalDecision } from "./tools/runtime.js";
@@ -158,7 +160,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const pluginHooks: HookEventName[] = [];
   const pluginCommands = new Map<string, PluginCommandHandler>();
 
-  const registeredProviders = registerConfiguredAdapters(config.providers, registry, environment, diagnostics);
+  const registeredProviders = await registerConfiguredAdapters(config.providers, registry, environment, diagnostics, home);
 
   const pluginHost = new PluginHost({
     globalPluginDirs: [join(home, ".flavor-code", "plugins")],
@@ -526,6 +528,56 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     },
     output: options.output,
     questions,
+    async login() {
+      // If any provider has an apiKey, user is already authenticated
+      const apiKeyProvider = Object.entries(config.providers)
+        .find(([, p]) => p.apiKey !== undefined);
+      if (apiKeyProvider !== undefined) {
+        return `Already authenticated — provider "${apiKeyProvider[0]}" has an API key configured. Use /logout to clear it.`;
+      }
+
+      // Pick the provider to authenticate: prefer the main agent's provider
+      let providerName: string | undefined;
+      let providerConfig: ProviderRuntimeConfig | undefined;
+      const mainModel = config.agents?.main?.model;
+      if (mainModel !== undefined) {
+        const mainProvider = safeProvider(mainModel);
+        if (config.providers[mainProvider] !== undefined) {
+          providerName = mainProvider;
+          providerConfig = config.providers[mainProvider];
+        }
+      }
+      // Fallback: first provider without an apiKey, or default to "openai"
+      if (providerName === undefined) {
+        const firstWithoutKey = Object.entries(config.providers)
+          .find(([, p]) => p.apiKey === undefined);
+        providerName = firstWithoutKey?.[0] ?? "openai";
+        providerConfig = firstWithoutKey?.[1];
+      }
+
+      const oauthConfig = providerConfig !== undefined
+        ? resolveOAuthConfig(providerConfig)
+        : getOAuthDefaults();
+
+      if (oauthConfig === undefined) {
+        return `Provider "${providerName}" is missing authorizationUrl, tokenUrl, or clientId.`;
+      }
+
+      try {
+        const tokenStore = createFileTokenStore(join(home, ".flavor-code", "auth.json"));
+        const oauth = new OAuthCallbackAuthProvider({
+          authorizationUrl: oauthConfig.authorizationUrl,
+          tokenUrl: oauthConfig.tokenUrl,
+          clientId: oauthConfig.clientId,
+          ...(oauthConfig.scope === undefined ? {} : { scope: oauthConfig.scope }),
+          store: tokenStore,
+        });
+        const result = await oauth.resolve(providerName);
+        return `Authenticated to "${providerName}". Token expires ${result.expiresAt ?? "unknown"}. Restart flavor-code for the new token to take effect.`;
+      } catch (error) {
+        return `Login failed: ${message(error)}`;
+      }
+    },
   };
   const session = new FlavorSession(services);
   let disposed = false;
@@ -631,33 +683,88 @@ async function runChild(
   }, signal);
 }
 
-function registerConfiguredAdapters(
+async function registerConfiguredAdapters(
   providers: Record<string, ProviderRuntimeConfig>,
   registry: ModelRegistry,
   environment: NodeJS.ProcessEnv,
   diagnostics: string[],
-): RegisteredProvider[] {
+  home: string,
+): Promise<RegisteredProvider[]> {
   const configured = { ...providers };
   if (configured.openai === undefined && environment.OPENAI_API_KEY) configured.openai = { type: "openai", apiKey: environment.OPENAI_API_KEY };
   if (configured.anthropic === undefined && environment.ANTHROPIC_API_KEY) configured.anthropic = { type: "anthropic", apiKey: environment.ANTHROPIC_API_KEY };
+  const oauthTokenStore = createFileTokenStore(join(home, ".flavor-code", "auth.json"));
   const registered: RegisteredProvider[] = [];
   for (const [name, provider] of Object.entries(configured)) {
     try {
-      let adapter: ModelAdapter;
-      if (provider.type === "openai" && provider.apiKey === undefined) {
-        diagnostics.push(`Provider "${name}" requires apiKey or OPENAI_API_KEY.`); continue;
+      // Step 1: Determine the API protocol from provider type
+      let apiProtocol: "openai" | "anthropic";
+      if (provider.type === "oauth-callback") {
+        apiProtocol = provider.apiType ?? "openai";
+      } else if (provider.type === "openai" || provider.type === "openai-compatible") {
+        apiProtocol = "openai";
+      } else if (provider.type === "anthropic") {
+        apiProtocol = "anthropic";
+      } else {
+        diagnostics.push(`Provider "${name}" has unsupported type "${provider.type}".`);
+        continue;
       }
-      if (provider.type === "anthropic" && provider.apiKey === undefined) {
-        diagnostics.push(`Provider "${name}" requires apiKey or ANTHROPIC_API_KEY.`); continue;
+
+      // Step 2: Resolve the API key (apiKey config → OAuth PKCE → env vars)
+      let apiKey: string | undefined;
+      if (provider.apiKey !== undefined) {
+        apiKey = provider.apiKey;
+      } else {
+        // Try OAuth PKCE (uses OAUTH_DEFAULTS when no explicit OAuth fields are set)
+        const oauthConfig = resolveOAuthConfig(provider);
+        if (oauthConfig !== undefined) {
+          const oauth = new OAuthCallbackAuthProvider({
+            authorizationUrl: oauthConfig.authorizationUrl,
+            tokenUrl: oauthConfig.tokenUrl,
+            clientId: oauthConfig.clientId,
+            ...(oauthConfig.scope === undefined ? {} : { scope: oauthConfig.scope }),
+            store: oauthTokenStore,
+          });
+          const result = await oauth.resolve(name);
+          apiKey = result.headers.authorization?.replace(/^Bearer /, "") ?? "";
+        }
+
+        // Fallback to environment variables
+        if (apiKey === undefined && apiProtocol === "openai") {
+          apiKey = environment.OPENAI_API_KEY;
+        }
+        if (apiKey === undefined && apiProtocol === "anthropic") {
+          apiKey = environment.ANTHROPIC_API_KEY;
+        }
+
+        if (apiKey === undefined) {
+          const hasOAuthFields = provider.authorizationUrl !== undefined
+            || provider.tokenUrl !== undefined
+            || provider.clientId !== undefined;
+          if (hasOAuthFields) {
+            diagnostics.push(
+              `Provider "${name}" has incomplete OAuth configuration. Set authorizationUrl, tokenUrl, and clientId together, or provide an apiKey.`,
+            );
+          } else {
+            const envVar = apiProtocol === "openai" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY";
+            diagnostics.push(
+              `Provider "${name}" requires apiKey, ${envVar}, or OAuth PKCE configuration. Use /login to authenticate.`,
+            );
+          }
+          continue;
+        }
       }
+
+      // Step 3: Create the adapter
       const adapterOptions = {
-        apiKey: provider.apiKey ?? "not-required",
+        apiKey,
         ...(provider.baseURL === undefined ? {} : { baseURL: provider.baseURL }),
         ...(provider.maxOutputTokens === undefined ? {} : { maxOutputTokens: provider.maxOutputTokens }),
       };
-      if (provider.type === "anthropic") adapter = new AnthropicModelAdapter(adapterOptions);
-      else if (provider.type === "openai" || provider.type === "openai-compatible") adapter = new OpenAIModelAdapter(adapterOptions);
-      else { diagnostics.push(`Provider "${name}" has unsupported type "${provider.type}".`); continue; }
+      const adapter: ModelAdapter = apiProtocol === "anthropic"
+        ? new AnthropicModelAdapter(adapterOptions)
+        : new OpenAIModelAdapter(adapterOptions);
+
       registry.register(name, adapter);
       registered.push({ name, ...provider });
     } catch (error) { diagnostics.push(`Provider "${name}" could not start: ${message(error)}`); }
@@ -672,6 +779,48 @@ interface ProviderRuntimeConfig {
   defaultModel?: string | undefined;
   cheapModel?: string | undefined;
   maxOutputTokens?: number | undefined;
+  // OAuth PKCE fields — all have built-in defaults when type=oauth-callback
+  apiType?: "openai" | "anthropic" | undefined;
+  authorizationUrl?: string | undefined;
+  tokenUrl?: string | undefined;
+  clientId?: string | undefined;
+  scope?: string | undefined;
+}
+
+// Built-in OAuth defaults — override via OAUTH_* env vars for remote auth servers.
+// Deferred to a function so .env values loaded at runtime are visible.
+function getOAuthDefaults(): ResolvedOAuthConfig {
+  return {
+    authorizationUrl: process.env.OAUTH_AUTHORIZATION_URL ?? "",
+    tokenUrl: process.env.OAUTH_TOKEN_URL ?? "",
+    clientId: process.env.OAUTH_CLIENT_ID ?? "flavor-code-cli",
+    scope: process.env.OAUTH_SCOPE ?? "models:read models:use",
+  };
+}
+
+interface ResolvedOAuthConfig {
+  authorizationUrl: string;
+  tokenUrl: string;
+  clientId: string;
+  scope?: string;
+}
+
+function resolveOAuthConfig(provider: ProviderRuntimeConfig): ResolvedOAuthConfig | undefined {
+  if (provider.apiKey !== undefined) return undefined; // apiKey mode, no PKCE needed
+  if (provider.authorizationUrl !== undefined || provider.tokenUrl !== undefined || provider.clientId !== undefined) {
+    // At least one OAuth field is explicitly set — require all of them
+    if (!provider.authorizationUrl || !provider.tokenUrl || !provider.clientId) {
+      return undefined; // partial config; caller reports the diagnostic
+    }
+    return {
+      authorizationUrl: provider.authorizationUrl,
+      tokenUrl: provider.tokenUrl,
+      clientId: provider.clientId,
+      ...(provider.scope === undefined ? {} : { scope: provider.scope }),
+    };
+  }
+  // No OAuth config at all — use built-in defaults
+  return getOAuthDefaults();
 }
 interface RegisteredProvider extends ProviderRuntimeConfig { name: string }
 
@@ -715,12 +864,12 @@ function selectModels(
 }
 
 function providerDefault(type: string | undefined): string | undefined {
-  if (type === "openai") return "gpt-5";
+  if (type === "openai" || type === "oauth-callback") return "gpt-5";
   if (type === "anthropic") return "claude-opus-4-5";
   return undefined;
 }
 function providerCheapDefault(type: string | undefined): string | undefined {
-  if (type === "openai") return "gpt-5-mini";
+  if (type === "openai" || type === "oauth-callback") return "gpt-5-mini";
   if (type === "anthropic") return "claude-sonnet-4-5";
   return undefined;
 }

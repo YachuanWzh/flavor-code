@@ -542,18 +542,17 @@ async function createExampleFlavorConfig(cwd: string): Promise<void> {
   }
   const example = {
     providers: {
-      deepseek: {
+      anthropic: {
         type: "anthropic",
-        baseURL: "https://api.deepseek.com/anthropic",
-        apiKey: "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        baseURL: "http://127.0.0.1:8092",
         defaultModel: "deepseek-v4-pro",
         cheapModel: "deepseek-v4-flash",
         maxOutputTokens: 65_536,
       },
     },
     agents: {
-      main: { model: "deepseek:deepseek-v4-pro" },
-      subagent: { model: "deepseek:deepseek-v4-flash" },
+      main: { model: "anthropic:deepseek-v4-pro" },
+      subagent: { model: "anthropic:deepseek-v4-flash" },
     },
     maxSubagents: 3,
     permissionMode: "workspace",
