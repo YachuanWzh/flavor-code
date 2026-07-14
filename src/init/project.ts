@@ -2,6 +2,7 @@ import { lstat, mkdir, readdir, readFile, realpath, writeFile } from "node:fs/pr
 import { readFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parse as parseEnv } from "dotenv";
 
 const GENERATED_START = "<!-- flavor-code:start -->";
 const GENERATED_END = "<!-- flavor-code:end -->";
@@ -530,7 +531,7 @@ async function ensureFlavorDirectories(cwd: string): Promise<void> {
   }
 }
 
-async function createExampleFlavorConfig(cwd: string): Promise<void> {
+async function createExampleFlavorConfig(cwd: string, resolvedBaseURL?: string): Promise<void> {
   const configPath = join(cwd, ".flavor", "flavor.json");
   const root = await realpath(cwd);
   await assertSafeManagedPath(configPath, root);
@@ -540,15 +541,18 @@ async function createExampleFlavorConfig(cwd: string): Promise<void> {
   } catch (error) {
     if (!isMissingPathError(error)) throw error;
   }
+  // Priority: loaded config → current env → flavor-code .env → template (lazy resolution)
+  const baseURL = resolvedBaseURL ?? process.env.ANTHROPIC_BASE_URL ?? await readFlavorEnvBaseURL() ?? "${ANTHROPIC_BASE_URL}";
+  const provider: Record<string, unknown> = {
+    type: "anthropic",
+    baseURL,
+    defaultModel: "deepseek-v4-pro",
+    cheapModel: "deepseek-v4-flash",
+    maxOutputTokens: 65_536,
+  };
   const example = {
     providers: {
-      anthropic: {
-        type: "anthropic",
-        baseURL: "${ANTHROPIC_BASE_URL}",
-        defaultModel: "deepseek-v4-pro",
-        cheapModel: "deepseek-v4-flash",
-        maxOutputTokens: 65_536,
-      },
+      anthropic: provider,
     },
     agents: {
       main: { model: "anthropic:deepseek-v4-pro" },
@@ -562,6 +566,25 @@ async function createExampleFlavorConfig(cwd: string): Promise<void> {
 }
 
 const CODEISLAND_SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), "codeisland");
+
+async function readFlavorEnvBaseURL(): Promise<string | undefined> {
+  // Walk up from the current module to find the flavor-code root .env.
+  // Handles both source (src/init/project.ts) and bundled (dist/chunk-*.js) layouts.
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 6; i++) {
+    try {
+      const envPath = join(dir, ".env");
+      const content = await readFile(envPath, "utf8");
+      const parsed = parseEnv(content);
+      const value = parsed.ANTHROPIC_BASE_URL;
+      if (value !== undefined) return value;
+    } catch {
+      // .env not found at this level, continue walking up
+    }
+    dir = dirname(dir);
+  }
+  return undefined;
+}
 
 const CODEISLAND_FILES = ["flavor-plugin.json", "activate.mjs", "bridge.mjs"] as const;
 
@@ -580,10 +603,11 @@ async function copyCodeIslandPlugin(cwd: string): Promise<void> {
   }
 }
 
-export async function initializeFlavor(cwd: string): Promise<InitResult> {
+export async function initializeFlavor(cwd: string, config?: { providers?: Record<string, { baseURL?: string | undefined }> | undefined }): Promise<InitResult> {
   await ensureFlavorDirectories(cwd);
   await copyCodeIslandPlugin(cwd);
-  await createExampleFlavorConfig(cwd);
+  const resolvedBaseURL: string | undefined = config?.providers?.anthropic?.baseURL ?? undefined;
+  await createExampleFlavorConfig(cwd, resolvedBaseURL);
   const facts = await inspectProject(cwd);
   const path = join(cwd, "FLAVOR.md");
   const root = await realpath(cwd);

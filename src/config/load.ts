@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parse } from "dotenv";
 import { FlavorConfigSchema, type FlavorConfig } from "./schema.js";
@@ -72,9 +72,16 @@ function mergeConfig(base: ConfigObject, override: ConfigObject): ConfigObject {
 
 function interpolate(value: unknown, environment: Record<string, string | undefined>): unknown {
   if (typeof value === "string") {
-    return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (match, name: string) =>
+    const result = value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (match, name: string) =>
       environment[name] === undefined ? match : environment[name],
     );
+    // If the entire value is an unresolved template reference, drop it so
+    // optional fields like baseURL fall back to their defaults instead of
+    // failing URL validation with the literal "${...}" string.
+    if (/^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/.test(value) && result === value) {
+      return undefined;
+    }
+    return result;
   }
   if (Array.isArray(value)) {
     return value.map((item) => interpolate(item, environment));
@@ -87,8 +94,44 @@ function interpolate(value: unknown, environment: Record<string, string | undefi
   return value;
 }
 
+const FLAVOR_ENV_VARS = [
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_API_KEY",
+  "OPENAI_API_KEY",
+  "OAUTH_AUTHORIZATION_URL",
+  "OAUTH_TOKEN_URL",
+  "OAUTH_CALLBACK_HOST",
+  "OAUTH_CLIENT_ID",
+  "OAUTH_SCOPE",
+] as const;
+
+async function seedGlobalEnv(globalEnvPath: string): Promise<void> {
+  try {
+    // Skip if global .env already exists — never overwrite user settings.
+    await readFile(globalEnvPath, "utf8");
+    return;
+  } catch (error) {
+    if (!isMissingFileError(error)) return;
+  }
+  const lines: string[] = [];
+  for (const key of FLAVOR_ENV_VARS) {
+    const value = process.env[key];
+    if (value !== undefined && value !== "") {
+      lines.push(`${key}=${value}`);
+    }
+  }
+  if (lines.length === 0) return;
+  try {
+    await mkdir(join(globalEnvPath, ".."), { recursive: true });
+    await writeFile(globalEnvPath, `${lines.join("\n")}\n`, "utf8");
+  } catch {
+    // Failing to seed the global env is not fatal.
+  }
+}
+
 export async function loadConfig(options: LoadConfigOptions): Promise<LoadedConfig> {
   const globalPath = join(options.home, ".flavor-code", "flavor.json");
+  const globalEnvPath = join(options.home, ".flavor-code", ".env");
   const envPath = join(options.cwd, ".env");
   const projectPath = join(options.cwd, ".flavor", "flavor.json");
   const sources: string[] = [];
@@ -96,9 +139,15 @@ export async function loadConfig(options: LoadConfigOptions): Promise<LoadedConf
   const globalConfig = await readJsonIfPresent(globalPath);
   if (globalConfig) sources.push(globalPath);
 
-  const envText = await readTextIfPresent(envPath);
-  const projectEnvironment = envText === undefined ? {} : parse(envText);
-  if (envText !== undefined) sources.push(envPath);
+  // Load global .env first (lower priority), then project .env (higher priority).
+  const globalEnvText = await readTextIfPresent(globalEnvPath);
+  const projectEnvText = await readTextIfPresent(envPath);
+  const projectEnvironment = {
+    ...(globalEnvText === undefined ? {} : parse(globalEnvText)),
+    ...(projectEnvText === undefined ? {} : parse(projectEnvText)),
+  };
+  if (globalEnvText !== undefined) sources.push(globalEnvPath);
+  if (projectEnvText !== undefined) sources.push(envPath);
 
   // Populate process.env with .env values so they are visible to module-level
   // consumers (OAUTH_DEFAULTS, etc.). Never override an already-set env var.
@@ -107,6 +156,10 @@ export async function loadConfig(options: LoadConfigOptions): Promise<LoadedConf
       process.env[key] = value;
     }
   }
+
+  // Seed global .env on first use — copy any flavor-relevant env vars from
+  // the current environment so they are available from any project directory.
+  await seedGlobalEnv(globalEnvPath);
 
   const projectConfig = await readJsonIfPresent(projectPath);
   if (projectConfig) sources.push(projectPath);

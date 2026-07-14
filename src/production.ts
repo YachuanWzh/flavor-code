@@ -449,7 +449,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     setModel: async (role, id) => { harness.setModel(role, id); await persist(); },
     setPermissionMode: async (mode) => { harness.setPermissionMode(mode); await persist(); },
     compact: async (signal) => { const changed = await harness.main.context.compact(signal); if (changed) await persist(); return changed; },
-    initialize: () => initializeFlavor(workspace),
+    initialize: () => initializeFlavor(workspace, config),
     config: () => ({
       ...config, sources: loaded.sources,
       diagnostics: [...diagnostics, ...pluginHost.diagnostics.map((item) => `${item.plugin}: ${item.message}`),
