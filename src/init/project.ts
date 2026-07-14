@@ -544,7 +544,7 @@ async function createExampleFlavorConfig(cwd: string): Promise<void> {
     providers: {
       anthropic: {
         type: "anthropic",
-        baseURL: "http://127.0.0.1:8092",
+        baseURL: "${ANTHROPIC_BASE_URL}",
         defaultModel: "deepseek-v4-pro",
         cheapModel: "deepseek-v4-flash",
         maxOutputTokens: 65_536,

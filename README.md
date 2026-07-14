@@ -115,6 +115,138 @@ OPENAI_API_KEY=sk-你的密钥
 - `${OPENAI_API_KEY}` 自动从环境变量或 `.env` 取值
 - `language: "zh-CN"` 让 Flavor 用简体中文回复（也支持 `en-US`、`ja-JP` 等 BCP47 标签）
 - 支持 Anthropic（`"type": "anthropic"`）和任何兼容 OpenAI 接口的服务（`"type": "openai-compatible"`）
+- 关于 OAuth PKCE 企业级认证，请参阅下方 [PKCE 认证配置](#pkce-认证配置)
+
+---
+
+## PKCE 认证配置
+
+> **适用场景**：企业或团队需要通过统一授权体系访问 LLM 服务，且不希望真正的 API Key 暴露给每个开发者。
+
+### 什么是 PKCE
+
+PKCE（Proof Key for Code Exchange，发音 "pixy"）是 OAuth 2.0 的一种扩展协议，专为**无法安全存储客户端密钥**的原生应用设计。flavor-code 内置了完整的 PKCE 客户端能力，配合 **flavor-pkce** 项目（授权服务器 + API 网关）实现"无 API Key 暴露"的 LLM 安全访问。
+
+### 工作原理
+
+一句话概括：**用户浏览器登录授权服务器 → 获取短期 JWT → 用 JWT 通过 API 网关访问 LLM → 网关将 JWT 替换为真正的 API Key 再转发到上游**。
+
+```mermaid
+sequenceDiagram
+    participant 用户
+    participant flavor-code
+    participant 浏览器
+    participant 授权服务器
+    participant API网关
+    participant LLM
+
+    用户->>flavor-code: flavor
+    flavor-code->>flavor-code: 启动时检测 OAuth 配置
+    flavor-code->>浏览器: 打开授权页面
+    浏览器->>授权服务器: 登录 + 授权
+    授权服务器-->>浏览器: 重定向到本地回调
+    浏览器->>flavor-code: code + state
+    flavor-code->>授权服务器: code + code_verifier
+    授权服务器-->>flavor-code: JWT access_token (3天有效)
+    Note over flavor-code: Token 缓存到本地文件
+
+    用户->>flavor-code: 输入 prompt
+    flavor-code->>API网关: POST + Authorization: Bearer JWT
+    API网关->>API网关: 验证 JWT 签名
+    API网关->>LLM: POST + 真实 API Key
+    LLM-->>API网关: SSE 流式响应
+    API网关-->>flavor-code: 透明转发 SSE
+    flavor-code-->>用户: 展示回复
+```
+
+真实 API Key **只存在于 API 网关**，在整个授权和调用过程中不会离开网关。
+
+### 配置方法
+
+#### 方式一：显式 OAuth 配置（推荐）
+
+在 `.flavor/flavor.json` 中配置完整的 OAuth 参数：
+
+```json
+{
+  "providers": {
+    "openai": {
+      "type": "oauth-callback",
+      "apiType": "openai",
+      "baseURL": "https://api-gateway.your-company.com",
+      "authorizationUrl": "https://auth.your-company.com/authorize",
+      "tokenUrl": "https://auth.your-company.com/token",
+      "clientId": "flavor-code-cli",
+      "scope": "models:read models:use",
+      "defaultModel": "gpt-5",
+      "cheapModel": "gpt-5-mini"
+    }
+  }
+}
+```
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `type` | 是 | 固定为 `"oauth-callback"` |
+| `apiType` | 是 | `"openai"` 或 `"anthropic"`，决定上游 API 协议 |
+| `baseURL` | 是 | API 网关地址（注意：不是 LLM 服务商的地址） |
+| `authorizationUrl` | 是 | 授权服务器的 `/authorize` 端点 |
+| `tokenUrl` | 是 | 授权服务器的 `/token` 端点 |
+| `clientId` | 是 | 在授权服务器注册的客户端标识 |
+| `scope` | 否 | 空格分隔的权限范围，默认 `"models:read models:use"` |
+| `defaultModel` | 是 | 主 Agent 使用的模型 |
+| `cheapModel` | 是 | 子 Agent 使用的模型 |
+
+#### 方式二：环境变量内建默认值
+
+如果不想在每个项目配置文件里写 OAuth 地址，可以通过环境变量设置全局默认值（`.env` 或 shell 环境变量）：
+
+```bash
+export OAUTH_AUTHORIZATION_URL="https://auth.your-company.com/authorize"
+export OAUTH_TOKEN_URL="https://auth.your-company.com/token"
+export OAUTH_CLIENT_ID="flavor-code-cli"
+export OAUTH_SCOPE="models:read models:use"
+```
+
+此时 `.flavor/flavor.json` 只需最简配置：
+
+```json
+{
+  "providers": {
+    "openai": {
+      "type": "oauth-callback",
+      "apiType": "openai",
+      "baseURL": "https://api-gateway.your-company.com",
+      "defaultModel": "gpt-5",
+      "cheapModel": "gpt-5-mini"
+    }
+  }
+}
+```
+
+### 首次使用流程
+
+1. 按上述方式配置 `.flavor/flavor.json`
+2. 运行 `flavor`
+3. 系统自动打开浏览器，跳转到授权服务器登录页面
+4. 输入用户名和密码登录
+5. 在授权确认页面点击 Approve
+6. 浏览器显示"授权成功，请返回终端"
+7. flavor-code 自动获取 JWT Token 并缓存（3 天有效）
+8. 后续 3 天内重启 flavor 无需再次授权
+
+Token 缓存文件位于 `~/.flavor-code/auth.json`。
+
+### 常见问题
+
+**Q: 和直接用 API Key 有什么区别？**
+从使用体验上几乎没有区别。从安全角度，你的终端从未持有真正的 LLM API Key——它拿到的只是一个 3 天过期的 JWT。即使 JWT 泄露，影响范围也有限（3 天、受 scope 约束、可被服务端撤销）。
+
+**Q: 缓存过期了怎么办？**
+flavor-code 默认在过期前 60 秒自动丢弃缓存，下次启动时自动重新弹出浏览器授权。你也可以手动删除 `~/.flavor-code/auth.json` 强制重新授权。
+
+**Q: 如何搭建授权服务器和网关？**
+参考 **flavor-pkce** 项目，提供了完整的 Docker Compose 部署方案（FastAPI + SQLite + JWT RS256），一键启动。
 
 ---
 
@@ -313,8 +445,7 @@ npm run smoke:install  # 验证打包和安装
 - 后台 Session Memory 持久化记忆系统
 - 更细粒度的任务恢复与重放
 - IDE 集成（VS Code / JetBrains 扩展）
-- OAuth 与系统凭据存储
-- 远程 Provider 登录
+- 系统凭据存储（keychain 集成）
 - 插件隔离/签名验证
 - 跨设备会话
 
@@ -329,6 +460,7 @@ npm run smoke:install  # 验证打包和安装
 - 三级上下文压缩（微压缩、模型摘要、反应式压缩）
 - 任务系统（TaskPlan 六状态机、子 Agent DAG 并行调度）
 - Provider 适配层与错误标准化
+- **PKCE 到 SSE 全链路（OAuth 授权 → API 网关 → 流式代理）**
 - 权限引擎决策树与 Shell 安全分析
 - Hook 事件总线（19 个事件）
 - Skill 渐进加载与资源安全
