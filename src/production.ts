@@ -38,6 +38,7 @@ import { SESSION_VERSION, SessionStore, type SessionDocument } from "./session/s
 import { createApplyPatchTool, createEditTool, createReadTool, createWriteTool } from "./tools/files.js";
 import { createGlobTool, createGrepTool } from "./tools/search.js";
 import { createShellTool } from "./tools/shell.js";
+import { createLspTools } from "./tools/lsp.js";
 import { createAskUserQuestionTool, QuestionBridge, type AskUserQuestionHandler } from "./tools/ask-user-question.js";
 import { createTaskOutputTool } from "./tools/task-output.js";
 import { createTodoWriteTool } from "./tools/todo-write.js";
@@ -152,6 +153,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const tools: ToolDefinition<unknown>[] = [
     createReadTool(workspace), createWriteTool(workspace), createEditTool(workspace), createApplyPatchTool(workspace),
     createGlobTool(workspace), createGrepTool(workspace), createShellTool(workspace),
+    ...createLspTools(workspace, {
+      onStatus: (message) => options.output({ type: "notice", message }),
+    }),
     ...(options.approvalPolicy === "deny" ? [] : [createAskUserQuestionTool(askUserQuestionHandler)]),
     createTaskOutputTool(),
     createTodoWriteTool(),

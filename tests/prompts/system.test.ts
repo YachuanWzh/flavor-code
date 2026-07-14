@@ -61,6 +61,7 @@ describe("buildSystemPrompt", () => {
       "AskUserQuestion", "TodoWrite", "TaskPlan", "TaskUpdate", "Task",
       "TaskOutput", "SkillResource",
     ]) expect(allTools).toContain(`\`${name}\``);
+    expect(allTools).toContain("exact context has one unique nearby match");
     expect(readOnly).toContain("`Read`");
     for (const name of ["Shell", "Task", "TodoWrite", "AskUserQuestion"]) {
       expect(readOnly).not.toContain(`\`${name}\``);

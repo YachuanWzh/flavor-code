@@ -75,10 +75,13 @@ function toolsSection(toolNames: ReadonlySet<string>): string {
   addToolRule(rules, toolNames, "Read", "Use `Read` to inspect files; read enough surrounding context to understand code before changing it.");
   addToolRule(rules, toolNames, "Write", "Use `Write` to create a file only when a new file is necessary.");
   addToolRule(rules, toolNames, "Edit", "Use `Edit` for precise replacements in existing files.");
-  addToolRule(rules, toolNames, "ApplyPatch", "Use `ApplyPatch` for clear multi-hunk file edits.");
+  addToolRule(rules, toolNames, "ApplyPatch", "Use `ApplyPatch` for clear multi-hunk file edits. Hunks may relocate only when their exact context has one unique nearby match; use `Edit` for a single replacement.");
   addToolRule(rules, toolNames, "Glob", "Use `Glob` to find files by path pattern instead of shell directory crawling.");
   addToolRule(rules, toolNames, "Grep", "Use `Grep` to search file contents instead of shell text-search commands.");
   addToolRule(rules, toolNames, "Shell", "Use `Shell` for builds, tests, Git inspection, and commands without a dedicated tool. Keep commands scoped, non-interactive, and easy to audit.");
+  addToolRule(rules, toolNames, "LspFindRefs", "Use `LspFindRefs` to find all references to a symbol using the Language Server Protocol. Prefer this over Grep when you need precise semantic results.");
+  addToolRule(rules, toolNames, "LspHover", "Use `LspHover` to get type information and documentation for a symbol at a cursor position.");
+  addToolRule(rules, toolNames, "LspDiagnostics", "Use `LspDiagnostics` to read compiler and linter errors for a file. Always run this before claiming a code change is correct.");
   addToolRule(rules, toolNames, "AskUserQuestion", "Use `AskUserQuestion` only when a material ambiguity cannot be resolved safely from local context. Ask focused questions with mutually exclusive choices, then continue from the answer.");
   addToolRule(rules, toolNames, "TodoWrite", "Use `TodoWrite` to track non-trivial multi-step implementation work. Keep at most one item in progress and update status as work changes.");
   addToolRule(rules, toolNames, "TaskPlan", "Use `TaskPlan` before complex work with several dependent implementation or verification steps. Skip it for straightforward requests.");

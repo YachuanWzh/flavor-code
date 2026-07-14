@@ -195,6 +195,72 @@ describe("file tools", () => {
     });
   });
 
+  it("ApplyPatch describes its exact unique context relocation", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+
+    expect(createApplyPatchTool(workspace).description).toContain("unique exact context");
+  });
+
+  it("ApplyPatch relocates a hunk by unique exact context", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "zero\none\ntwo\nthree\n");
+    const patch = "--- a/file.txt\n+++ b/file.txt\n@@ -3,2 +3,2 @@\n-one\n+ONE\n two\n";
+
+    const output = await createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal);
+
+    expect(readFileSync(path, "utf8")).toBe("zero\nONE\ntwo\nthree\n");
+    expect(getToolPresentation(output)?.lines).toContainEqual({ kind: "removed", oldLine: 2, text: "one" });
+    expect(getToolPresentation(output)?.lines).toContainEqual({ kind: "added", newLine: 2, text: "ONE" });
+  });
+
+  it("ApplyPatch relocates multiple hunks independently", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "prefix\na\nold-a\nc\nmiddle\nd\nold-b\nf\n");
+    const patch = [
+      "--- a/file.txt", "+++ b/file.txt",
+      "@@ -4,3 +4,3 @@", " a", "-old-a", "+new-a", " c",
+      "@@ -9,3 +9,3 @@", " d", "-old-b", "+new-b", " f", "",
+    ].join("\n");
+
+    await createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal);
+
+    expect(readFileSync(path, "utf8")).toBe("prefix\na\nnew-a\nc\nmiddle\nd\nnew-b\nf\n");
+  });
+
+  it("ApplyPatch rejects ambiguous relocated context without writing", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    const original = "same\nold\nsame\nx\nsame\nold\nsame\n";
+    writeFileSync(path, original);
+    const patch = "--- a/file.txt\n+++ b/file.txt\n@@ -4,3 +4,3 @@\n same\n-old\n+new\n same\n";
+
+    await expect(createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal))
+      .rejects.toThrow(/hunk 1.*ambiguous.*lines 1, 5/i);
+    expect(readFileSync(path, "utf8")).toBe(original);
+  });
+
+  it("ApplyPatch diagnoses an already-applied hunk", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "zero\nnew\nend\n");
+    const patch = "--- a/file.txt\n+++ b/file.txt\n@@ -2 +2 @@\n-old\n+new\n";
+
+    await expect(createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal))
+      .rejects.toThrow(/hunk 1.*already applied.*line 2/i);
+  });
+
+  it("ApplyPatch reports expected and actual context on mismatch", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "zero\nactual\nend\n");
+    const patch = "--- a/file.txt\n+++ b/file.txt\n@@ -2 +2 @@\n-old\n+new\n";
+
+    await expect(createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal))
+      .rejects.toThrow(/hunk 1.*declared line 2.*expected.*old.*actual/i);
+  });
+
   it("ApplyPatch creation refuses to overwrite an existing binary file", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
     const path = join(workspace, "file.dat");

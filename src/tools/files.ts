@@ -115,25 +115,26 @@ export function createApplyPatchTool(workspace: string): ToolDefinition<z.infer<
   const guard = createPathGuard(workspace);
   return {
     name: "ApplyPatch",
-    description: "Apply a workspace-limited unified diff",
+    description: "Apply a workspace-limited unified diff, relocating hunks only by unique exact context",
     inputSchema: ApplyPatchInput,
     paths: (input) => parsePatch(input.patch).map((file) => guard.lexical(file.path)),
     execute: async (input, signal) => {
       abortIfNeeded(signal);
       const changes = parsePatch(input.patch);
-      const prepared: Array<{ path: string; content: string; change: PatchFile }> = [];
+      const prepared: Array<{ path: string; content: string; change: PatchFile; hunks: PatchHunk[] }> = [];
       for (const change of changes) {
         const path = await guard.destination(change.path);
         const original = change.created
           ? await requireAbsent(guard, change.path)
           : await readText(await guard.existing(change.path));
-        prepared.push({ path, content: applyHunks(original, change.hunks), change });
+        const applied = applyHunks(original, change.hunks);
+        prepared.push({ path, content: applied.content, change, hunks: applied.hunks });
       }
       for (const change of prepared) await atomicWrite(change.path, change.content, signal);
       const first = prepared[0]!;
       return withToolPresentation(
         { files: prepared.map((change) => change.path) },
-        buildPatchPresentation(first.path, first.change.created, first.change.hunks),
+        buildPatchPresentation(first.path, first.change.created, first.hunks),
       );
     },
   };
@@ -264,6 +265,9 @@ function isMissing(error: unknown): boolean {
 
 interface PatchFile { path: string; created: boolean; hunks: PatchHunk[] }
 interface PatchHunk { oldStart: number; newStart: number; lines: string[] }
+interface AppliedHunks { content: string; hunks: PatchHunk[] }
+
+const PATCH_SEARCH_RADIUS = 100;
 
 function parsePatch(patch: string): PatchFile[] {
   const lines = patch.replaceAll("\r\n", "\n").split("\n");
@@ -371,15 +375,22 @@ function buildEditDiagnosis(contentsLF: string, oldTextLF: string, first: number
   return diagnosis;
 }
 
-function applyHunks(original: string, hunks: readonly PatchHunk[]): string {
+function applyHunks(original: string, hunks: readonly PatchHunk[]): AppliedHunks {
   const hasCRLF = original.includes("\r\n");
   const source = original.replace(/\r\n/g, "\n").split("\n");
   if (source.at(-1) === "") source.pop();
   const output: string[] = [];
+  const appliedHunks: PatchHunk[] = [];
   let cursor = 0;
-  for (const hunk of hunks) {
-    const target = Math.max(0, hunk.oldStart - 1);
-    if (target < cursor || target > source.length) throw new Error("Patch hunk is out of range");
+  for (const [index, hunk] of hunks.entries()) {
+    const declaredTarget = Math.max(0, hunk.oldStart - 1);
+    const target = resolveHunkTarget(source, hunk, cursor, index + 1);
+    const offset = target - declaredTarget;
+    appliedHunks.push({
+      ...hunk,
+      oldStart: hunk.oldStart === 0 ? 0 : target + 1,
+      newStart: hunk.newStart === 0 ? 0 : Math.max(1, hunk.newStart + offset),
+    });
     output.push(...source.slice(cursor, target));
     cursor = target;
     for (const line of hunk.lines) {
@@ -394,5 +405,73 @@ function applyHunks(original: string, hunks: readonly PatchHunk[]): string {
   }
   output.push(...source.slice(cursor));
   const result = `${output.join("\n")}\n`;
-  return hasCRLF ? result.replace(/\n/g, "\r\n") : result;
+  return {
+    content: hasCRLF ? result.replace(/\n/g, "\r\n") : result,
+    hunks: appliedHunks,
+  };
+}
+
+function resolveHunkTarget(
+  source: readonly string[],
+  hunk: PatchHunk,
+  cursor: number,
+  hunkNumber: number,
+): number {
+  const declared = Math.max(0, hunk.oldStart - 1);
+  const oldLines = patchSideLines(hunk, "old");
+  if (oldLines.length === 0) {
+    if (declared < cursor || declared > source.length) {
+      throw new Error(`Patch hunk ${hunkNumber} is out of range at declared line ${hunk.oldStart}`);
+    }
+    return declared;
+  }
+  if (declared >= cursor && matchesLines(source, declared, oldLines)) return declared;
+
+  const matches = exactMatchesNear(source, oldLines, declared, cursor);
+  if (matches.length === 1) return matches[0]!;
+  if (matches.length > 1) {
+    const lines = matches.map((match) => match + 1).join(", ");
+    throw new Error(`Patch hunk ${hunkNumber} is ambiguous near declared line ${hunk.oldStart}; exact context matches at lines ${lines}`);
+  }
+
+  const newLines = patchSideLines(hunk, "new");
+  const newDeclared = Math.max(0, hunk.newStart - 1);
+  const appliedMatches = exactMatchesNear(source, newLines, newDeclared, cursor);
+  if (appliedMatches.length === 1) {
+    throw new Error(`Patch hunk ${hunkNumber} appears to be already applied at line ${appliedMatches[0]! + 1}`);
+  }
+
+  const expected = JSON.stringify(oldLines[0]);
+  const actualLine = declared < source.length ? source[declared] : "<end of file>";
+  const actual = JSON.stringify(actualLine);
+  throw new Error(
+    `Patch hunk ${hunkNumber} does not match near declared line ${hunk.oldStart}; expected ${expected}, actual ${actual}`,
+  );
+}
+
+function patchSideLines(hunk: PatchHunk, side: "old" | "new"): string[] {
+  const markers = side === "old" ? new Set([" ", "-"]) : new Set([" ", "+"]);
+  return hunk.lines.filter((line) => markers.has(line[0]!)).map((line) => line.slice(1));
+}
+
+function exactMatchesNear(
+  source: readonly string[],
+  expected: readonly string[],
+  declared: number,
+  cursor: number,
+): number[] {
+  if (expected.length === 0 || source.length < expected.length) return [];
+  const first = Math.max(cursor, 0, declared - PATCH_SEARCH_RADIUS);
+  const last = Math.min(source.length - expected.length, declared + PATCH_SEARCH_RADIUS);
+  const matches: number[] = [];
+  for (let start = first; start <= last; start += 1) {
+    if (matchesLines(source, start, expected)) matches.push(start);
+  }
+  return matches;
+}
+
+function matchesLines(source: readonly string[], start: number, expected: readonly string[]): boolean {
+  return start >= 0
+    && start + expected.length <= source.length
+    && expected.every((line, index) => source[start + index] === line);
 }
