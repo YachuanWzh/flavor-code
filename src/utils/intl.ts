@@ -46,7 +46,7 @@ export function resolveLanguage(explicit: string | undefined): string {
 export function languageInstruction(language: string): string {
   // Map common BCP47 tags to human-readable labels the model understands.
   const label = LANG_LABELS.get(language) ?? language;
-  return `Always respond in ${label}.`;
+  return `Always respond in ${label}. Do NOT reply in any other language unless the user explicitly asks for it.`;
 }
 
 const LANG_LABELS = new Map<string, string>([

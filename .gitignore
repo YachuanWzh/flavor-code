@@ -16,3 +16,4 @@ Thumbs.db
 FLAVOR.md
 # superharness brainstorm mind-map session state (transient)
 .superharness/
+.flavor/audit.jsonl
