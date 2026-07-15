@@ -20,6 +20,24 @@ const turn = (id: number, prompt: string, assistantText: string): TranscriptTurn
 });
 
 describe("TerminalLayout", () => {
+  it("collapses pasted draft text but keeps submitted content fully visible with a spaced chevron", () => {
+    const pasted = "first pasted line\nsecond pasted line\nthird pasted line";
+    const output = renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[turn(1, pasted, "done")]}
+      input={pasted}
+      promptCursor={[...pasted].length}
+      pastedBlocks={[{ id: 1, text: pasted }]}
+      columns={80}
+      activeSession={false}
+    />, { columns: 80 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(output).toContain("[Pasted text #1 +2 lines]");
+    expect(output.match(/first pasted line/g)).toHaveLength(1);
+    expect(output).toContain("❯ first pasted line");
+  });
+
   it("renders retry statuses in bright yellow", () => {
     const retrying: TranscriptTurn = {
       id: 1,
