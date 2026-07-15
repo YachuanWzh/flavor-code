@@ -169,7 +169,7 @@ describe("AgentLoop + HallucinationGuard integration", () => {
       const warnings = events.filter((e) => e.type === "warning");
       expect(warnings).toHaveLength(1);
       expect(warnings[0]!.message).toContain("Hallucination guard");
-      expect(warnings[0]!.message).toContain("confidence=0.2");
+      expect(warnings[0]!.message).toMatch(/0\.20/);
       expect(warnings[0]!.message).toContain("vague");
 
       // Should still finish with done (warning is advisory, not terminal)

@@ -3,6 +3,7 @@ import { confidenceCheck } from "./confidence.js";
 import { RetryMonitor } from "./retry-monitor.js";
 import type { HallucinationReport } from "./types.js";
 import { DEFAULT_CONFIDENCE_THRESHOLD } from "./types.js";
+import { buildWarningMessages } from "./messages.js";
 
 export interface HallucinationGuardConfig {
   registry: ModelRegistry;
@@ -11,6 +12,8 @@ export interface HallucinationGuardConfig {
   maxToolRetries?: number;
   windowSize?: number;
   threshold?: number;
+  /** BCP47 language tag (e.g. "zh-CN", "en-US") for localized warning messages. */
+  language?: string;
 }
 
 export class HallucinationGuard {
@@ -18,12 +21,14 @@ export class HallucinationGuard {
   readonly #cheapModelId: string;
   readonly #confidenceThreshold: number;
   readonly #retryMonitor: RetryMonitor;
+  readonly #language: string;
   readonly #lastParams = new Map<string, unknown>();
 
   constructor(config: HallucinationGuardConfig) {
     this.#registry = config.registry;
     this.#cheapModelId = config.cheapModelId;
     this.#confidenceThreshold = config.confidenceThreshold ?? DEFAULT_CONFIDENCE_THRESHOLD;
+    this.#language = config.language ?? "en-US";
     const retryConfig: Record<string, number> = {};
     if (config.maxToolRetries !== undefined) retryConfig.maxToolRetries = config.maxToolRetries;
     if (config.windowSize !== undefined) retryConfig.windowSize = config.windowSize;
@@ -71,16 +76,24 @@ export class HallucinationGuard {
       && retryResult.retryViolations.length === 0
       && !retryResult.circuitBreakerTripped;
 
-    // 4. Reset state for next evaluation cycle
-    this.#retryMonitor.reset();
-
-    return {
+    // Build report first so we can generate localized warnings
+    const base = {
       confidence: confidenceResult,
       retryViolations: retryResult.retryViolations,
       circuitBreakerTripped: retryResult.circuitBreakerTripped,
       circuitBreakerDetail: retryResult.circuitBreakerDetail,
       passed,
     };
+
+    // Generate localized warning messages
+    const warnings = passed
+      ? []
+      : buildWarningMessages(base, this.#language);
+
+    // 4. Reset state for next evaluation cycle
+    this.#retryMonitor.reset();
+
+    return { ...base, warnings };
   }
 
   reset(): void {

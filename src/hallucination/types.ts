@@ -31,6 +31,8 @@ export interface HallucinationReport {
   circuitBreakerTripped: boolean;
   circuitBreakerDetail: string | null;
   passed: boolean;
+  /** Human-readable warning messages already localized to the configured language. */
+  warnings: string[];
 }
 
 export interface RetryViolation {

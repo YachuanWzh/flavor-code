@@ -649,7 +649,7 @@ function StatusLine({ block, interactive }: { block: Extract<TranscriptBlock, { 
 export function statusLineColor(
   block: Extract<TranscriptBlock, { kind: "status" }>,
 ): "ansi:yellowBright" | "ansi:green" | "#d77757" | "#e06c50" | undefined {
-  if (block.tone === "retry") return "ansi:yellowBright";
+  if (block.tone === "retry" || block.tone === "warning") return "ansi:yellowBright";
   if (block.state === "running") return "#d77757";
   if (block.state === "completed") return "ansi:green";
   if (block.state === "failed" || block.state === "cancelled") return "#e06c50";

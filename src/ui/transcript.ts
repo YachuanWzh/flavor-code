@@ -18,7 +18,7 @@ export type TranscriptBlock =
     kind: "status";
     id: string;
     state: "running" | "completed" | "failed" | "cancelled" | "info";
-    tone?: "retry";
+    tone?: "retry" | "warning";
     text: string;
     hint?: string;
     task?: { subject: string; activeForm: string; role: "main" | "subagent" };
@@ -152,7 +152,7 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
     kind: "status", id: `compact:${state.active.blocks.length}`, state: "info", text: "· Context compacted.",
   });
   if (event.type === "warning") return upsertStatus(state, {
-    kind: "status", id: `warn:${state.active.blocks.length}`, state: "info", text: `⚠ ${event.message}`,
+    kind: "status", id: `warn:${state.active.blocks.length}`, state: "info", tone: "warning", text: `⚠ ${event.message}`,
   });
   if (event.type === "limit_reached") {
     const suffix = event.extended ? " — auto-extended" : "";

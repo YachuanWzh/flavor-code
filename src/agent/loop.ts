@@ -451,21 +451,8 @@ export class AgentLoop {
         if (this.#options.hallucinationGuard !== undefined && this.#options.agent === "main") {
           try {
             const report = await this.#options.hallucinationGuard.evaluate(request.prompt, accumulatedText);
-            if (!report.passed) {
-              const details: string[] = [];
-              if (report.confidence !== null) {
-                details.push(`confidence=${report.confidence.confidence} reason="${report.confidence.reason}"`);
-              }
-              for (const v of report.retryViolations) {
-                details.push(`tool "${v.toolName}" retried ${v.retryCount}/${v.maxRetries}×`);
-              }
-              if (report.circuitBreakerTripped && report.circuitBreakerDetail !== null) {
-                details.push(report.circuitBreakerDetail);
-              }
-              yield {
-                type: "warning",
-                message: `Hallucination guard: ${details.join(" | ")}`,
-              };
+            for (const warning of report.warnings) {
+              yield { type: "warning", message: warning };
             }
           } catch {
             // Guard failure is non-fatal for interactive sessions

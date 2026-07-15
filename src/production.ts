@@ -380,9 +380,11 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     return Object.values(taskStates).some((state) => state === "running");
   };
 
+  const language = resolveLanguage(config.language);
   const hallucinationGuard = new HallucinationGuard({
     registry,
     cheapModelId: childModel,
+    language,
   });
   harness = new LocalHarness({
     registry, hooks, workspace, mainModelId: mainModel, subagentModelId: childModel,

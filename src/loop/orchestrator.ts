@@ -203,19 +203,7 @@ export class LoopOrchestrator {
             try {
               const report = await this.#options.hallucinationGuard.evaluate(request.goal, workerText);
               if (!report.passed) {
-                const details: string[] = [];
-                if (report.confidence !== null && report.confidence.confidence < 0.7) {
-                  details.push(`low confidence (${report.confidence.confidence}): ${report.confidence.reason}`);
-                }
-                if (report.retryViolations.length > 0) {
-                  for (const v of report.retryViolations) {
-                    details.push(`tool "${v.toolName}" retried ${v.retryCount}/${v.maxRetries} times (last error: ${v.lastErrorCode ?? "unknown"})`);
-                  }
-                }
-                if (report.circuitBreakerTripped && report.circuitBreakerDetail !== null) {
-                  details.push(report.circuitBreakerDetail);
-                }
-                guardReason = `Verification passed but hallucination guard failed: ${details.join("; ")}`;
+                guardReason = report.warnings.join("; ");
                 state = await this.#terminal(state, "failed", guardReason, now());
                 yield { type: "loop-terminal", loopId, status: "failed", reason: guardReason };
                 return;
