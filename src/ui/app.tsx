@@ -12,6 +12,7 @@ import {
 } from "../claude-ink/index.js";
 import { useAnimationFrame } from "../claude-ink/hooks/use-animation-frame.js";
 import { useHasSelection, useSelection } from "../claude-ink/hooks/use-selection.js";
+import { useTerminalTitle } from "../claude-ink/hooks/use-terminal-title.js";
 
 import { createProductionRuntime, type ProductionRuntime } from "../production.js";
 import { isDestructiveTool } from "../permissions/engine.js";
@@ -111,6 +112,8 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   const runtimeRef = useRef<ProductionRuntime | undefined>(undefined);
   const closing = useRef(false);
   const textBuf = useRef<{ pending: string; timer: ReturnType<typeof setTimeout> | null }>({ pending: "", timer: null });
+
+  useTerminalTitle("flavor");
 
   const flushText = (): void => {
     const t = textBuf.current;
