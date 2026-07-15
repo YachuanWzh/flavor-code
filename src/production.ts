@@ -55,6 +55,7 @@ import { awaitWithSignal } from "./utils/async.js";
 import { message } from "./utils/error.js";
 import { execFileNoThrow } from "./utils/execFileNoThrow.js";
 import { redactSecrets } from "./utils/redact.js";
+import { HallucinationGuard } from "./hallucination/guard.js";
 import { AuditLogger } from "./utils/log.js";
 
 export interface ProductionRuntimeOptions {
@@ -379,8 +380,13 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     return Object.values(taskStates).some((state) => state === "running");
   };
 
+  const hallucinationGuard = new HallucinationGuard({
+    registry,
+    cheapModelId: childModel,
+  });
   harness = new LocalHarness({
     registry, hooks, workspace, mainModelId: mainModel, subagentModelId: childModel,
+    hallucinationGuard,
     tools, createContext, permissionMode: recovered?.permissionMode ?? config.permissionMode,
     maxIterationsMain: config.maxIterations.main,
     maxIterationsSubagent: config.maxIterations.subagent,
@@ -542,6 +548,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     workspace,
     config: config.loop,
     persistence: loopStore,
+    hallucinationGuard,
     prepareWorkspace: (input) => prepareLoopWorkspace(input),
     inferVerification: inferVerificationPlan,
     runWorker: ({ workspace: executionWorkspace, prompt, signal }) =>

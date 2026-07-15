@@ -2,6 +2,7 @@ import type { AgentEvent } from "../agent/types.js";
 import { message } from "../utils/error.js";
 import { buildLoopCyclePrompt } from "../skills/builtin-loop.js";
 import { budgetDecision, extendBudget, rejectBudget, type BudgetDimension } from "./budget.js";
+import type { HallucinationGuard } from "../hallucination/guard.js";
 import type { LoopWorkspaceResolution } from "./isolation.js";
 import { LoopStateSchema, type LoopEvent, type LoopState, type LoopStatus, type LoopVerificationEvidence } from "./types.js";
 import type { VerificationPlan } from "./verifier.js";
@@ -32,6 +33,8 @@ export interface LoopOrchestratorOptions {
   runVerifier(plan: VerificationPlan, workspace: string, signal: AbortSignal): Promise<LoopVerificationEvidence>;
   confirmBudget(state: LoopState, dimensions: readonly BudgetDimension[], signal: AbortSignal): Promise<LoopConfirmation>;
   fingerprint(workspace: string): Promise<string>;
+  /** Optional hallucination guard for confidence checks and retry monitoring. */
+  hallucinationGuard?: HallucinationGuard;
   now?(): string;
   idFactory?(): string;
 }
@@ -106,6 +109,7 @@ export class LoopOrchestrator {
         let cycleInputTokens = 0;
         let cycleOutputTokens = 0;
         let workerError: string | undefined;
+        let workerText = "";
         for await (const event of this.#options.runWorker({
           goal: request.goal, cycle, workspace: executionWorkspace.root, prompt, signal: request.signal,
         })) {
@@ -114,6 +118,19 @@ export class LoopOrchestrator {
             cycleOutputTokens += event.outputTokens;
           }
           if (event.type === "error") workerError = event.error.message;
+          if (event.type === "text") workerText += event.text;
+          // Hallucination guard: record tool calls and results
+          if (this.#options.hallucinationGuard !== undefined) {
+            if (event.type === "tool-start") {
+              this.#options.hallucinationGuard.recordToolCall(event.name, event.input);
+            } else if (event.type === "tool-end") {
+              this.#options.hallucinationGuard.recordToolResult(
+                event.name,
+                event.result.ok,
+                event.result.error?.code,
+              );
+            }
+          }
           yield { type: "worker-event", event };
         }
         if (workerError !== undefined) {
@@ -180,7 +197,34 @@ export class LoopOrchestrator {
         }
 
         if (evidence.passed) {
-          const reason = evidence.summary;
+          // Hallucination guard: check confidence before declaring success
+          let guardReason = "";
+          if (this.#options.hallucinationGuard !== undefined) {
+            try {
+              const report = await this.#options.hallucinationGuard.evaluate(request.goal, workerText);
+              if (!report.passed) {
+                const details: string[] = [];
+                if (report.confidence !== null && report.confidence.confidence < 0.7) {
+                  details.push(`low confidence (${report.confidence.confidence}): ${report.confidence.reason}`);
+                }
+                if (report.retryViolations.length > 0) {
+                  for (const v of report.retryViolations) {
+                    details.push(`tool "${v.toolName}" retried ${v.retryCount}/${v.maxRetries} times (last error: ${v.lastErrorCode ?? "unknown"})`);
+                  }
+                }
+                if (report.circuitBreakerTripped && report.circuitBreakerDetail !== null) {
+                  details.push(report.circuitBreakerDetail);
+                }
+                guardReason = `Verification passed but hallucination guard failed: ${details.join("; ")}`;
+                state = await this.#terminal(state, "failed", guardReason, now());
+                yield { type: "loop-terminal", loopId, status: "failed", reason: guardReason };
+                return;
+              }
+            } catch {
+              // Guard evaluation failure is not fatal — proceed with success
+            }
+          }
+          const reason = evidence.summary + guardReason;
           state = await this.#terminal(state, "succeeded", reason, now());
           yield { type: "loop-terminal", loopId, status: "succeeded", reason };
           return;

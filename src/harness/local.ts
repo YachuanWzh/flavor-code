@@ -1,6 +1,7 @@
 import { AgentLoop } from "../agent/loop.js";
 import { MAIN_TASK_TOOL_NAMES } from "../agent/task-tools.js";
 import type { TaskNode } from "../agent/planner.js";
+import type { HallucinationGuard } from "../hallucination/guard.js";
 import type { PermissionMode } from "../permissions/engine.js";
 import { PermissionEngine } from "../permissions/engine.js";
 import type { ContextManager } from "../context/manager.js";
@@ -28,6 +29,7 @@ export interface LocalHarnessOptions {
   maxIterationsMain?: number;
   maxIterationsSubagent?: number;
   hasActiveProgress?(): boolean;
+  hallucinationGuard?: HallucinationGuard;
 }
 
 export interface HarnessProfile {
@@ -172,6 +174,7 @@ export class LocalHarness {
         agent,
         ...(maxIterations === undefined ? {} : { maxIterations }),
         ...(isMain && this.#options.hasActiveProgress !== undefined ? { hasActiveProgress: this.#options.hasActiveProgress } : {}),
+        ...(isMain && this.#options.hallucinationGuard !== undefined ? { hallucinationGuard: this.#options.hallucinationGuard } : {}),
       });
       return { get modelId() { return loop.modelId; }, context, runtime, tools, loop };
     } catch (error) {

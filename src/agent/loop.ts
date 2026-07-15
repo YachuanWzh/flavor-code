@@ -1,4 +1,5 @@
 import type { ContextManager } from "../context/manager.js";
+import type { HallucinationGuard } from "../hallucination/guard.js";
 import type { HookBus } from "../hooks/bus.js";
 import type { ModelRegistry } from "../models/registry.js";
 import { withStructuredOutput } from "../models/structured.js";
@@ -41,6 +42,7 @@ export interface AgentLoopOptions {
   maxExtensions?: number;
   hasActiveProgress?(): boolean;
   agent?: "main" | "subagent";
+  hallucinationGuard?: HallucinationGuard;
 }
 
 export class AgentLoop {
@@ -82,6 +84,7 @@ export class AgentLoop {
     this.#options.context.append({ role: "user", content: request.prompt });
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
+    let accumulatedText = "";
 
     let maxIterations = this.#options.maxIterations;
     let extensions = 0;
@@ -190,6 +193,7 @@ export class AgentLoop {
           for await (const event of adapter.stream(modelRequest)) {
             if (event.type === "text") {
               assistantText += event.text;
+              accumulatedText += event.text;
               yield event;
             } else if (event.type === "tool-call") {
               collectedToolCalls.push({ kind: "valid", id: event.id, name: event.name, input: event.input });
@@ -443,6 +447,30 @@ export class AgentLoop {
         });
       }
       if (toolCalls.length === 0) {
+        // Hallucination guard: for main agent, check confidence before declaring done
+        if (this.#options.hallucinationGuard !== undefined && this.#options.agent === "main") {
+          try {
+            const report = await this.#options.hallucinationGuard.evaluate(request.prompt, accumulatedText);
+            if (!report.passed) {
+              const details: string[] = [];
+              if (report.confidence !== null) {
+                details.push(`confidence=${report.confidence.confidence} reason="${report.confidence.reason}"`);
+              }
+              for (const v of report.retryViolations) {
+                details.push(`tool "${v.toolName}" retried ${v.retryCount}/${v.maxRetries}×`);
+              }
+              if (report.circuitBreakerTripped && report.circuitBreakerDetail !== null) {
+                details.push(report.circuitBreakerDetail);
+              }
+              yield {
+                type: "warning",
+                message: `Hallucination guard: ${details.join(" | ")}`,
+              };
+            }
+          } catch {
+            // Guard failure is non-fatal for interactive sessions
+          }
+        }
         yield { type: "done", usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens } };
         return;
       }
@@ -459,6 +487,7 @@ export class AgentLoop {
         }
         const label = this.#options.runtime.label(call);
         const hint = this.#options.runtime.hint(call);
+        this.#options.hallucinationGuard?.recordToolCall(call.name, call.input);
         yield { type: "tool-start", id: call.id, name: call.name, input: call.input, ...(label === undefined ? {} : { label }), ...(hint === undefined ? {} : { hint }) };
         const result = await this.#options.runtime.execute(call, { agent: this.#options.agent, ...(request.signal === undefined ? {} : { signal: request.signal }) });
         if (request.signal?.aborted) {
@@ -488,6 +517,7 @@ export class AgentLoop {
       for (const { call, result } of stagedResults) {
         const endLabel = this.#options.runtime.label(call);
         const endHint = this.#options.runtime.hint(call);
+        this.#options.hallucinationGuard?.recordToolResult(call.name, result.ok, result.error?.code);
         yield { type: "tool-end", id: call.id, name: call.name, result, ...(endLabel === undefined ? {} : { label: endLabel }), ...(endHint === undefined ? {} : { hint: endHint }) };
       }
       if (turnError !== undefined) {
