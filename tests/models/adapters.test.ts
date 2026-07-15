@@ -86,6 +86,47 @@ describe("OpenAIModelAdapter", () => {
     );
   });
 
+  it("preserves malformed OpenAI tool arguments for structured repair", async () => {
+    const raw = String.raw`{"path":"C:\Users\wangzh"}`;
+    const client = {
+      responses: {
+        stream: () => events(
+          {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: { type: "function_call", call_id: "call_bad", name: "weather" },
+          },
+          {
+            type: "response.function_call_arguments.done",
+            output_index: 0,
+            name: "weather",
+            arguments: raw,
+          },
+          {
+            type: "response.completed",
+            response: { usage: { input_tokens: 4, output_tokens: 3 } },
+          },
+        ),
+      },
+    };
+
+    const output = await collect(
+      new OpenAIModelAdapter({ client: asOpenAIClient(client) }).stream(request),
+    );
+
+    expect(output).toContainEqual(expect.objectContaining({
+      type: "invalid-tool-call",
+      id: "call_bad",
+      name: "weather",
+      rawInput: raw,
+      error: expect.objectContaining({ code: "invalid_tool_arguments" }),
+    }));
+    expect(output).not.toContainEqual(expect.objectContaining({
+      type: "error",
+      error: expect.objectContaining({ code: "unknown" }),
+    }));
+  });
+
   it("turns provider stream errors into stable error events", async () => {
     const client = {
       responses: {
@@ -194,7 +235,7 @@ describe("AnthropicModelAdapter", () => {
         { type: "message_stop" },
       ),
     );
-    const client = { messages: { stream } };
+    const client = { messages: { create: stream } };
 
     const output = await collect(
       new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream(request),
@@ -217,10 +258,54 @@ describe("AnthropicModelAdapter", () => {
     );
   });
 
+  it("preserves Anthropic tool arguments with invalid escapes before SDK snapshot parsing", async () => {
+    const raw = String.raw`{"path":"C:\Users\wangzh"}`;
+    const client = {
+      messages: {
+        create: () => events(
+          { type: "message_start", message: { usage: { input_tokens: 5, output_tokens: 0 } } },
+          {
+            type: "content_block_start",
+            index: 1,
+            content_block: { type: "tool_use", id: "tool_bad", name: "weather", input: {} },
+          },
+          {
+            type: "content_block_delta",
+            index: 1,
+            delta: { type: "input_json_delta", partial_json: raw },
+          },
+          { type: "content_block_stop", index: 1 },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "tool_use", stop_sequence: null },
+            usage: { output_tokens: 4 },
+          },
+          { type: "message_stop" },
+        ),
+      },
+    };
+
+    const output = await collect(
+      new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream(request),
+    );
+
+    expect(output).toContainEqual(expect.objectContaining({
+      type: "invalid-tool-call",
+      id: "tool_bad",
+      name: "weather",
+      rawInput: raw,
+      error: expect.objectContaining({ code: "invalid_tool_arguments" }),
+    }));
+    expect(output).not.toContainEqual(expect.objectContaining({
+      type: "error",
+      error: expect.objectContaining({ code: "unknown" }),
+    }));
+  });
+
   it("does not emit a truncated tool call when the provider reaches max_tokens", async () => {
     const client = {
       messages: {
-        stream: () =>
+        create: () =>
           events(
             { type: "message_start", message: { usage: { input_tokens: 5, output_tokens: 0 } } },
             {
@@ -261,7 +346,7 @@ describe("AnthropicModelAdapter", () => {
   it("reports malformed tool-call JSON instead of normalizing it to an empty object", async () => {
     const client = {
       messages: {
-        stream: () =>
+        create: () =>
           events(
             { type: "message_start", message: { usage: { input_tokens: 5, output_tokens: 0 } } },
             {
@@ -289,21 +374,24 @@ describe("AnthropicModelAdapter", () => {
       new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream(request),
     );
 
-    expect(output).toHaveLength(2);
-    expect(output[0]).toEqual({ type: "usage", inputTokens: 5, outputTokens: 12 });
-    expect(output[1]).toMatchObject({
-      type: "error",
+    expect(output).toHaveLength(3);
+    expect(output[0]).toMatchObject({
+      type: "invalid-tool-call",
+      id: "tool_1",
+      name: "weather",
       error: {
-        code: "unknown",
+        code: "invalid_tool_arguments",
         message: expect.stringContaining('Invalid tool-call input for "weather"'),
       },
     });
+    expect(output[1]).toEqual({ type: "usage", inputTokens: 5, outputTokens: 12 });
+    expect(output[2]).toEqual({ type: "done", usage: { inputTokens: 5, outputTokens: 12 } });
     expect(output).not.toContainEqual(expect.objectContaining({ type: "tool-call", input: {} }));
   });
 
   it("uses a configured Anthropic output token limit", async () => {
     const stream = vi.fn(() => events());
-    const client = { messages: { stream } };
+    const client = { messages: { create: stream } };
 
     await collect(
       new AnthropicModelAdapter({
@@ -321,7 +409,7 @@ describe("AnthropicModelAdapter", () => {
   it("normalizes rejected SDK streams without throwing provider-specific errors", async () => {
     const client = {
       messages: {
-        stream: () => {
+        create: () => {
           throw Object.assign(new Error("bad key"), { status: 401 });
         },
       },
@@ -335,7 +423,7 @@ describe("AnthropicModelAdapter", () => {
   });
 
   it("emits accumulated usage before an Anthropic stream error", async () => {
-    const client = { messages: { stream: () => (async function* () {
+    const client = { messages: { create: () => (async function* () {
       yield { type: "message_start", message: { usage: { input_tokens: 5, output_tokens: 0 } } };
       yield { type: "message_delta", delta: {}, usage: { output_tokens: 2 } };
       throw new Error("stream broke");
@@ -355,7 +443,7 @@ describe("AnthropicModelAdapter", () => {
     };
     const client = {
       messages: {
-        stream: () =>
+        create: () =>
           events(
             { type: "message_start", message: { usage: cumulativeUsage } },
             { type: "message_delta", delta: {}, usage: cumulativeUsage },
@@ -375,7 +463,7 @@ describe("AnthropicModelAdapter", () => {
   it("retains prior cumulative input components when a later snapshot contains nulls", async () => {
     const client = {
       messages: {
-        stream: () =>
+        create: () =>
           events(
             {
               type: "message_start",
@@ -413,7 +501,7 @@ describe("AnthropicModelAdapter", () => {
 
   it("merges consecutive tool messages into a single user message", async () => {
     const stream = vi.fn(() => events());
-    const client = { messages: { stream } };
+    const client = { messages: { create: stream } };
     const mappingRequest: ModelRequest = {
       ...request,
       messages: [
@@ -455,7 +543,7 @@ describe("AnthropicModelAdapter", () => {
 
   it("maps system prompts and tool results to the Messages request", async () => {
     const stream = vi.fn(() => events());
-    const client = { messages: { stream } };
+    const client = { messages: { create: stream } };
     const mappingRequest: ModelRequest = {
       ...request,
       messages: [

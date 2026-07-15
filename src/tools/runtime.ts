@@ -19,6 +19,10 @@ export interface ToolRuntimeOptions {
   approve?: ApprovalCallback;
 }
 
+export type ToolInputValidation =
+  | { ok: true; input: unknown }
+  | { ok: false; error: { code: "unknown_tool" | "invalid_input"; message: string } };
+
 const PreToolUsePayload = z.object({
   tool: z.string(),
   input: z.unknown(),
@@ -59,6 +63,32 @@ export class ToolRuntime {
     for (const dispose of this.#disposeSchemas) dispose();
   }
 
+  definition(name: string): ToolDefinition<unknown> | undefined {
+    return this.#tools.get(name);
+  }
+
+  validate(call: ToolCall): ToolInputValidation {
+    const tool = this.#tools.get(call.name);
+    if (tool === undefined) {
+      return { ok: false, error: { code: "unknown_tool", message: `Unknown tool: ${call.name}` } };
+    }
+    try {
+      return { ok: true, input: tool.inputSchema.parse(call.input) };
+    } catch (primary) {
+      if (typeof call.input !== "string") {
+        return { ok: false, error: { code: "invalid_input", message: message(primary) } };
+      }
+      try {
+        return {
+          ok: true,
+          input: tool.inputSchema.parse(JSON.parse(call.input) as unknown),
+        };
+      } catch (secondary) {
+        return { ok: false, error: { code: "invalid_input", message: message(secondary) } };
+      }
+    }
+  }
+
   label(call: ToolCall): string | undefined {
     const tool = this.#tools.get(call.name);
     if (tool === undefined) return undefined;
@@ -89,25 +119,11 @@ export class ToolRuntime {
     if (tool === undefined) return { ok: false, error: { code: "unknown_tool", message: `Unknown tool: ${call.name}` } };
     const signal = context.signal ?? new AbortController().signal;
 
-    let input: unknown;
-    try {
-      input = tool.inputSchema.parse(call.input);
-    } catch (primary) {
-      // Some models wrap tool-call arguments in a JSON string instead of emitting a
-      // JSON object directly.  When the first parse fails and the raw input is a
-      // string, attempt a second JSON parse to recover the real argument object.
-      if (typeof call.input === "string") {
-        try {
-          const reparsed = JSON.parse(call.input) as unknown;
-          input = tool.inputSchema.parse(reparsed);
-          console.warn(`[ToolRuntime] Recovered string-wrapped input for tool "${call.name}". Consider upgrading the model.`);
-        } catch (secondary) {
-          return this.#fail(call.name, call.input, context.agent, "invalid_input", message(secondary));
-        }
-      } else {
-        return this.#fail(call.name, call.input, context.agent, "invalid_input", message(primary));
-      }
+    const validation = this.validate(call);
+    if (!validation.ok) {
+      return this.#fail(call.name, call.input, context.agent, validation.error.code, validation.error.message);
     }
+    let input = validation.input;
 
     try {
       const pre = await this.#hooks.emit({

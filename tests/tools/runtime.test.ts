@@ -39,6 +39,27 @@ function fixture(decision: "allow" | "deny" | "ask" = "allow") {
 }
 
 describe("ToolRuntime", () => {
+  it("exposes and validates a tool definition without side effects", () => {
+    const f = fixture();
+    const runtime = new ToolRuntime({ tools: [f.tool], hooks: f.hooks, permissions: f.permissions });
+
+    expect(runtime.definition("Test")).toMatchObject({
+      name: "Test",
+      description: "test tool",
+      inputSchema: f.tool.inputSchema,
+    });
+    expect(runtime.definition("Missing")).toBeUndefined();
+    expect(runtime.validate({ name: "Test", input: { path: "notes.md" } })).toEqual({
+      ok: true,
+      input: { path: "notes.md" },
+    });
+    expect(runtime.validate({ name: "Test", input: { path: 42 } })).toMatchObject({
+      ok: false,
+      error: { code: "invalid_input", message: expect.stringMatching(/path|string/i) },
+    });
+    expect(f.calls).toEqual([]);
+  });
+
   it("exposes presentation metadata without adding it to serialized tool output", async () => {
     const f = fixture();
     const presentation = {

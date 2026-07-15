@@ -39,6 +39,15 @@ export type AgentEvent =
   | { type: "usage"; inputTokens: number; outputTokens: number; totalInputTokens: number; totalOutputTokens: number }
   | { type: "model-retry"; attempt: number; maxAttempts: number; delayMs: number }
   | {
+    type: "structured-output-retry";
+    tool: string;
+    modelId: string;
+    attempt: number;
+    maxAttempts: number;
+    delayMs: number;
+    error: string;
+  }
+  | {
     type: "loop-progress";
     loopId: string;
     phase: "resolved" | "cycle" | "verification" | "budget" | "terminal";

@@ -50,6 +50,23 @@ function toInput(message: ModelMessage): ResponseInputItem[] {
   ];
 }
 
+function toolCallEvent(id: string, name: string, rawInput: string): ModelEvent {
+  try {
+    return { type: "tool-call", id, name, input: normalizeToolCallInput(rawInput) };
+  } catch (error) {
+    return {
+      type: "invalid-tool-call",
+      id,
+      name,
+      rawInput,
+      error: {
+        code: "invalid_tool_arguments",
+        message: error instanceof Error ? error.message : String(error),
+      },
+    };
+  }
+}
+
 export class OpenAIModelAdapter implements ModelAdapter {
   private readonly client: OpenAIClient;
 
@@ -90,12 +107,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
           callIds.set(event.output_index, event.item.call_id);
           const pending = pendingCalls.get(event.output_index);
           if (pending) {
-            yield {
-              type: "tool-call",
-              id: event.item.call_id,
-              name: pending.name,
-              input: normalizeToolCallInput(pending.arguments),
-            };
+            yield toolCallEvent(event.item.call_id, pending.name, pending.arguments);
             pendingCalls.delete(event.output_index);
           }
         } else if (event.type === "response.output_text.delta" && event.delta) {
@@ -107,12 +119,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
         ) {
           const callId = callIds.get(event.output_index);
           if (callId) {
-            yield {
-              type: "tool-call",
-              id: callId,
-              name: event.name,
-              input: normalizeToolCallInput(event.arguments ?? ""),
-            };
+            yield toolCallEvent(callId, event.name, event.arguments ?? "");
           } else {
             pendingCalls.set(event.output_index, {
               name: event.name,

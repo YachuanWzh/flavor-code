@@ -32,6 +32,8 @@ export type ProviderErrorCode =
   | "model_not_found"
   | "network"
   | "cancelled"
+  | "invalid_tool_arguments"
+  | "structured_output_error"
   | "unknown";
 
 export interface ProviderError {
@@ -42,6 +44,13 @@ export interface ProviderError {
 export type ModelEvent =
   | { type: "text"; text: string }
   | { type: "tool-call"; id: string; name: string; input: unknown }
+  | {
+    type: "invalid-tool-call";
+    id: string;
+    name: string;
+    rawInput: string;
+    error: ProviderError;
+  }
   | { type: "usage"; inputTokens: number; outputTokens: number }
   | { type: "error"; error: ProviderError }
   | { type: "done"; usage: { inputTokens: number; outputTokens: number } };

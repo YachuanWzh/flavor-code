@@ -1,8 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type {
   MessageDeltaUsage,
+  MessageCreateParamsStreaming,
   MessageParam,
-  MessageStreamParams,
   RawMessageStreamEvent,
   Usage,
 } from "@anthropic-ai/sdk/resources/messages/messages.js";
@@ -17,10 +17,12 @@ import { normalizeToolCallInput } from "../utils/json.js";
 
 export interface AnthropicClient {
   messages: {
-    stream(
-      body: MessageStreamParams,
+    create(
+      body: MessageCreateParamsStreaming,
       options?: Anthropic.RequestOptions,
-    ): AsyncIterable<RawMessageStreamEvent>;
+    ):
+      | AsyncIterable<RawMessageStreamEvent>
+      | PromiseLike<AsyncIterable<RawMessageStreamEvent>>;
   };
 }
 
@@ -131,9 +133,10 @@ export class AnthropicModelAdapter implements ModelAdapter {
         }
       }
 
-      const body: MessageStreamParams = {
+      const body: MessageCreateParamsStreaming = {
         model: request.model,
         max_tokens: this.maxOutputTokens,
+        stream: true,
         messages,
         ...(system ? { system } : {}),
         tools: request.tools.map((tool) => ({
@@ -142,7 +145,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
           input_schema: { ...tool.inputSchema, type: "object" as const },
         })),
       };
-      const stream = this.client.messages.stream(body, { signal: request.signal });
+      const stream = await this.client.messages.create(body, { signal: request.signal });
 
       for await (const event of stream) {
         if (event.type === "message_start") {
@@ -199,14 +202,22 @@ export class AnthropicModelAdapter implements ModelAdapter {
             throw new Error(`Provider stopped with ${pendingTools.size} incomplete tool-call block(s)`);
           }
           for (const pending of completedTools) {
-            let input: Record<string, unknown>;
             try {
-              input = normalizeToolCallInput(pending.json || "{}");
+              const input = normalizeToolCallInput(pending.json || "{}");
+              yield { type: "tool-call", id: pending.id, name: pending.name, input };
             } catch (error) {
               const detail = error instanceof Error ? error.message : String(error);
-              throw new Error(`Invalid tool-call input for "${pending.name}": ${detail}`);
+              yield {
+                type: "invalid-tool-call",
+                id: pending.id,
+                name: pending.name,
+                rawInput: pending.json,
+                error: {
+                  code: "invalid_tool_arguments",
+                  message: `Invalid tool-call input for "${pending.name}": ${detail}`,
+                },
+              };
             }
-            yield { type: "tool-call", id: pending.id, name: pending.name, input };
           }
           usageEmitted = true;
           yield { type: "usage", ...usage };

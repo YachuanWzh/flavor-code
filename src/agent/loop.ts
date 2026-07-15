@@ -1,7 +1,8 @@
 import type { ContextManager } from "../context/manager.js";
 import type { HookBus } from "../hooks/bus.js";
 import type { ModelRegistry } from "../models/registry.js";
-import { normalizeProviderError, type ModelMessage, type ModelTool } from "../models/types.js";
+import { withStructuredOutput } from "../models/structured.js";
+import { normalizeProviderError, type ModelMessage, type ModelTool, type ProviderError } from "../models/types.js";
 import type { ToolRuntime } from "../tools/runtime.js";
 import type { ToolResult } from "../tools/types.js";
 import type { AgentError, AgentEvent, AgentRunRequest } from "./types.js";
@@ -13,6 +14,10 @@ const RETRY_BASE_DELAY_MS = 1_000;
 const RECOVERABLE_MODEL_ERRORS = new Set<AgentError["code"]>([
   "network", "rate_limit", "unknown", "incomplete_stream",
 ]);
+
+type CollectedToolCall =
+  | { kind: "valid"; id: string; name: string; input: unknown }
+  | { kind: "invalid"; id: string; name: string; rawInput: string; error: ProviderError };
 
 function envMaxIterations(): number | undefined {
   const raw = process.env["FLAVOR_MAX_ITERATIONS"];
@@ -133,7 +138,7 @@ export class AgentLoop {
       }
 
       let assistantText = "";
-      const toolCalls: Array<{ id: string; name: string; input: unknown }> = [];
+      const collectedToolCalls: CollectedToolCall[] = [];
       let completed = false;
       let reactiveRetried = false;
       let attempt = 1;
@@ -176,7 +181,7 @@ export class AgentLoop {
         }
 
         assistantText = "";
-        toolCalls.length = 0;
+        collectedToolCalls.length = 0;
         completed = false;
         let terminalError: AgentError | undefined;
         let providerError = false;
@@ -187,13 +192,21 @@ export class AgentLoop {
               assistantText += event.text;
               yield event;
             } else if (event.type === "tool-call") {
-              toolCalls.push(event);
+              collectedToolCalls.push({ kind: "valid", id: event.id, name: event.name, input: event.input });
+            } else if (event.type === "invalid-tool-call") {
+              collectedToolCalls.push({
+                kind: "invalid",
+                id: event.id,
+                name: event.name,
+                rawInput: event.rawInput,
+                error: event.error,
+              });
             } else if (event.type === "usage") {
               usage = { inputTokens: event.inputTokens, outputTokens: event.outputTokens };
             } else if (event.type === "error") {
               terminalError = event.error;
               break;
-            } else {
+            } else if (event.type === "done") {
               completed = true;
               usage = event.usage;
               break;
@@ -238,7 +251,7 @@ export class AgentLoop {
           totalOutputTokens += usage.outputTokens;
           yield { type: "usage", ...usage, totalInputTokens, totalOutputTokens };
         }
-        const providerProducedOutput = assistantText.length > 0 || toolCalls.length > 0;
+        const providerProducedOutput = assistantText.length > 0 || collectedToolCalls.length > 0;
         if (
           terminalError?.code === "context_overflow"
           && !reactiveRetried
@@ -286,6 +299,141 @@ export class AgentLoop {
           return;
         }
         break;
+      }
+
+      const toolCalls: Array<{ id: string; name: string; input: unknown }> = [];
+      for (const collected of collectedToolCalls) {
+        const definition = this.#options.runtime.definition(collected.name);
+        if (definition === undefined) {
+          toolCalls.push({
+            id: collected.id,
+            name: collected.name,
+            input: collected.kind === "valid" ? collected.input : collected.rawInput,
+          });
+          continue;
+        }
+
+        const validation = collected.kind === "valid"
+          ? this.#options.runtime.validate(collected)
+          : { ok: false as const, error: collected.error };
+        if (validation.ok) {
+          toolCalls.push({ id: collected.id, name: collected.name, input: validation.input });
+          continue;
+        }
+
+        const repairModelId = this.#options.fallbackModelId ?? this.#options.modelId;
+        const invalidOutput = collected.kind === "invalid"
+          ? collected.rawInput
+          : serializeToolInput(collected.input);
+        const structured = withStructuredOutput({
+          registry: this.#options.registry,
+          modelId: repairModelId,
+          name: definition.name,
+          description: definition.description,
+          schema: definition.inputSchema,
+          beforeAttempt: async ({ attempt: repairAttempt, maxAttempts: repairMaxAttempts, messageCount }) => {
+            const before = await this.#options.hooks.emit({
+              version: 1,
+              type: "BeforeModelCall",
+              payload: {
+                modelId: repairModelId,
+                iteration,
+                messageCount,
+                attempt: repairAttempt,
+                maxAttempts: repairMaxAttempts,
+                purpose: "structured-output-repair",
+                tool: collected.name,
+                repairAttempt,
+                repairMaxAttempts,
+              },
+            });
+            if (before.decision === "deny") {
+              throw new Error(before.reason ?? "Structured output repair denied by hook");
+            }
+          },
+          afterAttempt: async ({
+            attempt: repairAttempt,
+            maxAttempts: repairMaxAttempts,
+            completed: repairCompleted,
+            error,
+          }) => {
+            await this.#options.hooks.emit({
+              version: 1,
+              type: "AfterModelCall",
+              payload: {
+                modelId: repairModelId,
+                iteration,
+                attempt: repairAttempt,
+                maxAttempts: repairMaxAttempts,
+                completed: repairCompleted,
+                agent: this.#options.agent,
+                providerError: !repairCompleted,
+                purpose: "structured-output-repair",
+                tool: collected.name,
+                repairAttempt,
+                repairMaxAttempts,
+                ...(error === undefined ? {} : {
+                  errorCode: error.code,
+                  errorMessage: error.message,
+                }),
+              },
+            });
+          },
+        });
+
+        let repairedInput: unknown;
+        try {
+          for await (const event of structured.stream({
+            messages: [{ role: "user", content: `Repair the invalid arguments for tool "${collected.name}".` }],
+            invalidOutput,
+            validationError: validation.error.message,
+            ...(request.signal === undefined ? {} : { signal: request.signal }),
+          })) {
+            if (event.type === "usage") {
+              this.#options.context.recordModelUsage(event.inputTokens);
+              totalInputTokens += event.inputTokens;
+              totalOutputTokens += event.outputTokens;
+              yield {
+                type: "usage",
+                inputTokens: event.inputTokens,
+                outputTokens: event.outputTokens,
+                totalInputTokens,
+                totalOutputTokens,
+              };
+            } else if (event.type === "retry") {
+              yield {
+                type: "structured-output-retry",
+                tool: collected.name,
+                modelId: repairModelId,
+                attempt: event.attempt,
+                maxAttempts: event.maxAttempts,
+                delayMs: event.delayMs,
+                error: event.error,
+              };
+            } else {
+              repairedInput = event.value;
+            }
+          }
+        } catch (error) {
+          if (request.signal?.aborted) {
+            yield { type: "error", error: { code: "cancelled", message: abortMessage(request.signal) } };
+          } else {
+            const normalized = normalizeProviderError(error);
+            yield {
+              type: "error",
+              error: { code: "structured_output_error", message: normalized.message },
+            };
+          }
+          return;
+        }
+        if (repairedInput === undefined) {
+          yield {
+            type: "error",
+            error: { code: "structured_output_error", message: `Structured output repair for "${collected.name}" returned no value` },
+          };
+          return;
+        }
+        toolCalls.push({ id: collected.id, name: collected.name, input: repairedInput });
       }
 
       if (toolCalls.length === 0 && assistantText) {
@@ -358,6 +506,11 @@ function toolResultMessage(toolCallId: string, result: ToolResult): ModelMessage
 
 function abortMessage(signal: AbortSignal): string {
   return signal.reason instanceof Error ? signal.reason.message : "Agent run cancelled";
+}
+
+function serializeToolInput(input: unknown): string {
+  try { return JSON.stringify(input) ?? String(input); }
+  catch { return String(input); }
 }
 
 function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<void> {

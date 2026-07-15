@@ -620,10 +620,7 @@ function StatusLine({ block, interactive }: { block: Extract<TranscriptBlock, { 
   if (block.progress !== undefined) return <CompactProgressLine progress={block.progress} />;
   const running = block.state === "running";
   const [ref, time] = useAnimationFrame(running && interactive ? 120 : null);
-  const color = running ? "#d77757"
-    : block.state === "completed" ? "ansi:green"
-    : block.state === "failed" || block.state === "cancelled" ? "#e06c50"
-    : undefined;
+  const color = statusLineColor(block);
   const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   const spinner = running && interactive ? frames[Math.floor(Math.max(0, time) / 120) % frames.length] + " " : "";
   return <Box ref={ref} flexDirection="row">
@@ -631,6 +628,16 @@ function StatusLine({ block, interactive }: { block: Extract<TranscriptBlock, { 
     {block.hint === undefined ? null
       : <Text dimColor wrap="truncate-end"> ({block.hint})</Text>}
   </Box>;
+}
+
+export function statusLineColor(
+  block: Extract<TranscriptBlock, { kind: "status" }>,
+): "ansi:yellowBright" | "ansi:green" | "#d77757" | "#e06c50" | undefined {
+  if (block.tone === "retry") return "ansi:yellowBright";
+  if (block.state === "running") return "#d77757";
+  if (block.state === "completed") return "ansi:green";
+  if (block.state === "failed" || block.state === "cancelled") return "#e06c50";
+  return undefined;
 }
 
 function CompactProgressLine({ progress }: { progress: number }): React.JSX.Element {

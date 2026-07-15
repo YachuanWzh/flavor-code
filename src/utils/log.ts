@@ -18,6 +18,9 @@ export interface AuditEntry {
   errorMessage?: string | undefined;
   attempt?: number | undefined;
   maxAttempts?: number | undefined;
+  purpose?: string | undefined;
+  repairAttempt?: number | undefined;
+  repairMaxAttempts?: number | undefined;
   input?: unknown;
 }
 

@@ -2,7 +2,7 @@ import React from "react";
 import { renderToString } from "ink";
 import { describe, expect, it } from "vitest";
 
-import { TerminalLayout } from "../../src/ui/app.js";
+import { TerminalLayout, statusLineColor } from "../../src/ui/app.js";
 import {
   COMPACT_PROGRESS_COMPLETE,
   COMPACT_PROGRESS_REMAINING,
@@ -20,6 +20,36 @@ const turn = (id: number, prompt: string, assistantText: string): TranscriptTurn
 });
 
 describe("TerminalLayout", () => {
+  it("renders retry statuses in bright yellow", () => {
+    const retrying: TranscriptTurn = {
+      id: 1,
+      prompt: "recover",
+      assistantText: "",
+      statusLines: ["↻ Retrying model call · attempt 2/5 in 1s"],
+      blocks: [{
+        kind: "status",
+        id: "model-retry",
+        state: "info",
+        tone: "retry",
+        text: "↻ Retrying model call · attempt 2/5 in 1s",
+      }],
+    };
+
+    const raw = renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[retrying]}
+      input=""
+      promptCursor={0}
+      columns={80}
+      activeSession={false}
+    />, { columns: 80 });
+
+    expect(raw).toContain("↻ Retrying model call · attempt 2/5 in 1s");
+    expect(statusLineColor(retrying.blocks[0] as Extract<TranscriptTurn["blocks"][number], { kind: "status" }>))
+      .toBe("ansi:yellowBright");
+  });
+
   it("renders compact progress as three blue and seven gray cells at thirty percent", () => {
     const compacting: TranscriptTurn = {
       id: 1,

@@ -209,6 +209,117 @@ describe("AgentLoop", () => {
     expect(events.at(-1)).toEqual({ type: "error", error: { code: "context_overflow", message: "incomplete" } });
   });
 
+  it("repairs invalid tool JSON with the cheap model without regenerating assistant text", async () => {
+    const mainRequests: ModelRequest[] = [];
+    const cheapRequests: ModelRequest[] = [];
+    const executions: Array<{ value: string }> = [];
+    const fixture = createLoop({
+      adapter: fakeAdapter([
+        [
+          { type: "text", text: "Checking " },
+          {
+            type: "invalid-tool-call",
+            id: "call-original",
+            name: "echo",
+            rawInput: String.raw`{"value":"C:\Users"}`,
+            error: { code: "invalid_tool_arguments", message: "Bad escaped character at position 12" },
+          },
+          { type: "usage", inputTokens: 10, outputTokens: 2 },
+          { type: "done", usage: { inputTokens: 10, outputTokens: 2 } },
+        ],
+        [
+          { type: "text", text: "finished" },
+          { type: "done", usage: { inputTokens: 12, outputTokens: 3 } },
+        ],
+      ], mainRequests),
+      fallbackAdapter: fakeAdapter([[
+        { type: "tool-call", id: "cheap-new-id", name: "echo", input: { value: "C:\\Users" } },
+        { type: "usage", inputTokens: 2, outputTokens: 1 },
+        { type: "done", usage: { inputTokens: 2, outputTokens: 1 } },
+      ]], cheapRequests),
+      fallbackModelId: "cheap:small",
+      execute: async (input) => { executions.push(input); return input; },
+    });
+    const beforePayloads: Record<string, unknown>[] = [];
+    const afterPayloads: Record<string, unknown>[] = [];
+    fixture.hooks.on("BeforeModelCall", (event) => {
+      beforePayloads.push(event.payload);
+      return { decision: "allow" };
+    });
+    fixture.hooks.on("AfterModelCall", (event) => {
+      afterPayloads.push(event.payload);
+      return { decision: "allow" };
+    });
+
+    const events = await collect(fixture.loop.run({ prompt: "repair it" }));
+
+    expect(mainRequests).toHaveLength(2);
+    expect(cheapRequests).toHaveLength(1);
+    expect(cheapRequests[0]?.messages.map(({ content }) => content).join("\n"))
+      .toMatch(/Bad escaped character|C:\\Users/);
+    expect(events.filter((event) => event.type === "text").map((event) => event.text))
+      .toEqual(["Checking ", "finished"]);
+    expect(executions).toEqual([{ value: "C:\\Users" }]);
+    const repairedAssistant = mainRequests[1]?.messages.find((message) =>
+      message.role === "assistant" && message.toolCalls?.length === 1,
+    );
+    expect(repairedAssistant).toMatchObject({
+      content: "Checking ",
+      toolCalls: [{ id: "call-original", name: "echo", input: { value: "C:\\Users" } }],
+    });
+    expect(events.filter((event) => event.type === "usage")).toContainEqual({
+      type: "usage",
+      inputTokens: 2,
+      outputTokens: 1,
+      totalInputTokens: 12,
+      totalOutputTokens: 3,
+    });
+    expect(beforePayloads).toContainEqual(expect.objectContaining({
+      modelId: "cheap:small",
+      purpose: "structured-output-repair",
+      tool: "echo",
+      repairAttempt: 1,
+      repairMaxAttempts: 4,
+    }));
+    expect(afterPayloads).toContainEqual(expect.objectContaining({
+      modelId: "cheap:small",
+      purpose: "structured-output-repair",
+      tool: "echo",
+      repairAttempt: 1,
+      repairMaxAttempts: 4,
+      completed: true,
+    }));
+    expect(JSON.stringify(afterPayloads)).not.toContain(String.raw`{"value":"C:\Users"}`);
+    expect(events.at(-1)?.type).toBe("done");
+  });
+
+  it("repairs a parsed tool call that fails the Zod input schema", async () => {
+    const cheapRequests: ModelRequest[] = [];
+    const executions: Array<{ value: string }> = [];
+    const fixture = createLoop({
+      adapter: fakeAdapter([
+        [
+          { type: "tool-call", id: "call-schema", name: "echo", input: { value: 42 } },
+          { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+        ],
+        [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
+      ]),
+      fallbackAdapter: fakeAdapter([[
+        { type: "tool-call", id: "cheap-id", name: "echo", input: { value: "42" } },
+        { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      ]], cheapRequests),
+      fallbackModelId: "cheap:small",
+      execute: async (input) => { executions.push(input); return input; },
+    });
+
+    const events = await collect(fixture.loop.run({ prompt: "repair schema" }));
+
+    expect(cheapRequests).toHaveLength(1);
+    expect(cheapRequests[0]?.messages.map(({ content }) => content).join("\n")).toMatch(/value|string/i);
+    expect(executions).toEqual([{ value: "42" }]);
+    expect(events.at(-1)?.type).toBe("done");
+  });
+
   it("includes provider error details in AfterModelCall hooks", async () => {
     const fixture = createLoop({ adapter: fakeAdapter([[
       { type: "error", error: { code: "output_limit", message: "tool input was truncated" } },

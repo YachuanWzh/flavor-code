@@ -18,6 +18,7 @@ export type TranscriptBlock =
     kind: "status";
     id: string;
     state: "running" | "completed" | "failed" | "cancelled" | "info";
+    tone?: "retry";
     text: string;
     hint?: string;
     task?: { subject: string; activeForm: string; role: "main" | "subagent" };
@@ -131,7 +132,15 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
     kind: "status",
     id: "model-retry",
     state: "info",
+    tone: "retry",
     text: `↻ Retrying model call · attempt ${event.attempt}/${event.maxAttempts} in ${event.delayMs / 1_000}s`,
+  });
+  if (event.type === "structured-output-retry") return upsertStatus(state, {
+    kind: "status",
+    id: `structured-retry:${event.tool}`,
+    state: "info",
+    tone: "retry",
+    text: `↻ Repairing ${event.tool} arguments · attempt ${event.attempt}/${event.maxAttempts} in ${event.delayMs / 1_000}s`,
   });
   if (event.type === "loop-progress") return upsertStatus(state, {
     kind: "status",

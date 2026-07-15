@@ -64,9 +64,32 @@ describe("transcriptReducer", () => {
       kind: "status",
       id: "model-retry",
       state: "info",
+      tone: "retry",
       text: "↻ Retrying model call · attempt 4/5 in 4s",
     }]);
     expect(JSON.stringify(state.active)).not.toMatch(/fake:model|cheap:small|terminated/i);
+  });
+
+  it("shows structured-output repair retries as a distinct retry row", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "recover JSON" });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "structured-output-retry",
+      tool: "write_file",
+      modelId: "cheap:small",
+      attempt: 2,
+      maxAttempts: 4,
+      delayMs: 1_000,
+      error: "Invalid JSON",
+    } });
+
+    expect(state.active?.blocks).toEqual([{
+      kind: "status",
+      id: "structured-retry:write_file",
+      state: "info",
+      tone: "retry",
+      text: "↻ Repairing write_file arguments · attempt 2/4 in 1s",
+    }]);
+    expect(JSON.stringify(state.active)).not.toContain("cheap:small");
   });
 
   it("updates one loop progress row through cycles, budget, and terminal state", () => {

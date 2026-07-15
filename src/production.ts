@@ -417,7 +417,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   });
   hooks.on("SessionEnd", async () => { await persist(); return { decision: "allow" }; });
   hooks.on("AfterModelCall", (event) => {
-    const { modelId, agent, providerError, errorCode, errorMessage, attempt, maxAttempts } = event.payload as Record<string, unknown>;
+    const {
+      modelId, agent, providerError, errorCode, errorMessage, attempt, maxAttempts,
+      purpose, tool, repairAttempt, repairMaxAttempts,
+    } = event.payload as Record<string, unknown>;
     if (providerError === true) {
       void auditLogger.append({
         timestamp: new Date().toISOString(),
@@ -429,6 +432,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         errorMessage: typeof errorMessage === "string" ? errorMessage : undefined,
         attempt: typeof attempt === "number" ? attempt : undefined,
         maxAttempts: typeof maxAttempts === "number" ? maxAttempts : undefined,
+        purpose: typeof purpose === "string" ? purpose : undefined,
+        tool: typeof tool === "string" ? tool : undefined,
+        repairAttempt: typeof repairAttempt === "number" ? repairAttempt : undefined,
+        repairMaxAttempts: typeof repairMaxAttempts === "number" ? repairMaxAttempts : undefined,
       });
     }
     return { decision: "allow" };
