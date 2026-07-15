@@ -16,6 +16,9 @@
       "model": "anthropic:deepseek-v4-flash"
     }
   },
+  "hallucination": {
+    "showWarnings": false
+  },
   "maxSubagents": 3,
   "permissionMode": "workspace",
   "language": "zh-CN"

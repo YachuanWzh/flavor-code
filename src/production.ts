@@ -385,6 +385,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     registry,
     cheapModelId: childModel,
     language,
+    showWarnings: config.hallucination.showWarnings,
   });
   harness = new LocalHarness({
     registry, hooks, workspace, mainModelId: mainModel, subagentModelId: childModel,

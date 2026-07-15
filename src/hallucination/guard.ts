@@ -14,6 +14,8 @@ export interface HallucinationGuardConfig {
   threshold?: number;
   /** BCP47 language tag (e.g. "zh-CN", "en-US") for localized warning messages. */
   language?: string;
+  /** When false, warning messages are suppressed — detection still runs internally. Default true. */
+  showWarnings?: boolean;
 }
 
 export class HallucinationGuard {
@@ -22,6 +24,7 @@ export class HallucinationGuard {
   readonly #confidenceThreshold: number;
   readonly #retryMonitor: RetryMonitor;
   readonly #language: string;
+  readonly #showWarnings: boolean;
   readonly #lastParams = new Map<string, unknown>();
 
   constructor(config: HallucinationGuardConfig) {
@@ -29,6 +32,7 @@ export class HallucinationGuard {
     this.#cheapModelId = config.cheapModelId;
     this.#confidenceThreshold = config.confidenceThreshold ?? DEFAULT_CONFIDENCE_THRESHOLD;
     this.#language = config.language ?? "zh-CN";
+    this.#showWarnings = config.showWarnings !== false;
     const retryConfig: Record<string, number> = {};
     if (config.maxToolRetries !== undefined) retryConfig.maxToolRetries = config.maxToolRetries;
     if (config.windowSize !== undefined) retryConfig.windowSize = config.windowSize;
@@ -55,21 +59,24 @@ export class HallucinationGuard {
     // 1. Retry monitor evaluation
     const retryResult = this.#retryMonitor.evaluate();
 
-    // 2. Confidence check using cheap model
+    // 2. Confidence check using cheap model (skipped when warnings are suppressed)
     let confidenceResult = null;
-    try {
-      confidenceResult = await confidenceCheck(
-        this.#registry,
-        this.#cheapModelId,
-        query,
-        output,
-      );
-    } catch {
-      // Confidence check failed — treat as unavailable, not as hallucination
+    if (this.#showWarnings) {
+      try {
+        confidenceResult = await confidenceCheck(
+          this.#registry,
+          this.#cheapModelId,
+          query,
+          output,
+        );
+      } catch {
+        // Confidence check failed — treat as unavailable, not as hallucination
+      }
     }
 
-    // 3. Determine pass/fail
-    const confidenceFailed = confidenceResult !== null
+    // 3. Determine pass/fail (confidence only matters when warnings are shown)
+    const confidenceFailed = this.#showWarnings
+      && confidenceResult !== null
       && confidenceResult.confidence < this.#confidenceThreshold;
 
     const passed = !confidenceFailed
@@ -85,8 +92,8 @@ export class HallucinationGuard {
       passed,
     };
 
-    // Generate localized warning messages
-    const warnings = passed
+    // Generate localized warning messages (suppressed when configured off)
+    const warnings = (passed || !this.#showWarnings)
       ? []
       : buildWarningMessages(base, this.#language);
 
