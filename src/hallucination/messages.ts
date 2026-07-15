@@ -12,7 +12,8 @@ type Language = "zh-CN" | "en";
 
 function lang(tag: string): Language {
   if (tag.startsWith("zh")) return "zh-CN";
-  return "en";
+  if (tag.startsWith("en")) return "en";
+  return "zh-CN";
 }
 
 const LABELS: Record<Language, {

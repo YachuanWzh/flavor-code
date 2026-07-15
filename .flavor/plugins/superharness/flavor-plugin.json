@@ -1,0 +1,16 @@
+{
+  "name": "superharness",
+  "version": "1.0.0",
+  "apiVersion": "1",
+  "main": "./index.js",
+  "permissions": [],
+  "contributes": {
+    "commands": [],
+    "tools": [],
+    "hooks": [],
+    "skillRoots": [
+      { "name": "superharness", "path": "./skills" }
+    ],
+    "modelAdapters": []
+  }
+}

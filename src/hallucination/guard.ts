@@ -28,7 +28,7 @@ export class HallucinationGuard {
     this.#registry = config.registry;
     this.#cheapModelId = config.cheapModelId;
     this.#confidenceThreshold = config.confidenceThreshold ?? DEFAULT_CONFIDENCE_THRESHOLD;
-    this.#language = config.language ?? "en-US";
+    this.#language = config.language ?? "zh-CN";
     const retryConfig: Record<string, number> = {};
     if (config.maxToolRetries !== undefined) retryConfig.maxToolRetries = config.maxToolRetries;
     if (config.windowSize !== undefined) retryConfig.windowSize = config.windowSize;

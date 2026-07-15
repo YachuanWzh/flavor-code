@@ -1,0 +1,27 @@
+{
+  "name": "codeisland",
+  "version": "0.1.0",
+  "apiVersion": "1",
+  "main": "activate.mjs",
+  "permissions": [],
+  "contributes": {
+    "commands": [],
+    "tools": [],
+    "skillRoots": [],
+    "modelAdapters": [],
+    "hooks": [
+      { "name": "SessionStart" },
+      { "name": "SessionEnd" },
+      { "name": "UserPromptSubmit" },
+      { "name": "Stop" },
+      { "name": "SubagentStart" },
+      { "name": "SubagentStop" },
+      { "name": "PreToolUse" },
+      { "name": "PostToolUse" },
+      { "name": "PostToolUseFailure" },
+      { "name": "PermissionRequest" },
+      { "name": "PreCompact" },
+      { "name": "Notification" }
+    ]
+  }
+}
