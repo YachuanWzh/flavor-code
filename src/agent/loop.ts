@@ -4,9 +4,15 @@ import type { ModelRegistry } from "../models/registry.js";
 import { normalizeProviderError, type ModelMessage, type ModelTool } from "../models/types.js";
 import type { ToolRuntime } from "../tools/runtime.js";
 import type { ToolResult } from "../tools/types.js";
-import type { AgentEvent, AgentRunRequest } from "./types.js";
+import type { AgentError, AgentEvent, AgentRunRequest } from "./types.js";
 
 const DEFAULT_MAX_ITERATIONS = 40;
+const DEFAULT_MODEL_ATTEMPTS = 3;
+const FALLBACK_MODEL_ATTEMPTS = 2;
+const RETRY_BASE_DELAY_MS = 1_000;
+const RECOVERABLE_MODEL_ERRORS = new Set<AgentError["code"]>([
+  "network", "rate_limit", "unknown", "incomplete_stream",
+]);
 
 function envMaxIterations(): number | undefined {
   const raw = process.env["FLAVOR_MAX_ITERATIONS"];
@@ -19,6 +25,7 @@ function envMaxIterations(): number | undefined {
 export interface AgentLoopOptions {
   registry: ModelRegistry;
   modelId: string;
+  fallbackModelId?: string;
   context: ContextManager;
   runtime: ToolRuntime;
   hooks: HookBus;
@@ -59,6 +66,11 @@ export class AgentLoop {
   setModel(modelId: string): void {
     this.#options.registry.get(modelId);
     this.#options.modelId = modelId;
+  }
+
+  setFallbackModel(modelId: string): void {
+    this.#options.registry.get(modelId);
+    this.#options.fallbackModelId = modelId;
   }
 
   async *run(request: AgentRunRequest): AsyncIterable<AgentEvent> {
@@ -124,9 +136,15 @@ export class AgentLoop {
       const toolCalls: Array<{ id: string; name: string; input: unknown }> = [];
       let completed = false;
       let reactiveRetried = false;
+      let attempt = 1;
+      const maxAttempts = DEFAULT_MODEL_ATTEMPTS
+        + (this.#options.fallbackModelId === undefined ? 0 : FALLBACK_MODEL_ATTEMPTS);
       while (true) {
+        const attemptedModelId = attempt <= DEFAULT_MODEL_ATTEMPTS
+          ? this.#options.modelId
+          : this.#options.fallbackModelId!;
         let resolved: ReturnType<ModelRegistry["get"]>;
-        try { resolved = this.#options.registry.get(this.#options.modelId); }
+        try { resolved = this.#options.registry.get(attemptedModelId); }
         catch (error) {
           yield { type: "error", error: normalizeProviderError(error) };
           return;
@@ -146,7 +164,7 @@ export class AgentLoop {
           before = await this.#options.hooks.emit({
             version: 1,
             type: "BeforeModelCall",
-            payload: { modelId: this.#options.modelId, iteration, messageCount: modelRequest.messages.length },
+            payload: { modelId: attemptedModelId, iteration, messageCount: modelRequest.messages.length, attempt, maxAttempts },
           });
         } catch (error) {
           yield { type: "error", error: normalizeProviderError(error) };
@@ -160,7 +178,8 @@ export class AgentLoop {
         assistantText = "";
         toolCalls.length = 0;
         completed = false;
-        let terminalError: ReturnType<typeof normalizeProviderError> | undefined;
+        let terminalError: AgentError | undefined;
+        let providerError = false;
         let usage: { inputTokens: number; outputTokens: number } | undefined;
         try {
           for await (const event of adapter.stream(modelRequest)) {
@@ -183,16 +202,22 @@ export class AgentLoop {
         } catch (error) {
           terminalError = normalizeProviderError(error);
         } finally {
+          if (!completed && terminalError === undefined) {
+            terminalError = { code: "incomplete_stream", message: "Provider stream ended without a done or error event" };
+          }
+          providerError = terminalError !== undefined;
           try {
             await this.#options.hooks.emit({
               version: 1,
               type: "AfterModelCall",
               payload: {
-                modelId: this.#options.modelId,
+                modelId: attemptedModelId,
                 iteration,
+                attempt,
+                maxAttempts,
                 completed,
                 agent: this.#options.agent,
-                providerError: terminalError !== undefined,
+                providerError,
                 ...(terminalError === undefined ? {} : {
                   errorCode: terminalError.code,
                   errorMessage: terminalError.message,
@@ -200,7 +225,10 @@ export class AgentLoop {
               },
             });
           } catch (error) {
-            terminalError ??= normalizeProviderError(error);
+            if (terminalError === undefined) {
+              terminalError = normalizeProviderError(error);
+              providerError = false;
+            }
           }
         }
 
@@ -211,7 +239,12 @@ export class AgentLoop {
           yield { type: "usage", ...usage, totalInputTokens, totalOutputTokens };
         }
         const providerProducedOutput = assistantText.length > 0 || toolCalls.length > 0;
-        if (terminalError?.code === "context_overflow" && !reactiveRetried && !providerProducedOutput) {
+        if (
+          terminalError?.code === "context_overflow"
+          && !reactiveRetried
+          && !providerProducedOutput
+          && attempt < maxAttempts
+        ) {
           let compacted = false;
           try { compacted = await this.#options.context.compact(request.signal, "reactive"); }
           catch {
@@ -222,16 +255,34 @@ export class AgentLoop {
           }
           if (compacted) {
             reactiveRetried = true;
+            attempt += 1;
             yield { type: "compacted" };
             continue;
           }
         }
+        if (
+          terminalError !== undefined
+          && providerError
+          && !providerProducedOutput
+          && RECOVERABLE_MODEL_ERRORS.has(terminalError.code)
+          && attempt < maxAttempts
+        ) {
+          const nextAttempt = attempt + 1;
+          const delayMs = RETRY_BASE_DELAY_MS * (2 ** (attempt - 1));
+          yield { type: "model-retry", attempt: nextAttempt, maxAttempts, delayMs };
+          try {
+            await waitForRetry(delayMs, request.signal);
+          } catch {
+            yield { type: "error", error: { code: "cancelled", message: request.signal === undefined
+              ? "Agent run cancelled"
+              : abortMessage(request.signal) } };
+            return;
+          }
+          attempt = nextAttempt;
+          continue;
+        }
         if (terminalError !== undefined) {
           yield { type: "error", error: terminalError };
-          return;
-        }
-        if (!completed) {
-          yield { type: "error", error: { code: "incomplete_stream", message: "Provider stream ended without a done or error event" } };
           return;
         }
         break;
@@ -307,6 +358,22 @@ function toolResultMessage(toolCallId: string, result: ToolResult): ModelMessage
 
 function abortMessage(signal: AbortSignal): string {
   return signal.reason instanceof Error ? signal.reason.message : "Agent run cancelled";
+}
+
+function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(signal?.reason);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function stageSyntheticResults(

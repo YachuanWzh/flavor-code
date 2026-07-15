@@ -51,6 +51,38 @@ describe("transcriptReducer", () => {
     ]);
   });
 
+  it("updates one model-neutral retry row with the five-attempt total", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "recover" });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "model-retry", attempt: 2, maxAttempts: 5, delayMs: 1_000,
+    } });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "model-retry", attempt: 4, maxAttempts: 5, delayMs: 4_000,
+    } });
+
+    expect(state.active?.blocks).toEqual([{
+      kind: "status",
+      id: "model-retry",
+      state: "info",
+      text: "↻ Retrying model call · attempt 4/5 in 4s",
+    }]);
+    expect(JSON.stringify(state.active)).not.toMatch(/fake:model|cheap:small|terminated/i);
+  });
+
+  it("updates compact progress in place instead of appending rows", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "/compact" });
+    state = transcriptReducer(state, { type: "session", event: { type: "compact-progress", progress: 10 } });
+    state = transcriptReducer(state, { type: "session", event: { type: "compact-progress", progress: 40 } });
+
+    expect(state.active?.blocks).toEqual([{
+      kind: "status",
+      id: "compact:progress",
+      state: "running",
+      text: "Compacting context",
+      progress: 40,
+    }]);
+  });
+
   it("stores successful file-change presentation on the completed tool block", () => {
     const presentation = {
       kind: "file-change" as const,

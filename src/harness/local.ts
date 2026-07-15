@@ -58,7 +58,14 @@ export class LocalHarness {
     this.#subagentModelId = options.subagentModelId;
     const context = options.createContext("main", options.tools, options.mainModelId);
     this.#claimContext(context);
-    this.main = this.#createProfile(options.mainModelId, options.tools, "main", context, options.approve);
+    this.main = this.#createProfile(
+      options.mainModelId,
+      options.tools,
+      "main",
+      context,
+      options.approve,
+      options.subagentModelId,
+    );
   }
 
   get mainModelId(): string { return this.main.loop.modelId; }
@@ -68,7 +75,10 @@ export class LocalHarness {
   setModel(role: "main" | "subagent", modelId: string): void {
     this.#options.registry.get(modelId);
     if (role === "main") this.main.loop.setModel(modelId);
-    else this.#subagentModelId = modelId;
+    else {
+      this.#subagentModelId = modelId;
+      this.main.loop.setFallbackModel(modelId);
+    }
   }
 
   setPermissionMode(mode: PermissionMode): void { this.#mainPermissions.setMode(mode); }
@@ -134,6 +144,7 @@ export class LocalHarness {
     agent: "main" | "subagent",
     context: ContextManager,
     approve?: ApprovalCallback,
+    fallbackModelId?: string,
   ): HarnessProfile {
     const permissions = new PermissionEngine({
       workspace: this.#options.workspace,
@@ -153,6 +164,7 @@ export class LocalHarness {
       const loop = new AgentLoop({
         registry: this.#options.registry,
         modelId,
+        ...(fallbackModelId === undefined ? {} : { fallbackModelId }),
         context,
         runtime,
         hooks: this.#options.hooks,

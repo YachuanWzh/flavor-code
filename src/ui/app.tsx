@@ -44,6 +44,7 @@ import {
 } from "./slash-completion.js";
 import { message } from "../utils/error.js";
 import { redactErrorText } from "../utils/redact.js";
+import { compactProgressPresentation } from "./compact-progress.js";
 
 export const HISTORY_CAP = 200;
 const BUILTIN_SLASH_CANDIDATES = MVP_COMMANDS.map((name) => ({ name, description: COMMAND_DESCRIPTIONS[name] }));
@@ -616,6 +617,7 @@ function lineCount(count: number): string {
 }
 
 function StatusLine({ block, interactive }: { block: Extract<TranscriptBlock, { kind: "status" }>; interactive: boolean }): React.JSX.Element {
+  if (block.progress !== undefined) return <CompactProgressLine progress={block.progress} />;
   const running = block.state === "running";
   const [ref, time] = useAnimationFrame(running && interactive ? 120 : null);
   const color = running ? "#d77757"
@@ -628,6 +630,19 @@ function StatusLine({ block, interactive }: { block: Extract<TranscriptBlock, { 
     <Text {...(color === undefined ? { dimColor: true } : { color })}>{spinner}{block.text}</Text>
     {block.hint === undefined ? null
       : <Text dimColor wrap="truncate-end"> ({block.hint})</Text>}
+  </Box>;
+}
+
+function CompactProgressLine({ progress }: { progress: number }): React.JSX.Element {
+  const presentation = compactProgressPresentation(progress);
+  return <Box flexDirection="row">
+    <Text>Compacting context </Text>
+    {presentation.cells.map((cell, index) => (
+      <Text key={index} color={cell.color}>
+        ■{index === presentation.cells.length - 1 ? "" : " "}
+      </Text>
+    ))}
+    <Text dimColor> {presentation.progress}%</Text>
   </Box>;
 }
 

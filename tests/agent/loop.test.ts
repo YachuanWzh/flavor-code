@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { AgentLoop, type AgentLoopOptions } from "../../src/agent/loop.js";
 import type { AgentEvent } from "../../src/agent/types.js";
@@ -172,9 +172,21 @@ describe("AgentLoop", () => {
   });
 
   it("turns an incomplete provider stream into a terminal typed error", async () => {
-    const fixture = createLoop({ adapter: fakeAdapter([[{ type: "text", text: "partial" }]]) });
-    const events = await collect(fixture.loop.run({ prompt: "go" }));
-    expect(events.at(-1)).toEqual(expect.objectContaining({ type: "error", error: { code: "incomplete_stream", message: expect.any(String) } }));
+    vi.useFakeTimers();
+    try {
+      const requests: ModelRequest[] = [];
+      const fixture = createLoop({ adapter: fakeAdapter([
+        [{ type: "text", text: "partial" }], [], [],
+      ], requests) });
+      const eventsPromise = collect(fixture.loop.run({ prompt: "go" }));
+      await vi.runAllTimersAsync();
+      const events = await eventsPromise;
+      expect(requests).toHaveLength(1);
+      expect(events.filter((event) => event.type === "model-retry")).toHaveLength(0);
+      expect(events.at(-1)).toEqual(expect.objectContaining({ type: "error", error: { code: "incomplete_stream", message: expect.any(String) } }));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("stops consuming provider events after done", async () => {
@@ -216,6 +228,175 @@ describe("AgentLoop", () => {
       errorCode: "output_limit",
       errorMessage: "tool input was truncated",
     });
+  });
+
+  it("retries three main attempts then two cheap attempts with exponential backoff", async () => {
+    vi.useFakeTimers();
+    try {
+      const requests: ModelRequest[] = [];
+      const fixture = createLoop({
+        adapter: fakeAdapter([
+          [{ type: "error", error: { code: "network", message: "main-1" } }],
+          [{ type: "error", error: { code: "rate_limit", message: "main-2" } }],
+          [{ type: "error", error: { code: "unknown", message: "main-3" } }],
+        ], requests),
+        fallbackAdapter: fakeAdapter([
+          [{ type: "error", error: { code: "network", message: "cheap-1" } }],
+          [{ type: "done", usage: { inputTokens: 2, outputTokens: 1 } }],
+        ], requests),
+        fallbackModelId: "cheap:small",
+      });
+
+      const eventsPromise = collect(fixture.loop.run({ prompt: "recover" }));
+      await vi.runAllTimersAsync();
+      const events = await eventsPromise;
+
+      expect(requests.map(({ model }) => model)).toEqual(["model", "model", "model", "small", "small"]);
+      expect(events.filter((event) => event.type === "model-retry")).toEqual([
+        { type: "model-retry", attempt: 2, maxAttempts: 5, delayMs: 1_000 },
+        { type: "model-retry", attempt: 3, maxAttempts: 5, delayMs: 2_000 },
+        { type: "model-retry", attempt: 4, maxAttempts: 5, delayMs: 4_000 },
+        { type: "model-retry", attempt: 5, maxAttempts: 5, delayMs: 8_000 },
+      ]);
+      expect(events.some((event) => event.type === "error")).toBe(false);
+      expect(JSON.stringify(events)).not.toContain("main-1");
+      expect(JSON.stringify(events)).not.toContain("cheap-1");
+      expect(events.at(-1)?.type).toBe("done");
+      expect(fixture.loop.modelId).toBe("fake:model");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("exposes only the fifth recoverable failure as a terminal error", async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = createLoop({
+        adapter: fakeAdapter(Array.from({ length: 3 }, (_, index) => [
+          { type: "error" as const, error: { code: "network" as const, message: `main-${index + 1}` } },
+        ])),
+        fallbackAdapter: fakeAdapter(Array.from({ length: 2 }, (_, index) => [
+          { type: "error" as const, error: { code: "network" as const, message: `cheap-${index + 1}` } },
+        ])),
+        fallbackModelId: "cheap:small",
+      });
+
+      const eventsPromise = collect(fixture.loop.run({ prompt: "fail completely" }));
+      await vi.runAllTimersAsync();
+      const events = await eventsPromise;
+
+      expect(events.filter((event) => event.type === "error")).toEqual([
+        { type: "error", error: { code: "network", message: "cheap-2" } },
+      ]);
+      expect(events.filter((event) => event.type === "model-retry")).toHaveLength(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries an incomplete stream that ended before producing output", async () => {
+    vi.useFakeTimers();
+    try {
+      const requests: ModelRequest[] = [];
+      const fixture = createLoop({
+        adapter: fakeAdapter([[], [], []], requests),
+        fallbackAdapter: fakeAdapter([
+          [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
+        ], requests),
+        fallbackModelId: "cheap:small",
+      });
+
+      const eventsPromise = collect(fixture.loop.run({ prompt: "recover incomplete stream" }));
+      await vi.runAllTimersAsync();
+      const events = await eventsPromise;
+
+      expect(requests.map(({ model }) => model)).toEqual(["model", "model", "model", "small"]);
+      expect(events.filter((event) => event.type === "model-retry")).toHaveLength(3);
+      expect(events.some((event) => event.type === "error")).toBe(false);
+      expect(events.at(-1)?.type).toBe("done");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not retry non-recoverable failures or failures after visible output", async () => {
+    const authRequests: ModelRequest[] = [];
+    const auth = createLoop({ adapter: fakeAdapter([[
+      { type: "error", error: { code: "authentication", message: "bad key" } },
+    ]], authRequests), fallbackAdapter: fakeAdapter([]), fallbackModelId: "cheap:small" });
+    const authEvents = await collect(auth.loop.run({ prompt: "authenticate" }));
+
+    const partialRequests: ModelRequest[] = [];
+    const partial = createLoop({ adapter: fakeAdapter([[
+      { type: "text", text: "partial" },
+      { type: "error", error: { code: "network", message: "stream broke" } },
+    ]], partialRequests), fallbackAdapter: fakeAdapter([]), fallbackModelId: "cheap:small" });
+    const partialEvents = await collect(partial.loop.run({ prompt: "stream" }));
+
+    expect(authRequests).toHaveLength(1);
+    expect(authEvents.filter((event) => event.type === "model-retry")).toHaveLength(0);
+    expect(authEvents.at(-1)).toEqual({ type: "error", error: { code: "authentication", message: "bad key" } });
+    expect(partialRequests).toHaveLength(1);
+    expect(partialEvents.filter((event) => event.type === "model-retry")).toHaveLength(0);
+    expect(partialEvents.at(-1)).toEqual({ type: "error", error: { code: "network", message: "stream broke" } });
+  });
+
+  it("audits every physical model attempt with attempt metadata", async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = createLoop({
+        adapter: fakeAdapter([
+          [{ type: "error", error: { code: "network", message: "temporary" } }],
+          [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
+        ]),
+        fallbackAdapter: fakeAdapter([]),
+        fallbackModelId: "cheap:small",
+      });
+      const payloads: Record<string, unknown>[] = [];
+      fixture.hooks.on("AfterModelCall", (event) => {
+        payloads.push(event.payload);
+        return { decision: "allow" };
+      });
+
+      const eventsPromise = collect(fixture.loop.run({ prompt: "audit retries" }));
+      await vi.runAllTimersAsync();
+      await eventsPromise;
+
+      expect(payloads).toEqual([
+        expect.objectContaining({ modelId: "fake:model", attempt: 1, maxAttempts: 5, providerError: true }),
+        expect.objectContaining({ modelId: "fake:model", attempt: 2, maxAttempts: 5, providerError: false }),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops during exponential backoff when the run is cancelled", async () => {
+    vi.useFakeTimers();
+    try {
+      const requests: ModelRequest[] = [];
+      const controller = new AbortController();
+      const fixture = createLoop({
+        adapter: fakeAdapter([
+          [{ type: "error", error: { code: "network", message: "temporary" } }],
+          [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
+        ], requests),
+        fallbackAdapter: fakeAdapter([]),
+        fallbackModelId: "cheap:small",
+      });
+
+      const eventsPromise = collect(fixture.loop.run({ prompt: "cancel retry", signal: controller.signal }));
+      await vi.advanceTimersByTimeAsync(0);
+      controller.abort(new Error("stop retrying"));
+      await vi.runAllTimersAsync();
+      const events = await eventsPromise;
+
+      expect(requests).toHaveLength(1);
+      expect(events.filter((event) => event.type === "model-retry")).toHaveLength(1);
+      expect(events.at(-1)).toEqual({ type: "error", error: { code: "cancelled", message: "stop retrying" } });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reports cancellation that occurs while a tool is running", async () => {
@@ -318,6 +499,7 @@ describe("AgentLoop", () => {
           { type: "tool-call", id: "call-1", name: "echo", input: { value: "hi" } },
           { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
         ],
+        [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
       ]),
       toolSummarize: (input) => `echo: ${input.value}`,
     });
@@ -339,6 +521,7 @@ describe("AgentLoop", () => {
           { type: "tool-call", id: "call-1", name: "echo", input: { value: "hi" } },
           { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
         ],
+        [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
       ]),
     });
 
@@ -352,6 +535,8 @@ describe("AgentLoop", () => {
 
 function createLoop(options: {
   adapter: ModelAdapter;
+  fallbackAdapter?: ModelAdapter;
+  fallbackModelId?: string;
   execute?: (input: { value: string }, signal: AbortSignal) => Promise<unknown>;
   maxIterations?: number;
   recentTurns?: number;
@@ -374,6 +559,7 @@ function createLoop(options: {
     approve: () => "once",
   });
   const registry = new ModelRegistry().register("fake", options.adapter);
+  if (options.fallbackAdapter !== undefined) registry.register("cheap", options.fallbackAdapter);
   const context = new ContextManager({
     system: "system",
     compactAtChars: 100_000,
@@ -385,6 +571,7 @@ function createLoop(options: {
   const loopOptions: AgentLoopOptions = {
     registry,
     modelId: "fake:model",
+    ...(options.fallbackModelId === undefined ? {} : { fallbackModelId: options.fallbackModelId }),
     context,
     runtime,
     hooks,

@@ -22,6 +22,7 @@ export type TranscriptBlock =
     hint?: string;
     task?: { subject: string; activeForm: string; role: "main" | "subagent" };
     presentation?: ToolPresentation;
+    progress?: number;
     startedAt?: number;
     elapsedMs?: number;
   };
@@ -112,10 +113,26 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
   if (event.type === "notice") return upsertStatus(state, {
     kind: "status", id: `notice:${state.active.blocks.length}`, state: "info", text: `· ${event.message}`,
   });
+  if (event.type === "compact-progress") {
+    const progress = Math.max(0, Math.min(100, Math.floor(event.progress / 10) * 10));
+    return upsertStatus(state, {
+      kind: "status",
+      id: "compact:progress",
+      state: progress === 100 ? "completed" : "running",
+      text: "Compacting context",
+      progress,
+    });
+  }
   if (event.type === "error") {
     return { ...state, active: addText(state.active, `◆ ${event.error.code}: ${event.error.message}`, true) };
   }
   if (event.type === "usage") return state;
+  if (event.type === "model-retry") return upsertStatus(state, {
+    kind: "status",
+    id: "model-retry",
+    state: "info",
+    text: `↻ Retrying model call · attempt ${event.attempt}/${event.maxAttempts} in ${event.delayMs / 1_000}s`,
+  });
   if (event.type === "compacted") return upsertStatus(state, {
     kind: "status", id: `compact:${state.active.blocks.length}`, state: "info", text: "· Context compacted.",
   });

@@ -16,6 +16,8 @@ export interface AuditEntry {
   agent?: string | undefined;
   errorCode?: string | undefined;
   errorMessage?: string | undefined;
+  attempt?: number | undefined;
+  maxAttempts?: number | undefined;
   input?: unknown;
 }
 

@@ -69,18 +69,21 @@ export interface SessionEntry {
   mainModel: string;
 }
 
-export interface SessionStoreOptions { workspace: string; maxBytes?: number }
+export interface SessionStoreOptions { workspace: string; maxBytes?: number; maxSessions?: number }
 
 export class SessionStore {
   readonly #workspace: string;
   readonly #sessions: string;
   readonly #maxBytes: number;
+  readonly #maxSessions: number;
 
   constructor(options: SessionStoreOptions) {
     this.#workspace = resolve(options.workspace);
     this.#sessions = join(this.#workspace, ".flavor", "sessions");
     this.#maxBytes = options.maxBytes ?? DEFAULT_MAX_SESSION_BYTES;
     if (!Number.isSafeInteger(this.#maxBytes) || this.#maxBytes < 256) throw new Error("maxBytes must be an integer of at least 256");
+    this.#maxSessions = options.maxSessions ?? 50;
+    if (!Number.isSafeInteger(this.#maxSessions) || this.#maxSessions < 1) throw new Error("maxSessions must be an integer of at least 1");
   }
 
   async save(input: SessionDocument): Promise<void> {
@@ -109,6 +112,7 @@ export class SessionStore {
       await handle?.close().catch(() => undefined);
       await rm(temporary, { force: true }).catch(() => undefined);
     }
+    void this.#prune().catch(() => undefined);
   }
 
   async load(sessionId?: string): Promise<SessionDocument> {
@@ -191,6 +195,15 @@ export class SessionStore {
     const path = resolve(this.#sessions, `${sessionId}.jsonl`);
     if (!isWithin(this.#sessions, path)) throw new Error("Invalid session id");
     return path;
+  }
+
+  async #prune(): Promise<void> {
+    const entries = await this.list();
+    if (entries.length <= this.#maxSessions) return;
+    const excess = entries.slice(this.#maxSessions);
+    for (const entry of excess) {
+      await rm(this.#path(entry.sessionId), { force: true }).catch(() => undefined);
+    }
   }
 
   async #assertWorkspace(stored: string): Promise<void> {

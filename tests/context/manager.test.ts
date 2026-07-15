@@ -73,6 +73,20 @@ describe("ContextManager", () => {
     expect(context.snapshot().compact).toMatchObject({ summary: "structured summary" });
   });
 
+  it("reports full compaction milestones through completion", async () => {
+    const progress: number[] = [];
+    const context = createContext({
+      compactAtChars: 1,
+      recentTurns: 0,
+      onCompactProgress: (percentage) => { progress.push(percentage); },
+    });
+    context.append({ role: "user", content: "old question" });
+
+    await expect(context.compact()).resolves.toBe(true);
+
+    expect(progress).toEqual([0, 10, 80, 90, 100]);
+  });
+
   it("keeps the latest tool exchange as one recent turn", async () => {
     const context = createContext({ compactAtChars: 1, recentTurns: 1 });
     context.append({ role: "user", content: "old" });

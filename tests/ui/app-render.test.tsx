@@ -3,6 +3,11 @@ import { renderToString } from "ink";
 import { describe, expect, it } from "vitest";
 
 import { TerminalLayout } from "../../src/ui/app.js";
+import {
+  COMPACT_PROGRESS_COMPLETE,
+  COMPACT_PROGRESS_REMAINING,
+  compactProgressPresentation,
+} from "../../src/ui/compact-progress.js";
 import type { SlashCompletion } from "../../src/ui/slash-completion.js";
 import type { TranscriptTurn } from "../../src/ui/transcript.js";
 
@@ -15,6 +20,39 @@ const turn = (id: number, prompt: string, assistantText: string): TranscriptTurn
 });
 
 describe("TerminalLayout", () => {
+  it("renders compact progress as three blue and seven gray cells at thirty percent", () => {
+    const compacting: TranscriptTurn = {
+      id: 1,
+      prompt: "/compact",
+      assistantText: "",
+      statusLines: ["Compacting context"],
+      blocks: [{
+        kind: "status",
+        id: "compact:progress",
+        state: "running",
+        text: "Compacting context",
+        progress: 30,
+      }],
+    };
+
+    const raw = renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[]}
+      active={compacting}
+      input=""
+      promptCursor={0}
+      columns={80}
+      activeSession
+    />, { columns: 80 });
+    const plain = raw.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+    expect(plain.match(/■/g)).toHaveLength(10);
+    const presentation = compactProgressPresentation(30);
+    expect(presentation.cells.filter((cell) => cell.color === COMPACT_PROGRESS_COMPLETE)).toHaveLength(3);
+    expect(presentation.cells.filter((cell) => cell.color === COMPACT_PROGRESS_REMAINING)).toHaveLength(7);
+    expect(plain).toContain("30%");
+  });
+
   it("renders a completed update with numbered colored rows and white content", async () => {
     const changed: TranscriptTurn = {
       id: 1,

@@ -23,9 +23,12 @@ export interface ContextManagerOptions {
   recentTurns?: number;
   /** @deprecated Prefer recentTurns. */
   recentMessages?: number;
-  summarize(messages: readonly ModelMessage[], signal: AbortSignal): Promise<string>;
+  summarize(messages: readonly ModelMessage[], signal: AbortSignal, onProgress?: CompactProgressCallback): Promise<string>;
+  onCompactProgress?: CompactProgressCallback;
   hooks: HookBus;
 }
+
+export type CompactProgressCallback = (percentage: number) => void;
 
 export type SystemPromptSource = string | readonly string[] | (() => string | readonly string[]);
 
@@ -55,6 +58,7 @@ export class ContextManager {
   readonly #recentTurns: number | undefined;
   readonly #compaction: CompactionPolicy;
   readonly #summarize: ContextManagerOptions["summarize"];
+  readonly #onCompactProgress: CompactProgressCallback | undefined;
   readonly #hooks: HookBus;
   #taskState: string | undefined;
   #compact: CompactBoundary | undefined;
@@ -62,6 +66,7 @@ export class ContextManager {
   #lastRecordedInputTokens: number | undefined;
   #estimatedTokensAtLastRecordedUsage: number | undefined;
   #consecutiveAutoCompactFailures = 0;
+  #lastCompactProgress: number | undefined;
 
   constructor(options: ContextManagerOptions) {
     if (options.compactAtChars !== undefined && options.compactAtChars <= 0) throw new Error("compactAtChars must be positive");
@@ -83,6 +88,7 @@ export class ContextManager {
     this.#recentTurns = recentTurns;
     this.#compaction = compaction;
     this.#summarize = options.summarize;
+    this.#onCompactProgress = options.onCompactProgress;
     this.#hooks = options.hooks;
   }
 
@@ -213,6 +219,8 @@ export class ContextManager {
       : recentTurnStart(this.#messages, this.#recentTurns);
     const older = this.#messages.slice(0, splitAt);
     if (older.length === 0) return false;
+    this.#lastCompactProgress = undefined;
+    this.#reportCompactProgress(0);
     const inputs: ModelMessage[] = [
       ...(this.#compact === undefined ? [] : [{ role: "user", content: compactContinuationMessage(this.#compact.summary) } as const]),
       ...older,
@@ -224,12 +232,18 @@ export class ContextManager {
     }, signal);
     signal.throwIfAborted();
     if (before.decision === "deny") return false;
+    this.#reportCompactProgress(10);
 
     const rawSummary = await awaitWithSignal(
-      this.#summarize(inputs.map((message) => ({ ...message })), signal),
+      this.#summarize(
+        inputs.map((message) => ({ ...message })),
+        signal,
+        (percentage) => this.#reportCompactProgress(percentage),
+      ),
       signal,
     );
     signal.throwIfAborted();
+    this.#reportCompactProgress(80);
     const summary = formatCompactSummary(rawSummary);
     const nextCompact: CompactBoundary = { summary, compactedAt: new Date().toISOString() };
     const nextMessages = this.#messages.slice(splitAt);
@@ -245,11 +259,21 @@ export class ContextManager {
       payload: { messageCount: inputs.length, estimatedTokens: estimateMessageTokens(nextVisible) },
     }, signal);
     signal.throwIfAborted();
+    this.#reportCompactProgress(90);
     this.#compact = nextCompact;
     this.#messages = nextMessages.map(cloneMessage);
     this.#lastRecordedInputTokens = undefined;
     this.#estimatedTokensAtLastRecordedUsage = undefined;
+    this.#reportCompactProgress(100);
     return true;
+  }
+
+  #reportCompactProgress(percentage: number): void {
+    const normalized = Math.max(0, Math.min(100, Math.floor(percentage / 10) * 10));
+    if (normalized === this.#lastCompactProgress) return;
+    this.#lastCompactProgress = normalized;
+    try { this.#onCompactProgress?.(normalized); }
+    catch { /* Progress observers must not affect the compaction transaction. */ }
   }
 
   #currentTokenUsage(): number {

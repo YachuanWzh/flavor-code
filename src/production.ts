@@ -132,7 +132,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const environment = options.environment ?? process.env;
   const loaded = await loadConfig({ cwd: workspace, home, environment });
   const config = loaded.config;
-  const sessionStore = new SessionStore({ workspace });
+  const sessionStore = new SessionStore({ workspace, maxSessions: config.maxSessions });
   const auditLogger = new AuditLogger(workspace);
   const recovered = options.resumeSession === undefined
     ? undefined
@@ -356,12 +356,16 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       ...(compactAtChars === undefined ? {} : { compactAtChars }),
       toolOutputChars,
       compaction,
-      summarize: (messages, signal) => summarizeWithModel({
+      summarize: (messages, signal, onProgress) => summarizeWithModel({
         registry,
         modelId: () => agent === "main" ? harness.mainModelId : harness.subagentModelId,
         messages,
         signal,
+        ...(onProgress === undefined ? {} : { onProgress }),
       }),
+      ...(agent === "main"
+        ? { onCompactProgress: (progress: number) => options.output({ type: "compact-progress", progress }) }
+        : {}),
       hooks,
     });
   };
@@ -408,7 +412,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   });
   hooks.on("SessionEnd", async () => { await persist(); return { decision: "allow" }; });
   hooks.on("AfterModelCall", (event) => {
-    const { modelId, agent, providerError, errorCode, errorMessage } = event.payload as Record<string, unknown>;
+    const { modelId, agent, providerError, errorCode, errorMessage, attempt, maxAttempts } = event.payload as Record<string, unknown>;
     if (providerError === true) {
       void auditLogger.append({
         timestamp: new Date().toISOString(),
@@ -418,6 +422,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         agent: typeof agent === "string" ? agent : undefined,
         errorCode: typeof errorCode === "string" ? errorCode : undefined,
         errorMessage: typeof errorMessage === "string" ? errorMessage : undefined,
+        attempt: typeof attempt === "number" ? attempt : undefined,
+        maxAttempts: typeof maxAttempts === "number" ? maxAttempts : undefined,
       });
     }
     return { decision: "allow" };

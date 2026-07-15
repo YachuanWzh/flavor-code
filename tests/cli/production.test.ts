@@ -1,7 +1,7 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createProductionRuntime, createPromptEnvironment } from "../../src/production.js";
 import { SessionStore } from "../../src/session/store.js";
@@ -209,6 +209,63 @@ describe("production runtime", () => {
     expect(runtime.services.mainModel()).toBe("openai:gpt-5");
     expect(runtime.services.subagentModel()).toBe("openai:gpt-5-mini");
     await runtime.dispose();
+  });
+
+  it("audits all five recoverable failures while exposing only the final error", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-")); roots.push(workspace);
+    const pluginRoot = join(workspace, ".flavor", "plugins", "failing-model");
+    await mkdir(pluginRoot, { recursive: true });
+    await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
+      providers: { failing: { type: "plugin", defaultModel: "main", cheapModel: "cheap" } },
+      agents: { main: { model: "failing:main" }, subagent: { model: "failing:cheap" } },
+    }));
+    await writeFile(join(pluginRoot, "flavor-plugin.json"), JSON.stringify({
+      name: "failing-model", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
+      contributes: { commands: [], tools: [], hooks: [], skillRoots: [], modelAdapters: [{ name: "failing" }] },
+    }));
+    await writeFile(join(pluginRoot, "index.mjs"), `export function activate(ctx) {
+      ctx.registerModelAdapter("failing", { async *stream(request) {
+        globalThis.__flavorRetryModels ??= [];
+        globalThis.__flavorRetryModels.push(request.model);
+        yield { type: "error", error: {
+          code: "network", message: "terminated-" + globalThis.__flavorRetryModels.length,
+        } };
+      }});
+    }`);
+    const outputs: unknown[] = [];
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, output: (event) => outputs.push(event),
+    });
+
+    vi.useFakeTimers();
+    try {
+      const submission = runtime.session.submit("retry safely");
+      await vi.runAllTimersAsync();
+      await submission;
+    } finally {
+      vi.useRealTimers();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect((globalThis as { __flavorRetryModels?: string[] }).__flavorRetryModels)
+      .toEqual(["main", "main", "main", "cheap", "cheap"]);
+    expect(outputs.filter((event): event is { type: "error"; error: { message: string } } =>
+      typeof event === "object" && event !== null && (event as { type?: string }).type === "error"))
+      .toEqual([{ type: "error", error: { code: "network", message: "terminated-5" } }]);
+    expect(JSON.stringify(outputs.filter((event) =>
+      typeof event === "object" && event !== null && (event as { type?: string }).type === "model-retry")))
+      .not.toContain("terminated-");
+
+    const auditEntries = (await readFile(join(workspace, ".flavor", "audit.jsonl"), "utf8"))
+      .trim().split("\n").map((line) => JSON.parse(line));
+    expect(auditEntries).toHaveLength(5);
+    expect(auditEntries.map(({ attempt, maxAttempts }) => ({ attempt, maxAttempts }))).toEqual([
+      { attempt: 1, maxAttempts: 5 }, { attempt: 2, maxAttempts: 5 },
+      { attempt: 3, maxAttempts: 5 }, { attempt: 4, maxAttempts: 5 },
+      { attempt: 5, maxAttempts: 5 },
+    ]);
+
+    await runtime.dispose();
+    delete (globalThis as { __flavorRetryModels?: string[] }).__flavorRetryModels;
   });
 
   it("activates, dispatches, and unloads a validated plugin command", async () => {

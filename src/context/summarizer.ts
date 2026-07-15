@@ -8,6 +8,7 @@ export interface ModelSummarizerOptions {
   messages: readonly ModelMessage[];
   signal?: AbortSignal;
   maxPromptTooLongAttempts?: number;
+  onProgress?: (percentage: number) => void;
 }
 
 export async function summarizeWithModel(options: ModelSummarizerOptions): Promise<string> {
@@ -16,6 +17,8 @@ export async function summarizeWithModel(options: ModelSummarizerOptions): Promi
   options.signal?.throwIfAborted();
   let groups = groupMessagesByApiRound(options.messages);
   let lastOverflow: ProviderError | undefined;
+  let progress = 20;
+  reportProgress(options.onProgress, progress);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     options.signal?.throwIfAborted();
@@ -30,13 +33,18 @@ export async function summarizeWithModel(options: ModelSummarizerOptions): Promi
       tools: [],
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     })) {
-      if (event.type === "text") text += event.text;
+      if (event.type === "text") {
+        text += event.text;
+        progress = Math.min(70, progress + 10);
+        reportProgress(options.onProgress, progress);
+      }
       else if (event.type === "error") { terminalError = event.error; break; }
       else if (event.type === "done") { completed = true; break; }
     }
 
     if (terminalError === undefined) {
       if (!completed) throw new Error("Compact summary stream ended without completion");
+      reportProgress(options.onProgress, 80);
       return formatCompactSummary(text);
     }
     if (terminalError.code !== "context_overflow") throw terminalError;
@@ -46,4 +54,9 @@ export async function summarizeWithModel(options: ModelSummarizerOptions): Promi
   }
 
   throw lastOverflow ?? new Error("Compact summary failed");
+}
+
+function reportProgress(callback: ModelSummarizerOptions["onProgress"], percentage: number): void {
+  try { callback?.(percentage); }
+  catch { /* Progress observers must not affect summarization. */ }
 }

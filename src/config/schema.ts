@@ -24,6 +24,7 @@ export const FlavorConfigSchema = z.object({
     })
     .optional(),
   maxSubagents: z.number().int().min(1).max(16).default(3),
+  maxSessions: z.number().int().min(1).max(1000).default(50),
   permissionMode: z.enum(["safe", "workspace", "full"]).default("workspace"),
   language: z
     .string()

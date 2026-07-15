@@ -30,6 +30,27 @@ describe("summarizeWithModel", () => {
     expect(requests[0]?.messages.at(-1)?.content).toContain("Optional Next Step");
   });
 
+  it("advances summary streaming progress in ten-percent steps capped at eighty", async () => {
+    const adapter: ModelAdapter = {
+      async *stream() {
+        yield { type: "text", text: "<summary>" };
+        yield { type: "text", text: "structured " };
+        yield { type: "text", text: "result</summary>" };
+        yield { type: "done", usage: { inputTokens: 10, outputTokens: 3 } };
+      },
+    };
+    const progress: number[] = [];
+
+    await summarizeWithModel({
+      registry: new ModelRegistry().register("fake", adapter),
+      modelId: () => "fake:current",
+      messages: [{ role: "user", content: "history" }],
+      onProgress: (percentage) => { progress.push(percentage); },
+    });
+
+    expect(progress).toEqual([20, 30, 40, 50, 80]);
+  });
+
   it("drops oldest complete API rounds and succeeds on the third PTL attempt", async () => {
     const requests: ModelRequest[] = [];
     const adapter: ModelAdapter = {
