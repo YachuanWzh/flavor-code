@@ -107,6 +107,11 @@ OPENAI_API_KEY=sk-你的密钥
     "subagent": 40,
     "softLimitFactor": 0.8,
     "extendBy": 20
+  },
+  "loop": {
+    "maxCycles": 20,
+    "maxTokens": 500000,
+    "isolation": "auto"
   }
 }
 ```
@@ -116,6 +121,19 @@ OPENAI_API_KEY=sk-你的密钥
 - `language: "zh-CN"` 让 Flavor 用简体中文回复（也支持 `en-US`、`ja-JP` 等 BCP47 标签）
 - 支持 Anthropic（`"type": "anthropic"`）和任何兼容 OpenAI 接口的服务（`"type": "openai-compatible"`）
 - 关于 OAuth PKCE 企业级认证，请参阅下方 [PKCE 认证配置](#pkce-认证配置)
+
+### Loop Engineering
+
+使用 `/loop <goal>` 启动经过宿主验证的前台自治循环，例如：
+
+```text
+/loop 修复当前项目的类型错误并通过测试
+```
+
+- `loop.maxCycles` 和 `loop.maxTokens` 是每次用户授权的步长；达到门槛后询问是否继续，再按相同步长增加下一道门槛。
+- 验证命令从 `package.json` 与 `FLAVOR.md` 自动推断；若启动时没有，则先运行一次 verifier-discovery cycle，让 worker 建立有意义的项目原生检查，再由宿主重新推断。只有宿主执行的确定性验证通过才会结束为 `succeeded`。
+- `isolation: "auto"` 对只读目标使用当前目录，对代码修改或不明确目标使用独立 Git worktree；不能安全隔离时进入 `needs_human`。
+- 运行状态与证据写入 `.flavor/loops/<loop-id>/`。Ctrl+C 可取消；不会自动 merge、push 或 deploy。
 
 ---
 
@@ -441,7 +459,7 @@ npm run smoke:install  # 验证打包和安装
 
 后续方向包括（这些是未来规划，非 0.1.0 已交付能力）：
 
-- `/loop` 与 loop-engineering 长期自主循环调度
+- `/loop` 的后台恢复、调度与并发 loop 管理
 - 后台 Session Memory 持久化记忆系统
 - 更细粒度的任务恢复与重放
 - IDE 集成（VS Code / JetBrains 扩展）

@@ -51,6 +51,25 @@ describe("summarizeWithModel", () => {
     expect(progress).toEqual([20, 30, 40, 50, 80]);
   });
 
+  it("reports compaction model usage exactly once per attempt", async () => {
+    const adapter: ModelAdapter = {
+      async *stream() {
+        yield { type: "usage", inputTokens: 12, outputTokens: 3 };
+        yield { type: "done", usage: { inputTokens: 12, outputTokens: 3 } };
+      },
+    };
+    const usage: Array<{ inputTokens: number; outputTokens: number }> = [];
+
+    await expect(summarizeWithModel({
+      registry: new ModelRegistry().register("fake", adapter),
+      modelId: () => "fake:model",
+      messages: [{ role: "user", content: "history" }],
+      onUsage: (item) => usage.push(item),
+    })).rejects.toThrow(/empty/i);
+
+    expect(usage).toEqual([{ inputTokens: 12, outputTokens: 3 }]);
+  });
+
   it("drops oldest complete API rounds and succeeds on the third PTL attempt", async () => {
     const requests: ModelRequest[] = [];
     const adapter: ModelAdapter = {

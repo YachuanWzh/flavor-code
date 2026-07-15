@@ -39,6 +39,22 @@ it("uses Claude-style token compaction defaults and accepts explicit overrides",
   } }).context).toMatchObject({ windowTokens: 128_000, compactAtChars: 4_000 });
 });
 
+it("uses loop tranche defaults and validates explicit overrides", () => {
+  expect(FlavorConfigSchema.parse({}).loop).toEqual({
+    maxCycles: 20,
+    maxTokens: 500_000,
+    isolation: "auto",
+  });
+  expect(FlavorConfigSchema.parse({ loop: {
+    maxCycles: 40,
+    maxTokens: 5_000_000,
+    isolation: "auto",
+  } }).loop).toEqual({ maxCycles: 40, maxTokens: 5_000_000, isolation: "auto" });
+  expect(() => FlavorConfigSchema.parse({ loop: { maxCycles: 0 } })).toThrow();
+  expect(() => FlavorConfigSchema.parse({ loop: { maxTokens: 0 } })).toThrow();
+  expect(() => FlavorConfigSchema.parse({ loop: { isolation: "current" } })).toThrow();
+});
+
 it("preserves a positive provider output token limit", () => {
   const parsed = FlavorConfigSchema.parse({
     providers: {
@@ -63,11 +79,11 @@ it("merges CLI, project, env, global, and defaults in precedence order", async (
   await mkdir(join(cwd, ".flavor"), { recursive: true });
   await writeFile(
     join(home, ".flavor-code", "flavor.json"),
-    JSON.stringify({ maxSubagents: 2, permissionMode: "full" }),
+    JSON.stringify({ maxSubagents: 2, permissionMode: "full", loop: { maxCycles: 10, maxTokens: 1_000_000 } }),
   );
   await writeFile(
     join(cwd, ".flavor", "flavor.json"),
-    JSON.stringify({ maxSubagents: 4, permissionMode: "safe" }),
+    JSON.stringify({ maxSubagents: 4, permissionMode: "safe", loop: { maxCycles: 30 } }),
   );
   await writeFile(join(cwd, ".env"), "OPENAI_API_KEY=project-secret\n");
 
@@ -75,6 +91,7 @@ it("merges CLI, project, env, global, and defaults in precedence order", async (
 
   expect(loaded.config.maxSubagents).toBe(5);
   expect(loaded.config.permissionMode).toBe("safe");
+  expect(loaded.config.loop).toEqual({ maxCycles: 30, maxTokens: 1_000_000, isolation: "auto" });
 });
 
 it("ignores undefined CLI overrides and preserves configured values", async () => {

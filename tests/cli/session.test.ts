@@ -23,6 +23,7 @@ function services(events: string[], outputs: string[]): SessionServices {
       yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
     },
     runSkill: async function* () {},
+    runLoop: async function* () {},
     setModel: () => {}, setPermissionMode: () => {}, compact: async () => false,
     initialize: async () => ({ path: "/work/FLAVOR.md", created: true }),
     config: () => ({ providers: { openai: { apiKey: "top-secret", token: "also-secret" } } }),
@@ -31,6 +32,7 @@ function services(events: string[], outputs: string[]): SessionServices {
     pluginCommands: () => [], runPluginCommand: async () => undefined,
     output: (event) => outputs.push(event.type === "text" ? event.text : event.type === "notice" ? event.message : event.type),
     questions,
+    login: async () => "authenticated",
   };
 }
 
@@ -165,5 +167,22 @@ describe("FlavorSession", () => {
 
     expect(calls).toEqual([{ skill: "frontend-design", prompt: "polish footer" }]);
     expect(outputs).toContain("done");
+  });
+
+  it("runs /loop with the remaining input as its goal", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const goals: string[] = [];
+    base.runLoop = async function* (goal) {
+      goals.push(goal);
+      yield { type: "text", text: "looping" };
+      yield { type: "done", usage: { inputTokens: 2, outputTokens: 1 } };
+    };
+
+    const session = new FlavorSession(base);
+    await session.submit("/loop fix all type errors");
+
+    expect(goals).toEqual(["fix all type errors"]);
+    expect(outputs).toContain("looping");
   });
 });

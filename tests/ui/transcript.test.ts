@@ -69,6 +69,23 @@ describe("transcriptReducer", () => {
     expect(JSON.stringify(state.active)).not.toMatch(/fake:model|cheap:small|terminated/i);
   });
 
+  it("updates one loop progress row through cycles, budget, and terminal state", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "/loop fix tests" });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "loop-progress", loopId: "loop-one", phase: "cycle", state: "running", message: "Cycle 2 running",
+    } });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "loop-progress", loopId: "loop-one", phase: "budget", state: "info", message: "Waiting for token budget approval",
+    } });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "loop-progress", loopId: "loop-one", phase: "terminal", state: "completed", message: "Loop succeeded",
+    } });
+
+    expect(state.active?.blocks).toEqual([{
+      kind: "status", id: "loop:loop-one", state: "completed", text: "Loop succeeded",
+    }]);
+  });
+
   it("updates compact progress in place instead of appending rows", () => {
     let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "/compact" });
     state = transcriptReducer(state, { type: "session", event: { type: "compact-progress", progress: 10 } });

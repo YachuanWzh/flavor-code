@@ -133,6 +133,12 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
     state: "info",
     text: `↻ Retrying model call · attempt ${event.attempt}/${event.maxAttempts} in ${event.delayMs / 1_000}s`,
   });
+  if (event.type === "loop-progress") return upsertStatus(state, {
+    kind: "status",
+    id: `loop:${event.loopId}`,
+    state: event.state,
+    text: event.message,
+  });
   if (event.type === "compacted") return upsertStatus(state, {
     kind: "status", id: `compact:${state.active.blocks.length}`, state: "info", text: "· Context compacted.",
   });

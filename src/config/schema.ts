@@ -38,6 +38,13 @@ export const FlavorConfigSchema = z.object({
       extendBy: z.number().int().min(5).max(100).default(20),
     })
     .prefault({}),
+  loop: z
+    .object({
+      maxCycles: z.number().int().positive().max(10_000).default(20),
+      maxTokens: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(500_000),
+      isolation: z.literal("auto").default("auto"),
+    })
+    .prefault({}),
   context: z
     .object({
       windowTokens: z.number().int().positive().default(200_000),

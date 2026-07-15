@@ -72,6 +72,131 @@ describe("production runtime", () => {
     delete globalState.__flavorPromptRequests;
   });
 
+  it("runs /loop through a fresh worker and host verifier", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-loop-")); roots.push(workspace);
+    const pluginRoot = join(workspace, ".flavor", "plugins", "loop-model");
+    await mkdir(pluginRoot, { recursive: true });
+    await writeFile(join(workspace, "package.json"), JSON.stringify({
+      name: "loop-fixture", private: true,
+      scripts: { test: "node -e \"require('node:fs').accessSync('package.json')\"" },
+    }));
+    await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
+      providers: { capture: { type: "plugin", defaultModel: "main", cheapModel: "child" } },
+      agents: { main: { model: "capture:main" }, subagent: { model: "capture:child" } },
+      loop: { maxCycles: 3, maxTokens: 1000, isolation: "auto" },
+    }));
+    await writeFile(join(pluginRoot, "flavor-plugin.json"), JSON.stringify({
+      name: "loop-model", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
+      contributes: { commands: [], tools: [], hooks: [], skillRoots: [], modelAdapters: [{ name: "capture" }] },
+    }));
+    await writeFile(join(pluginRoot, "index.mjs"), `export function activate(ctx) {
+      ctx.registerModelAdapter("capture", { async *stream(request) {
+        globalThis.__flavorLoopRequests ??= [];
+        globalThis.__flavorLoopRequests.push(request.messages);
+        yield { type: "text", text: "Ready for host verification." };
+        yield { type: "usage", inputTokens: 10, outputTokens: 5 };
+        yield { type: "done", usage: { inputTokens: 10, outputTokens: 5 } };
+      }});
+    }`);
+    const globalState = globalThis as typeof globalThis & { __flavorLoopRequests?: unknown[][] };
+    delete globalState.__flavorLoopRequests;
+    const outputs: Array<{ type?: string; phase?: string; state?: string; message?: string }> = [];
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, approvalPolicy: "deny",
+      output: (event) => outputs.push(event as typeof outputs[number]),
+    });
+
+    await runtime.session.start();
+    await runtime.session.submit("/loop analyze the current project");
+
+    expect(globalState.__flavorLoopRequests).toHaveLength(1);
+    expect(JSON.stringify(globalState.__flavorLoopRequests)).toContain("Built-in Loop Skill");
+    expect(outputs).toContainEqual(expect.objectContaining({
+      type: "loop-progress", phase: "terminal", state: "completed",
+    }));
+    expect(outputs.find((event) => event.type === "loop-progress" && event.phase === "terminal")?.message)
+      .toContain("succeeded");
+    await runtime.dispose();
+    delete globalState.__flavorLoopRequests;
+  });
+
+  it("asks again at each loop budget tranche", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-budget-")); roots.push(workspace);
+    const pluginRoot = join(workspace, ".flavor", "plugins", "budget-model");
+    await mkdir(pluginRoot, { recursive: true });
+    await writeFile(join(workspace, "package.json"), JSON.stringify({
+      name: "budget-fixture", private: true, scripts: { test: "node -e \"process.exit(1)\"" },
+    }));
+    await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
+      providers: { capture: { type: "plugin", defaultModel: "main", cheapModel: "child" } },
+      agents: { main: { model: "capture:main" }, subagent: { model: "capture:child" } },
+      loop: { maxCycles: 1, maxTokens: 1000, isolation: "auto" },
+    }));
+    await writeFile(join(pluginRoot, "flavor-plugin.json"), JSON.stringify({
+      name: "budget-model", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
+      contributes: { commands: [], tools: [], hooks: [], skillRoots: [], modelAdapters: [{ name: "capture" }] },
+    }));
+    await writeFile(join(pluginRoot, "index.mjs"), `export function activate(ctx) {
+      ctx.registerModelAdapter("capture", { async *stream() {
+        yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
+      }});
+    }`);
+    const outputs: Array<{ type?: string; phase?: string; message?: string }> = [];
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {},
+      output: (event) => outputs.push(event as typeof outputs[number]),
+    });
+
+    const submission = runtime.session.submit("/loop analyze the current project");
+    await vi.waitFor(() => expect(runtime.services.questions.pending?.[0]?.question).toContain("1 cycles"));
+    expect(runtime.services.questions.pending?.[0]?.question).toContain("2 cycles");
+    expect(runtime.services.questions.pending?.[0]?.question).toContain("test failed with exit code 1");
+    runtime.services.questions.answer({ 0: "Continue" });
+    await vi.waitFor(() => expect(runtime.services.questions.pending?.[0]?.question).toContain("2 cycles"));
+    expect(runtime.services.questions.pending?.[0]?.question).toContain("3 cycles");
+    runtime.services.questions.answer({ 0: "Stop" });
+    await submission;
+
+    expect(outputs.find((event) => event.phase === "terminal")?.message).toContain("budget_exhausted");
+    await runtime.dispose();
+  });
+
+  it("uses a worker discovery cycle instead of exiting at zero tokens without a verifier", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-discovery-")); roots.push(workspace);
+    const pluginRoot = join(workspace, ".flavor", "plugins", "discovery-model");
+    await mkdir(pluginRoot, { recursive: true });
+    await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
+      providers: { capture: { type: "plugin", defaultModel: "main", cheapModel: "child" } },
+      agents: { main: { model: "capture:main" }, subagent: { model: "capture:child" } },
+    }));
+    await writeFile(join(pluginRoot, "flavor-plugin.json"), JSON.stringify({
+      name: "discovery-model", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
+      contributes: { commands: [], tools: [], hooks: [], skillRoots: [], modelAdapters: [{ name: "capture" }] },
+    }));
+    await writeFile(join(pluginRoot, "index.mjs"), `export function activate(ctx) {
+      ctx.registerModelAdapter("capture", { async *stream() {
+        globalThis.__flavorDiscoveryCalls = (globalThis.__flavorDiscoveryCalls ?? 0) + 1;
+        yield { type: "done", usage: { inputTokens: 7, outputTokens: 3 } };
+      }});
+    }`);
+    const globalState = globalThis as typeof globalThis & { __flavorDiscoveryCalls?: number };
+    delete globalState.__flavorDiscoveryCalls;
+    const outputs: Array<{ type?: string; phase?: string; message?: string; usage?: { inputTokens: number; outputTokens: number } }> = [];
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, approvalPolicy: "deny",
+      output: (event) => outputs.push(event as typeof outputs[number]),
+    });
+
+    await runtime.session.submit("/loop analyze and improve direction four");
+
+    expect(globalState.__flavorDiscoveryCalls).toBe(1);
+    expect(outputs.find((event) => event.phase === "resolved")?.message).toContain("discovery");
+    expect(outputs.find((event) => event.phase === "terminal")?.message).toContain("needs_human");
+    expect(outputs.find((event) => event.type === "done")?.usage).toEqual({ inputTokens: 7, outputTokens: 3 });
+    await runtime.dispose();
+    delete globalState.__flavorDiscoveryCalls;
+  });
+
   it("restores a main plan and publishes its task snapshot at session start", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-")); roots.push(workspace);
     await mkdir(join(workspace, ".flavor"), { recursive: true });

@@ -38,6 +38,13 @@ export type AgentEvent =
   | { type: "tasks"; snapshot: TaskSnapshot }
   | { type: "usage"; inputTokens: number; outputTokens: number; totalInputTokens: number; totalOutputTokens: number }
   | { type: "model-retry"; attempt: number; maxAttempts: number; delayMs: number }
+  | {
+    type: "loop-progress";
+    loopId: string;
+    phase: "resolved" | "cycle" | "verification" | "budget" | "terminal";
+    state: "running" | "completed" | "failed" | "cancelled" | "info";
+    message: string;
+  }
   | { type: "compact-progress"; progress: number }
   | { type: "compacted" }
   | { type: "warning"; message: string }

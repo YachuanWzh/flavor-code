@@ -11,6 +11,7 @@ describe("parseSlashCommand", () => {
     ["/tasks", { name: "tasks" }], ["/skills", { name: "skills" }],
     ["/plugins", { name: "plugins" }], ["/hooks", { name: "hooks" }],
     ["/config", { name: "config" }], ["/clear", { name: "clear" }],
+    ["/loop fix all tests", { name: "loop", goal: "fix all tests" }],
     ["/help", { name: "help" }], ["/exit", { name: "exit" }],
   ])("parses %s", (input, expected) => expect(parseSlashCommand(input)).toEqual(expected));
 
@@ -36,10 +37,13 @@ describe("parseSlashCommand", () => {
     expect(parseSlashCommand("/frontend-design polish footer", [], ["frontend-design"]))
       .toEqual({ name: "skill", skill: "frontend-design", prompt: "polish footer" });
     expect(parseSlashCommand("/help", ["help"], ["help"])).toEqual({ name: "help" });
+    expect(parseSlashCommand("/loop ship it", ["loop"], ["loop"]))
+      .toEqual({ name: "loop", goal: "ship it" });
   });
 
   it("reports invalid arguments without throwing", () => {
     expect(parseSlashCommand("/permissions reckless")).toMatchObject({ name: "invalid", command: "permissions" });
     expect(parseSlashCommand("/model sidekick foo:bar")).toMatchObject({ name: "invalid", command: "model" });
+    expect(parseSlashCommand("/loop")).toEqual({ name: "invalid", command: "loop", message: "Use /loop <goal>." });
   });
 });

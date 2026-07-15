@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir, release as osRelease, version as osVersion } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 
 import {
   parseFinalSubagentMessage,
@@ -21,6 +21,11 @@ import { LocalHarness } from "./harness/local.js";
 import { HookBus } from "./hooks/bus.js";
 import { HOOK_EVENT_NAMES, type HookEventName } from "./hooks/types.js";
 import { initializeFlavor } from "./init/project.js";
+import { LoopOrchestrator, type LoopRuntimeEvent } from "./loop/orchestrator.js";
+import { prepareLoopWorkspace } from "./loop/isolation.js";
+import { LoopStore } from "./loop/store.js";
+import type { LoopStatus } from "./loop/types.js";
+import { inferVerificationPlan, runVerificationPlan } from "./loop/verifier.js";
 import { AnthropicModelAdapter } from "./models/anthropic.js";
 import { OpenAIModelAdapter } from "./models/openai.js";
 import { ModelRegistry, parseModelId } from "./models/registry.js";
@@ -443,6 +448,121 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     return { decision: "allow" };
   });
 
+  const runLoopWorker = async function* (input: {
+    workspace: string; prompt: string; signal: AbortSignal;
+  }): AsyncIterable<AgentEvent> {
+    if (selectedModels.mainError !== undefined) {
+      yield { type: "error", error: { code: "unknown", message: selectedModels.mainError } };
+      return;
+    }
+    const loopTools: ToolDefinition<unknown>[] = [
+      createReadTool(input.workspace), createWriteTool(input.workspace), createEditTool(input.workspace),
+      createApplyPatchTool(input.workspace), createGlobTool(input.workspace), createGrepTool(input.workspace),
+      createShellTool(input.workspace),
+      ...createLspTools(input.workspace, {
+        onStatus: (status) => options.output({ type: "notice", message: status }),
+      }),
+      createTodoWriteTool(),
+    ];
+    const loopFlavor = await optionalText(join(input.workspace, "FLAVOR.md"));
+    const loopEnvironment = createPromptEnvironment({
+      now: new Date(), platform: process.platform, osVersion: `${osVersion()} ${osRelease()}`,
+      shell: environment.ComSpec ?? environment.SHELL ?? "unknown",
+      isGitRepository: await detectGitRepository(input.workspace),
+    });
+    let compactionInputTokens = 0;
+    let compactionOutputTokens = 0;
+    let loopHarness!: LocalHarness;
+    const createLoopContext = (
+      agent: "main" | "subagent", agentTools: readonly ToolDefinition<unknown>[], contextModelId: string,
+    ) => {
+      const language = resolveLanguage(config.language);
+      const { compactAtChars, toolOutputChars, ...compaction } = config.context;
+      return new ContextManager({
+        system: () => buildSystemPrompt({
+          agent,
+          languageInstruction: languageInstruction(language),
+          workspace: input.workspace,
+          model: agent === "main" ? loopHarness.mainModelId : contextModelId,
+          permissionMode: agent === "subagent" ? "workspace" : loopHarness.permissionMode,
+          toolNames: new Set(agentTools.map((tool) => tool.name)),
+          environment: loopEnvironment,
+        }),
+        ...(loopFlavor === undefined ? {} : { flavor: loopFlavor }),
+        ...(compactAtChars === undefined ? {} : { compactAtChars }),
+        toolOutputChars,
+        compaction,
+        summarize: (messages, compactSignal, onProgress) => summarizeWithModel({
+          registry, modelId: () => loopHarness.mainModelId, messages, signal: compactSignal,
+          ...(onProgress === undefined ? {} : { onProgress }),
+          onUsage: (usage) => {
+            compactionInputTokens += usage.inputTokens;
+            compactionOutputTokens += usage.outputTokens;
+          },
+        }),
+        onCompactProgress: (progress) => options.output({ type: "compact-progress", progress }),
+        hooks,
+      });
+    };
+    loopHarness = new LocalHarness({
+      registry, hooks, workspace: input.workspace,
+      mainModelId: harness.mainModelId, subagentModelId: harness.subagentModelId,
+      tools: loopTools, createContext: createLoopContext, permissionMode: harness.permissionMode,
+      maxIterationsMain: config.maxIterations.main,
+      maxIterationsSubagent: config.maxIterations.subagent,
+      approve: options.approvalPolicy === "deny"
+        ? () => "deny" as ApprovalDecision
+        : (request, approvalSignal) => approvals.request(request, approvalSignal),
+    });
+    try {
+      yield* loopHarness.main.loop.run({ prompt: input.prompt, signal: input.signal });
+      if (compactionInputTokens > 0 || compactionOutputTokens > 0) {
+        yield {
+          type: "usage",
+          inputTokens: compactionInputTokens,
+          outputTokens: compactionOutputTokens,
+          totalInputTokens: compactionInputTokens,
+          totalOutputTokens: compactionOutputTokens,
+        };
+      }
+    } finally {
+      loopHarness.dispose();
+    }
+  };
+
+  const loopStore = new LoopStore({ workspace });
+  const loopOrchestrator = new LoopOrchestrator({
+    workspace,
+    config: config.loop,
+    persistence: loopStore,
+    prepareWorkspace: (input) => prepareLoopWorkspace(input),
+    inferVerification: inferVerificationPlan,
+    runWorker: ({ workspace: executionWorkspace, prompt, signal }) =>
+      runLoopWorker({ workspace: executionWorkspace, prompt, signal }),
+    runVerifier: runVerificationPlan,
+    confirmBudget: async (state, dimensions, signal) => {
+      if (options.approvalPolicy === "deny") return "unavailable";
+      const reached = dimensions.map((dimension) => dimension === "cycles"
+        ? `${state.budget.cyclesUsed} cycles`
+        : `${state.budget.inputTokens + state.budget.outputTokens} tokens`).join(" and ");
+      const next = dimensions.map((dimension) => dimension === "cycles"
+        ? `${state.budget.cycleCheckpoint + state.config.cycleStep} cycles`
+        : `${state.budget.tokenCheckpoint + state.config.tokenStep} tokens`).join(" and ");
+      const latestVerification = state.cycles.at(-1)?.verification.summary ?? "No host verification evidence yet.";
+      const answers = await questions.ask([{
+        header: "Loop budget",
+        question: `Loop ${state.loopId} reached ${reached}. Latest verification: ${latestVerification} Continue until the next checkpoint (${next})?`,
+        options: [
+          { label: "Continue", description: "Extend only the reached budget tranche and keep looping." },
+          { label: "Stop", description: "End this loop as budget exhausted." },
+        ],
+      }], signal);
+      return answers[0] === "Continue" ? "approved" : "rejected";
+    },
+    fingerprint: workspaceFingerprint,
+    idFactory: () => `loop-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`,
+  });
+
   const services: SessionServices = {
     hooks, workspace,
     mainModel: () => harness.mainModelId,
@@ -452,6 +572,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     runSkill: (skill, prompt, signal) => persistAfter(
       runExplicitSkill(harness, skills, skill, prompt, signal, selectedModels.mainError), persist,
     ),
+    runLoop: (goal, signal) => runLoopSession(loopOrchestrator, goal, signal),
     setModel: async (role, id) => { harness.setModel(role, id); await persist(); },
     setPermissionMode: async (mode) => { harness.setPermissionMode(mode); await persist(); },
     compact: async (signal) => { const changed = await harness.main.context.compact(signal); if (changed) await persist(); return changed; },
@@ -609,6 +730,103 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     catch (cleanupError) { attachCleanupError(primaryError, cleanupError); }
     throw primaryError;
   }
+}
+
+async function* runLoopSession(
+  orchestrator: LoopOrchestrator, goal: string, signal: AbortSignal,
+): AsyncIterable<AgentEvent> {
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  for await (const event of orchestrator.run({ goal, signal })) {
+    if (event.type === "worker-event") {
+      if (event.event.type === "usage") {
+        totalInputTokens += event.event.inputTokens;
+        totalOutputTokens += event.event.outputTokens;
+        yield {
+          ...event.event,
+          totalInputTokens,
+          totalOutputTokens,
+        };
+      } else if (event.event.type !== "done") yield event.event;
+      continue;
+    }
+    yield loopProgressEvent(event);
+    if (event.type === "loop-terminal") {
+      yield { type: "done", usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens } };
+    }
+  }
+}
+
+function loopProgressEvent(event: Exclude<LoopRuntimeEvent, { type: "worker-event" }>): AgentEvent {
+  if (event.type === "loop-resolved") {
+    return {
+      type: "loop-progress", loopId: event.loopId, phase: "resolved", state: "info",
+      message: event.verifierCommands.length === 0
+        ? `Using ${event.isolation} workspace; verifier discovery is required in the first cycle.`
+        : `Using ${event.isolation} workspace; verifier: ${event.verifierCommands.join(" && ")}.`,
+    };
+  }
+  if (event.type === "loop-cycle-start") {
+    return {
+      type: "loop-progress", loopId: event.loopId, phase: "cycle", state: "running",
+      message: `Cycle ${event.cycle} is running.`,
+    };
+  }
+  if (event.type === "loop-verification") {
+    return {
+      type: "loop-progress", loopId: event.loopId, phase: "verification",
+      state: event.evidence.passed ? "completed" : "running",
+      message: `Cycle ${event.cycle}: ${event.evidence.summary}`,
+    };
+  }
+  if (event.type === "loop-budget") {
+    return {
+      type: "loop-progress", loopId: event.loopId, phase: "budget", state: "info",
+      message: `Confirmation required for ${event.dimensions.join(" and ")} budget.`,
+    };
+  }
+  return {
+    type: "loop-progress", loopId: event.loopId, phase: "terminal",
+    state: terminalProgressState(event.status),
+    message: `Loop ${event.status}: ${event.reason}`,
+  };
+}
+
+function terminalProgressState(status: Exclude<LoopStatus, "running">): "completed" | "failed" | "cancelled" | "info" {
+  if (status === "succeeded") return "completed";
+  if (status === "cancelled") return "cancelled";
+  if (status === "needs_human") return "info";
+  return "failed";
+}
+
+async function workspaceFingerprint(workspace: string): Promise<string> {
+  const hash = createHash("sha256");
+  const diff = await execFileNoThrow(
+    "git", ["-C", workspace, "diff", "--no-ext-diff", "--binary", "HEAD"],
+    { timeout: 30_000, useCwd: false },
+  );
+  if (diff.code !== 0) return hash.update("non-git-workspace").digest("hex");
+  hash.update(diff.stdout);
+  const untracked = await execFileNoThrow(
+    "git", ["-C", workspace, "ls-files", "--others", "--exclude-standard", "-z"],
+    { timeout: 30_000, useCwd: false },
+  );
+  let remaining = 5 * 1024 * 1024;
+  for (const name of untracked.stdout.split("\0").filter(Boolean).sort()) {
+    if (name === ".flavor/loops" || name.startsWith(".flavor/loops/")) continue;
+    const path = resolve(workspace, name);
+    const relativePath = relative(resolve(workspace), path);
+    if (relativePath === ".." || relativePath.startsWith(`..${sep}`)) continue;
+    hash.update(name);
+    if (remaining <= 0) continue;
+    try {
+      const content = await readFile(path);
+      const slice = content.subarray(0, remaining);
+      hash.update(slice);
+      remaining -= slice.length;
+    } catch { /* A concurrently removed or non-file path is represented by its name. */ }
+  }
+  return hash.digest("hex");
 }
 
 async function* runMain(

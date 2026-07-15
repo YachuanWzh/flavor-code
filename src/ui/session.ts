@@ -20,6 +20,7 @@ export interface SessionServices {
   permissionMode(): PermissionMode;
   run(prompt: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
   runSkill(skill: string, prompt: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
+  runLoop(goal: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
   setModel(role: ModelRole, modelId: string): void | Promise<void>;
   setPermissionMode(mode: PermissionMode): void | Promise<void>;
   compact(signal?: AbortSignal): Promise<boolean>;
@@ -45,6 +46,7 @@ const HELP = [
   "/login                                  authenticate via OAuth PKCE",
   "/init  /config  /skills  /plugins  /hooks  /tasks",
   "/compact  /clear  /help  /exit",
+  "/loop <goal>                            run a verified autonomous loop",
 ].join("\n");
 
 export class FlavorSession {
@@ -165,6 +167,8 @@ export class FlavorSession {
       this.#notice(format(await this.#services.runPluginCommand(command.command, command.args, signal)));
     } else if (command.name === "skill") {
       for await (const event of this.#services.runSkill(command.skill, command.prompt, signal)) this.#services.output(event);
+    } else if (command.name === "loop") {
+      for await (const event of this.#services.runLoop(command.goal, signal)) this.#services.output(event);
     } else if (command.name === "compact") {
       this.#notice(await this.#services.compact(signal) ? "Context compacted." : "Context does not need compaction.");
     } else if (command.name === "init") {

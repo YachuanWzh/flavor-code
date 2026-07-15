@@ -9,6 +9,7 @@ export interface ModelSummarizerOptions {
   signal?: AbortSignal;
   maxPromptTooLongAttempts?: number;
   onProgress?: (percentage: number) => void;
+  onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
 }
 
 export async function summarizeWithModel(options: ModelSummarizerOptions): Promise<string> {
@@ -27,6 +28,7 @@ export async function summarizeWithModel(options: ModelSummarizerOptions): Promi
     let text = "";
     let completed = false;
     let terminalError: ProviderError | undefined;
+    let usage: { inputTokens: number; outputTokens: number } | undefined;
     for await (const event of adapter.stream({
       model,
       messages: [...candidate, { role: "user", content: buildCompactPrompt() }],
@@ -38,9 +40,11 @@ export async function summarizeWithModel(options: ModelSummarizerOptions): Promi
         progress = Math.min(70, progress + 10);
         reportProgress(options.onProgress, progress);
       }
+      else if (event.type === "usage") usage = { inputTokens: event.inputTokens, outputTokens: event.outputTokens };
       else if (event.type === "error") { terminalError = event.error; break; }
-      else if (event.type === "done") { completed = true; break; }
+      else if (event.type === "done") { usage = event.usage; completed = true; break; }
     }
+    if (usage !== undefined) reportUsage(options.onUsage, usage);
 
     if (terminalError === undefined) {
       if (!completed) throw new Error("Compact summary stream ended without completion");
@@ -54,6 +58,13 @@ export async function summarizeWithModel(options: ModelSummarizerOptions): Promi
   }
 
   throw lastOverflow ?? new Error("Compact summary failed");
+}
+
+function reportUsage(
+  callback: ModelSummarizerOptions["onUsage"], usage: { inputTokens: number; outputTokens: number },
+): void {
+  try { callback?.(usage); }
+  catch { /* Usage observers must not affect summarization. */ }
 }
 
 function reportProgress(callback: ModelSummarizerOptions["onProgress"], percentage: number): void {
