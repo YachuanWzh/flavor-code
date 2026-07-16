@@ -38,6 +38,7 @@
 
 **Files:**
 - Modify: `src/hallucination/types.ts`
+- Modify: `src/hallucination/guard.ts`
 - Modify: `src/config/schema.ts`
 - Modify: `src/production.ts`
 - Modify: `tests/config/load.test.ts`
@@ -100,7 +101,7 @@ Task 4 will extend `HallucinationReport` when the guard can populate the new req
 evaluationTimeoutMs: z.number().int().min(100).max(30_000).default(2_000),
 ```
 
-Pass `config.hallucination.evaluationTimeoutMs` to `new HallucinationGuard(...)` in `src/production.ts`.
+Add `evaluationTimeoutMs?: number` to `HallucinationGuardConfig` so the wiring remains type-safe; Task 4 will store and enforce it. Pass `config.hallucination.evaluationTimeoutMs` to `new HallucinationGuard(...)` in `src/production.ts`.
 
 - [ ] **Step 4: Run focused tests and typecheck**
 
@@ -111,7 +112,7 @@ Expected: configuration tests and typecheck PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/hallucination/types.ts src/config/schema.ts src/production.ts tests/config/load.test.ts
+git add src/hallucination/types.ts src/hallucination/guard.ts src/config/schema.ts src/production.ts tests/config/load.test.ts
 git commit -m "feat(hallucination): configure evaluation timeout"
 ```
 
