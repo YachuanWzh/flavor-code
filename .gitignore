@@ -17,3 +17,4 @@ FLAVOR.md
 # superharness brainstorm mind-map session state (transient)
 .superharness/
 .flavor/audit.jsonl
+.flavor/loops
