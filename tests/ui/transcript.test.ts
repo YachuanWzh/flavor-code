@@ -5,6 +5,25 @@ import { createTranscriptState, transcriptReducer } from "../../src/ui/transcrip
 afterEach(() => vi.useRealTimers());
 
 describe("transcriptReducer", () => {
+  it("hydrates retained user and assistant turns without tool output", () => {
+    const state = transcriptReducer(createTranscriptState(), { type: "hydrate", messages: [
+      { role: "user", content: "first question" },
+      { role: "assistant", content: "checking" },
+      { role: "tool", content: "very long tool output" },
+      { role: "assistant", content: "first answer" },
+      { role: "assistant", content: "" },
+      { role: "user", content: "second question" },
+    ] });
+
+    expect(state.completed.map(({ id, prompt, assistantText, blocks }) => ({ id, prompt, assistantText, blocks }))).toEqual([
+      { id: 1, prompt: "first question", assistantText: "checkingfirst answer", blocks: [{ kind: "text", text: "checkingfirst answer" }] },
+      { id: 2, prompt: "second question", assistantText: "", blocks: [] },
+    ]);
+    expect(state.active).toBeUndefined();
+    expect(state.nextId).toBe(3);
+    expect(JSON.stringify(state)).not.toContain("very long tool output");
+  });
+
   it("shows a submitted prompt immediately and accumulates streamed text", () => {
     let state = createTranscriptState();
     state = transcriptReducer(state, { type: "submit", prompt: "你好" });

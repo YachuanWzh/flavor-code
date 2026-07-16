@@ -12,6 +12,11 @@ export interface TranscriptTurn {
   suppressedTaskIds?: string[];
 }
 
+export interface TranscriptHistoryMessage {
+  readonly role: "user" | "assistant" | "tool";
+  readonly content: string;
+}
+
 export type TranscriptBlock =
   | { kind: "text"; text: string }
   | {
@@ -36,6 +41,7 @@ export interface TranscriptState {
 }
 
 export type TranscriptAction =
+  | { type: "hydrate"; messages: readonly TranscriptHistoryMessage[] }
   | { type: "submit"; prompt: string }
   | { type: "session"; event: SessionOutput }
   | { type: "submit-error"; message: string }
@@ -47,6 +53,7 @@ export function createTranscriptState(): TranscriptState {
 }
 
 export function transcriptReducer(state: TranscriptState, action: TranscriptAction): TranscriptState {
+  if (action.type === "hydrate") return hydrateHistory(action.messages);
   if (action.type === "clear") return createTranscriptState();
   if (action.type === "submit") {
     const active: TranscriptTurn = {
@@ -165,6 +172,27 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
     });
   }
   return state;
+}
+
+function hydrateHistory(messages: readonly TranscriptHistoryMessage[]): TranscriptState {
+  const completed: TranscriptTurn[] = [];
+  let turn: TranscriptTurn | undefined;
+  for (const message of messages) {
+    if (message.role === "user") {
+      if (turn !== undefined) completed.push(turn);
+      turn = {
+        id: completed.length + 1,
+        prompt: message.content,
+        assistantText: "",
+        statusLines: [],
+        blocks: [],
+      };
+    } else if (message.role === "assistant" && message.content.length > 0 && turn !== undefined) {
+      turn = addText(turn, message.content);
+    }
+  }
+  if (turn !== undefined) completed.push(turn);
+  return { completed, nextId: completed.length + 1 };
 }
 
 function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot, includeTerminal = true): TranscriptTurn {
