@@ -2,7 +2,7 @@ import { AgentLoop } from "../agent/loop.js";
 import { MAIN_TASK_TOOL_NAMES } from "../agent/task-tools.js";
 import type { TaskNode } from "../agent/planner.js";
 import type { HallucinationGuard } from "../hallucination/guard.js";
-import type { PermissionMode } from "../permissions/engine.js";
+import type { PermissionMode, ToolCategory } from "../permissions/engine.js";
 import { PermissionEngine } from "../permissions/engine.js";
 import type { ContextManager } from "../context/manager.js";
 import type { HookBus } from "../hooks/bus.js";
@@ -11,6 +11,9 @@ import type { ModelTool } from "../models/types.js";
 import { modelToolFromZod } from "../models/structured.js";
 import { ToolRuntime, type ApprovalCallback } from "../tools/runtime.js";
 import type { ToolDefinition } from "../tools/types.js";
+
+/** Categories that auto-approve in loop mode — everything except destructive. */
+const LOOP_ALWAYS_ALLOWED: readonly ToolCategory[] = ["read", "write", "shell", "network"];
 
 export interface LocalHarnessOptions {
   registry: ModelRegistry;
@@ -30,6 +33,8 @@ export interface LocalHarnessOptions {
   maxIterationsSubagent?: number;
   hasActiveProgress?(): boolean;
   hallucinationGuard?: HallucinationGuard;
+  /** When true, non-destructive tools skip the approval callback. Destructive tools still require confirmation. */
+  loopMode?: boolean;
 }
 
 export interface HarnessProfile {
@@ -170,11 +175,13 @@ export class LocalHarness {
       mode: agent === "subagent" ? "workspace" : (this.#options.permissionMode ?? "workspace"),
     });
     if (agent === "main") this.#mainPermissions = permissions;
+    const alwaysAllowed = this.#options.loopMode ? [...LOOP_ALWAYS_ALLOWED] : undefined;
     const runtime = new ToolRuntime({
       tools: definitions,
       hooks: this.#options.hooks,
       permissions,
       ...(agent === "main" && approve !== undefined ? { approve } : {}),
+      ...(alwaysAllowed !== undefined ? { alwaysAllowed } : {}),
     });
     try {
       const tools = definitions.map(toModelTool);

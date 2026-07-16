@@ -565,6 +565,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       tools: loopTools, createContext: createLoopContext, permissionMode: harness.permissionMode,
       maxIterationsMain: config.maxIterations.main,
       maxIterationsSubagent: config.maxIterations.subagent,
+      loopMode: true,
       approve: options.approvalPolicy === "deny"
         ? () => "deny" as ApprovalDecision
         : (request, approvalSignal) => approvals.request(request, approvalSignal),

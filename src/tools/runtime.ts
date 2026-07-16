@@ -2,7 +2,7 @@ import { basename } from "node:path";
 import { z } from "zod";
 
 import type { HookBus } from "../hooks/bus.js";
-import { type PermissionEngine, type PermissionRequest, getToolCategory } from "../permissions/engine.js";
+import { type PermissionEngine, type PermissionRequest, getToolCategory, type ToolCategory } from "../permissions/engine.js";
 import { getToolPresentation, type ToolCall, type ToolContext, type ToolDefinition, type ToolResult } from "./types.js";
 import { message } from "../utils/error.js";
 
@@ -17,6 +17,8 @@ export interface ToolRuntimeOptions {
   hooks: HookBus;
   permissions: PermissionEngine;
   approve?: ApprovalCallback;
+  /** Categories that should skip the approval callback. Destructive is never added. */
+  alwaysAllowed?: ToolCategory[];
 }
 
 export type ToolInputValidation =
@@ -48,7 +50,7 @@ export class ToolRuntime {
     this.#hooks = options.hooks;
     this.#permissions = options.permissions;
     this.#approve = options.approve;
-    this.#alwaysAllowed = new Set();
+    this.#alwaysAllowed = new Set(options.alwaysAllowed ?? []);
     this.#disposeSchemas = [
       this.#hooks.registerPayloadSchema("PreToolUse", PreToolUsePayload),
       this.#hooks.registerPayloadSchema("PermissionRequest", PermissionRequestPayload),
