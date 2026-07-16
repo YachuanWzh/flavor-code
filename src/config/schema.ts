@@ -33,6 +33,7 @@ export const FlavorConfigSchema = z.object({
   hallucination: z
     .object({
       showWarnings: z.boolean().default(false),
+      evaluationTimeoutMs: z.number().int().min(100).max(30_000).default(2_000),
     })
     .prefault({}),
   maxIterations: z

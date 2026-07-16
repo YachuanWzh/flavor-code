@@ -16,6 +16,8 @@ export interface HallucinationGuardConfig {
   language?: string;
   /** When false, warning messages are suppressed — detection still runs internally. Default true. */
   showWarnings?: boolean;
+  /** Hard deadline for one cheap-model evaluation. */
+  evaluationTimeoutMs?: number;
 }
 
 export class HallucinationGuard {

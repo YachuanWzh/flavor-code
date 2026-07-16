@@ -55,6 +55,22 @@ it("uses loop tranche defaults and validates explicit overrides", () => {
   expect(() => FlavorConfigSchema.parse({ loop: { isolation: "current" } })).toThrow();
 });
 
+it("uses the hallucination evaluation timeout default and validates overrides", () => {
+  expect(FlavorConfigSchema.parse({}).hallucination).toEqual({
+    showWarnings: false,
+    evaluationTimeoutMs: 2_000,
+  });
+  expect(FlavorConfigSchema.parse({ hallucination: {
+    showWarnings: true,
+    evaluationTimeoutMs: 750,
+  } }).hallucination).toEqual({ showWarnings: true, evaluationTimeoutMs: 750 });
+  for (const value of [99, 30_001, 1.5]) {
+    expect(() => FlavorConfigSchema.parse({
+      hallucination: { evaluationTimeoutMs: value },
+    })).toThrow();
+  }
+});
+
 it("preserves a positive provider output token limit", () => {
   const parsed = FlavorConfigSchema.parse({
     providers: {
