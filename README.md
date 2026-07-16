@@ -381,6 +381,8 @@ Flavor 的压缩是分层执行的：
 | `/audit [toolFilter]` | 查看工具失败审计日志 |
 | `/compact` | 强制压缩上下文 |
 | `/clear` | 清空终端显示 |
+| `/mcp [status\|tools\|reconnect\|enable\|disable]` | 管理 MCP 服务器 |
+| `/loop <goal>` | 启动经验证的前台自治循环 |
 | `/help` | 显示帮助 |
 | `/exit` | 退出 |
 
