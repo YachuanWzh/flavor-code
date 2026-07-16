@@ -13,6 +13,7 @@ import {
 import { useAnimationFrame } from "../claude-ink/hooks/use-animation-frame.js";
 import { useHasSelection, useSelection } from "../claude-ink/hooks/use-selection.js";
 import { useTerminalTitle } from "../claude-ink/hooks/use-terminal-title.js";
+import type { ClickEvent } from "../claude-ink/events/click-event.js";
 
 import { createProductionRuntime, type ProductionRuntime } from "../production.js";
 import { isDestructiveTool } from "../permissions/engine.js";
@@ -608,7 +609,7 @@ export function MentionMenu({
       return <Box
         key={path}
         width="100%"
-        onClick={(event) => {
+        onClick={(event: ClickEvent) => {
           if (!event.cellIsBlank) onSelect?.(path);
         }}
       >
