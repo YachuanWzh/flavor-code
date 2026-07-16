@@ -125,7 +125,10 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
     });
   }
   if (event.type === "error") {
-    return { ...state, active: addText(state.active, `◆ ${event.error.code}: ${event.error.message}`, true) };
+    const active = event.error.code === "cancelled"
+      ? stripRetryBlocks(state.active)
+      : state.active;
+    return { ...state, active: addText(active, `◆ ${event.error.code}: ${event.error.message}`, true) };
   }
   if (event.type === "usage") return state;
   if (event.type === "model-retry") return upsertStatus(state, {
@@ -285,6 +288,22 @@ function finishActive(state: TranscriptState): TranscriptState {
 
 function appendLine(text: string, line: string): string {
   return text.length === 0 || text.endsWith("\n") ? text + line : `${text}\n${line}`;
+}
+
+function stripRetryBlocks(turn: TranscriptTurn): TranscriptTurn {
+  const blocks = turn.blocks.filter((block) => {
+    if (block.kind !== "status") return true;
+    if (block.id === "model-retry") return false;
+    if (block.id.startsWith("structured-retry:")) return false;
+    return true;
+  });
+  return {
+    ...turn,
+    blocks,
+    statusLines: blocks
+      .filter((item): item is Extract<TranscriptBlock, { kind: "status" }> => item.kind === "status")
+      .map((item) => item.text),
+  };
 }
 
 function addText(turn: TranscriptTurn, text: string, onNewLine = false): TranscriptTurn {
