@@ -70,12 +70,18 @@ export interface ProductionRuntimeOptions {
   resumeSession?: string | true;
 }
 
+export interface RestoredConversationMessage {
+  readonly role: "user" | "assistant" | "tool";
+  readonly content: string;
+}
+
 export interface ProductionRuntime {
   session: FlavorSession;
   services: SessionServices;
   approvals: ApprovalBridge;
   diagnostics: readonly string[];
   sessionId: string;
+  restoredMessages: readonly RestoredConversationMessage[];
   dispose(): Promise<void>;
 }
 
@@ -143,6 +149,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const recovered = options.resumeSession === undefined
     ? undefined
     : await sessionStore.load(options.resumeSession === true ? undefined : options.resumeSession);
+  const restoredMessages: readonly RestoredConversationMessage[] = recovered?.conversation.messages
+    .map(({ role, content }) => ({ role, content })) ?? [];
   const secrets = [
     ...Object.values(config.providers).map((provider) => provider.apiKey),
     environment.OPENAI_API_KEY, environment.ANTHROPIC_API_KEY,
@@ -731,7 +739,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const session = new FlavorSession(services);
   let disposed = false;
   return {
-    session, services, approvals,
+    session, services, approvals, restoredMessages,
     get sessionId() { return sessionId; },
     get diagnostics() { return diagnostics.map((item) => redactSecrets(item, secrets)); },
     async dispose() {

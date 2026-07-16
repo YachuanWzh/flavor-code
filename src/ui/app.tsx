@@ -171,6 +171,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
       onApprovalChange: () => setRevision((value) => value + 1),
     }).then(async (created) => {
       if (disposed) { await created.dispose(); return; }
+      dispatch({ type: "hydrate", messages: created.restoredMessages });
       runtimeRef.current = created;
       setSlashCandidates(buildSlashCandidates(BUILTIN_SLASH_CANDIDATES, created.services.pluginCommands(), []));
       setRuntime(created);

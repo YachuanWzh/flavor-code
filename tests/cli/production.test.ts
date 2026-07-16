@@ -210,7 +210,11 @@ describe("production runtime", () => {
       createdAt: "2026-07-13T01:00:00.000Z",
       updatedAt: "2026-07-13T01:01:00.000Z",
       workspace: { path: workspace },
-      conversation: { messages: [] },
+      conversation: { messages: [
+        { role: "user", content: "persist me" },
+        { role: "assistant", content: "persisted answer" },
+        { role: "tool", content: "hidden tool output", toolCallId: "call-1" },
+      ] },
       tasks: {
         plan: { tasks: [{
           id: "inspect", subject: "Inspect code", activeForm: "Inspecting code",
@@ -230,6 +234,11 @@ describe("production runtime", () => {
 
     await runtime.session.start();
 
+    expect(runtime.restoredMessages).toEqual([
+      { role: "user", content: "persist me" },
+      { role: "assistant", content: "persisted answer" },
+      { role: "tool", content: "hidden tool output" },
+    ]);
     expect(runtime.services.tasks()).toMatchObject({ plan: { tasks: [{ id: "inspect" }] } });
     expect(outputs).toContainEqual(expect.objectContaining({
       type: "tasks",
@@ -254,6 +263,7 @@ describe("production runtime", () => {
     expect(saved.permissionMode).toBe("safe");
 
     const fresh = await createProductionRuntime({ workspace, home: workspace, environment: {}, output: () => {} });
+    expect(fresh.restoredMessages).toEqual([]);
     expect(fresh.services.permissionMode()).toBe("workspace");
     await fresh.dispose();
     const resumed = await createProductionRuntime({ workspace, home: workspace, environment: {}, resumeSession: saved.sessionId, output: () => {} });

@@ -9,7 +9,7 @@ import {
   compactProgressPresentation,
 } from "../../src/ui/compact-progress.js";
 import type { SlashCompletion } from "../../src/ui/slash-completion.js";
-import type { TranscriptTurn } from "../../src/ui/transcript.js";
+import { createTranscriptState, transcriptReducer, type TranscriptTurn } from "../../src/ui/transcript.js";
 
 const turn = (id: number, prompt: string, assistantText: string): TranscriptTurn => ({
   id,
@@ -243,6 +243,27 @@ describe("TerminalLayout", () => {
     expect(output.indexOf("second answer")).toBeLessThan(output.indexOf("visible immediately"));
     expect(output.indexOf("streaming now")).toBeLessThan(output.indexOf("next"));
     expect(output).toContain("─".repeat(20));
+  });
+
+  it("renders hydrated conversation history without restored tool output", () => {
+    const state = transcriptReducer(createTranscriptState(), { type: "hydrate", messages: [
+      { role: "user", content: "restored question" },
+      { role: "assistant", content: "restored answer" },
+      { role: "tool", content: "hidden tool output" },
+    ] });
+    const output = renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={state.completed}
+      input=""
+      promptCursor={0}
+      columns={80}
+      activeSession={false}
+    />, { columns: 80 });
+
+    expect(output).toContain("restored question");
+    expect(output).toContain("restored answer");
+    expect(output).not.toContain("hidden tool output");
   });
 
   it("does not emit application scroll-region or absolute-position escapes", () => {
