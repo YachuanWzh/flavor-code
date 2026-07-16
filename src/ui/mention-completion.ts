@@ -7,6 +7,31 @@ export interface MentionCompletion {
   windowStart: number;
 }
 
+export interface MentionCandidatePresentation {
+  marker: "› " | "  ";
+  textStyle: Record<string, never> | { color: "rgb(120,155,255)"; bold: true };
+  highlightMatches: boolean;
+  matchStyle: { color: "ansi:cyan"; bold: true };
+}
+
+export function mentionCandidatePresentation(selected: boolean): MentionCandidatePresentation {
+  if (selected) {
+    const selectedText = { color: "rgb(120,155,255)", bold: true } as const;
+    return {
+      marker: "› ",
+      textStyle: selectedText,
+      highlightMatches: false,
+      matchStyle: { color: "ansi:cyan", bold: true },
+    };
+  }
+  return {
+    marker: "  ",
+    textStyle: {},
+    highlightMatches: true,
+    matchStyle: { color: "ansi:cyan", bold: true },
+  };
+}
+
 interface MentionToken {
   start: number;
   end: number;

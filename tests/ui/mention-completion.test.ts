@@ -4,6 +4,7 @@ import {
   buildMentionCandidates,
   completeMentionSelection,
   deriveMentionCompletion,
+  mentionCandidatePresentation,
   moveMentionSelection,
 } from "../../src/ui/mention-completion.js";
 
@@ -53,5 +54,20 @@ describe("mention completion", () => {
   it("replaces only the active token and escapes spaces", () => {
     expect(completeMentionSelection("review @my later", 10, "docs/my notes.md"))
       .toEqual({ text: "review @docs/my\\ notes.md later", cursor: 26 });
+  });
+
+  it("highlights all text in the selected row like the reference", () => {
+    expect(mentionCandidatePresentation(true)).toEqual({
+      marker: "› ",
+      textStyle: { color: "rgb(120,155,255)", bold: true },
+      highlightMatches: false,
+      matchStyle: { color: "ansi:cyan", bold: true },
+    });
+    expect(mentionCandidatePresentation(false)).toEqual({
+      marker: "  ",
+      textStyle: {},
+      highlightMatches: true,
+      matchStyle: { color: "ansi:cyan", bold: true },
+    });
   });
 });

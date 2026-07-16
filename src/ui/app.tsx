@@ -52,6 +52,7 @@ import {
   buildMentionCandidates,
   completeMentionSelection,
   deriveMentionCompletion,
+  mentionCandidatePresentation,
   moveMentionSelection,
   type MentionCompletion,
 } from "./mention-completion.js";
@@ -605,7 +606,7 @@ export function MentionMenu({
   return <Box flexDirection="column" width="100%">
     {visible.map((path, visibleIndex) => {
       const index = completion.windowStart + visibleIndex;
-      const presentation = slashCandidatePresentation(index === completion.selectedIndex);
+      const presentation = mentionCandidatePresentation(index === completion.selectedIndex);
       return <Box
         key={path}
         width="100%"
@@ -613,9 +614,11 @@ export function MentionMenu({
           if (!event.cellIsBlank) onSelect?.(path);
         }}
       >
-        <Text {...presentation.rowStyle} wrap="truncate-end">
+        <Text {...presentation.textStyle} wrap="truncate-end">
           {presentation.marker}
-          <HighlightedName name={path} query={completion.query} matchStyle={presentation.matchStyle} />
+          {presentation.highlightMatches
+            ? <HighlightedName name={path} query={completion.query} matchStyle={presentation.matchStyle} />
+            : path}
         </Text>
       </Box>;
     })}
