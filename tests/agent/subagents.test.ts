@@ -383,6 +383,16 @@ describe("LocalHarness", () => {
       paths: () => [],
       execute: async () => null,
     }));
+    definitions.push({
+      name: "MainOnly",
+      description: "main only",
+      inputSchema: z.object({}),
+      agents: ["main"],
+      modelInputSchema: { type: "object", properties: { optional: { type: "string" } } },
+      modelStrict: false,
+      paths: () => [],
+      execute: async () => null,
+    });
     const harness = new LocalHarness({
       registry: new ModelRegistry().register("fake", adapter),
       hooks,
@@ -398,12 +408,17 @@ describe("LocalHarness", () => {
       },
     });
 
+    expect(harness.main.tools.find((tool) => tool.name === "MainOnly")).toMatchObject({
+      inputSchema: { type: "object", properties: { optional: { type: "string" } } },
+      strict: false,
+    });
+
     harness.createSubagent(node("tool-aware"));
     harness.setModel("subagent", "fake:new-child");
     harness.createSubagent(node("new-model"));
 
     expect(received).toEqual([
-      { agent: "main", tools: ["Read", "Task"], model: "fake:main" },
+      { agent: "main", tools: ["Read", "Task", "MainOnly"], model: "fake:main" },
       { agent: "subagent", tools: ["Read"], model: "fake:child" },
       { agent: "subagent", tools: ["Read"], model: "fake:new-child" },
     ]);

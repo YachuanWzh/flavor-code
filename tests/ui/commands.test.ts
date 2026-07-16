@@ -10,6 +10,12 @@ describe("parseSlashCommand", () => {
     ["/compact", { name: "compact" }], ["/init", { name: "init" }],
     ["/tasks", { name: "tasks" }], ["/skills", { name: "skills" }],
     ["/plugins", { name: "plugins" }], ["/hooks", { name: "hooks" }],
+    ["/mcp", { name: "mcp", action: "status" }],
+    ["/mcp status", { name: "mcp", action: "status" }],
+    ["/mcp tools filesystem", { name: "mcp", action: "tools", target: "filesystem" }],
+    ["/mcp reconnect filesystem", { name: "mcp", action: "reconnect", target: "filesystem" }],
+    ["/mcp enable", { name: "mcp", action: "enable", target: "all" }],
+    ["/mcp disable docs", { name: "mcp", action: "disable", target: "docs" }],
     ["/config", { name: "config" }], ["/clear", { name: "clear" }],
     ["/loop fix all tests", { name: "loop", goal: "fix all tests" }],
     ["/help", { name: "help" }], ["/exit", { name: "exit" }],
@@ -45,5 +51,9 @@ describe("parseSlashCommand", () => {
     expect(parseSlashCommand("/permissions reckless")).toMatchObject({ name: "invalid", command: "permissions" });
     expect(parseSlashCommand("/model sidekick foo:bar")).toMatchObject({ name: "invalid", command: "model" });
     expect(parseSlashCommand("/loop")).toEqual({ name: "invalid", command: "loop", message: "Use /loop <goal>." });
+    expect(parseSlashCommand("/mcp tools")).toEqual({
+      name: "invalid", command: "mcp", message: "Use /mcp [status|tools <server>|reconnect <server>|enable [server|all]|disable [server|all]].",
+    });
+    expect(parseSlashCommand("/mcp remove docs")).toMatchObject({ name: "invalid", command: "mcp" });
   });
 });

@@ -1,9 +1,9 @@
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { ApiKeyAuthProvider } from "../../src/auth/types.js";
-import { loadConfig, redactConfig } from "../../src/config/load.js";
+import { loadConfig, redactConfig, setProjectMcpServerDisabled } from "../../src/config/load.js";
 import { FlavorConfigSchema } from "../../src/config/schema.js";
 
 afterEach(() => {
@@ -69,6 +69,72 @@ it("uses the hallucination evaluation timeout default and validates overrides", 
       hallucination: { evaluationTimeoutMs: value },
     })).toThrow();
   }
+});
+
+it("defaults MCP servers to an empty record", () => {
+  expect(FlavorConfigSchema.parse({}).mcpServers).toEqual({});
+});
+
+it("persists an MCP enabled override in project configuration without losing existing fields", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "flavor-mcp-toggle-"));
+  const path = join(cwd, ".flavor", "flavor.json");
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, JSON.stringify({
+    language: "zh-CN",
+    mcpServers: { filesystem: { command: "npx", args: ["server", "."] } },
+  }));
+
+  await setProjectMcpServerDisabled(cwd, "filesystem", true);
+
+  expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+    language: "zh-CN",
+    mcpServers: { filesystem: { command: "npx", args: ["server", "."], disabled: true } },
+  });
+});
+
+it("accepts stdio and Streamable HTTP MCP server configurations", () => {
+  const parsed = FlavorConfigSchema.parse({
+    mcpServers: {
+      filesystem: {
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-filesystem", "."],
+        env: { MCP_TOKEN: "secret" },
+        cwd: ".",
+      },
+      remote_api: {
+        url: "https://mcp.example.com/mcp",
+        headers: { Authorization: "Bearer secret" },
+        timeoutMs: 120_000,
+      },
+    },
+  });
+
+  expect(parsed.mcpServers.filesystem).toEqual({
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "."],
+    env: { MCP_TOKEN: "secret" },
+    cwd: ".",
+    disabled: false,
+    timeoutMs: 60_000,
+  });
+  expect(parsed.mcpServers.remote_api).toEqual({
+    url: "https://mcp.example.com/mcp",
+    headers: { Authorization: "Bearer secret" },
+    disabled: false,
+    timeoutMs: 120_000,
+  });
+});
+
+it("rejects ambiguous or unsafe MCP server configurations", () => {
+  expect(() => FlavorConfigSchema.parse({
+    mcpServers: { mixed: { command: "node", url: "https://mcp.example.com/mcp" } },
+  })).toThrow();
+  expect(() => FlavorConfigSchema.parse({
+    mcpServers: { "unsafe server": { command: "node" } },
+  })).toThrow();
+  expect(() => FlavorConfigSchema.parse({
+    mcpServers: { slow: { command: "node", timeoutMs: 0 } },
+  })).toThrow();
 });
 
 it("preserves a positive provider output token limit", () => {
@@ -161,6 +227,22 @@ it("interpolates and redacts provider secrets", () => {
     },
   });
   expect(config.providers.custom.apiKey).toBe("${FLAVOR_TEST_KEY}");
+});
+
+it("redacts case-insensitive MCP headers and secret environment variables", () => {
+  const redacted = redactConfig({
+    mcpServers: {
+      remote: { headers: { Authorization: "Bearer secret", "X-Tenant": "demo" } },
+      local: { env: { MCP_TOKEN: "secret", PATH: "safe-path" } },
+    },
+  });
+
+  expect(redacted).toEqual({
+    mcpServers: {
+      remote: { headers: { Authorization: "[redacted]", "X-Tenant": "demo" } },
+      local: { env: { MCP_TOKEN: "[redacted]", PATH: "safe-path" } },
+    },
+  });
 });
 
 it("interpolates provider secrets from the project environment", async () => {

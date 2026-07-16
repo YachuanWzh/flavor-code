@@ -52,17 +52,20 @@ export class LocalHarness {
   #mainPermissions!: PermissionEngine;
   readonly #contexts = new WeakSet<ContextManager>();
   readonly #children = new Set<SubagentHarness>();
+  readonly #mainDefinitions: ToolDefinition<unknown>[];
   readonly main: HarnessProfile;
   #disposed = false;
 
   constructor(options: LocalHarnessOptions) {
     this.#options = options;
     this.#subagentModelId = options.subagentModelId;
-    const context = options.createContext("main", options.tools, options.mainModelId);
+    const tools = [...this.#toolsForAgent("main")];
+    this.#mainDefinitions = tools;
+    const context = options.createContext("main", tools, options.mainModelId);
     this.#claimContext(context);
     this.main = this.#createProfile(
       options.mainModelId,
-      options.tools,
+      tools,
       "main",
       context,
       options.approve,
@@ -85,9 +88,19 @@ export class LocalHarness {
 
   setPermissionMode(mode: PermissionMode): void { this.#mainPermissions.setMode(mode); }
 
+  replaceMainTools(definitions: readonly ToolDefinition<unknown>[]): void {
+    if (this.#disposed) throw new Error("LocalHarness is disposed");
+    const nextDefinitions = definitions.filter((tool) => tool.agents === undefined || tool.agents.includes("main"));
+    this.#mainDefinitions.splice(0, this.#mainDefinitions.length, ...nextDefinitions);
+    this.main.runtime.replaceTools(this.#mainDefinitions);
+    const nextModelTools = this.#mainDefinitions.map(toModelTool);
+    const modelTools = this.main.tools as ModelTool[];
+    modelTools.splice(0, modelTools.length, ...nextModelTools);
+  }
+
   createSubagent(task: TaskNode): SubagentHarness {
     if (this.#disposed) throw new Error("LocalHarness is disposed");
-    const tools = this.#options.tools.filter((tool) => !MAIN_TASK_TOOL_NAMES.has(tool.name));
+    const tools = this.#toolsForAgent("subagent").filter((tool) => !MAIN_TASK_TOOL_NAMES.has(tool.name));
     const context = this.#options.createContext("subagent", tools, this.#subagentModelId);
     this.#claimContext(context);
     const profile = this.#createProfile(this.#subagentModelId, tools, "subagent", context);
@@ -140,6 +153,10 @@ export class LocalHarness {
     this.#contexts.add(context);
   }
 
+  #toolsForAgent(agent: "main" | "subagent"): readonly ToolDefinition<unknown>[] {
+    return this.#options.tools.filter((tool) => tool.agents === undefined || tool.agents.includes(agent));
+  }
+
   #createProfile(
     modelId: string,
     definitions: readonly ToolDefinition<unknown>[],
@@ -185,5 +202,14 @@ export class LocalHarness {
 }
 
 function toModelTool(tool: ToolDefinition<unknown>): ModelTool {
-  return modelToolFromZod(tool.name, tool.description, tool.inputSchema);
+  if (tool.modelInputSchema !== undefined) {
+    return {
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.modelInputSchema,
+      ...(tool.modelStrict === undefined ? {} : { strict: tool.modelStrict }),
+    };
+  }
+  const modelTool = modelToolFromZod(tool.name, tool.description, tool.inputSchema);
+  return tool.modelStrict === undefined ? modelTool : { ...modelTool, strict: tool.modelStrict };
 }

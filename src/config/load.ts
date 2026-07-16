@@ -179,7 +179,36 @@ export async function loadConfig(options: LoadConfigOptions): Promise<LoadedConf
   };
 }
 
-const SECRET_FIELDS = new Set(["apiKey", "authorization", "token"]);
+const SECRET_FIELD_SUFFIXES = ["apikey", "authorization", "token", "password", "secret"] as const;
+
+function isSecretField(key: string): boolean {
+  const normalized = key.replace(/[-_.]/g, "").toLowerCase();
+  return SECRET_FIELD_SUFFIXES.some((suffix) => normalized.endsWith(suffix));
+}
+
+export async function setProjectMcpServerDisabled(
+  cwd: string,
+  serverName: string,
+  disabled: boolean,
+): Promise<string> {
+  const directory = join(cwd, ".flavor");
+  const path = join(directory, "flavor.json");
+  const projectConfig = await readJsonIfPresent(path) ?? {};
+  const currentServers = projectConfig["mcpServers"];
+  if (currentServers !== undefined && !isPlainObject(currentServers)) {
+    throw new Error(`Configuration field mcpServers in ${path} must be an object`);
+  }
+  const servers: ConfigObject = { ...(currentServers ?? {}) };
+  const currentServer = servers[serverName];
+  if (currentServer !== undefined && !isPlainObject(currentServer)) {
+    throw new Error(`MCP server ${serverName} in ${path} must be an object`);
+  }
+  servers[serverName] = { ...(currentServer ?? {}), disabled };
+  projectConfig["mcpServers"] = servers;
+  await mkdir(directory, { recursive: true });
+  await writeFile(path, `${JSON.stringify(projectConfig, null, 2)}\n`, "utf8");
+  return path;
+}
 
 export function redactConfig(config: unknown): unknown {
   if (Array.isArray(config)) {
@@ -191,7 +220,7 @@ export function redactConfig(config: unknown): unknown {
   return Object.fromEntries(
     Object.entries(config).map(([key, value]) => [
       key,
-      SECRET_FIELDS.has(key) ? "[redacted]" : redactConfig(value),
+      isSecretField(key) ? "[redacted]" : redactConfig(value),
     ]),
   );
 }

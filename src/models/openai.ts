@@ -91,7 +91,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
           name: tool.name,
           description: tool.description,
           parameters: tool.inputSchema,
-          strict: true,
+          strict: tool.strict ?? true,
         })),
       };
       const stream = this.client.responses.stream(body, { signal: request.signal });

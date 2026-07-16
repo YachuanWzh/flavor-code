@@ -1,7 +1,7 @@
 export const MVP_COMMANDS = [
   "model", "init", "config", "login", "permissions", "skills", "plugins", "hooks",
   "tasks", "compact", "clear", "help", "exit", "audit",
-  "loop",
+  "loop", "mcp",
 ] as const;
 
 export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string> = {
@@ -20,10 +20,15 @@ export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string>
   exit: "Exit Flavor",
   audit: "Query tool failure audit log",
   loop: "Run a verified autonomous loop toward a goal",
+  mcp: "Manage MCP servers",
 };
 
 export type PermissionCommandMode = "safe" | "workspace" | "full";
 export type ModelRole = "main" | "subagent";
+export type McpSlashCommand =
+  | { name: "mcp"; action: "status" }
+  | { name: "mcp"; action: "tools" | "reconnect"; target: string }
+  | { name: "mcp"; action: "enable" | "disable"; target: string };
 
 export type SlashCommand =
   | { name: "model"; role: ModelRole; modelId: string }
@@ -31,7 +36,8 @@ export type SlashCommand =
   | { name: "plugin"; command: string; args: string[] }
   | { name: "skill"; skill: string; prompt: string }
   | { name: "loop"; goal: string }
-  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop"> }
+  | McpSlashCommand
+  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop" | "mcp"> }
   | { name: "audit"; toolFilter?: string | undefined }
   | { name: "unknown"; input: string; suggestions: string[] }
   | { name: "invalid"; command: string; message: string };
@@ -76,6 +82,18 @@ export function parseSlashCommand(
     const goal = args.join(" ").trim();
     if (!goal) return { name: "invalid", command: name, message: "Use /loop <goal>." };
     return { name, goal };
+  }
+  if (name === "mcp") {
+    const usage = "Use /mcp [status|tools <server>|reconnect <server>|enable [server|all]|disable [server|all]].";
+    const [action, target, ...extra] = args;
+    if (action === undefined || (action === "status" && target === undefined)) return { name, action: "status" };
+    if ((action === "tools" || action === "reconnect") && target !== undefined && extra.length === 0) {
+      return { name, action, target };
+    }
+    if ((action === "enable" || action === "disable") && extra.length === 0) {
+      return { name, action, target: target ?? "all" };
+    }
+    return { name: "invalid", command: name, message: usage };
   }
   if (args.length > 0) return { name: "invalid", command: name, message: `/${name} does not accept arguments.` };
   return { name } as SlashCommand;

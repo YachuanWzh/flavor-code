@@ -40,6 +40,12 @@ export interface ToolDefinition<T> {
   name: string;
   description: string;
   inputSchema: z.ZodType<T>;
+  /** Restrict a tool to selected agent roles. Omit to expose it to both roles. */
+  agents?: readonly ToolContext["agent"][];
+  /** Optional provider-facing JSON Schema when it must differ from runtime validation. */
+  modelInputSchema?: Record<string, unknown>;
+  /** Whether providers should enforce strict function arguments. Defaults to true. */
+  modelStrict?: boolean;
   paths(input: T): string[];
   /**
    * Optional short human-readable parameter summary, rendered dimmed next to the tool name.

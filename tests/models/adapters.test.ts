@@ -127,6 +127,23 @@ describe("OpenAIModelAdapter", () => {
     }));
   });
 
+  it("honors non-strict schemas for externally supplied tools", async () => {
+    const stream = vi.fn(() => events());
+    const client = { responses: { stream } };
+
+    await collect(new OpenAIModelAdapter({ client: asOpenAIClient(client) }).stream({
+      ...request,
+      tools: [{ ...request.tools[0]!, strict: false }],
+    }));
+
+    expect(stream).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tools: [expect.objectContaining({ name: "weather", strict: false })],
+      }),
+      { signal },
+    );
+  });
+
   it("turns provider stream errors into stable error events", async () => {
     const client = {
       responses: {

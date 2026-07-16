@@ -67,6 +67,12 @@ export class ToolRuntime {
     return this.#tools.get(name);
   }
 
+  replaceTools(tools: readonly ToolDefinition<unknown>[]): void {
+    if (this.#disposed) throw new Error("ToolRuntime is disposed");
+    this.#tools.clear();
+    for (const tool of tools) this.#tools.set(tool.name, tool);
+  }
+
   validate(call: ToolCall): ToolInputValidation {
     const tool = this.#tools.get(call.name);
     if (tool === undefined) {

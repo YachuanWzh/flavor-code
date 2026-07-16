@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { HookBus } from "../../src/hooks/bus.js";
 import { QuestionBridge } from "../../src/tools/ask-user-question.js";
@@ -24,6 +24,7 @@ function services(events: string[], outputs: string[]): SessionServices {
     },
     runSkill: async function* () {},
     runLoop: async function* () {},
+    mcp: async () => "No MCP servers configured.",
     setModel: () => {}, setPermissionMode: () => {}, compact: async () => false,
     initialize: async () => ({ path: "/work/FLAVOR.md", created: true }),
     config: () => ({ providers: { openai: { apiKey: "top-secret", token: "also-secret" } } }),
@@ -184,5 +185,19 @@ describe("FlavorSession", () => {
 
     expect(goals).toEqual(["fix all type errors"]);
     expect(outputs).toContain("looping");
+  });
+
+  it("dispatches MCP management commands without invoking the model", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const mcp = vi.fn(async () => "filesystem  connected  stdio  14 tools");
+    Object.assign(base, { mcp });
+    base.run = async function* () { throw new Error("ordinary run must not be called"); };
+    const session = new FlavorSession(base);
+
+    await session.submit("/mcp reconnect filesystem");
+
+    expect(mcp).toHaveBeenCalledWith({ name: "mcp", action: "reconnect", target: "filesystem" }, expect.any(AbortSignal));
+    expect(outputs).toContain("filesystem  connected  stdio  14 tools");
   });
 });

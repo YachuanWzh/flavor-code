@@ -16,6 +16,7 @@
       "model": "anthropic:deepseek-v4-flash"
     }
   },
+  "mcpServers": {},
   "hallucination": {
     "showWarnings": true,
     "evaluationTimeoutMs": 5000

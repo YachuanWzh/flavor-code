@@ -3,7 +3,7 @@ import { redactConfig } from "../config/load.js";
 import type { HookBus } from "../hooks/bus.js";
 import type { PermissionMode } from "../permissions/engine.js";
 import type { SkillMetadata } from "../skills/registry.js";
-import { parseSlashCommand, type ModelRole, type SlashCommand } from "./commands.js";
+import { parseSlashCommand, type McpSlashCommand, type ModelRole, type SlashCommand } from "./commands.js";
 import type { QuestionBridge } from "../tools/ask-user-question.js";
 import { message } from "../utils/error.js";
 
@@ -21,6 +21,7 @@ export interface SessionServices {
   run(prompt: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
   runSkill(skill: string, prompt: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
   runLoop(goal: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
+  mcp(command: McpSlashCommand, signal: AbortSignal): Promise<string>;
   setModel(role: ModelRole, modelId: string): void | Promise<void>;
   setPermissionMode(mode: PermissionMode): void | Promise<void>;
   compact(signal?: AbortSignal): Promise<boolean>;
@@ -47,6 +48,7 @@ const HELP = [
   "/init  /config  /skills  /plugins  /hooks  /tasks",
   "/compact  /clear  /help  /exit",
   "/loop <goal>                            run a verified autonomous loop",
+  "/mcp [status|tools|reconnect|enable|disable]  manage MCP servers",
 ].join("\n");
 
 export class FlavorSession {
@@ -169,6 +171,8 @@ export class FlavorSession {
       for await (const event of this.#services.runSkill(command.skill, command.prompt, signal)) this.#services.output(event);
     } else if (command.name === "loop") {
       for await (const event of this.#services.runLoop(command.goal, signal)) this.#services.output(event);
+    } else if (command.name === "mcp") {
+      this.#notice(await this.#services.mcp(command, signal));
     } else if (command.name === "compact") {
       this.#notice(await this.#services.compact(signal) ? "Context compacted." : "Context does not need compaction.");
     } else if (command.name === "init") {

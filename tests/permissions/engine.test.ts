@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { PermissionEngine } from "../../src/permissions/engine.js";
+import { getToolCategory, PermissionEngine } from "../../src/permissions/engine.js";
 
 describe("PermissionEngine", () => {
   it("updates the main permission mode for subsequent decisions", () => {
@@ -96,6 +96,19 @@ describe("PermissionEngine", () => {
     expect(engine.decide({ agent: "subagent", tool: "Shell", command: "sh -c 'npm test'", cwd: workspace }).decision).toBe("ask");
     expect(engine.decide({ agent: "subagent", tool: "Shell", command: "rm -r -f /", cwd: workspace }).decision).toBe("deny");
     expect(engine.decide({ agent: "subagent", tool: "Shell", command: "npm test", cwd: outside }).decision).toBe("deny");
+  });
+
+  it("classifies namespaced MCP tools as network access", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-workspace-"));
+    const tool = "mcp__docs__search";
+
+    expect(getToolCategory(tool)).toBe("network");
+    expect(new PermissionEngine({ workspace, mode: "workspace" })
+      .decide({ agent: "main", tool }).decision).toBe("ask");
+    expect(new PermissionEngine({ workspace, mode: "full" })
+      .decide({ agent: "main", tool }).decision).toBe("allow");
+    expect(new PermissionEngine({ workspace, mode: "full" })
+      .decide({ agent: "subagent", tool }).decision).toBe("ask");
   });
 
   it("detects destructive and opaque commands behind wrappers", () => {

@@ -15,8 +15,38 @@ export const ProviderConfigSchema = z.object({
   scope: z.string().optional(),
 });
 
+const McpServerCommonShape = {
+  disabled: z.boolean().default(false),
+  timeoutMs: z.number().int().min(100).max(30 * 60_000).default(60_000),
+};
+
+export const McpStdioServerConfigSchema = z.object({
+  command: z.string().min(1),
+  args: z.array(z.string()).default([]),
+  env: z.record(z.string(), z.string()).default({}),
+  cwd: z.string().min(1).optional(),
+  ...McpServerCommonShape,
+}).strict();
+
+export const McpHttpServerConfigSchema = z.object({
+  url: z.string().url(),
+  headers: z.record(z.string(), z.string()).default({}),
+  ...McpServerCommonShape,
+}).strict();
+
+export const McpServerConfigSchema = z.union([
+  McpStdioServerConfigSchema,
+  McpHttpServerConfigSchema,
+]);
+
+const McpServerNameSchema = z.string()
+  .min(1)
+  .max(32)
+  .regex(/^[A-Za-z0-9_-]+$/, "MCP server names may contain only letters, digits, underscores, and hyphens");
+
 export const FlavorConfigSchema = z.object({
   providers: z.record(z.string(), ProviderConfigSchema).default({}),
+  mcpServers: z.record(McpServerNameSchema, McpServerConfigSchema).default({}),
   agents: z
     .object({
       main: z.object({ model: z.string() }).optional(),
@@ -79,3 +109,6 @@ export const FlavorConfigSchema = z.object({
 
 export type FlavorConfig = z.infer<typeof FlavorConfigSchema>;
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
+export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
+export type McpStdioServerConfig = z.infer<typeof McpStdioServerConfigSchema>;
+export type McpHttpServerConfig = z.infer<typeof McpHttpServerConfigSchema>;

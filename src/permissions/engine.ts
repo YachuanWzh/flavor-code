@@ -41,7 +41,7 @@ for (const name of SHELL_TOOLS) CATEGORY_MAP[name] = "shell";
 for (const name of NETWORK_TOOLS) CATEGORY_MAP[name] = "network";
 
 export function getToolCategory(name: string): ToolCategory {
-  return CATEGORY_MAP[name] ?? "unknown";
+  return isNetworkTool(name) ? "network" : (CATEGORY_MAP[name] ?? "unknown");
 }
 
 export function isDestructiveTool(name: string): boolean {
@@ -97,7 +97,7 @@ export class PermissionEngine {
       return { decision: "ask", reason: "Write is outside the workspace" };
     }
     if (SHELL_TOOLS.has(request.tool)) return this.#shellDecision(request);
-    if (NETWORK_TOOLS.has(request.tool)) {
+    if (isNetworkTool(request.tool)) {
       if (request.agent === "subagent") return { decision: "ask", reason: "Subagent network access requires main-Agent approval" };
       return this.#mode === "full" ? { decision: "allow" } : { decision: "ask", reason: "Network access requires approval" };
     }
@@ -132,6 +132,10 @@ export class PermissionEngine {
     if (this.#mode === "workspace" && isRoutineCommand(analysis.command)) return { decision: "allow" };
     return { decision: "ask", reason: "Shell command requires approval" };
   }
+}
+
+function isNetworkTool(name: string): boolean {
+  return NETWORK_TOOLS.has(name) || name.startsWith("mcp__");
 }
 
 function analyzeArgumentCommand(executable: string, args: readonly string[]): CommandAnalysis {

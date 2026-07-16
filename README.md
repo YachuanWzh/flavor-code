@@ -122,6 +122,57 @@ OPENAI_API_KEY=sk-你的密钥
 - 支持 Anthropic（`"type": "anthropic"`）和任何兼容 OpenAI 接口的服务（`"type": "openai-compatible"`）
 - 关于 OAuth PKCE 企业级认证，请参阅下方 [PKCE 认证配置](#pkce-认证配置)
 
+## MCP 服务器
+
+Flavor 可以作为 MCP client，在启动时连接配置的 server，并把远端 tools 直接加入 Agent 的工具列表。支持本地 stdio 与远程 Streamable HTTP 两种传输。
+
+在项目级 `.flavor/flavor.json`（或全局 `~/.flavor-code/flavor.json`）中添加：
+
+```json
+{
+  "mcpServers": {
+    "mcp-docs": {
+      "url": "https://modelcontextprotocol.io/mcp"
+    },
+    "filesystem": {
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "@modelcontextprotocol/server-filesystem", "."],
+      "cwd": ".",
+      "timeoutMs": 60000
+    },
+    "company-api": {
+      "url": "https://mcp.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MCP_API_TOKEN}"
+      },
+      "timeoutMs": 120000
+    }
+  }
+}
+```
+
+- stdio server 使用 `command`，并可配置 `args`、`env`、`cwd`；相对 `cwd` 从工作区解析。
+- 上面的 filesystem 配置适用于 Windows；macOS/Linux 可改为 `"command": "npx"`，并从 `args` 删除 `"/c", "npx"`。
+- HTTP server 使用 `url`，并可配置 `headers`。鉴权信息建议通过 `.env` 和 `${ENV_NAME}` 插值传入。
+- 两种 server 都支持 `disabled: true` 和 `timeoutMs`（默认 60000，范围 100–1800000 毫秒）。
+- 远端 tool 暴露为 `mcp__<server>__<tool>`；不兼容模型命名规则的字符会被稳定转义。
+- MCP 调用按网络工具处理：`safe` / `workspace` 模式会请求批准，`full` 模式直接允许；`--print` 不会绕过批准策略。
+- MCP tools 只暴露给主 Agent，不会出现在子 Agent 的工具列表中。
+- 单个 server 连接失败不会阻止 Flavor 启动，可通过 `/config` 查看已脱敏的 diagnostics。
+- 当前版本接入 MCP tools；resources、prompts、sampling、elicitation 与旧式 HTTP+SSE 尚未暴露给 Agent。
+
+运行时可以直接管理 MCP 服务：
+
+```text
+/mcp                         # 查看服务状态、传输类型和工具数量
+/mcp tools <server>          # 查看服务暴露的工具及输入 schema
+/mcp reconnect <server>      # 重新连接服务并刷新模型工具列表
+/mcp enable [server|all]     # 启用服务，省略名称时处理全部
+/mcp disable [server|all]    # 禁用服务，省略名称时处理全部
+```
+
+启用/禁用状态会写入项目的 `.flavor/flavor.json`，并在当前会话中立即更新，无需重启 Flavor。stdio server 的启动日志不会直接写入交互终端；连接失败可通过 `/mcp` 查看。
+
 ### Loop Engineering
 
 使用 `/loop <goal>` 启动经过宿主验证的前台自治循环，例如：

@@ -14,7 +14,7 @@ import { TaskGraphSchema, TaskPlanner, type TaskGraph, type TaskNode } from "./a
 import { createTaskPlanTools } from "./agent/task-tools.js";
 import { updatePlanTask, type TaskPlan } from "./agent/task-plan.js";
 import type { AgentEvent, TaskSnapshot } from "./agent/types.js";
-import { loadConfig } from "./config/load.js";
+import { loadConfig, setProjectMcpServerDisabled } from "./config/load.js";
 import { ContextManager, type ContextSnapshot } from "./context/manager.js";
 import { summarizeWithModel } from "./context/summarizer.js";
 import { LocalHarness } from "./harness/local.js";
@@ -30,6 +30,8 @@ import { AnthropicModelAdapter } from "./models/anthropic.js";
 import { OpenAIModelAdapter } from "./models/openai.js";
 import { ModelRegistry, parseModelId } from "./models/registry.js";
 import type { ModelAdapter } from "./models/types.js";
+import { connectMcpServers, McpManager, type McpClientFactory, type McpServerSummary } from "./mcp/client.js";
+import { connectSdkMcpClient } from "./mcp/sdk.js";
 import { OAuthCallbackAuthProvider } from "./auth/oauth.js";
 import { createFileTokenStore } from "./auth/store.js";
 import type { PermissionRequest } from "./permissions/engine.js";
@@ -68,6 +70,8 @@ export interface ProductionRuntimeOptions {
   approvalPolicy?: "prompt" | "deny";
   /** Resume a named session, or the latest session when true. Never resumed implicitly. */
   resumeSession?: string | true;
+  /** Test and embedding seam for creating configured MCP clients. */
+  mcpClientFactory?: McpClientFactory;
 }
 
 export interface RestoredConversationMessage {
@@ -153,6 +157,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     .map(({ role, content }) => ({ role, content })) ?? [];
   const secrets = [
     ...Object.values(config.providers).map((provider) => provider.apiKey),
+    ...Object.values(config.mcpServers).flatMap((server) =>
+      Object.values("command" in server ? server.env : server.headers)),
     environment.OPENAI_API_KEY, environment.ANTHROPIC_API_KEY,
   ].filter((value): value is string => typeof value === "string" && value.length > 0);
   const hooks = new HookBus();
@@ -177,6 +183,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const pluginSkillRoots: string[] = [];
   const pluginHooks: HookEventName[] = [];
   const pluginCommands = new Map<string, PluginCommandHandler>();
+  const mcpTools: ToolDefinition<unknown>[] = [];
+  let mcpManager: McpManager | undefined;
 
   const registeredProviders = await registerConfiguredAdapters(config.providers, registry, environment, diagnostics, home);
 
@@ -218,6 +226,27 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   let harness!: LocalHarness;
   let harnessCreated = false;
   try {
+  mcpManager = await connectMcpServers({
+    servers: config.mcpServers,
+    workspace,
+    clientFactory: options.mcpClientFactory ?? connectSdkMcpClient,
+  });
+  diagnostics.push(...mcpManager.diagnostics);
+  const syncMcpTools = (): void => {
+    for (const tool of mcpTools) remove(tools, tool);
+    mcpTools.length = 0;
+    for (const tool of mcpManager!.tools) {
+      if (tools.some((candidate) => candidate.name === tool.name)) {
+        const diagnostic = `MCP tool "${tool.name}" conflicts with an existing tool and was skipped`;
+        if (!diagnostics.includes(diagnostic)) diagnostics.push(diagnostic);
+        continue;
+      }
+      tools.push(tool);
+      mcpTools.push(tool);
+    }
+    if (harnessCreated) harness.replaceMainTools(tools);
+  };
+  syncMcpTools();
   const skills = new SkillRegistry({
     globalRoots: [join(home, ".flavor-code", "skills")],
     projectRoots: [join(workspace, ".flavor", "skills"), ...pluginSkillRoots],
@@ -488,6 +517,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         onStatus: (status) => options.output({ type: "notice", message: status }),
       }),
       createTodoWriteTool(),
+      ...mcpTools,
     ];
     const loopFlavor = await optionalText(join(input.workspace, "FLAVOR.md"));
     const loopEnvironment = createPromptEnvironment({
@@ -599,6 +629,43 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       runExplicitSkill(harness, skills, skill, prompt, signal, selectedModels.mainError), persist,
     ),
     runLoop: (goal, signal) => runLoopSession(loopOrchestrator, goal, signal),
+    mcp: async (command, signal) => {
+      signal.throwIfAborted();
+      const manager = mcpManager!;
+      if (command.action === "status") return redactSecrets(formatMcpStatus(manager), secrets);
+      if (command.action === "tools") return redactSecrets(formatMcpTools(manager, command.target), secrets);
+      if (command.action === "reconnect") {
+        const summary = await manager.reconnect(command.target);
+        syncMcpTools();
+        return redactSecrets(formatMcpReconnect(summary), secrets);
+      }
+
+      const enabled = command.action === "enable";
+      const summaries = manager.listServers();
+      const targets = command.target === "all"
+        ? summaries.filter((server) => enabled ? server.status === "disabled" : server.status !== "disabled")
+        : summaries.filter((server) => server.name === command.target);
+      if (targets.length === 0) {
+        if (command.target === "all") return `All MCP servers are already ${enabled ? "enabled" : "disabled"}.`;
+        throw new Error(`MCP server "${command.target}" not found`);
+      }
+      if (command.target !== "all") {
+        const current = targets[0]!;
+        if ((enabled && current.status !== "disabled") || (!enabled && current.status === "disabled")) {
+          return `MCP server "${command.target}" is already ${enabled ? "enabled" : "disabled"}.`;
+        }
+      }
+      for (const target of targets) {
+        signal.throwIfAborted();
+        await setProjectMcpServerDisabled(workspace, target.name, !enabled);
+        await manager.setEnabled(target.name, enabled);
+      }
+      syncMcpTools();
+      const action = enabled ? "Enabled" : "Disabled";
+      return command.target === "all"
+        ? `${action} ${targets.length} MCP server${targets.length === 1 ? "" : "s"}.`
+        : `${action} MCP server "${command.target}".`;
+    },
     setModel: async (role, id) => { harness.setModel(role, id); await persist(); },
     setPermissionMode: async (mode) => { harness.setPermissionMode(mode); await persist(); },
     compact: async (signal) => { const changed = await harness.main.context.compact(signal); if (changed) await persist(); return changed; },
@@ -748,14 +815,50 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       await persist();
       await persistTail;
       auditLogger.close();
-      await cleanupProduction(approvals, questions, pluginHost, harness);
+      await cleanupProduction(approvals, questions, pluginHost, mcpManager, harness);
     },
   };
   } catch (primaryError) {
-    try { await cleanupProduction(approvals, questions, pluginHost, harnessCreated ? harness : undefined); }
+    try { await cleanupProduction(approvals, questions, pluginHost, mcpManager, harnessCreated ? harness : undefined); }
     catch (cleanupError) { attachCleanupError(primaryError, cleanupError); }
     throw primaryError;
   }
+}
+
+function formatMcpStatus(manager: McpManager): string {
+  const servers = manager.listServers();
+  if (servers.length === 0) {
+    return "No MCP servers configured. Add them under mcpServers in .flavor/flavor.json.";
+  }
+  const lines = servers.map((server) => {
+    const detail = server.error === undefined ? "" : ` - ${server.error}`;
+    return `${server.name}  ${server.status}  ${server.transport}  ${server.toolCount} tool${server.toolCount === 1 ? "" : "s"}${detail}`;
+  });
+  return [
+    `MCP servers (${servers.length}):`,
+    ...lines.map((line) => `  ${line}`),
+    "",
+    "Commands: /mcp tools <server> | /mcp reconnect <server> | /mcp enable|disable [server|all]",
+  ].join("\n");
+}
+
+function formatMcpTools(manager: McpManager, serverName: string): string {
+  const tools = manager.toolsFor(serverName);
+  if (tools.length === 0) return `MCP server "${serverName}" exposes no tools.`;
+  const lines = tools.flatMap((tool) => [
+    `- ${tool.name} -> ${tool.generatedName}`,
+    ...(tool.description === undefined ? [] : [`  ${tool.description}`]),
+    `  input: ${JSON.stringify(tool.inputSchema)}`,
+  ]);
+  return [`MCP tools for "${serverName}" (${tools.length}):`, ...lines].join("\n");
+}
+
+function formatMcpReconnect(server: McpServerSummary): string {
+  if (server.status === "connected") {
+    return `Reconnected MCP server "${server.name}" (${server.toolCount} tool${server.toolCount === 1 ? "" : "s"}).`;
+  }
+  if (server.status === "disabled") return `MCP server "${server.name}" is disabled. Enable it before reconnecting.`;
+  return `Failed to reconnect MCP server "${server.name}": ${server.error ?? "unknown error"}`;
 }
 
 async function* runLoopSession(
@@ -1165,7 +1268,8 @@ function storedConversation(snapshot: ContextSnapshot): SessionDocument["convers
 }
 
 async function cleanupProduction(
-  approvals: ApprovalBridge, questions: QuestionBridge, pluginHost: PluginHost, harness: LocalHarness | undefined,
+  approvals: ApprovalBridge, questions: QuestionBridge, pluginHost: PluginHost,
+  mcpManager: McpManager | undefined, harness: LocalHarness | undefined,
 ): Promise<void> {
   let primary: unknown;
   try { approvals.resolve("deny"); }
@@ -1182,6 +1286,11 @@ async function cleanupProduction(
   }
   finally {
     try { harness?.dispose(); }
+    catch (error) {
+      if (primary === undefined) primary = error;
+      else attachCleanupError(primary, error);
+    }
+    try { await mcpManager?.close(); }
     catch (error) {
       if (primary === undefined) primary = error;
       else attachCleanupError(primary, error);

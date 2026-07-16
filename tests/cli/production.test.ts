@@ -72,6 +72,115 @@ describe("production runtime", () => {
     delete globalState.__flavorPromptRequests;
   });
 
+  it("advertises configured MCP tools and closes their clients on disposal", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-mcp-")); roots.push(workspace);
+    const pluginRoot = join(workspace, ".flavor", "plugins", "capture-mcp-model");
+    await mkdir(pluginRoot, { recursive: true });
+    await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
+      providers: { capture: { type: "plugin", defaultModel: "main", cheapModel: "child" } },
+      agents: { main: { model: "capture:main" }, subagent: { model: "capture:child" } },
+      mcpServers: { docs: { command: "node", args: ["server.js"] } },
+    }));
+    await writeFile(join(pluginRoot, "flavor-plugin.json"), JSON.stringify({
+      name: "capture-mcp-model", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
+      contributes: { commands: [], tools: [], hooks: [], skillRoots: [], modelAdapters: [{ name: "capture" }] },
+    }));
+    await writeFile(join(pluginRoot, "index.mjs"), `export function activate(ctx) {
+      ctx.registerModelAdapter("capture", { async *stream(request) {
+        globalThis.__flavorMcpTools = request.tools.map((tool) => tool.name);
+        yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
+      }});
+    }`);
+    const close = vi.fn(async () => undefined);
+    const mcpClientFactory = vi.fn(async () => ({
+      listTools: async () => ({ tools: [{
+        name: "search", description: "Search docs", inputSchema: { type: "object" },
+      }] }),
+      callTool: async () => ({ content: [] }),
+      close,
+    }));
+    const globalState = globalThis as typeof globalThis & { __flavorMcpTools?: string[] };
+    delete globalState.__flavorMcpTools;
+
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, approvalPolicy: "deny", output: () => {},
+      mcpClientFactory,
+    });
+    await runtime.session.start();
+    await runtime.session.submit("inspect MCP tools");
+
+    expect(mcpClientFactory).toHaveBeenCalledWith(expect.objectContaining({ name: "docs", workspace }));
+    expect(globalState.__flavorMcpTools).toContain("mcp__docs__search");
+    await runtime.dispose();
+    await runtime.dispose();
+    expect(close).toHaveBeenCalledTimes(1);
+    delete globalState.__flavorMcpTools;
+  });
+
+  it("updates model-visible MCP tools when project servers are disabled and enabled", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-mcp-manage-")); roots.push(workspace);
+    const pluginRoot = join(workspace, ".flavor", "plugins", "capture-mcp-management");
+    await mkdir(pluginRoot, { recursive: true });
+    const configPath = join(workspace, ".flavor", "flavor.json");
+    await writeFile(configPath, JSON.stringify({
+      providers: { capture: { type: "plugin", defaultModel: "main", cheapModel: "child" } },
+      agents: { main: { model: "capture:main" }, subagent: { model: "capture:child" } },
+      mcpServers: { docs: { command: "node", args: ["server.js"] } },
+    }));
+    await writeFile(join(pluginRoot, "flavor-plugin.json"), JSON.stringify({
+      name: "capture-mcp-management", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
+      contributes: { commands: [], tools: [], hooks: [], skillRoots: [], modelAdapters: [{ name: "capture" }] },
+    }));
+    await writeFile(join(pluginRoot, "index.mjs"), `export function activate(ctx) {
+      ctx.registerModelAdapter("capture", { async *stream(request) {
+        globalThis.__flavorMcpToolSnapshots ??= [];
+        globalThis.__flavorMcpToolSnapshots.push(request.tools.map((tool) => tool.name));
+        yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
+      }});
+    }`);
+    const globalState = globalThis as typeof globalThis & { __flavorMcpToolSnapshots?: string[][] };
+    delete globalState.__flavorMcpToolSnapshots;
+    const clients: Array<{ close: ReturnType<typeof vi.fn> }> = [];
+    const mcpClientFactory = vi.fn(async () => {
+      const client = {
+        listTools: async () => ({ tools: [{ name: "search", description: "Search docs", inputSchema: { type: "object" } }] }),
+        callTool: async () => ({ content: [] }),
+        close: vi.fn(async () => undefined),
+      };
+      clients.push(client);
+      return client;
+    });
+    const outputs: string[] = [];
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, approvalPolicy: "deny",
+      output: (event) => { if (event.type === "notice") outputs.push(event.message); },
+      mcpClientFactory,
+    });
+
+    await runtime.session.submit("/mcp");
+    await runtime.session.submit("/mcp tools docs");
+    await runtime.session.submit("before toggle");
+    await runtime.session.submit("/mcp disable docs");
+    await runtime.session.submit("after disable");
+    expect(JSON.parse(await readFile(configPath, "utf8")).mcpServers.docs.disabled).toBe(true);
+    await runtime.session.submit("/mcp enable docs");
+    await runtime.session.submit("after enable");
+
+    expect(globalState.__flavorMcpToolSnapshots).toHaveLength(3);
+    expect(globalState.__flavorMcpToolSnapshots?.[0]).toContain("mcp__docs__search");
+    expect(globalState.__flavorMcpToolSnapshots?.[1]).not.toContain("mcp__docs__search");
+    expect(globalState.__flavorMcpToolSnapshots?.[2]).toContain("mcp__docs__search");
+    expect(outputs.join("\n")).toContain("Disabled MCP server \"docs\"");
+    expect(outputs.join("\n")).toContain("Enabled MCP server \"docs\"");
+    expect(outputs.join("\n")).toContain("docs  connected  stdio  1 tool");
+    expect(outputs.join("\n")).toContain("search -> mcp__docs__search");
+    expect(mcpClientFactory).toHaveBeenCalledTimes(2);
+    expect(clients[0]?.close).toHaveBeenCalledTimes(1);
+    await runtime.dispose();
+    expect(clients[1]?.close).toHaveBeenCalledTimes(1);
+    delete globalState.__flavorMcpToolSnapshots;
+  });
+
   it("runs /loop through a fresh worker and host verifier", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-loop-")); roots.push(workspace);
     const pluginRoot = join(workspace, ".flavor", "plugins", "loop-model");
