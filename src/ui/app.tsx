@@ -52,6 +52,7 @@ import {
   completeMentionSelection,
   deriveMentionCompletion,
   moveMentionSelection,
+  type MentionCompletion,
 } from "./mention-completion.js";
 
 export const HISTORY_CAP = 200;
@@ -427,6 +428,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     completedSlashTokenLength={completedTokenLength}
     scrollRef={scrollRef}
     {...(slashCompletion === null ? {} : { completion: slashCompletion })}
+    {...(mentionCompletion === null ? {} : { mentionCompletion, onMentionSelect: selectMention })}
     {...(approval === undefined ? {} : { approval })}
     {...(questions === undefined ? {} : { questions })}
   />;
@@ -461,6 +463,8 @@ export interface TerminalLayoutProps {
   activeSession: boolean;
   completedSlashTokenLength?: number;
   completion?: SlashCompletion;
+  mentionCompletion?: MentionCompletion;
+  onMentionSelect?: (path: string) => void;
   approval?: { tool: string; reason?: string };
   questions?: readonly Question[];
   scrollRef?: React.Ref<ScrollBoxHandle>;
@@ -468,10 +472,11 @@ export interface TerminalLayoutProps {
 
 export function TerminalLayout({
   model, workspaceName, completed, active, input, pastedBlocks = [], promptCursor, columns, rows = 24, activeSession, approval,
-  questions, completion, completedSlashTokenLength: tokenLength = 0, scrollRef,
+  questions, completion, mentionCompletion, onMentionSelect, completedSlashTokenLength: tokenLength = 0, scrollRef,
 }: TerminalLayoutProps): React.JSX.Element {
   const dividerWidth = Math.max(1, columns - 1);
-  const menuRows = completion === undefined ? 0 : Math.min(6, completion.items.length - completion.windowStart);
+  const activeCompletion = completion ?? mentionCompletion;
+  const menuRows = activeCompletion === undefined ? 0 : Math.min(6, activeCompletion.items.length - activeCompletion.windowStart);
 
   const activeTaskBlocks = active?.blocks.filter(
     (block): block is Extract<TranscriptBlock, { kind: "status" }> =>
@@ -526,6 +531,9 @@ export function TerminalLayout({
         <QuestionCards questions={questions} />
       )}
       {completion === undefined ? null : <SlashMenu completion={completion} />}
+      {mentionCompletion === undefined ? null : (
+        <MentionMenu completion={mentionCompletion} {...(onMentionSelect === undefined ? {} : { onSelect: onMentionSelect })} />
+      )}
       <Text dimColor>{"─".repeat(dividerWidth)}</Text>
       <PromptLine
         input={input}
@@ -537,9 +545,11 @@ export function TerminalLayout({
       />
       <Text dimColor wrap="truncate-end">{activeSession
         ? "Ctrl+C cancel · Ctrl+C again exit"
-        : completion === undefined
-          ? "Enter send · ↑↓ history · Ctrl+C exit"
-          : "↑/↓ select · Tab complete · Esc close"}</Text>
+        : completion !== undefined
+          ? "↑/↓ select · Tab complete · Esc close"
+          : mentionCompletion !== undefined
+            ? "↑/↓ select · Tab complete · click choose · Esc close"
+            : "Enter send · ↑↓ history · Ctrl+C exit"}</Text>
     </Box>
   </Box>;
 }
@@ -579,6 +589,34 @@ function SlashMenu({ completion }: { completion: SlashCompletion }): React.JSX.E
         <HighlightedName name={candidate.name} query={completion.query} matchStyle={presentation.matchStyle} />
         {candidate.description === undefined ? null : <Text dimColor>{`  ${candidate.description}`}</Text>}
       </Text>;
+    })}
+  </Box>;
+}
+
+export function MentionMenu({
+  completion,
+  onSelect,
+}: {
+  completion: MentionCompletion;
+  onSelect?: (path: string) => void;
+}): React.JSX.Element {
+  const visible = completion.items.slice(completion.windowStart, completion.windowStart + 6);
+  return <Box flexDirection="column" width="100%">
+    {visible.map((path, visibleIndex) => {
+      const index = completion.windowStart + visibleIndex;
+      const presentation = slashCandidatePresentation(index === completion.selectedIndex);
+      return <Box
+        key={path}
+        width="100%"
+        onClick={(event) => {
+          if (!event.cellIsBlank) onSelect?.(path);
+        }}
+      >
+        <Text {...presentation.rowStyle} wrap="truncate-end">
+          {presentation.marker}
+          <HighlightedName name={path} query={completion.query} matchStyle={presentation.matchStyle} />
+        </Text>
+      </Box>;
     })}
   </Box>;
 }

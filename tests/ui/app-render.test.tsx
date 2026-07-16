@@ -2,13 +2,14 @@ import React from "react";
 import { renderToString } from "ink";
 import { describe, expect, it } from "vitest";
 
-import { TerminalLayout, statusLineColor } from "../../src/ui/app.js";
+import { MentionMenu, TerminalLayout, statusLineColor } from "../../src/ui/app.js";
 import {
   COMPACT_PROGRESS_COMPLETE,
   COMPACT_PROGRESS_REMAINING,
   compactProgressPresentation,
 } from "../../src/ui/compact-progress.js";
 import type { SlashCompletion } from "../../src/ui/slash-completion.js";
+import type { MentionCompletion } from "../../src/ui/mention-completion.js";
 import { createTranscriptState, transcriptReducer, type TranscriptTurn } from "../../src/ui/transcript.js";
 
 const turn = (id: number, prompt: string, assistantText: string): TranscriptTurn => ({
@@ -223,6 +224,48 @@ describe("TerminalLayout", () => {
     expect(output).not.toContain("  skill");
     expect(output).toContain("↑/↓ select · Tab complete · Esc close");
     expect(output).toContain("› frontend-design");
+  });
+
+  it("renders a selected at-file candidate with mouse and keyboard hints", () => {
+    const mentionCompletion: MentionCompletion = {
+      query: "app",
+      items: ["src/app.test.ts", "src/ui/app.tsx"],
+      selectedIndex: 1,
+      windowStart: 0,
+    };
+    const raw = renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[]}
+      input="@app"
+      promptCursor={4}
+      columns={80}
+      activeSession={false}
+      mentionCompletion={mentionCompletion}
+    />, { columns: 80 });
+    const output = raw.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(output).toContain("src/app.test.ts");
+    expect(output).toContain("› src/ui/app.tsx");
+    expect(output).toContain("↑/↓ select · Tab complete · click choose · Esc close");
+  });
+
+  it("binds at-file rows to nonblank mouse clicks only", () => {
+    const completion: MentionCompletion = {
+      query: "app",
+      items: ["src/app.tsx"],
+      selectedIndex: 0,
+      windowStart: 0,
+    };
+    const selected: string[] = [];
+    const menu = MentionMenu({ completion, onSelect: (path) => selected.push(path) });
+    const row = React.Children.toArray(menu.props.children)[0] as React.ReactElement<{
+      onClick?: (event: { cellIsBlank: boolean }) => void;
+    }>;
+
+    row.props.onClick?.({ cellIsBlank: true });
+    row.props.onClick?.({ cellIsBlank: false });
+    expect(selected).toEqual(["src/app.tsx"]);
   });
 
   it("renders completed turns and the active SSE turn in append-only order above the prompt", () => {
