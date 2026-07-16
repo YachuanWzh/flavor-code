@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { EvidenceLedger } from "../../src/hallucination/evidence-ledger.js";
+import {
+  DEFAULT_EVALUATION_TIMEOUT_MS,
+  EvidenceLedger,
+} from "../../src/hallucination/index.js";
+
+it("exports evidence-aware hallucination primitives", () => {
+  expect(EvidenceLedger).toBeTypeOf("function");
+  expect(DEFAULT_EVALUATION_TIMEOUT_MS).toBe(2_000);
+});
 
 describe("EvidenceLedger", () => {
   it("keeps a failed read before a successful shell fallback", () => {
@@ -91,6 +99,25 @@ describe("EvidenceLedger", () => {
     expect(ids).toContain("write");
     expect(ids).toContain("failure");
     expect(ids).toContain("recent-29");
+  });
+
+  it("retains an old success adjacent to a retained failure", () => {
+    const ledger = new EvidenceLedger();
+    ledger.recordCall("old-read", "Read", { path: "src/a.ts" });
+    ledger.recordResult("old-read", "Read", {
+      ok: false,
+      error: { code: "missing", message: "not found" },
+    });
+    ledger.recordCall("old-shell", "Shell", { command: "Get-Content src/a.ts" });
+    ledger.recordResult("old-shell", "Shell", { ok: true, output: "recovered" });
+    for (let index = 0; index < 30; index += 1) {
+      ledger.recordCall(`later-${index}`, "Read", { path: `later-${index}.ts` });
+      ledger.recordResult(`later-${index}`, "Read", { ok: true, output: `${index}` });
+    }
+
+    const ids = ledger.snapshot().events.map((event) => event.callId);
+    expect(ids).toContain("old-read");
+    expect(ids).toContain("old-shell");
   });
 
   it("reset clears events and pending calls", () => {

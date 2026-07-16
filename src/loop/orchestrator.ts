@@ -122,13 +122,9 @@ export class LoopOrchestrator {
           // Hallucination guard: record tool calls and results
           if (this.#options.hallucinationGuard !== undefined) {
             if (event.type === "tool-start") {
-              this.#options.hallucinationGuard.recordToolCall(event.name, event.input);
+              this.#options.hallucinationGuard.recordToolCall(event.name, event.input, event.id);
             } else if (event.type === "tool-end") {
-              this.#options.hallucinationGuard.recordToolResult(
-                event.name,
-                event.result.ok,
-                event.result.error?.code,
-              );
+              this.#options.hallucinationGuard.recordToolResult(event.name, event.result, event.id);
             }
           }
           yield { type: "worker-event", event };
@@ -198,21 +194,23 @@ export class LoopOrchestrator {
 
         if (evidence.passed) {
           // Hallucination guard: check confidence before declaring success
-          let guardReason = "";
+          let guardWarnings: string[] = [];
           if (this.#options.hallucinationGuard !== undefined) {
             try {
               const report = await this.#options.hallucinationGuard.evaluate(request.goal, workerText);
               if (!report.passed) {
-                guardReason = report.warnings.join("; ");
+                const guardReason = report.blockingReasons.join("; ")
+                  || "Hallucination guard blocked completion.";
                 state = await this.#terminal(state, "failed", guardReason, now());
                 yield { type: "loop-terminal", loopId, status: "failed", reason: guardReason };
                 return;
               }
+              guardWarnings = report.warnings;
             } catch {
               // Guard evaluation failure is not fatal — proceed with success
             }
           }
-          const reason = evidence.summary + guardReason;
+          const reason = [evidence.summary, ...guardWarnings].filter(Boolean).join("; ");
           state = await this.#terminal(state, "succeeded", reason, now());
           yield { type: "loop-terminal", loopId, status: "succeeded", reason };
           return;

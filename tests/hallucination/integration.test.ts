@@ -32,7 +32,10 @@ describe("AgentLoop + HallucinationGuard integration", () => {
         ],
       ], mainRequests));
       registry.register("cheap", fakeAdapter([[
-        { type: "tool-call", id: "c1", name: "flavor_confidence", input: { confidence: 0.95, reason: "Output matches the query" } },
+        { type: "tool-call", id: "c1", name: "flavor_confidence", input: {
+          taskAlignment: 0.95, evidenceGrounding: 0.95, processReliability: 0.95,
+          reason: "Output matches the query", unsupportedClaims: [],
+        } },
         { type: "done", usage: { inputTokens: 5, outputTokens: 2 } },
       ]], cheapRequests));
 
@@ -85,11 +88,15 @@ describe("AgentLoop + HallucinationGuard integration", () => {
 
       // Assertions: guard methods were called
       // 1. recordToolCall should be called for the tool call
-      expect(recordToolCallSpy).toHaveBeenCalledWith("echo", { value: "hello" });
+      expect(recordToolCallSpy).toHaveBeenCalledWith("echo", { value: "hello" }, "call-1");
       expect(recordToolCallSpy).toHaveBeenCalledTimes(1);
 
       // 2. recordToolResult should be called when the tool result comes back
-      expect(recordToolResultSpy).toHaveBeenCalledWith("echo", true, undefined);
+      expect(recordToolResultSpy).toHaveBeenCalledWith(
+        "echo",
+        expect.objectContaining({ ok: true, output: { value: "hello" } }),
+        "call-1",
+      );
       expect(recordToolResultSpy).toHaveBeenCalledTimes(1);
 
       // 3. evaluate should be called once, when the model returns no tool calls (done)
@@ -123,7 +130,10 @@ describe("AgentLoop + HallucinationGuard integration", () => {
         { type: "done", usage: { inputTokens: 5, outputTokens: 2 } },
       ]]));
       registry.register("cheap", fakeAdapter([[
-        { type: "tool-call", id: "c1", name: "flavor_confidence", input: { confidence: 0.2, reason: "Output is vague and uncertain" } },
+        { type: "tool-call", id: "c1", name: "flavor_confidence", input: {
+          taskAlignment: 0.2, evidenceGrounding: 0.2, processReliability: 0.2,
+          reason: "Output is vague and uncertain", unsupportedClaims: ["No verification evidence"],
+        } },
         { type: "done", usage: { inputTokens: 5, outputTokens: 2 } },
       ]]));
 

@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { AgentEvent } from "../../src/agent/types.js";
+import type { HallucinationGuard } from "../../src/hallucination/guard.js";
 import { LoopOrchestrator, type LoopPersistence, type LoopRuntimeEvent } from "../../src/loop/orchestrator.js";
 import type { LoopEvent, LoopState, LoopVerificationEvidence } from "../../src/loop/types.js";
 import { buildLoopCyclePrompt } from "../../src/skills/builtin-loop.js";
@@ -75,6 +76,58 @@ describe("LoopOrchestrator", () => {
     const events = await collect(f.orchestrator.run({ goal: "fix tests", signal: new AbortController().signal }));
     expect(events.at(-1)).toMatchObject({ type: "loop-terminal", status: "succeeded" });
     expect(f.persistence.states.at(-1)).toMatchObject({ status: "succeeded", budget: { cyclesUsed: 1, inputTokens: 100, outputTokens: 50 } });
+  });
+
+  it("keeps low model confidence advisory after host verification passes", async () => {
+    const guard = {
+      recordToolCall: vi.fn(),
+      recordToolResult: vi.fn(),
+      evaluate: vi.fn(async () => ({
+        confidence: { confidence: 0.3, reason: "uncertain" },
+        evaluationStatus: "completed" as const,
+        retryViolations: [],
+        circuitBreakerTripped: false,
+        circuitBreakerDetail: null,
+        passed: true,
+        blockingReasons: [],
+        warnings: ["advisory warning"],
+      })),
+    } as unknown as HallucinationGuard;
+    const f = fixture({ hallucinationGuard: guard });
+
+    const events = await collect(f.orchestrator.run({ goal: "fix tests", signal: new AbortController().signal }));
+
+    expect(events.at(-1)).toMatchObject({
+      type: "loop-terminal",
+      status: "succeeded",
+      reason: expect.stringContaining("advisory warning"),
+    });
+  });
+
+  it("uses deterministic blocking reasons when the guard fails", async () => {
+    const guard = {
+      recordToolCall: vi.fn(),
+      recordToolResult: vi.fn(),
+      evaluate: vi.fn(async () => ({
+        confidence: null,
+        evaluationStatus: "skipped" as const,
+        retryViolations: [{ toolName: "Read", retryCount: 3, maxRetries: 3, lastErrorCode: "denied" }],
+        circuitBreakerTripped: false,
+        circuitBreakerDetail: null,
+        passed: false,
+        blockingReasons: ["Read failed repeatedly"],
+        warnings: [],
+      })),
+    } as unknown as HallucinationGuard;
+    const f = fixture({ hallucinationGuard: guard });
+
+    const events = await collect(f.orchestrator.run({ goal: "fix tests", signal: new AbortController().signal }));
+
+    expect(events.at(-1)).toMatchObject({
+      type: "loop-terminal",
+      status: "failed",
+      reason: "Read failed repeatedly",
+    });
   });
 
   it("feeds failed host evidence into a fresh next-cycle prompt", async () => {

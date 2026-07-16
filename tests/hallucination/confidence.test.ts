@@ -1,106 +1,157 @@
 import { describe, expect, it, vi } from "vitest";
-import { confidenceCheck } from "../../src/hallucination/confidence.js";
+import {
+  confidenceCheck,
+  HallucinationEvaluationTimeoutError,
+} from "../../src/hallucination/confidence.js";
+import type { EvidenceSnapshot } from "../../src/hallucination/evidence-ledger.js";
 import { ModelRegistry } from "../../src/models/registry.js";
 import type { ModelAdapter, ModelEvent, ModelRequest } from "../../src/models/types.js";
 
 describe("confidenceCheck", () => {
-  it("returns high confidence when cheap model confirms task completion", async () => {
-    const registry = registryWith(fakeAdapter([[
-      { type: "tool-call", id: "c1", name: "flavor_confidence", input: { confidence: 0.95, reason: "All tasks match the query" } },
-      { type: "done", usage: { inputTokens: 100, outputTokens: 20 } },
-    ]]));
-
-    const result = await confidenceCheck(registry, "cheap:mini", "fix the bug", "The bug was fixed by updating line 42.");
-    expect(result.confidence).toBe(0.95);
-    expect(result.reason).toBe("All tasks match the query");
-  });
-
-  it("returns low confidence when cheap model detects mismatch", async () => {
-    const registry = registryWith(fakeAdapter([[
-      { type: "tool-call", id: "c1", name: "flavor_confidence", input: { confidence: 0.25, reason: "Output addresses a different file than requested" } },
-      { type: "done", usage: { inputTokens: 100, outputTokens: 20 } },
-    ]]));
-
-    const result = await confidenceCheck(registry, "cheap:mini", "fix login bug", "I updated the README.");
-    expect(result.confidence).toBe(0.25);
-    expect(result.reason).toBe("Output addresses a different file than requested");
-  });
-
-  it("clamps confidence to 0-1 range", async () => {
-    vi.useFakeTimers();
-    try {
-      const registry = registryWith(fakeAdapter([[
-        { type: "tool-call", id: "c1", name: "flavor_confidence", input: { confidence: 1.5, reason: "overconfident" } },
-        { type: "done", usage: { inputTokens: 100, outputTokens: 20 } },
-      ]]));
-
-      const promise = confidenceCheck(registry, "cheap:mini", "query", "output");
-      await vi.runAllTimersAsync();
-      const result = await promise;
-      expect(result.confidence).toBe(1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("handles repair retry and returns final result", async () => {
-    vi.useFakeTimers();
-    try {
-      const requests: ModelRequest[] = [];
-      const registry = registryWith(fakeAdapter([
-        [
-          { type: "invalid-tool-call", id: "c1", name: "flavor_confidence", rawInput: "{bad", error: { code: "invalid_tool_arguments", message: "bad JSON" } },
-          { type: "done", usage: { inputTokens: 100, outputTokens: 20 } },
-        ],
-        [
-          { type: "tool-call", id: "c2", name: "flavor_confidence", input: { confidence: 0.8, reason: "good after repair" } },
-          { type: "done", usage: { inputTokens: 150, outputTokens: 30 } },
-        ],
-      ], requests));
-
-      const promise = confidenceCheck(registry, "cheap:mini", "query", "output");
-      await vi.runAllTimersAsync();
-      const result = await promise;
-      expect(result.confidence).toBe(0.8);
-      expect(result.reason).toBe("good after repair");
-      expect(requests).toHaveLength(2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("throws when all repair attempts fail", async () => {
-    vi.useFakeTimers();
-    try {
-      const registry = registryWith(fakeAdapter([
-        [{ type: "invalid-tool-call", id: "c1", name: "flavor_confidence", rawInput: "{bad", error: { code: "invalid_tool_arguments", message: "bad 1" } }, { type: "done", usage: { inputTokens: 100, outputTokens: 20 } }],
-        [{ type: "invalid-tool-call", id: "c2", name: "flavor_confidence", rawInput: "{bad", error: { code: "invalid_tool_arguments", message: "bad 2" } }, { type: "done", usage: { inputTokens: 100, outputTokens: 20 } }],
-        [{ type: "invalid-tool-call", id: "c3", name: "flavor_confidence", rawInput: "{bad", error: { code: "invalid_tool_arguments", message: "bad 3" } }, { type: "done", usage: { inputTokens: 100, outputTokens: 20 } }],
-        [{ type: "invalid-tool-call", id: "c4", name: "flavor_confidence", rawInput: "{bad", error: { code: "invalid_tool_arguments", message: "bad 4" } }, { type: "done", usage: { inputTokens: 100, outputTokens: 20 } }],
-      ]));
-
-      const promise = confidenceCheck(registry, "cheap:mini", "query", "output");
-      await vi.runAllTimersAsync();
-      await expect(promise).rejects.toThrow("Confidence check failed");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("truncates long input to reasonable size", async () => {
+  it("computes a weighted score from task, evidence, and process dimensions", async () => {
     const requests: ModelRequest[] = [];
     const registry = registryWith(fakeAdapter([[
-      { type: "tool-call", id: "c1", name: "flavor_confidence", input: { confidence: 0.5, reason: "ok" } },
-      { type: "done", usage: { inputTokens: 100, outputTokens: 20 } },
+      scoreEvent({ taskAlignment: 0.9, evidenceGrounding: 0.8, processReliability: 0.7 }),
+      doneEvent(),
     ]], requests));
 
-    const longOutput = "x".repeat(20_000);
-    const result = await confidenceCheck(registry, "cheap:mini", "query", longOutput);
-    const content = requests[0]?.messages.find((m) => m.role === "user")?.content ?? "";
-    expect(content.length).toBeLessThan(longOutput.length + 500); // truncated
-    expect(result.confidence).toBe(0.5);
+    const result = await confidenceCheck(
+      registry,
+      "cheap:mini",
+      "read src/a.ts",
+      "Read completed through a fallback.",
+      { evidence: fallbackEvidence() },
+    );
+
+    expect(result.confidence).toBeCloseTo(0.82);
+    expect(result.scores).toEqual({
+      taskAlignment: 0.9,
+      evidenceGrounding: 0.8,
+      processReliability: 0.7,
+    });
+    expect(result.unsupportedClaims).toEqual([]);
+    const content = requests[0]?.messages.find((message) => message.role === "user")?.content ?? "";
+    expect(content).toContain("Execution evidence:");
+    expect(content).toMatch(/Read[\s\S]*missing[\s\S]*Shell[\s\S]*success/);
+  });
+
+  it("clamps each component before computing confidence", async () => {
+    const registry = registryWith(fakeAdapter([[
+      scoreEvent({ taskAlignment: 1.5, evidenceGrounding: -1, processReliability: 0.5 }),
+      doneEvent(),
+    ]]));
+
+    const result = await confidenceCheck(registry, "cheap:mini", "query", "output");
+
+    expect(result.scores).toEqual({
+      taskAlignment: 1,
+      evidenceGrounding: 0,
+      processReliability: 0.5,
+    });
+    expect(result.confidence).toBeCloseTo(0.5);
+  });
+
+  it("keeps both the head and tail of a long final output", async () => {
+    const requests: ModelRequest[] = [];
+    const registry = registryWith(fakeAdapter([[
+      scoreEvent({ taskAlignment: 1, evidenceGrounding: 1, processReliability: 1 }),
+      doneEvent(),
+    ]], requests));
+    const output = `HEAD-MARKER${"x".repeat(12_000)}TAIL-MARKER`;
+
+    await confidenceCheck(registry, "cheap:mini", "query", output);
+
+    const content = requests[0]?.messages.find((message) => message.role === "user")?.content ?? "";
+    expect(content).toContain("HEAD-MARKER");
+    expect(content).toContain("TAIL-MARKER");
+    expect(content).toContain("[truncated]");
+    expect(content.length).toBeLessThan(11_000);
+  });
+
+  it("does not retry malformed structured output", async () => {
+    const requests: ModelRequest[] = [];
+    const registry = registryWith(fakeAdapter([[
+      {
+        type: "invalid-tool-call",
+        id: "bad",
+        name: "flavor_confidence",
+        rawInput: "{bad",
+        error: { code: "invalid_tool_arguments", message: "bad JSON" },
+      },
+      doneEvent(),
+    ]], requests));
+
+    await expect(confidenceCheck(registry, "cheap:mini", "query", "output"))
+      .rejects.toThrow("Confidence check failed");
+    expect(requests).toHaveLength(1);
+  });
+
+  it("aborts and returns a typed timeout error at the configured deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      let observedAbort = false;
+      const registry = registryWith({
+        async *stream(request) {
+          await new Promise<void>((_resolve, reject) => {
+            request.signal?.addEventListener("abort", () => {
+              observedAbort = true;
+              reject(request.signal?.reason);
+            }, { once: true });
+          });
+        },
+      });
+
+      const run = confidenceCheck(registry, "cheap:mini", "query", "output", { timeoutMs: 500 });
+      const expectation = expect(run).rejects.toBeInstanceOf(HallucinationEvaluationTimeoutError);
+      await vi.advanceTimersByTimeAsync(500);
+      await expectation;
+      expect(observedAbort).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
+
+function fallbackEvidence(): EvidenceSnapshot {
+  const events = [
+    {
+      callId: "read-1", toolName: "Read", status: "failure" as const,
+      input: "src/a.ts", repeatCount: 1, sequence: 0, errorCode: "missing",
+    },
+    {
+      callId: "shell-1", toolName: "Shell", status: "success" as const,
+      input: "Get-Content src/a.ts", repeatCount: 1, sequence: 1,
+      outputKind: "string", outputChars: 10, outputExcerpt: "success",
+    },
+  ];
+  return {
+    events,
+    omittedCount: 0,
+    foldedCount: 0,
+    text: JSON.stringify({ omittedCount: 0, foldedCount: 0, events }),
+  };
+}
+
+function scoreEvent(scores: {
+  taskAlignment: number;
+  evidenceGrounding: number;
+  processReliability: number;
+}): ModelEvent {
+  return {
+    type: "tool-call",
+    id: "score",
+    name: "flavor_confidence",
+    input: {
+      ...scores,
+      reason: "The final claim is supported by the successful fallback.",
+      unsupportedClaims: [],
+    },
+  };
+}
+
+function doneEvent(): ModelEvent {
+  return { type: "done", usage: { inputTokens: 100, outputTokens: 20 } };
+}
 
 function registryWith(adapter: ModelAdapter): ModelRegistry {
   return new ModelRegistry().register("cheap", adapter);

@@ -17,7 +17,8 @@
     }
   },
   "hallucination": {
-    "showWarnings": false
+    "showWarnings": true,
+    "evaluationTimeoutMs": 5000
   },
   "maxSubagents": 3,
   "permissionMode": "workspace",

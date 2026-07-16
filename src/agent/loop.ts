@@ -474,7 +474,7 @@ export class AgentLoop {
         }
         const label = this.#options.runtime.label(call);
         const hint = this.#options.runtime.hint(call);
-        this.#options.hallucinationGuard?.recordToolCall(call.name, call.input);
+        this.#options.hallucinationGuard?.recordToolCall(call.name, call.input, call.id);
         yield { type: "tool-start", id: call.id, name: call.name, input: call.input, ...(label === undefined ? {} : { label }), ...(hint === undefined ? {} : { hint }) };
         const result = await this.#options.runtime.execute(call, { agent: this.#options.agent, ...(request.signal === undefined ? {} : { signal: request.signal }) });
         if (request.signal?.aborted) {
@@ -504,7 +504,7 @@ export class AgentLoop {
       for (const { call, result } of stagedResults) {
         const endLabel = this.#options.runtime.label(call);
         const endHint = this.#options.runtime.hint(call);
-        this.#options.hallucinationGuard?.recordToolResult(call.name, result.ok, result.error?.code);
+        this.#options.hallucinationGuard?.recordToolResult(call.name, result, call.id);
         yield { type: "tool-end", id: call.id, name: call.name, result, ...(endLabel === undefined ? {} : { label: endLabel }), ...(endHint === undefined ? {} : { hint: endHint }) };
       }
       if (turnError !== undefined) {

@@ -42,11 +42,17 @@ export function buildWarningMessages(report: WarningReport, languageTag: string)
   const warnings: string[] = [];
 
   if (report.confidence !== null) {
+    const scores = report.confidence.scores;
+    const scoreDetail = scores === undefined
+      ? ""
+      : ` [task=${scores.taskAlignment.toFixed(2)}, evidence=${scores.evidenceGrounding.toFixed(2)}, process=${scores.processReliability.toFixed(2)}]`;
+    const claims = report.confidence.unsupportedClaims ?? [];
+    const claimDetail = claims.length === 0 ? "" : `; unsupported: ${claims.join(" | ")}`;
     warnings.push(
       `${labels.guardLabel}: ${labels.lowConfidence(
         report.confidence.confidence,
         report.confidence.reason,
-      )}`,
+      )}${scoreDetail}${claimDetail}`,
     );
   }
 

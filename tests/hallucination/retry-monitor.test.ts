@@ -91,6 +91,19 @@ describe("RetryMonitor", () => {
     expect(report.circuitBreakerDetail).toContain("Read");
   });
 
+  it("counts one failed invocation once in the sliding window", () => {
+    const monitor = new RetryMonitor({
+      maxToolRetries: 20,
+      windowSize: 3,
+      threshold: 1,
+    });
+
+    monitor.recordCall("Read", { path: "/one" });
+    monitor.recordError("Read", { path: "/one" }, "tool_error");
+
+    expect(monitor.evaluate().circuitBreakerTripped).toBe(false);
+  });
+
   it("circuit breaker resets when different params push old ones out", () => {
     const monitor = new RetryMonitor({
       maxToolRetries: 20,

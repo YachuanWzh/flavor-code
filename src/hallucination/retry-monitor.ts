@@ -31,7 +31,7 @@ export class RetryMonitor {
   }
 
   recordError(toolName: string, params: unknown, errorCode: string): void {
-    this.#slidingWindow.push(toolName, params);
+    void params;
     const existing = this.#errorStates.get(toolName);
     if (existing === undefined) {
       this.#errorStates.set(toolName, { retryCount: 1, lastErrorCode: errorCode });

@@ -89,7 +89,11 @@ export class EvidenceLedger {
       selectedIndexes.add(index);
     }
     const priorityOrder = this.#events
-      .map((event, index) => ({ index, priority: retentionPriority(event), sequence: event.sequence }))
+      .map((event, index) => ({
+        index,
+        priority: selectionPriority(this.#events, index),
+        sequence: event.sequence,
+      }))
       .sort((left, right) => right.priority - left.priority || right.sequence - left.sequence);
     for (const candidate of priorityOrder) {
       if (selectedIndexes.size >= MAX_EVIDENCE_EVENTS) break;
@@ -104,7 +108,11 @@ export class EvidenceLedger {
 
     while (text.length > MAX_EVIDENCE_CHARS && events.length > 1) {
       const removable = events
-        .map((event, index) => ({ index, priority: retentionPriority(event), sequence: event.sequence }))
+        .map((event, index) => ({
+          index,
+          priority: selectionPriority(events, index),
+          sequence: event.sequence,
+        }))
         .sort((left, right) => left.priority - right.priority || left.sequence - right.sequence)[0]!;
       events.splice(removable.index, 1);
       omittedCount += 1;
@@ -159,6 +167,16 @@ function retentionPriority(event: CompactEvidenceEvent): number {
   if (/\b(write|edit|patch|apply)\b/.test(searchable)) return 40;
   if (event.status === "failure") return 30;
   return 10;
+}
+
+function selectionPriority(events: readonly CompactEvidenceEvent[], index: number): number {
+  const event = events[index]!;
+  const base = retentionPriority(event);
+  const previous = events[index - 1];
+  if (event.status === "success" && previous?.status === "failure") {
+    return Math.max(base, 35);
+  }
+  return base;
 }
 
 function serializeSnapshot(

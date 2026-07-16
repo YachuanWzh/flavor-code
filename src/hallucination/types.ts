@@ -38,10 +38,13 @@ export interface RetryThresholds {
 
 export interface HallucinationReport {
   confidence: ConfidenceResult | null;
+  evaluationStatus: HallucinationEvaluationStatus;
   retryViolations: RetryViolation[];
   circuitBreakerTripped: boolean;
   circuitBreakerDetail: string | null;
   passed: boolean;
+  /** Deterministic reasons that may block engineering-loop completion. */
+  blockingReasons: string[];
   /** Human-readable warning messages already localized to the configured language. */
   warnings: string[];
 }
