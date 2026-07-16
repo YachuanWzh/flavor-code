@@ -46,6 +46,13 @@ import {
 import { message } from "../utils/error.js";
 import { redactErrorText } from "../utils/redact.js";
 import { compactProgressPresentation } from "./compact-progress.js";
+import { createGlobTool, type SearchResult } from "../tools/search.js";
+import {
+  buildMentionCandidates,
+  completeMentionSelection,
+  deriveMentionCompletion,
+  moveMentionSelection,
+} from "./mention-completion.js";
 
 export const HISTORY_CAP = 200;
 const BUILTIN_SLASH_CANDIDATES = MVP_COMMANDS.map((name) => ({ name, description: COMMAND_DESCRIPTIONS[name] }));
@@ -71,21 +78,30 @@ export function classifyTerminalInput(key: Pick<Key, "wheelUp" | "wheelDown" | "
   return null;
 }
 
-export type SlashKeyAction =
+export type CompletionKeyAction =
   | { type: "select"; delta: -1 | 1 }
   | { type: "complete" }
   | { type: "dismiss" };
 
-export function slashKeyAction(
+export type SlashKeyAction = CompletionKeyAction;
+
+export function completionKeyAction(
   key: Pick<Key, "upArrow" | "downArrow" | "tab" | "escape">,
-  completion: SlashCompletion | null,
-): SlashKeyAction | null {
-  if (completion === null) return null;
+  menuOpen: boolean,
+): CompletionKeyAction | null {
+  if (!menuOpen) return null;
   if (key.upArrow) return { type: "select", delta: -1 };
   if (key.downArrow) return { type: "select", delta: 1 };
   if (key.tab) return { type: "complete" };
   if (key.escape) return { type: "dismiss" };
   return null;
+}
+
+export function slashKeyAction(
+  key: Pick<Key, "upArrow" | "downArrow" | "tab" | "escape">,
+  completion: SlashCompletion | null,
+): SlashKeyAction | null {
+  return completionKeyAction(key, completion !== null);
 }
 
 export interface FlavorAppProps { workspace: string; home?: string; resumeSession?: string | true }
@@ -104,6 +120,9 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   );
   const [slashSelection, setSlashSelection] = useState(0);
   const [dismissedSlashInput, setDismissedSlashInput] = useState<string>();
+  const [mentionCandidates, setMentionCandidates] = useState<string[]>([]);
+  const [mentionSelection, setMentionSelection] = useState(0);
+  const [dismissedMentionInput, setDismissedMentionInput] = useState<string>();
   const [revision, setRevision] = useState(0);
   const [columns, setColumns] = useState(stdout?.columns ?? 80);
   const [rows, setRows] = useState(stdout?.rows ?? 24);
@@ -198,6 +217,25 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   useEffect(() => installSigintHandler(process, interrupt), [interrupt]);
 
   useEffect(() => {
+    const controller = new AbortController();
+    let disposed = false;
+    void createGlobTool(workspace, { defaultLimit: 10_000 })
+      .execute({ pattern: "**", limit: 10_000 }, controller.signal)
+      .then((result) => {
+        if (!disposed) {
+          setMentionCandidates(buildMentionCandidates((result as SearchResult<string>).matches));
+        }
+      })
+      .catch(() => {
+        // File completion is optional; discovery failure must not block prompt input.
+      });
+    return () => {
+      disposed = true;
+      controller.abort();
+    };
+  }, [workspace]);
+
+  useEffect(() => {
     if (!stdout || typeof stdout.on !== "function") return;
     const onResize = (): void => {
       setColumns(stdout.columns ?? 80);
@@ -214,8 +252,22 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   const slashCompletion = dismissedSlashInput === input || transcript.active !== undefined || approval !== undefined || questions !== undefined
     ? null
     : derivedSlashCompletion;
+  const derivedMentionCompletion = slashCompletion === null
+    ? deriveMentionCompletion(input, promptCursor, mentionCandidates, mentionSelection)
+    : null;
+  const mentionCompletion = dismissedMentionInput === input || transcript.active !== undefined || approval !== undefined || questions !== undefined
+    ? null
+    : derivedMentionCompletion;
   const completedTokenLength = completedSlashTokenLength(input, slashCandidates, slashCompletion !== null);
   const selection = useSelection();
+
+  const selectMention = (path: string): void => {
+    const next = completeMentionSelection(input, promptCursor, path);
+    setInput(next.text);
+    setPromptCursor(next.cursor);
+    setMentionSelection(0);
+    setDismissedMentionInput(next.text);
+  };
 
   useInput((character, key) => {
     const terminalAction = classifyTerminalInput(key);
@@ -289,6 +341,20 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
       setDismissedSlashInput(input);
       return;
     }
+    const mentionAction = completionKeyAction(key, mentionCompletion !== null);
+    if (mentionAction?.type === "select" && mentionCompletion !== null) {
+      setMentionSelection((value) => moveMentionSelection(value, mentionAction.delta, mentionCompletion.items.length));
+      return;
+    }
+    if (mentionAction?.type === "complete" && mentionCompletion !== null) {
+      const selected = mentionCompletion.items[mentionCompletion.selectedIndex];
+      if (selected !== undefined) selectMention(selected);
+      return;
+    }
+    if (mentionAction?.type === "dismiss") {
+      setDismissedMentionInput(input);
+      return;
+    }
     if (key.return) {
       const prompt = input.trim();
       if (!prompt || active === undefined || transcript.active !== undefined) return;
@@ -301,6 +367,8 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
       setPromptCursor(0);
       setSlashSelection(0);
       setDismissedSlashInput(undefined);
+      setMentionSelection(0);
+      setDismissedMentionInput(undefined);
       void submitSafely(active.session, prompt, (error) => {
         dispatch({ type: "submit-error", message: error });
       }).finally(() => dispatch({ type: "finish" }));
@@ -309,9 +377,11 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     if (key.backspace) {
       updatePrompt({ type: "backspace" }, input, promptCursor, setInput, setPromptCursor);
       setSlashSelection(0); setDismissedSlashInput(undefined);
+      setMentionSelection(0); setDismissedMentionInput(undefined);
     } else if (key.delete) {
       updatePrompt({ type: "delete" }, input, promptCursor, setInput, setPromptCursor);
       setSlashSelection(0); setDismissedSlashInput(undefined);
+      setMentionSelection(0); setDismissedMentionInput(undefined);
     }
     else if (key.leftArrow) setPromptCursor((value) => Math.max(0, value - 1));
     else if (key.rightArrow) setPromptCursor((value) => Math.min([...input].length, value + 1));
@@ -319,16 +389,19 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
       const next = navigateHistory({ history, cursor: historyCursor }, "up");
       setHistoryCursor(next.cursor); setInput(next.input); setPromptCursor(next.promptCursor);
       setSlashSelection(0); setDismissedSlashInput(undefined);
+      setMentionSelection(0); setDismissedMentionInput(undefined);
     } else if (terminalAction?.type === "history" && terminalAction.direction === "down" && history.length) {
       const next = navigateHistory({ history, cursor: historyCursor }, "down");
       setHistoryCursor(next.cursor); setInput(next.input); setPromptCursor(next.promptCursor);
       setSlashSelection(0); setDismissedSlashInput(undefined);
+      setMentionSelection(0); setDismissedMentionInput(undefined);
     } else if (!key.ctrl && !key.meta && character) {
       updatePrompt({ type: "insert", value: character }, input, promptCursor, setInput, setPromptCursor);
       if (/[\r\n]/u.test(character)) {
         setPastedBlocks((current) => [...current, { id: current.length + 1, text: character }]);
       }
       setSlashSelection(0); setDismissedSlashInput(undefined);
+      setMentionSelection(0); setDismissedMentionInput(undefined);
     }
   });
 

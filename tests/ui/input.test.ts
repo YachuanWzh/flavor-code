@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { EventEmitter } from "node:events";
-import { editPrompt, navigateHistory, slashKeyAction } from "../../src/ui/app.js";
+import { completionKeyAction, editPrompt, navigateHistory, slashKeyAction } from "../../src/ui/app.js";
 import type { SlashCompletion } from "../../src/ui/slash-completion.js";
 import { installSigintHandler } from "../../src/ui/signals.js";
 
@@ -48,4 +48,27 @@ it("routes selection keys to an open slash menu only", () => {
   expect(slashKeyAction({ upArrow: false, downArrow: false, tab: false, escape: true }, completion))
     .toEqual({ type: "dismiss" });
   expect(slashKeyAction({ upArrow: true, downArrow: false, tab: false, escape: false }, null)).toBeNull();
+});
+
+it("routes selection keys only while a completion menu is open", () => {
+  expect(completionKeyAction(
+    { upArrow: true, downArrow: false, tab: false, escape: false },
+    true,
+  )).toEqual({ type: "select", delta: -1 });
+  expect(completionKeyAction(
+    { upArrow: false, downArrow: true, tab: false, escape: false },
+    true,
+  )).toEqual({ type: "select", delta: 1 });
+  expect(completionKeyAction(
+    { upArrow: false, downArrow: false, tab: true, escape: false },
+    true,
+  )).toEqual({ type: "complete" });
+  expect(completionKeyAction(
+    { upArrow: false, downArrow: false, tab: false, escape: true },
+    true,
+  )).toEqual({ type: "dismiss" });
+  expect(completionKeyAction(
+    { upArrow: true, downArrow: false, tab: false, escape: false },
+    false,
+  )).toBeNull();
 });
