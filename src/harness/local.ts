@@ -2,7 +2,7 @@ import { AgentLoop } from "../agent/loop.js";
 import { MAIN_TASK_TOOL_NAMES } from "../agent/task-tools.js";
 import type { TaskNode } from "../agent/planner.js";
 import type { HallucinationGuard } from "../hallucination/guard.js";
-import type { PermissionMode, ToolCategory } from "../permissions/engine.js";
+import type { PermissionMode } from "../permissions/engine.js";
 import { PermissionEngine } from "../permissions/engine.js";
 import type { ContextManager } from "../context/manager.js";
 import type { HookBus } from "../hooks/bus.js";
@@ -11,9 +11,6 @@ import type { ModelTool } from "../models/types.js";
 import { modelToolFromZod } from "../models/structured.js";
 import { ToolRuntime, type ApprovalCallback } from "../tools/runtime.js";
 import type { ToolDefinition } from "../tools/types.js";
-
-/** Categories that auto-approve in loop mode — everything except destructive. */
-const LOOP_ALWAYS_ALLOWED: readonly ToolCategory[] = ["read", "write", "shell", "network"];
 
 export interface LocalHarnessOptions {
   registry: ModelRegistry;
@@ -172,16 +169,14 @@ export class LocalHarness {
   ): HarnessProfile {
     const permissions = new PermissionEngine({
       workspace: this.#options.workspace,
-      mode: agent === "subagent" ? "workspace" : (this.#options.permissionMode ?? "workspace"),
+      mode: this.#options.loopMode ? "full" : (agent === "subagent" ? "workspace" : (this.#options.permissionMode ?? "workspace")),
     });
     if (agent === "main") this.#mainPermissions = permissions;
-    const alwaysAllowed = this.#options.loopMode ? [...LOOP_ALWAYS_ALLOWED] : undefined;
     const runtime = new ToolRuntime({
       tools: definitions,
       hooks: this.#options.hooks,
       permissions,
       ...(agent === "main" && approve !== undefined ? { approve } : {}),
-      ...(alwaysAllowed !== undefined ? { alwaysAllowed } : {}),
     });
     try {
       const tools = definitions.map(toModelTool);
