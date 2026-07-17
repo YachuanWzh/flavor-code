@@ -1165,21 +1165,27 @@ interface ResolvedOAuthConfig {
 
 function resolveOAuthConfig(provider: ProviderRuntimeConfig): ResolvedOAuthConfig | undefined {
   if (provider.apiKey !== undefined) return undefined; // apiKey mode, no PKCE needed
-  if (provider.authorizationUrl !== undefined || provider.tokenUrl !== undefined || provider.clientId !== undefined) {
-    // At least one OAuth field is explicitly set — require all of them
-    if (!provider.authorizationUrl || !provider.tokenUrl || !provider.clientId) {
-      return undefined; // partial config; caller reports the diagnostic
-    }
-    return {
-      authorizationUrl: provider.authorizationUrl,
-      tokenUrl: provider.tokenUrl,
-      clientId: provider.clientId,
-      ...(provider.scope === undefined ? {} : { scope: provider.scope }),
-    };
+
+  const hasExplicitOAuth = provider.authorizationUrl !== undefined
+    || provider.tokenUrl !== undefined
+    || provider.clientId !== undefined
+    || provider.scope !== undefined;
+
+  if (hasExplicitOAuth) {
+    // Merge flavor.json fields with env defaults — flavor.json wins for each field
+    const defaults = getOAuthDefaults();
+    const authorizationUrl = provider.authorizationUrl ?? defaults.authorizationUrl;
+    const tokenUrl = provider.tokenUrl ?? defaults.tokenUrl;
+    const clientId = provider.clientId ?? defaults.clientId;
+    const scope = provider.scope ?? defaults.scope;
+
+    if (!authorizationUrl || !tokenUrl || !clientId) return undefined;
+
+    return { authorizationUrl, tokenUrl, clientId, ...(scope ? { scope } : {}) };
   }
-  // Only use built-in OAuth defaults for oauth-callback providers (whose primary
-  // auth method is PKCE).  Other provider types should rely on apiKey or env vars.
-  if (provider.type !== "oauth-callback") return undefined;
+
+  // No OAuth config in flavor.json — use env defaults (OAUTH_* vars).
+  // If the user set them, they want PKCE regardless of provider type.
   return getOAuthDefaults();
 }
 interface RegisteredProvider extends ProviderRuntimeConfig { name: string }
