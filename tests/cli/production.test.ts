@@ -310,7 +310,7 @@ describe("production runtime", () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-")); roots.push(workspace);
     await mkdir(join(workspace, ".flavor"), { recursive: true });
     await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
-      providers: { local: { type: "openai-compatible", baseURL: "http://127.0.0.1:1/v1", defaultModel: "large", cheapModel: "small" } },
+      providers: { local: { type: "openai-compatible", baseURL: "http://127.0.0.1:1/v1", apiKey: "test-key", defaultModel: "large", cheapModel: "small" } },
     }));
     const store = new SessionStore({ workspace });
     await store.save({
@@ -419,7 +419,7 @@ describe("production runtime", () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-")); roots.push(workspace);
     await mkdir(join(workspace, ".flavor"), { recursive: true });
     await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
-      providers: { local: { type: "openai-compatible", baseURL: "http://localhost:1234/v1", defaultModel: "large", cheapModel: "small" } },
+      providers: { local: { type: "openai-compatible", baseURL: "http://localhost:1234/v1", apiKey: "test-key", defaultModel: "large", cheapModel: "small" } },
     }));
     const runtime = await createProductionRuntime({ workspace, home: workspace, environment: {}, output: () => {} });
     expect(runtime.services.mainModel()).toBe("local:large");
@@ -438,7 +438,7 @@ describe("production runtime", () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-")); roots.push(workspace);
     await mkdir(join(workspace, ".flavor"), { recursive: true });
     await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
-      providers: { local: { type: "openai-compatible", baseURL: "http://localhost:1234/v1", defaultModel: "large" } },
+      providers: { local: { type: "openai-compatible", baseURL: "http://localhost:1234/v1", apiKey: "test-key", defaultModel: "large" } },
     }));
     const runtime = await createProductionRuntime({ workspace, home: workspace, environment: {}, output: () => {} });
     expect(runtime.services.subagentModel()).toContain("configure-cheap-model");

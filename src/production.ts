@@ -1177,7 +1177,9 @@ function resolveOAuthConfig(provider: ProviderRuntimeConfig): ResolvedOAuthConfi
       ...(provider.scope === undefined ? {} : { scope: provider.scope }),
     };
   }
-  // No OAuth config at all — use built-in defaults
+  // Only use built-in OAuth defaults for oauth-callback providers (whose primary
+  // auth method is PKCE).  Other provider types should rely on apiKey or env vars.
+  if (provider.type !== "oauth-callback") return undefined;
   return getOAuthDefaults();
 }
 interface RegisteredProvider extends ProviderRuntimeConfig { name: string }
