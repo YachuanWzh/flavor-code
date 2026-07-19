@@ -47,6 +47,8 @@ export interface StructuredOutputRequest {
 }
 
 export type StructuredOutputEvent<T> =
+  | { type: "attempt-start"; attempt: number; maxAttempts: number }
+  | { type: "attempt-end"; attempt: number; maxAttempts: number }
   | { type: "usage"; inputTokens: number; outputTokens: number }
   | {
     type: "retry";
@@ -128,6 +130,7 @@ export function withStructuredOutput<T>(options: StructuredOutputOptions<T>): St
           messageCount: modelRequest.messages.length,
         };
         await options.beforeAttempt?.(attemptInfo);
+        yield { type: "attempt-start", attempt, maxAttempts };
 
         candidate = undefined;
         rawCandidate = undefined;
@@ -171,6 +174,7 @@ export function withStructuredOutput<T>(options: StructuredOutputOptions<T>): St
             const parsed = options.schema.safeParse(candidate);
             if (parsed.success) {
               await options.afterAttempt?.({ ...attemptInfo, completed: true });
+              yield { type: "attempt-end", attempt, maxAttempts };
               yield { type: "output", value: parsed.data, attempts: attempt };
               return;
             }
@@ -189,6 +193,7 @@ export function withStructuredOutput<T>(options: StructuredOutputOptions<T>): St
           completed: false,
           error: { ...attemptError, message: sanitize(attemptError.message, secrets) },
         });
+        yield { type: "attempt-end", attempt, maxAttempts };
         if (attempt >= maxAttempts) {
           throw new StructuredOutputError(
             sanitize(

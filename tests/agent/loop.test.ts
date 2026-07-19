@@ -76,6 +76,36 @@ describe("AgentLoop", () => {
     expect(fixture.context.lastRecordedInputTokens).toBe(12);
   });
 
+  it("emits balanced lifecycle events for every physical model call", async () => {
+    const fixture = createLoop({
+      adapter: fakeAdapter([
+        [
+          { type: "tool-call", id: "call-1", name: "echo", input: { value: "hi" } },
+          { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+        ],
+        [
+          { type: "text", text: "finished" },
+          { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+        ],
+      ]),
+    });
+
+    const events = await collect(fixture.loop.run({ prompt: "do it" }));
+    const lifecycle = events.filter((event) => [
+      "model-start", "model-end", "tool-start", "tool-end", "text",
+    ].includes(event.type));
+
+    expect(lifecycle).toEqual([
+      { type: "model-start", id: "1" },
+      { type: "model-end", id: "1" },
+      expect.objectContaining({ type: "tool-start", id: "call-1" }),
+      expect.objectContaining({ type: "tool-end", id: "call-1" }),
+      { type: "model-start", id: "2" },
+      { type: "text", text: "finished" },
+      { type: "model-end", id: "2" },
+    ]);
+  });
+
   it("reactively compacts and retries the same model iteration once after context overflow", async () => {
     const requests: ModelRequest[] = [];
     const fixture = createLoop({
@@ -255,6 +285,14 @@ describe("AgentLoop", () => {
 
     expect(mainRequests).toHaveLength(2);
     expect(cheapRequests).toHaveLength(1);
+    expect(events.filter((event) => event.type === "model-start" || event.type === "model-end")).toEqual([
+      { type: "model-start", id: "1" },
+      { type: "model-end", id: "1" },
+      { type: "model-start", id: "2" },
+      { type: "model-end", id: "2" },
+      { type: "model-start", id: "3" },
+      { type: "model-end", id: "3" },
+    ]);
     expect(cheapRequests[0]?.messages.map(({ content }) => content).join("\n"))
       .toMatch(/Bad escaped character|C:\\Users/);
     expect(events.filter((event) => event.type === "text").map((event) => event.text))

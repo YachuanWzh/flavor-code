@@ -27,6 +27,7 @@ export type TranscriptBlock =
     text: string;
     hint?: string;
     task?: { subject: string; activeForm: string; role: "main" | "subagent" };
+    activity?: "model";
     presentation?: ToolPresentation;
     progress?: number;
     startedAt?: number;
@@ -76,7 +77,7 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
     if (state.active === undefined) return state;
     return finishActive({
       ...state,
-      active: addText(state.active, `◆ ${action.message}`, true),
+      active: addText(withoutModelActivity(state.active), `◆ ${action.message}`, true),
     });
   }
 
@@ -91,17 +92,32 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
     };
   }
   if (event.type === "exit" || state.active === undefined) return state;
+  if (event.type === "model-start") return upsertStatus({
+    ...state,
+    active: withoutModelActivity(state.active),
+  }, {
+    kind: "status",
+    id: `model:${event.id}`,
+    state: "running",
+    text: "Flavoring",
+    activity: "model",
+    startedAt: Date.now(),
+  });
+  if (event.type === "model-end") return {
+    ...state,
+    active: withoutModelActivity(state.active, `model:${event.id}`),
+  };
   if (event.type === "done") {
-    const withUsage = upsertStatus(state, {
+    const withUsage = upsertStatus({ ...state, active: withoutModelActivity(state.active) }, {
       kind: "status", id: `usage:${state.active.id}`, state: "info",
       text: `· ${event.usage.inputTokens} in · ${event.usage.outputTokens} out`,
     });
     return finishActive(withUsage);
   }
   if (event.type === "text") {
-    return { ...state, active: addText(state.active, event.text) };
+    return { ...state, active: addText(withoutModelActivity(state.active), event.text) };
   }
-  if (event.type === "tool-start") return upsertStatus(state, {
+  if (event.type === "tool-start") return upsertStatus({ ...state, active: withoutModelActivity(state.active) }, {
     kind: "status", id: `tool:${event.id}`, state: "running", text: `${event.name}${event.label ? ` ${event.label}` : ""}`,
     ...(event.hint === undefined ? {} : { hint: event.hint }),
   });
@@ -132,13 +148,14 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
     });
   }
   if (event.type === "error") {
+    const withoutActivity = withoutModelActivity(state.active);
     const active = event.error.code === "cancelled"
-      ? stripRetryBlocks(state.active)
-      : state.active;
+      ? stripRetryBlocks(withoutActivity)
+      : withoutActivity;
     return { ...state, active: addText(active, `◆ ${event.error.code}: ${event.error.message}`, true) };
   }
   if (event.type === "usage") return state;
-  if (event.type === "model-retry") return upsertStatus(state, {
+  if (event.type === "model-retry") return upsertStatus({ ...state, active: withoutModelActivity(state.active) }, {
     kind: "status",
     id: "model-retry",
     state: "info",
@@ -306,10 +323,25 @@ function upsertStatus(state: TranscriptState, block: Extract<TranscriptBlock, { 
 
 function finishActive(state: TranscriptState): TranscriptState {
   if (state.active === undefined) return state;
+  const active = withoutModelActivity(state.active);
   return {
-    completed: [...state.completed, state.active],
+    completed: [...state.completed, active],
     nextId: state.nextId,
     ...(state.taskSnapshot === undefined ? {} : { taskSnapshot: state.taskSnapshot }),
+  };
+}
+
+function withoutModelActivity(turn: TranscriptTurn, id?: string): TranscriptTurn {
+  const blocks = turn.blocks.filter((block) => block.kind !== "status"
+    || block.activity !== "model"
+    || (id !== undefined && block.id !== id));
+  if (blocks.length === turn.blocks.length) return turn;
+  return {
+    ...turn,
+    blocks,
+    statusLines: blocks
+      .filter((block): block is Extract<TranscriptBlock, { kind: "status" }> => block.kind === "status")
+      .map((block) => block.text),
   };
 }
 

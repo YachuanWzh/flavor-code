@@ -12,7 +12,7 @@ export interface TaskStatusLineProps {
 
 export function TaskStatusLine({ block, interactive }: TaskStatusLineProps): React.JSX.Element {
   const running = block.state === "running";
-  const foreground = interactive && block.task?.role === "main";
+  const foreground = interactive && (block.activity === "model" || block.task?.role === "main");
   const [ref, time] = useAnimationFrame(running && foreground ? 120 : null);
   const startedAt = useRef<number | undefined>(undefined);
   const previousState = useRef(block.state);

@@ -85,6 +85,7 @@ export class AgentLoop {
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
     let accumulatedText = "";
+    let modelInvocation = 0;
 
     let maxIterations = this.#options.maxIterations;
     let extensions = 0;
@@ -189,6 +190,8 @@ export class AgentLoop {
         let terminalError: AgentError | undefined;
         let providerError = false;
         let usage: { inputTokens: number; outputTokens: number } | undefined;
+        const modelCallId = String(++modelInvocation);
+        yield { type: "model-start", id: modelCallId };
         try {
           for await (const event of adapter.stream(modelRequest)) {
             if (event.type === "text") {
@@ -248,6 +251,7 @@ export class AgentLoop {
             }
           }
         }
+        yield { type: "model-end", id: modelCallId };
 
         if (usage !== undefined) {
           this.#options.context.recordModelUsage(usage.inputTokens);
@@ -386,6 +390,7 @@ export class AgentLoop {
         });
 
         let repairedInput: unknown;
+        let activeRepairModelCallId: string | undefined;
         try {
           for await (const event of structured.stream({
             messages: [{ role: "user", content: `Repair the invalid arguments for tool "${collected.name}".` }],
@@ -393,7 +398,15 @@ export class AgentLoop {
             validationError: validation.error.message,
             ...(request.signal === undefined ? {} : { signal: request.signal }),
           })) {
-            if (event.type === "usage") {
+            if (event.type === "attempt-start") {
+              activeRepairModelCallId = String(++modelInvocation);
+              yield { type: "model-start", id: activeRepairModelCallId };
+            } else if (event.type === "attempt-end") {
+              if (activeRepairModelCallId !== undefined) {
+                yield { type: "model-end", id: activeRepairModelCallId };
+                activeRepairModelCallId = undefined;
+              }
+            } else if (event.type === "usage") {
               this.#options.context.recordModelUsage(event.inputTokens);
               totalInputTokens += event.inputTokens;
               totalOutputTokens += event.outputTokens;
@@ -419,6 +432,9 @@ export class AgentLoop {
             }
           }
         } catch (error) {
+          if (activeRepairModelCallId !== undefined) {
+            yield { type: "model-end", id: activeRepairModelCallId };
+          }
           if (request.signal?.aborted) {
             yield { type: "error", error: { code: "cancelled", message: abortMessage(request.signal) } };
           } else {

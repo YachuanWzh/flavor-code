@@ -35,6 +35,51 @@ describe("transcriptReducer", () => {
     expect(state.active?.assistantText).toBe("第一段");
   });
 
+  it("creates a transient activity block when a model call starts", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-19T00:00:00.000Z"));
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "wait" });
+
+    state = transcriptReducer(state, { type: "session", event: { type: "model-start", id: "1" } });
+
+    expect(state.active?.blocks).toEqual([{
+      kind: "status",
+      id: "model:1",
+      state: "running",
+      text: "Flavoring",
+      activity: "model",
+      startedAt: Date.parse("2026-07-19T00:00:00.000Z"),
+    }]);
+  });
+
+  it("removes model activity as soon as visible text arrives", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "wait" });
+    state = transcriptReducer(state, { type: "session", event: { type: "model-start", id: "1" } });
+
+    state = transcriptReducer(state, { type: "session", event: { type: "text", text: "answer" } });
+
+    expect(state.active?.blocks).toEqual([{ kind: "text", text: "answer" }]);
+    expect(state.active?.statusLines).toEqual([]);
+  });
+
+  it("ends tool-only activity and starts a fresh timer for the next model call", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-19T00:00:00.000Z"));
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "use a tool" });
+    state = transcriptReducer(state, { type: "session", event: { type: "model-start", id: "1" } });
+    state = transcriptReducer(state, { type: "session", event: { type: "model-end", id: "1" } });
+    expect(state.active?.blocks).toEqual([]);
+
+    vi.setSystemTime(new Date("2026-07-19T00:00:06.000Z"));
+    state = transcriptReducer(state, { type: "session", event: { type: "model-start", id: "2" } });
+
+    expect(state.active?.blocks).toEqual([expect.objectContaining({
+      id: "model:2",
+      activity: "model",
+      startedAt: Date.parse("2026-07-19T00:00:06.000Z"),
+    })]);
+  });
+
   it("appends completed turns without replacing earlier content", () => {
     let state = createTranscriptState();
     state = transcriptReducer(state, { type: "submit", prompt: "one" });

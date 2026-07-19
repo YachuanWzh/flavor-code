@@ -723,7 +723,9 @@ function TurnView({ turn, interactive }: { turn: TranscriptTurn; interactive: bo
     {/* Model output: indented to create clear visual hierarchy */}
     <Box flexDirection="column" paddingLeft={2} marginTop={1}>
       {turn.blocks.map((block, index) => block.kind === "status"
-        ? block.task === undefined
+        ? block.activity === "model"
+          ? <Box key={block.id}><TaskStatusLine block={block} interactive={interactive} /></Box>
+          : block.task === undefined
           ? block.state === "completed" && block.presentation !== undefined
             ? <FileDiffView key={block.id} presentation={block.presentation} />
             : <Box key={block.id}><StatusLine block={block} interactive={interactive} /></Box>

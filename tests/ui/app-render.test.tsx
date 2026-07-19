@@ -133,6 +133,38 @@ describe("TerminalLayout", () => {
       .toBe("ansi:yellowBright");
   });
 
+  it("renders active model thinking beneath the submitted prompt", () => {
+    const thinking: TranscriptTurn = {
+      id: 1,
+      prompt: "explain the system",
+      assistantText: "",
+      statusLines: ["Flavoring"],
+      blocks: [{
+        kind: "status",
+        id: "model:1",
+        state: "running",
+        text: "Flavoring",
+        activity: "model",
+        startedAt: Date.now(),
+      }],
+    };
+
+    const output = stripAnsi(renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[]}
+      active={thinking}
+      input=""
+      promptCursor={0}
+      columns={80}
+      rows={24}
+      activeSession
+    />, { columns: 80 }));
+
+    expect(output).toContain("explain the system");
+    expect(output).toContain("Flavoring… (0s · thinking)");
+  });
+
   it("renders compact progress as three blue and seven gray cells at thirty percent", () => {
     const compacting: TranscriptTurn = {
       id: 1,

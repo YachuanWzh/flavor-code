@@ -23,6 +23,24 @@ describe("task progress presentation", () => {
     expect(formatElapsed(4_900)).toBe("4s");
   });
 
+  it("presents model activity with Flavor copy, elapsed time, and thinking status", () => {
+    const result = statusPresentation({
+      kind: "status",
+      id: "model:1",
+      state: "running",
+      text: "Flavoring",
+      activity: "model",
+    }, 6_000, true);
+
+    expect(result).toEqual({
+      glyph: activityFrame(6_000),
+      text: "Flavoring… (6s · thinking)",
+      color: "#81c8f2",
+      statusLabel: "thinking",
+      statusColor: "ansi:blackBright",
+    });
+  });
+
   it("uses activeForm for an interactive running task", () => {
     expect(statusPresentation(runningTask, 4_900, true)).toEqual({
       glyph: activityFrame(4_900),

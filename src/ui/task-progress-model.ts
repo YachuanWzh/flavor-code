@@ -47,6 +47,21 @@ export function statusPresentation(
   elapsedMs: number,
   interactive: boolean,
 ): StatusPresentation {
+  if (block.state === "running" && block.activity === "model") {
+    return interactive ? {
+      glyph: activityFrame(elapsedMs),
+      text: `Flavoring… (${formatElapsed(elapsedMs)} · thinking)`,
+      color: "#81c8f2",
+      statusLabel: "thinking",
+      statusColor: "ansi:blackBright",
+    } : {
+      glyph: "·",
+      text: "Flavoring · thinking",
+      color: "#81c8f2",
+      statusLabel: "thinking",
+      statusColor: "ansi:blackBright",
+    };
+  }
   if (block.state === "running" && block.task !== undefined) {
     const isSubagent = block.task.role === "subagent";
     const activeForm = block.task.activeForm;
