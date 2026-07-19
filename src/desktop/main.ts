@@ -1,0 +1,190 @@
+import { readFile, stat, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
+
+import {
+  AnswerQuestionsInputSchema,
+  AppMenuInputSchema,
+  DeleteSessionInputSchema,
+  DESKTOP_CHANNELS,
+  OpenWorkspaceInputSchema,
+  ResolveApprovalInputSchema,
+  StartSessionInputSchema,
+  SubmitInputSchema,
+  type DesktopEvent,
+} from "./contracts.js";
+import { DesktopRuntimeController } from "./runtime-controller.js";
+import { isSafeExternalUrl, isTrustedNavigation, normalizePersistedWorkspace } from "./security.js";
+import { desktopWindowChrome } from "./window-options.js";
+
+const moduleDirectory = dirname(fileURLToPath(import.meta.url));
+const developmentUrl = process.env.FLAVOR_DESKTOP_DEV_URL;
+let mainWindow: BrowserWindow | undefined;
+let appMenu: Menu | undefined;
+let quitting = false;
+
+const controller = new DesktopRuntimeController({
+  emit(event: DesktopEvent) {
+    if (mainWindow !== undefined && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(DESKTOP_CHANNELS.event, event);
+    }
+  },
+});
+
+function statePath(): string {
+  return join(app.getPath("userData"), "desktop-state.json");
+}
+
+async function loadPersistedWorkspace(): Promise<string | undefined> {
+  try {
+    const raw = await readFile(statePath(), "utf8");
+    if (raw.length > 40_000) return undefined;
+    return normalizePersistedWorkspace(JSON.parse(raw));
+  } catch {
+    return undefined;
+  }
+}
+
+async function savePersistedWorkspace(workspace: string): Promise<void> {
+  await writeFile(statePath(), `${JSON.stringify({ workspace })}\n`, { encoding: "utf8", mode: 0o600 });
+}
+
+async function assertDirectory(path: string): Promise<void> {
+  if (!(await stat(path)).isDirectory()) throw new Error("The selected project is not a directory");
+}
+
+async function openWorkspace(path: string) {
+  await assertDirectory(path);
+  const snapshot = await controller.openWorkspace(path);
+  await savePersistedWorkspace(path);
+  return snapshot;
+}
+
+async function chooseAndOpenWorkspace() {
+  const result = await dialog.showOpenDialog(mainWindow!, {
+    title: "打开 Flavor Code 项目",
+    properties: ["openDirectory", "createDirectory"],
+  });
+  const path = result.filePaths[0];
+  return result.canceled || path === undefined ? undefined : openWorkspace(path);
+}
+
+function installIpcHandlers(): void {
+  ipcMain.handle(DESKTOP_CHANNELS.bootstrap, async () => {
+    const workspace = await loadPersistedWorkspace();
+    if (workspace === undefined) return controller.snapshot();
+    try { return await openWorkspace(workspace); }
+    catch { return controller.snapshot(); }
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.chooseWorkspace, chooseAndOpenWorkspace);
+  ipcMain.handle(DESKTOP_CHANNELS.openWorkspace, async (_event, value) => {
+    const { path } = OpenWorkspaceInputSchema.parse(value);
+    return openWorkspace(path);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.startSession, async (_event, value) => {
+    const { resumeSession } = StartSessionInputSchema.parse(value);
+    return controller.startSession(resumeSession);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.deleteSession, async (_event, value) => {
+    const { sessionId } = DeleteSessionInputSchema.parse(value);
+    return controller.deleteSession(sessionId);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.showAppMenu, async (_event, value) => {
+    const { menu, x, y } = AppMenuInputSchema.parse(value);
+    const window = mainWindow;
+    if (window === undefined) return;
+    const index = { file: 0, edit: 1, view: 2, help: 3 }[menu];
+    appMenu?.items[index]?.submenu?.popup({ window, x, y });
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.submit, async (_event, value) => {
+    const { prompt } = SubmitInputSchema.parse(value);
+    void controller.submit(prompt).catch(() => undefined);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.interrupt, async () => controller.interrupt());
+  ipcMain.handle(DESKTOP_CHANNELS.resolveApproval, async (_event, value) => {
+    controller.resolveApproval(ResolveApprovalInputSchema.parse(value).decision);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.answerQuestions, async (_event, value) => {
+    controller.answerQuestions(AnswerQuestionsInputSchema.parse(value).answers);
+  });
+}
+
+function applicationMenu(): Menu {
+  return Menu.buildFromTemplate([
+    { label: "文件", submenu: [
+      { label: "打开项目…", accelerator: "CmdOrCtrl+O", click: () => void chooseAndOpenWorkspace() },
+      { type: "separator" }, { role: "quit", label: "退出" },
+    ] },
+    { label: "编辑", submenu: [
+      { role: "undo", label: "撤销" }, { role: "redo", label: "重做" }, { type: "separator" },
+      { role: "cut", label: "剪切" }, { role: "copy", label: "复制" }, { role: "paste", label: "粘贴" },
+    ] },
+    { label: "视图", submenu: [
+      { role: "reload", label: "重新加载" }, { role: "toggleDevTools", label: "开发者工具" },
+      { type: "separator" }, { role: "resetZoom", label: "实际大小" }, { role: "zoomIn", label: "放大" }, { role: "zoomOut", label: "缩小" },
+    ] },
+    { label: "帮助", submenu: [
+      { label: "Flavor Code 文档", click: () => void shell.openExternal("https://github.com") },
+    ] },
+  ]);
+}
+
+async function createWindow(): Promise<void> {
+  const rendererUrl = developmentUrl ?? pathToFileURL(join(app.getAppPath(), "dist", "desktop-renderer", "index.html")).href;
+  mainWindow = new BrowserWindow({
+    title: "Flavor Code",
+    width: 1280,
+    height: 820,
+    minWidth: 720,
+    minHeight: 560,
+    backgroundColor: "#f7f9fc",
+    show: false,
+    ...desktopWindowChrome(),
+    webPreferences: {
+      preload: join(moduleDirectory, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+    },
+  });
+  mainWindow.setMenuBarVisibility(false);
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isSafeExternalUrl(url)) void shell.openExternal(url);
+    return { action: "deny" };
+  });
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    const current = mainWindow?.webContents.getURL();
+    if (!isTrustedNavigation(url, current ?? "", rendererUrl)) {
+      event.preventDefault();
+      if (isSafeExternalUrl(url)) void shell.openExternal(url);
+    }
+  });
+  mainWindow.once("ready-to-show", () => mainWindow?.show());
+  mainWindow.on("close", (event) => {
+    if (quitting) return;
+    event.preventDefault();
+    quitting = true;
+    void controller.dispose().finally(() => {
+      mainWindow?.destroy();
+      app.quit();
+    });
+  });
+  await mainWindow.loadURL(rendererUrl);
+}
+
+app.whenReady().then(async () => {
+  installIpcHandlers();
+  appMenu = applicationMenu();
+  Menu.setApplicationMenu(appMenu);
+  await createWindow();
+  app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow(); });
+}).catch((error) => {
+  dialog.showErrorBox("Flavor Code 无法启动", error instanceof Error ? error.message : String(error));
+  app.quit();
+});
+
+app.on("before-quit", () => { quitting = true; });
+app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });

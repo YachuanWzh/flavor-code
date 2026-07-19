@@ -1,7 +1,8 @@
 {
   "name": "flavor-code",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
+  "main": "dist/desktop/main.js",
   "bin": {
     "flavor": "dist/cli.js"
   },
@@ -15,12 +16,51 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsup && node -e \"require('fs').cpSync('src/init/codeisland','dist/codeisland',{recursive:true})\"",
+    "build": "npm run build:cli && npm run build:desktop",
+    "build:cli": "tsup && node -e \"require('fs').cpSync('src/init/codeisland','dist/codeisland',{recursive:true})\"",
+    "build:desktop": "npm run build:desktop:main && npm run build:desktop:renderer",
+    "build:desktop:main": "tsup --config tsup.desktop.config.ts",
+    "build:desktop:renderer": "vite build --config vite.desktop.config.ts",
+    "desktop:dev": "npm run build:desktop:main && node scripts/desktop-dev.mjs",
+    "desktop:start": "npm run build && electron .",
+    "desktop:pack": "npm run build && electron-builder --win --dir",
+    "desktop:dist": "npm run build && electron-builder --win nsis",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "smoke:install": "node scripts/smoke-install.mjs",
     "prepack": "npm run build"
+  },
+  "build": {
+    "appId": "dev.flavorcode.desktop",
+    "productName": "Flavor Code",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json",
+      "README.md",
+      "LICENSE"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Flavor-Code-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",
@@ -37,6 +77,7 @@
     "marked": "^16.4.2",
     "openai": "^6.46.0",
     "react": "^19.2.7",
+    "react-dom": "^19.2.7",
     "semver": "^7.7.4",
     "signal-exit": "4.1.0",
     "supports-hyperlinks": "^4.4.0",
@@ -48,7 +89,16 @@
   "devDependencies": {
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "electron": "^42.7.0",
+    "electron-builder": "^26.15.3",
     "tsup": "^8.5.1",
+    "vite": "^8.1.5",
     "vitest": "^4.1.10"
+  },
+  "allowScripts": {
+    "electron-winstaller@5.4.0": true,
+    "esbuild@0.27.7": true,
+    "electron@42.7.0": true
   }
 }

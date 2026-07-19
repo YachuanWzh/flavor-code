@@ -191,6 +191,20 @@ export class SessionStore {
     return entries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.sessionId.localeCompare(b.sessionId));
   }
 
+  async delete(sessionId: string): Promise<void> {
+    SessionIdSchema.parse(sessionId);
+    try { await this.#assertSafeExistingDirectory(); }
+    catch (error) { if (isCode(error, "ENOENT")) return; throw error; }
+    const path = this.#path(sessionId);
+    try {
+      const metadata = await lstat(path);
+      if (!metadata.isFile()) throw new Error("Session path is not a regular file");
+      await rm(path);
+    } catch (error) {
+      if (!isCode(error, "ENOENT")) throw error;
+    }
+  }
+
   #path(sessionId: string): string {
     SessionIdSchema.parse(sessionId);
     const path = resolve(this.#sessions, `${sessionId}.jsonl`);

@@ -1,0 +1,334 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+
+import type { PermissionMode } from "../../config/schema.js";
+import { createTranscriptState, transcriptReducer, type TranscriptBlock, type TranscriptState, type TranscriptTurn } from "../../ui/transcript.js";
+import type { DesktopEvent, DesktopSnapshot, DesktopSessionSummary } from "../contracts.js";
+import { applyDesktopOutput, groupSessions, permissionLabel, sessionTitle, STARTER_PROMPTS, workspaceName } from "./view-model.js";
+import { MarkdownContent } from "./markdown.js";
+
+const EMPTY_SNAPSHOT: DesktopSnapshot = { sessions: [], diagnostics: [] };
+const PERMISSIONS: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions", "auto", "bubble"];
+
+export function DesktopApp(): React.JSX.Element {
+  const [snapshot, setSnapshot] = useState<DesktopSnapshot>(EMPTY_SNAPSHOT);
+  const [transcript, setTranscript] = useState<TranscriptState>(createTranscriptState);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string>();
+  const [railOpen, setRailOpen] = useState(false);
+  const [railCollapsed, setRailCollapsed] = useState(false);
+  const [sessionMenu, setSessionMenu] = useState<string>();
+  const [pendingDelete, setPendingDelete] = useState<DesktopSessionSummary>();
+  const [deletingSession, setDeletingSession] = useState(false);
+  const [modelDraft, setModelDraft] = useState("");
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const unsubscribe = window.flavorDesktop.onEvent((event) => handleEvent(event, setSnapshot, setTranscript, setError));
+    window.flavorDesktop.bootstrap().then(setSnapshot).catch((cause) => setError(errorMessage(cause))).finally(() => setLoading(false));
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [transcript]);
+
+  const busy = snapshot.activeSession?.busy ?? false;
+  const groups = useMemo(() => groupSessions(snapshot.sessions), [snapshot.sessions]);
+
+  const chooseWorkspace = async () => {
+    setError(undefined);
+    try {
+      const next = await window.flavorDesktop.chooseWorkspace();
+      if (next !== undefined) {
+        setSnapshot(next); setTranscript(createTranscriptState()); setRailOpen(false);
+      }
+    } catch (cause) { setError(errorMessage(cause)); }
+  };
+
+  const startSession = async (session?: DesktopSessionSummary) => {
+    setError(undefined);
+    try {
+      const result = await window.flavorDesktop.startSession(session?.sessionId);
+      setSnapshot(result.snapshot);
+      setTranscript(transcriptReducer(createTranscriptState(), { type: "hydrate", messages: result.restoredMessages }));
+      setRailOpen(false);
+      setTimeout(() => inputRef.current?.focus(), 0);
+    } catch (cause) { setError(errorMessage(cause)); }
+  };
+
+  const send = async (override?: string) => {
+    const prompt = (override ?? input).trim();
+    if (!prompt || busy) return;
+    setError(undefined);
+    try {
+      let current = snapshot;
+      if (current.activeSession === undefined) {
+        const started = await window.flavorDesktop.startSession();
+        current = started.snapshot;
+        setSnapshot(current);
+        setTranscript(transcriptReducer(createTranscriptState(), { type: "hydrate", messages: started.restoredMessages }));
+      }
+      setTranscript((state) => transcriptReducer(state, { type: "submit", prompt }));
+      if (override === undefined) setInput("");
+      await window.flavorDesktop.submit(prompt);
+    } catch (cause) {
+      const value = errorMessage(cause);
+      setError(value);
+      setTranscript((state) => transcriptReducer(state, { type: "submit-error", message: value }));
+    }
+  };
+
+  const setPermission = (mode: PermissionMode) => void send(`/permissions ${mode}`);
+  const setModel = () => {
+    const value = modelDraft.trim();
+    if (value.includes(":")) { void send(`/model main ${value}`); setModelDraft(""); }
+  };
+
+  const showAppMenu = (menu: "file" | "edit" | "view" | "help", event: React.MouseEvent<HTMLButtonElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    void window.flavorDesktop.showAppMenu(menu, Math.round(bounds.left), Math.round(bounds.bottom));
+  };
+
+  const deletePendingSession = async () => {
+    if (pendingDelete === undefined || deletingSession) return;
+    setDeletingSession(true);
+    setError(undefined);
+    try {
+      const wasActive = pendingDelete.sessionId === snapshot.activeSession?.sessionId;
+      const next = await window.flavorDesktop.deleteSession(pendingDelete.sessionId);
+      setSnapshot(next);
+      if (wasActive) setTranscript(createTranscriptState());
+      setPendingDelete(undefined);
+      setSessionMenu(undefined);
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { setDeletingSession(false); }
+  };
+
+  return <div className="app-frame">
+    <AppTitleBar railCollapsed={railCollapsed} onToggleRail={() => setRailCollapsed((value) => !value)} onMenu={showAppMenu} />
+    <div className="desktop-shell" data-rail-collapsed={railCollapsed}>
+    <button className="rail-scrim" data-open={railOpen} onClick={() => setRailOpen(false)} aria-label="关闭项目栏" />
+    <aside className="project-rail" data-open={railOpen}>
+      <div className="brand-row">
+        <FlavorMark />
+        <strong>Flavor Code</strong>
+        <span className="brand-chevron">⌄</span>
+      </div>
+      <nav className="primary-actions" aria-label="主要操作">
+        <button className="rail-action rail-action-primary" disabled={snapshot.workspace === undefined} onClick={() => void startSession()}>
+          <span className="action-icon">＋</span><span>新建任务</span><kbd>Ctrl N</kbd>
+        </button>
+        <button className="rail-action" onClick={() => void chooseWorkspace()}><span className="action-icon">⌂</span><span>打开项目</span></button>
+        <button className="rail-action" onClick={() => void send("/skills")} disabled={snapshot.activeSession === undefined || busy}><span className="action-icon">◇</span><span>技能</span></button>
+        <button className="rail-action" onClick={() => void send("/mcp status")} disabled={snapshot.activeSession === undefined || busy}><span className="action-icon">◎</span><span>MCP 服务</span></button>
+      </nav>
+      <div className="sessions-scroll">
+        <div className="rail-section-title">项目</div>
+        {snapshot.workspace === undefined
+          ? <button className="empty-project" onClick={() => void chooseWorkspace()}>选择一个本地文件夹开始</button>
+          : <>
+            <div className="project-heading"><span className="folder-icon">▱</span><span>{workspaceName(snapshot.workspace)}</span></div>
+            {groups.length === 0 && <p className="no-sessions">还没有任务</p>}
+            {groups.map((group) => <section className="session-group" key={group.label}>
+              <h2>{group.label}</h2>
+              {group.sessions.map((session) => <div className="session-item-shell" key={session.sessionId}
+                onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setSessionMenu(undefined); }}>
+                <button className="session-item" data-active={session.sessionId === snapshot.activeSession?.sessionId}
+                  onClick={() => void startSession(session)}>
+                  <span>{sessionTitle(session)}</span><time>{formatSessionTime(session.updatedAt)}</time>
+                </button>
+                <button className="session-more" aria-label={`管理会话：${sessionTitle(session)}`} aria-expanded={sessionMenu === session.sessionId}
+                  onClick={() => setSessionMenu((current) => current === session.sessionId ? undefined : session.sessionId)}>•••</button>
+                {sessionMenu === session.sessionId && <div className="session-menu" role="menu">
+                  <button role="menuitem" className="danger-item"
+                    disabled={busy && session.sessionId === snapshot.activeSession?.sessionId}
+                    onClick={() => { setPendingDelete(session); setSessionMenu(undefined); }}>删除会话</button>
+                </div>}
+              </div>)}
+            </section>)}
+          </>}
+      </div>
+      <div className="rail-footer"><span className="avatar">F</span><span>本地工作区</span><button title="帮助">?</button></div>
+    </aside>
+
+    <main className="workspace-panel">
+      <header className="workspace-header">
+        <button className="mobile-rail-toggle" onClick={() => setRailOpen(true)} aria-label="打开项目栏">☰</button>
+        <div className="workspace-breadcrumb">
+          <span>{workspaceName(snapshot.workspace)}</span>
+        </div>
+        <div className="header-actions"><button title="更多选项">•••</button></div>
+      </header>
+
+      <div className="conversation-scroll" ref={scrollRef}>
+        {loading ? <LoadingState /> : snapshot.workspace === undefined ? <OpenProjectState onOpen={chooseWorkspace} />
+          : transcript.completed.length === 0 && transcript.active === undefined
+            ? <WelcomeState project={workspaceName(snapshot.workspace)} onStart={(prompt) => void send(prompt)} />
+            : <div className="conversation-column">
+              {transcript.completed.map((turn) => <TurnView key={turn.id} turn={turn} />)}
+              {transcript.active !== undefined && <TurnView turn={transcript.active} active />}
+            </div>}
+      </div>
+
+      {error !== undefined && <div className="error-toast" role="alert"><span>!</span><p>{error}</p><button onClick={() => setError(undefined)}>×</button></div>}
+      {snapshot.diagnostics.length > 0 && <details className="diagnostics"><summary>{snapshot.diagnostics.length} 条启动提示</summary><pre>{snapshot.diagnostics.join("\n")}</pre></details>}
+      <Composer input={input} setInput={setInput} onSend={() => void send()} busy={busy}
+        onInterrupt={() => void window.flavorDesktop.interrupt()} inputRef={inputRef} snapshot={snapshot}
+        modelDraft={modelDraft} setModelDraft={setModelDraft} setModel={setModel} setPermission={setPermission} />
+    </main>
+    </div>
+
+    {snapshot.approval !== undefined && <ApprovalSheet approval={snapshot.approval} onResolve={(decision) => void window.flavorDesktop.resolveApproval(decision)} />}
+    {snapshot.questions !== undefined && <QuestionSheet questions={snapshot.questions} onAnswer={(answers) => void window.flavorDesktop.answerQuestions(answers)} />}
+    {pendingDelete !== undefined && <DeleteSessionSheet session={pendingDelete} deleting={deletingSession}
+      onCancel={() => setPendingDelete(undefined)} onDelete={() => void deletePendingSession()} />}
+  </div>;
+}
+
+function AppTitleBar({ railCollapsed, onToggleRail, onMenu }: {
+  railCollapsed: boolean;
+  onToggleRail(): void;
+  onMenu(menu: "file" | "edit" | "view" | "help", event: React.MouseEvent<HTMLButtonElement>): void;
+}): React.JSX.Element {
+  return <header className="window-titlebar">
+    <button className="titlebar-icon sidebar-toggle" data-collapsed={railCollapsed} onClick={onToggleRail} aria-label={railCollapsed ? "显示项目栏" : "隐藏项目栏"} title={railCollapsed ? "显示项目栏" : "隐藏项目栏"}>
+      <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="11" rx="2"/><path d="M6 3v10"/></svg>
+    </button>
+    <button className="titlebar-icon nav-button" disabled aria-label="后退"><span>‹</span></button>
+    <button className="titlebar-icon nav-button" disabled aria-label="前进"><span>›</span></button>
+    <nav className="titlebar-menus" aria-label="应用菜单">
+      <button onClick={(event) => onMenu("file", event)}>文件</button>
+      <button onClick={(event) => onMenu("edit", event)}>编辑</button>
+      <button onClick={(event) => onMenu("view", event)}>视图</button>
+      <button onClick={(event) => onMenu("help", event)}>帮助</button>
+    </nav>
+  </header>;
+}
+
+function handleEvent(event: DesktopEvent, setSnapshot: React.Dispatch<React.SetStateAction<DesktopSnapshot>>,
+  setTranscript: React.Dispatch<React.SetStateAction<TranscriptState>>, setError: React.Dispatch<React.SetStateAction<string | undefined>>): void {
+  if (event.type === "snapshot") setSnapshot(event.snapshot);
+  else if (event.type === "session-started") {
+    setSnapshot(event.payload.snapshot);
+    setTranscript(transcriptReducer(createTranscriptState(), { type: "hydrate", messages: event.payload.restoredMessages }));
+  } else if (event.type === "session-output") setTranscript((state) => applyDesktopOutput(state, event.event));
+  else if (event.type === "runtime-error") setError(event.message);
+}
+
+function TurnView({ turn, active = false }: { turn: TranscriptTurn; active?: boolean }): React.JSX.Element {
+  return <article className="turn" data-active={active}>
+    <div className="user-message"><span>{turn.prompt}</span></div>
+    <div className="assistant-message">
+      <div className="assistant-avatar"><FlavorMark /></div>
+      <div className="turn-content">
+        {turn.blocks.map((block, index) => <BlockView block={block} key={block.kind === "status" ? block.id : `text-${index}`} />)}
+        {active && turn.blocks.length === 0 && <div className="thinking-line"><i /><span>正在理解任务…</span></div>}
+      </div>
+    </div>
+  </article>;
+}
+
+function BlockView({ block }: { block: TranscriptBlock }): React.JSX.Element {
+  if (block.kind === "text") return <div className="assistant-copy"><MarkdownContent text={block.text} /></div>;
+  const stateSymbol = block.state === "completed" ? "✓" : block.state === "failed" ? "×" : block.state === "cancelled" ? "–" : block.state === "running" ? "" : "·";
+  return <div className="activity-card" data-state={block.state} data-tone={block.tone}>
+    <span className="activity-node">{stateSymbol}</span>
+    <div className="activity-body"><div className="activity-title"><span>{block.text.replace(/^[·✓×]\s*/, "")}</span>{block.hint && <code>{block.hint}</code>}</div>
+      {block.progress !== undefined && <div className="progress-track"><i style={{ width: `${block.progress}%` }} /></div>}
+      {block.presentation && <details className="diff-preview"><summary>{block.presentation.path} <span>+{block.presentation.added} −{block.presentation.removed}</span></summary>
+        <pre>{block.presentation.lines.slice(0, 18).map((line) => `${line.kind === "added" ? "+" : line.kind === "removed" ? "-" : " "}${line.text}`).join("\n")}</pre>
+      </details>}
+    </div>
+  </div>;
+}
+
+interface ComposerProps {
+  input: string; setInput(value: string): void; onSend(): void; busy: boolean; onInterrupt(): void;
+  inputRef: React.RefObject<HTMLTextAreaElement | null>; snapshot: DesktopSnapshot;
+  modelDraft: string; setModelDraft(value: string): void; setModel(): void; setPermission(mode: PermissionMode): void;
+}
+
+function Composer(props: ComposerProps): React.JSX.Element {
+  const disabled = props.snapshot.workspace === undefined;
+  return <div className="composer-wrap"><div className="composer" data-busy={props.busy}>
+    <textarea ref={props.inputRef} value={props.input} onChange={(event) => props.setInput(event.target.value)}
+      onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); props.onSend(); } }}
+      placeholder={disabled ? "先打开一个项目" : "给 Flavor 一个任务，或输入 / 查看命令"} disabled={disabled} rows={1} />
+    <div className="composer-tools">
+      <button className="attach-button" title="在提示中输入 @ 引用项目文件" onClick={() => props.setInput(`${props.input}${props.input ? " " : ""}@`)} disabled={disabled}>＋</button>
+      <div className="composer-context"><span className="context-item">▱ {workspaceName(props.snapshot.workspace)}</span><span className="context-item">▣ 本地</span></div>
+      <div className="composer-controls">
+        <details className="model-menu"><summary>{shortModel(props.snapshot.activeSession?.mainModel)}⌄</summary><div className="popover">
+          <label>主模型 ID</label><div className="model-input"><input placeholder="provider:model" value={props.modelDraft} onChange={(event) => props.setModelDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") props.setModel(); }} /><button onClick={props.setModel}>切换</button></div>
+          <p>例如 openai:gpt-5</p>
+        </div></details>
+        <select aria-label="权限模式" value={props.snapshot.activeSession?.permissionMode ?? "default"} disabled={props.busy || props.snapshot.activeSession === undefined}
+          onChange={(event) => props.setPermission(event.target.value as PermissionMode)}>{PERMISSIONS.map((mode) => <option value={mode} key={mode}>{permissionLabel(mode)}</option>)}</select>
+        {props.busy ? <button className="send-button stop-button" onClick={props.onInterrupt} title="停止任务"><span /></button>
+          : <button className="send-button" onClick={props.onSend} disabled={disabled || !props.input.trim()} title="发送"><span>↑</span></button>}
+      </div>
+    </div>
+  </div><p className="composer-hint">Enter 发送 · Shift Enter 换行 · @ 引用文件 · / 调用命令</p></div>;
+}
+
+function DeleteSessionSheet({ session, deleting, onCancel, onDelete }: {
+  session: DesktopSessionSummary;
+  deleting: boolean;
+  onCancel(): void;
+  onDelete(): void;
+}): React.JSX.Element {
+  return <div className="modal-layer"><section className="decision-sheet delete-session-sheet" role="dialog" aria-modal="true" aria-labelledby="delete-session-title">
+    <div className="sheet-icon danger">×</div><div>
+      <p className="sheet-kicker">删除历史会话</p>
+      <h2 id="delete-session-title">删除“{sessionTitle(session)}”？</h2>
+      <p>此会话的消息和任务记录将从当前项目中永久删除，此操作无法撤销。</p>
+      <div className="sheet-actions"><button disabled={deleting} onClick={onCancel}>取消</button>
+        <button className="danger" disabled={deleting} onClick={onDelete}>{deleting ? "正在删除…" : "删除会话"}</button></div>
+    </div>
+  </section></div>;
+}
+
+function ApprovalSheet({ approval, onResolve }: { approval: NonNullable<DesktopSnapshot["approval"]>; onResolve(decision: "allow" | "deny"): void }): React.JSX.Element {
+  return <div className="modal-layer"><section className="decision-sheet" role="dialog" aria-modal="true" aria-labelledby="approval-title">
+    <div className="sheet-icon warning">!</div><div><p className="sheet-kicker">权限确认 · {approval.agent === "main" ? "主 Agent" : "子 Agent"}</p><h2 id="approval-title">允许执行 {approval.tool}？</h2>
+      <p>{approval.reason ?? "这项操作需要你的确认。"}</p>
+      {(approval.command || approval.paths?.length) && <pre>{approval.command ?? approval.paths?.join("\n")}{approval.args?.length ? ` ${approval.args.join(" ")}` : ""}</pre>}
+      <div className="sheet-actions"><button onClick={() => onResolve("deny")}>拒绝</button><button className="primary" onClick={() => onResolve("allow")}>允许一次</button></div>
+    </div>
+  </section></div>;
+}
+
+function QuestionSheet({ questions, onAnswer }: { questions: NonNullable<DesktopSnapshot["questions"]>; onAnswer(answers: Record<number, string>): void }): React.JSX.Element {
+  const [answers, setAnswers] = useState<Record<number, string>>({});
+  const ready = questions.every((_question, index) => answers[index]);
+  return <div className="modal-layer"><section className="question-sheet" role="dialog" aria-modal="true"><p className="sheet-kicker">Flavor 需要确认</p>
+    {questions.map((question, index) => <fieldset key={`${question.header}-${index}`}><legend>{question.header}</legend><p>{question.question}</p><div className="question-options">
+      {question.options.map((option) => <button data-selected={answers[index] === option.label} key={option.label} onClick={() => setAnswers((current) => ({ ...current, [index]: option.label }))}>
+        <strong>{option.label}</strong><span>{option.description}</span>
+      </button>)}</div></fieldset>)}
+    <div className="sheet-actions"><button className="primary" disabled={!ready} onClick={() => onAnswer(answers)}>继续</button></div>
+  </section></div>;
+}
+
+function WelcomeState({ project, onStart }: { project: string; onStart(prompt: string): void }): React.JSX.Element {
+  return <section className="welcome-state"><div className="welcome-mark"><FlavorMark /></div><p>已连接本地项目</p><h1>我们应该在 <u>{project}</u> 中构建什么？</h1>
+    <div className="starter-grid">{STARTER_PROMPTS.map((prompt) => <button key={prompt} onClick={() => onStart(prompt)}>{prompt}</button>)}</div>
+  </section>;
+}
+
+function OpenProjectState({ onOpen }: { onOpen(): void }): React.JSX.Element {
+  return <section className="open-state"><div className="welcome-mark"><FlavorMark /></div><h1>从一个本地项目开始</h1><p>Flavor 会在你选择的文件夹范围内阅读、修改和运行代码。</p><button onClick={onOpen}>打开项目</button></section>;
+}
+
+function LoadingState(): React.JSX.Element { return <div className="loading-state"><FlavorMark /><span>正在准备桌面工作区…</span></div>; }
+
+function FlavorMark(): React.JSX.Element {
+  return <svg className="flavor-mark" viewBox="0 0 36 36" aria-hidden="true"><path d="M8 17.5C8 11.7 12.5 7 18 7s10 4.7 10 10.5c0 2.7-1 5.1-2.7 7l1 3.8-4-1.2A9.5 9.5 0 0 1 18 28c-5.5 0-10-4.7-10-10.5Z"/><circle cx="14.5" cy="17" r="1.4"/><circle cx="21.5" cy="17" r="1.4"/><path className="mark-smile" d="M14 21c2.4 1.7 5.6 1.7 8 0"/></svg>;
+}
+
+function errorMessage(value: unknown): string { return value instanceof Error ? value.message : String(value); }
+function shortSessionId(id: string): string { return id.replace(/^session-/, "").slice(0, 17); }
+function shortModel(model?: string): string { if (!model) return "选择模型"; return model.split(":").at(-1) ?? model; }
+function formatSessionTime(value: string): string { const date = new Date(value); return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }); }

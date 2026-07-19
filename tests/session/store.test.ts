@@ -33,6 +33,27 @@ function document(root: string): SessionDocument {
 }
 
 describe("SessionStore", () => {
+  it("deletes one saved session without touching the remaining history", async () => {
+    const root = await workspace();
+    const store = new SessionStore({ workspace: root });
+    await store.save(document(root));
+    await store.save({ ...document(root), sessionId: "keep-session" });
+
+    await store.delete("session-20260712");
+
+    await expect(store.load("session-20260712")).rejects.toThrow(/not found/i);
+    await expect(store.list()).resolves.toEqual([
+      expect.objectContaining({ sessionId: "keep-session" }),
+    ]);
+  });
+
+  it("rejects traversal when deleting a session", async () => {
+    const root = await workspace();
+    const store = new SessionStore({ workspace: root });
+
+    await expect(store.delete("../outside")).rejects.toThrow(/session id/i);
+  });
+
   it("persists a main plan and cancels abandoned in-progress work on load", async () => {
     const root = await workspace();
     const store = new SessionStore({ workspace: root });

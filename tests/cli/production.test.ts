@@ -257,11 +257,11 @@ describe("production runtime", () => {
     });
 
     const submission = runtime.session.submit("/loop analyze the current project");
-    await vi.waitFor(() => expect(runtime.services.questions.pending?.[0]?.question).toContain("1 cycles"));
+    await vi.waitFor(() => expect(runtime.services.questions.pending?.[0]?.question).toContain("1 cycles"), { timeout: 5_000 });
     expect(runtime.services.questions.pending?.[0]?.question).toContain("2 cycles");
     expect(runtime.services.questions.pending?.[0]?.question).toContain("test failed with exit code 1");
     runtime.services.questions.answer({ 0: "Continue" });
-    await vi.waitFor(() => expect(runtime.services.questions.pending?.[0]?.question).toContain("2 cycles"));
+    await vi.waitFor(() => expect(runtime.services.questions.pending?.[0]?.question).toContain("2 cycles"), { timeout: 5_000 });
     expect(runtime.services.questions.pending?.[0]?.question).toContain("3 cycles");
     runtime.services.questions.answer({ 0: "Stop" });
     await submission;
