@@ -20,7 +20,56 @@ const turn = (id: number, prompt: string, assistantText: string): TranscriptTurn
   blocks: assistantText.length === 0 ? [] : [{ kind: "text", text: assistantText }],
 });
 
+const stripAnsi = (value: string): string => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/gu, "");
+
 describe("TerminalLayout", () => {
+  it("shows the Flavor welcome card only for an empty transcript", () => {
+    const empty = stripAnsi(renderToString(<TerminalLayout
+      model="anthropic:deepseek-v4-pro"
+      workspaceName="flavor-code"
+      completed={[]}
+      input=""
+      promptCursor={0}
+      columns={96}
+      rows={30}
+      activeSession={false}
+    />, { columns: 96 }));
+    const active = stripAnsi(renderToString(<TerminalLayout
+      model="anthropic:deepseek-v4-pro"
+      workspaceName="flavor-code"
+      completed={[]}
+      active={turn(1, "hello", "")}
+      input=""
+      promptCursor={0}
+      columns={96}
+      rows={30}
+      activeSession
+    />, { columns: 96 }));
+
+    expect(empty).toContain("Welcome back!");
+    expect(empty).toContain("Tips for getting started");
+    expect(empty).toContain("/init");
+    expect(active).not.toContain("Welcome back!");
+    expect(active).toContain("flavor · anthropic:deepseek-v4-pro · flavor-code");
+  });
+
+  it("uses a compact welcome card without overflowing narrow terminals", () => {
+    const output = stripAnsi(renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[]}
+      input=""
+      promptCursor={0}
+      columns={48}
+      rows={20}
+      activeSession={false}
+    />, { columns: 48 }));
+
+    expect(output).toContain("Flavor Code");
+    expect(output).not.toContain("Tips for getting started");
+    expect(Math.max(...output.split("\n").map((line) => [...line].length))).toBeLessThanOrEqual(48);
+  });
+
   it("collapses pasted draft text but keeps submitted content fully visible with a spaced chevron", () => {
     const pasted = "first pasted line\nsecond pasted line\nthird pasted line";
     const output = renderToString(<TerminalLayout

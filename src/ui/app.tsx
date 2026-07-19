@@ -56,6 +56,7 @@ import {
   moveMentionSelection,
   type MentionCompletion,
 } from "./mention-completion.js";
+import { WelcomeCard } from "./welcome.js";
 
 export const HISTORY_CAP = 200;
 const BUILTIN_SLASH_CANDIDATES = MVP_COMMANDS.map((name) => ({ name, description: COMMAND_DESCRIPTIONS[name] }));
@@ -477,6 +478,7 @@ export function TerminalLayout({
   questions, completion, mentionCompletion, onMentionSelect, completedSlashTokenLength: tokenLength = 0, scrollRef,
 }: TerminalLayoutProps): React.JSX.Element {
   const dividerWidth = Math.max(1, columns - 1);
+  const showWelcome = completed.length === 0 && active === undefined;
   const activeCompletion = completion ?? mentionCompletion;
   const menuRows = activeCompletion === undefined ? 0 : Math.min(6, activeCompletion.items.length - activeCompletion.windowStart);
 
@@ -504,7 +506,9 @@ export function TerminalLayout({
   const promptMaxLines = Math.max(1, bottomMaxRows - fixedBottomRows);
   return <Box flexGrow={1} width="100%" flexDirection="column" overflow="hidden">
     <ScrollBox {...(scrollRef === undefined ? {} : { ref: scrollRef })} flexGrow={1} flexDirection="column" stickyScroll>
-      <Text dimColor>{"flavor · "}{model}{" · "}{workspaceName}</Text>
+      {showWelcome
+        ? <WelcomeCard model={model} workspaceName={workspaceName} columns={columns} />
+        : <Text dimColor>{"flavor · "}{model}{" · "}{workspaceName}</Text>}
       <Box height={1} />
       {completed.map((turn, index) => (
         <Box key={turn.id} flexDirection="column">
