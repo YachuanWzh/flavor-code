@@ -46,6 +46,7 @@ export function createProgram(): Command {
       process.exitCode = 2;
       return;
     }
+    setInteractiveProcessTitle();
     const [{ render, AlternateScreen }, { createElement }, { App }] = await Promise.all([
       import("./claude-ink/index.js"), import("react"), import("./ui/app.js"),
     ]);
@@ -57,6 +58,10 @@ export function createProgram(): Command {
   });
 
   return program;
+}
+
+export function setInteractiveProcessTitle(target: { title: string } = process): void {
+  target.title = "flavor";
 }
 
 export interface PrintDependencies {
