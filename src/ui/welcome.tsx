@@ -9,6 +9,7 @@ export interface WelcomeCardProps {
 }
 
 const WIDE_WELCOME_COLUMNS = 72;
+const FLAVOR_ACCENT = "#67D4FF";
 const FLAVOR_WORDMARK = [
   "┌─┐┬  ┌─┐┬  ┬┌─┐┬─┐",
   "├┤ │  ├─┤└┐┌┘│ │├┬┘",
@@ -32,7 +33,7 @@ export function WelcomeCard({ model, workspaceName, columns }: WelcomeCardProps)
         paddingRight={1}
       >
         <Text bold color="yellowBright">Welcome back!</Text>
-        <Text color="yellow">{FLAVOR_WORDMARK}</Text>
+        <Text color={FLAVOR_ACCENT}>{FLAVOR_WORDMARK}</Text>
         <Text dimColor wrap="truncate-end">{model}</Text>
         <Text dimColor wrap="truncate-end">{workspaceName}</Text>
       </Box>
@@ -49,7 +50,7 @@ export function WelcomeCard({ model, workspaceName, columns }: WelcomeCardProps)
         </Text>
       </Box>
     </Box> : <Box width="100%" flexDirection="column">
-      <Text bold color="yellowBright">◆ Flavor Code</Text>
+      <Text bold color={FLAVOR_ACCENT}>◆ Flavor Code</Text>
       <Text>Welcome back!</Text>
       <Text dimColor wrap="truncate-end">{model}{" · "}{workspaceName}</Text>
       <Text><Text color="cyan">/init</Text>{" setup · "}<Text color="cyan">/help</Text>{" commands"}</Text>

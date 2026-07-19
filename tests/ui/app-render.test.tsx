@@ -11,6 +11,7 @@ import {
 import type { SlashCompletion } from "../../src/ui/slash-completion.js";
 import type { MentionCompletion } from "../../src/ui/mention-completion.js";
 import { createTranscriptState, transcriptReducer, type TranscriptTurn } from "../../src/ui/transcript.js";
+import { WelcomeCard } from "../../src/ui/welcome.js";
 
 const turn = (id: number, prompt: string, assistantText: string): TranscriptTurn => ({
   id,
@@ -23,6 +24,19 @@ const turn = (id: number, prompt: string, assistantText: string): TranscriptTurn
 const stripAnsi = (value: string): string => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/gu, "");
 
 describe("TerminalLayout", () => {
+  it("renders the Flavor brand mark with the sky-blue truecolor accent", () => {
+    const wide = WelcomeCard({ model: "model", workspaceName: "workspace", columns: 96 });
+    const wideLayout = wide.props.children as React.ReactElement<{ children?: React.ReactNode }>;
+    const wideLeft = React.Children.toArray(wideLayout.props.children)[0] as React.ReactElement<{ children?: React.ReactNode }>;
+    const wideWordmark = React.Children.toArray(wideLeft.props.children)[1] as React.ReactElement<{ color?: string }>;
+    const compact = WelcomeCard({ model: "model", workspaceName: "workspace", columns: 48 });
+    const compactLayout = compact.props.children as React.ReactElement<{ children?: React.ReactNode }>;
+    const compactBrand = React.Children.toArray(compactLayout.props.children)[0] as React.ReactElement<{ color?: string }>;
+
+    expect(wideWordmark.props.color).toBe("#67D4FF");
+    expect(compactBrand.props.color).toBe("#67D4FF");
+  });
+
   it("shows the Flavor welcome card only for an empty transcript", () => {
     const empty = stripAnsi(renderToString(<TerminalLayout
       model="anthropic:deepseek-v4-pro"
