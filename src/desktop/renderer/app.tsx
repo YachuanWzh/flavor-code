@@ -23,6 +23,7 @@ import {
   type MentionCompletion,
 } from "../../ui/mention-completion.js";
 import { COMMAND_DESCRIPTIONS, MVP_COMMANDS } from "../../ui/commands.js";
+import type { FileChangePresentation, FileDiffLine } from "../../tools/types.js";
 
 const EMPTY_SNAPSHOT: DesktopSnapshot = { sessions: [], diagnostics: [] };
 const PERMISSIONS: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions", "auto", "bubble"];
@@ -351,10 +352,49 @@ function BlockView({ block }: { block: TranscriptBlock }): React.JSX.Element {
     <span className="activity-node">{stateSymbol}</span>
     <div className="activity-body"><div className="activity-title"><span>{block.text.replace(/^[·✓×]\s*/, "")}</span>{block.hint && <code>{block.hint}</code>}</div>
       {block.progress !== undefined && <div className="progress-track"><i style={{ width: `${block.progress}%` }} /></div>}
-      {block.presentation && <details className="diff-preview"><summary>{block.presentation.path} <span>+{block.presentation.added} −{block.presentation.removed}</span></summary>
-        <pre>{block.presentation.lines.slice(0, 18).map((line) => `${line.kind === "added" ? "+" : line.kind === "removed" ? "-" : " "}${line.text}`).join("\n")}</pre>
-      </details>}
+      {block.presentation && <DiffPreview presentation={block.presentation} />}
     </div>
+  </div>;
+}
+
+function DiffPreview({ presentation }: { presentation: FileChangePresentation }): React.JSX.Element {
+  const isDelete = presentation.operation === "delete";
+  const operatorLabel = presentation.operation === "create" ? "新建" : presentation.operation === "delete" ? "删除" : "修改";
+  const fileName = presentation.path.replace(/^.*[/\\]/, "");
+  const lineWidth = isDelete
+    ? 1
+    : Math.max(1, ...presentation.lines.map((line) => Math.max(line.oldLine ?? 0, line.newLine ?? 0)))
+      .toString().length;
+
+  return <details className="diff-preview">
+    <summary>
+      <span className={`diff-marker ${isDelete ? "diff-delete" : "diff-add"}`}>{isDelete ? "●" : "●"}</span>
+      <span className="diff-label">{operatorLabel}</span>
+      <span className="diff-path">{fileName}</span>
+      <span className="diff-counts">
+        {!isDelete && <span className="diff-added-count">+{presentation.added}</span>}
+        {!isDelete && presentation.removed > 0 && <span className="diff-removed-count"> −{presentation.removed}</span>}
+        {isDelete && <span className="diff-removed-count">−{presentation.removed}</span>}
+      </span>
+    </summary>
+    {isDelete ? null : <div className="diff-body">
+      {presentation.lines.map((line, index) => <DiffRow key={index} line={line} lineWidth={lineWidth} />)}
+    </div>}
+  </details>;
+}
+
+function DiffRow({ line, lineWidth }: { line: FileDiffLine; lineWidth: number }): React.JSX.Element {
+  const number = line.kind === "removed" || line.kind === "context" ? line.oldLine : line.newLine;
+  const marker = line.kind === "removed" ? "-" : line.kind === "added" ? "+" : line.kind === "omitted" ? "…" : " ";
+  const rowClass = line.kind === "added" ? "diff-row-added"
+    : line.kind === "removed" ? "diff-row-removed"
+    : line.kind === "omitted" ? "diff-row-omitted"
+    : "diff-row-context";
+
+  return <div className={`diff-row ${rowClass}`}>
+    <span className="diff-line-number">{String(number ?? "").padStart(lineWidth)}</span>
+    <span className="diff-line-marker">{marker}</span>
+    <span className="diff-line-text">{line.text}</span>
   </div>;
 }
 
@@ -572,12 +612,15 @@ function DeleteSessionSheet({ session, deleting, onCancel, onDelete }: {
   </section></div>;
 }
 
-function ApprovalSheet({ approval, onResolve }: { approval: NonNullable<DesktopSnapshot["approval"]>; onResolve(decision: "allow" | "deny"): void }): React.JSX.Element {
+const DESTRUCTIVE_TOOLS = new Set(["Delete", "Move"]);
+
+function ApprovalSheet({ approval, onResolve }: { approval: NonNullable<DesktopSnapshot["approval"]>; onResolve(decision: "allow" | "deny" | "always"): void }): React.JSX.Element {
+  const isDestructive = DESTRUCTIVE_TOOLS.has(approval.tool);
   return <div className="modal-layer"><section className="decision-sheet" role="dialog" aria-modal="true" aria-labelledby="approval-title">
     <div className="sheet-icon warning">!</div><div><p className="sheet-kicker">权限确认 · {approval.agent === "main" ? "主 Agent" : "子 Agent"}</p><h2 id="approval-title">允许执行 {approval.tool}？</h2>
       <p>{approval.reason ?? "这项操作需要你的确认。"}</p>
       {(approval.command || approval.paths?.length) && <pre>{approval.command ?? approval.paths?.join("\n")}{approval.args?.length ? ` ${approval.args.join(" ")}` : ""}</pre>}
-      <div className="sheet-actions"><button onClick={() => onResolve("deny")}>拒绝</button><button className="primary" onClick={() => onResolve("allow")}>允许一次</button></div>
+      <div className="sheet-actions"><button onClick={() => onResolve("deny")}>拒绝</button>{!isDestructive && <button onClick={() => onResolve("always")}>始终允许同类操作</button>}<button className="primary" onClick={() => onResolve("allow")}>允许一次</button></div>
     </div>
   </section></div>;
 }

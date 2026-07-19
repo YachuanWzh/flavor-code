@@ -179,8 +179,8 @@ export class DesktopRuntimeController {
     this.#runtime?.session.interrupt();
   }
 
-  resolveApproval(decision: "allow" | "deny"): void {
-    this.#runtime?.approvals.resolve(decision === "allow" ? "once" : "deny");
+  resolveApproval(decision: "allow" | "deny" | "always"): void {
+    this.#runtime?.approvals.resolve(decision === "deny" ? "deny" : decision === "always" ? "always" : "once");
   }
 
   answerQuestions(answers: Record<number, string>): void {

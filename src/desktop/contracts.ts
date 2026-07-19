@@ -20,7 +20,7 @@ export const AppMenuInputSchema = z.object({
   y: z.number().int().min(0).max(32_768),
 }).strict();
 export const SubmitInputSchema = z.object({ prompt: z.string().trim().min(1).max(1_000_000) }).strict();
-export const ResolveApprovalInputSchema = z.object({ decision: z.enum(["allow", "deny"]) }).strict();
+export const ResolveApprovalInputSchema = z.object({ decision: z.enum(["allow", "deny", "always"]) }).strict();
 export const AnswerQuestionsInputSchema = z.object({
   answers: z.record(z.coerce.number().int().min(0).max(3), z.string().min(1).max(10_000)),
 }).strict();
@@ -79,7 +79,7 @@ export interface FlavorDesktopApi {
   showAppMenu(menu: "file" | "edit" | "view" | "help", x: number, y: number): Promise<void>;
   submit(prompt: string): Promise<void>;
   interrupt(): Promise<void>;
-  resolveApproval(decision: "allow" | "deny"): Promise<void>;
+  resolveApproval(decision: "allow" | "deny" | "always"): Promise<void>;
   answerQuestions(answers: Record<number, string>): Promise<void>;
   listFiles(): Promise<readonly string[]>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
