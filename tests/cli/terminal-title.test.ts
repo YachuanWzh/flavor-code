@@ -19,11 +19,11 @@ describe("interactive terminal identity", () => {
     expect(settings["terminal.integrated.tabs.title"]).toBe("${sequence}");
   });
 
-  it("labels the foreground process as flavor", () => {
+  it("labels the foreground process as Flavor Code", () => {
     const target = { title: "node" };
 
     setInteractiveProcessTitle(target);
 
-    expect(target.title).toBe("flavor");
+    expect(target.title).toBe("Flavor Code");
   });
 });

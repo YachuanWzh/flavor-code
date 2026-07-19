@@ -61,7 +61,7 @@ export function createProgram(): Command {
 }
 
 export function setInteractiveProcessTitle(target: { title: string } = process): void {
-  target.title = "flavor";
+  target.title = "Flavor Code";
 }
 
 export interface PrintDependencies {
