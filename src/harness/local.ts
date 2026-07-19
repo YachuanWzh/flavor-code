@@ -4,6 +4,7 @@ import type { TaskNode } from "../agent/planner.js";
 import type { HallucinationGuard } from "../hallucination/guard.js";
 import type { PermissionMode } from "../permissions/engine.js";
 import { PermissionEngine } from "../permissions/engine.js";
+import { createPermissionClassifier } from "../permissions/classifier.js";
 import type { ContextManager } from "../context/manager.js";
 import type { HookBus } from "../hooks/bus.js";
 import type { ModelRegistry } from "../models/registry.js";
@@ -105,7 +106,7 @@ export class LocalHarness {
     const tools = this.#toolsForAgent("subagent").filter((tool) => !MAIN_TASK_TOOL_NAMES.has(tool.name));
     const context = this.#options.createContext("subagent", tools, this.#subagentModelId);
     this.#claimContext(context);
-    const profile = this.#createProfile(this.#subagentModelId, tools, "subagent", context);
+    const profile = this.#createProfile(this.#subagentModelId, tools, "subagent", context, this.#options.approve);
     let disposed = false;
     const child: SubagentHarness = {
       ...profile,
@@ -169,14 +170,24 @@ export class LocalHarness {
   ): HarnessProfile {
     const permissions = new PermissionEngine({
       workspace: this.#options.workspace,
-      mode: this.#options.loopMode ? "full" : (agent === "subagent" ? "workspace" : (this.#options.permissionMode ?? "workspace")),
+      mode: this.#options.loopMode
+        ? "bypassPermissions"
+        : (agent === "subagent"
+          ? (this.#mainPermissions.mode === "plan" ? "plan" : "bubble")
+          : (this.#options.permissionMode ?? "default")),
     });
     if (agent === "main") this.#mainPermissions = permissions;
     const runtime = new ToolRuntime({
       tools: definitions,
       hooks: this.#options.hooks,
       permissions,
-      ...(agent === "main" && approve !== undefined ? { approve } : {}),
+      ...((agent === "main" || permissions.mode === "bubble") && approve !== undefined ? { approve } : {}),
+      ...(agent === "main" ? {
+        classify: createPermissionClassifier({
+          registry: this.#options.registry,
+          modelId: () => this.#subagentModelId,
+        }),
+      } : {}),
     });
     try {
       const tools = definitions.map(toModelTool);

@@ -18,7 +18,7 @@ try {
   await exec(npm, ["install", "--global", "--prefix", prefix, tarball], { cwd, windowsHide: true, maxBuffer: 10 * 1024 * 1024 });
   const binary = process.platform === "win32" ? join(prefix, "flavor.cmd") : join(prefix, "bin", "flavor");
   const version = await exec(binary, ["--version"], { cwd: prefix, windowsHide: true });
-  if (version.stdout.trim() !== "0.1.0") throw new Error(`Unexpected installed version: ${version.stdout.trim()}`);
+  if (version.stdout.trim() !== "0.2.0") throw new Error(`Unexpected installed version: ${version.stdout.trim()}`);
   const help = await exec(binary, ["--help"], {
     cwd: prefix, windowsHide: true,
     env: { ...process.env, OPENAI_API_KEY: "", ANTHROPIC_API_KEY: "", NO_PROXY: "*" },

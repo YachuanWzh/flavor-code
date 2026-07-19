@@ -1,5 +1,22 @@
 import { z } from "zod";
 
+export const PERMISSION_MODES = [
+  "default", "acceptEdits", "plan", "bypassPermissions", "auto", "bubble",
+] as const;
+export type PermissionMode = (typeof PERMISSION_MODES)[number];
+export type LegacyPermissionMode = "safe" | "workspace" | "full";
+
+export function normalizePermissionMode(value: unknown): unknown {
+  if (value === "safe" || value === "workspace") return "default";
+  if (value === "full") return "bypassPermissions";
+  return value;
+}
+
+export const PermissionModeSchema = z.preprocess(
+  normalizePermissionMode,
+  z.enum(PERMISSION_MODES).default("default"),
+);
+
 export const ProviderConfigSchema = z.object({
   type: z.string(),
   baseURL: z.string().url().optional(),
@@ -55,7 +72,7 @@ export const FlavorConfigSchema = z.object({
     .optional(),
   maxSubagents: z.number().int().min(1).max(16).default(3),
   maxSessions: z.number().int().min(1).max(1000).default(50),
-  permissionMode: z.enum(["safe", "workspace", "full"]).default("workspace"),
+  permissionMode: PermissionModeSchema,
   language: z
     .string()
     .regex(/^[a-z]{2}(-[A-Z]{2})?$/, "language must be a BCP47 tag like zh-CN or en-US")

@@ -273,10 +273,13 @@ describe("transcriptReducer", () => {
     ]);
   });
 
-  it("retains completed task rows when a replacement plan removes them", () => {
+  it("removes stale task and subagent rows when a replacement snapshot omits them", () => {
     const first = {
       id: "inspect", subject: "Inspect code", activeForm: "Inspecting code",
       status: "completed" as const, dependencies: [],
+    };
+    const oldWorker = {
+      id: "old-worker", description: "Old worker", dependencies: [], expectedOutputs: [], verification: [],
     };
     const second = {
       id: "implement", subject: "Implement change", activeForm: "Implementing change",
@@ -284,14 +287,17 @@ describe("transcriptReducer", () => {
     };
     let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "work" });
     state = transcriptReducer(state, { type: "session", event: {
-      type: "tasks", snapshot: { plan: { tasks: [first] }, subagents: { states: {} } },
+      type: "tasks",
+      snapshot: {
+        plan: { tasks: [first] },
+        subagents: { graph: { nodes: [oldWorker] }, states: { "old-worker": "completed" } },
+      },
     } });
     state = transcriptReducer(state, { type: "session", event: {
       type: "tasks", snapshot: { plan: { tasks: [second] }, subagents: { states: {} } },
     } });
 
     expect(state.active?.blocks).toEqual([
-      expect.objectContaining({ id: "task:inspect", state: "completed" }),
       expect.objectContaining({ id: "task:implement", state: "info" }),
     ]);
   });

@@ -55,6 +55,23 @@ it("uses loop tranche defaults and validates explicit overrides", () => {
   expect(() => FlavorConfigSchema.parse({ loop: { isolation: "current" } })).toThrow();
 });
 
+it("supports the six canonical permission modes and defaults to default", () => {
+  expect(FlavorConfigSchema.parse({}).permissionMode).toBe("default");
+  for (const permissionMode of [
+    "default", "acceptEdits", "plan", "bypassPermissions", "auto", "bubble",
+  ] as const) {
+    expect(FlavorConfigSchema.parse({ permissionMode }).permissionMode).toBe(permissionMode);
+  }
+});
+
+it.each([
+  ["safe", "default"],
+  ["workspace", "default"],
+  ["full", "bypassPermissions"],
+] as const)("migrates the legacy %s permission mode to %s", (legacy, canonical) => {
+  expect(FlavorConfigSchema.parse({ permissionMode: legacy }).permissionMode).toBe(canonical);
+});
+
 it("uses the hallucination evaluation timeout default and validates overrides", () => {
   expect(FlavorConfigSchema.parse({}).hallucination).toEqual({
     showWarnings: false,
@@ -90,6 +107,95 @@ it("persists an MCP enabled override in project configuration without losing exi
     language: "zh-CN",
     mcpServers: { filesystem: { command: "npx", args: ["server", "."], disabled: true } },
   });
+});
+
+it("serializes concurrent MCP updates and backs up the previous valid configuration", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "flavor-mcp-concurrent-"));
+  const path = join(cwd, ".flavor", "flavor.json");
+  await mkdir(dirname(path), { recursive: true });
+  const original = {
+    language: "zh-CN",
+    mcpServers: {
+      docs: { command: "node", args: ["docs.js"] },
+      search: { command: "node", args: ["search.js"] },
+    },
+  };
+  await writeFile(path, `${JSON.stringify(original, null, 2)}\n`);
+
+  await Promise.all([
+    setProjectMcpServerDisabled(cwd, "docs", true),
+    setProjectMcpServerDisabled(cwd, "search", true),
+  ]);
+
+  expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({
+    language: "zh-CN",
+    mcpServers: { docs: { disabled: true }, search: { disabled: true } },
+  });
+  expect(JSON.parse(await readFile(`${path}.bak`, "utf8"))).toMatchObject({
+    language: "zh-CN",
+    mcpServers: { docs: { command: "node" }, search: { command: "node" } },
+  });
+});
+
+it("loads a valid backup when the primary project configuration is malformed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "flavor-config-backup-"));
+  const home = join(root, "home");
+  const cwd = join(root, "repo");
+  const path = join(cwd, ".flavor", "flavor.json");
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, "{ truncated");
+  await writeFile(`${path}.bak`, JSON.stringify({ language: "zh-CN", maxSubagents: 7 }));
+
+  const loaded = await loadConfig({ cwd, home });
+
+  expect(loaded.config).toMatchObject({ language: "zh-CN", maxSubagents: 7 });
+  expect(loaded.sources).toContain(`${path}.bak`);
+});
+
+it("migrates global plaintext secrets to authenticated envelopes without changing resolved values", async () => {
+  const root = await mkdtemp(join(tmpdir(), "flavor-config-encryption-"));
+  const home = join(root, "home");
+  const cwd = join(root, "repo");
+  const path = join(home, ".flavor-code", "flavor.json");
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, JSON.stringify({
+    providers: { custom: { type: "openai", apiKey: "global-top-secret" } },
+  }));
+
+  const loaded = await loadConfig({ cwd, home });
+  const persisted = await readFile(path, "utf8");
+  const backup = await readFile(`${path}.bak`, "utf8");
+
+  expect(loaded.config.providers.custom?.apiKey).toBe("global-top-secret");
+  expect(persisted).not.toContain("global-top-secret");
+  expect(backup).not.toContain("global-top-secret");
+  expect(persisted).toContain("flavor:v1:");
+  const key = await readFile(join(home, ".flavor-code", ".config.key"), "utf8");
+  expect(Buffer.from(key.trim(), "base64")).toHaveLength(32);
+});
+
+it("recovers a tampered encrypted global configuration from its authenticated backup", async () => {
+  const root = await mkdtemp(join(tmpdir(), "flavor-config-encrypted-backup-"));
+  const home = join(root, "home");
+  const cwd = join(root, "repo");
+  const path = join(home, ".flavor-code", "flavor.json");
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, JSON.stringify({
+    providers: { custom: { type: "openai", apiKey: "recover-me" } },
+  }));
+  await loadConfig({ cwd, home });
+
+  const tamper = (raw: string) => raw.replace(/(flavor:v1:[^:\"]+:[^:\"]+:)([^\"])/, (_match, prefix: string, byte: string) =>
+    `${prefix}${byte === "A" ? "B" : "A"}`,
+  );
+  await writeFile(path, tamper(await readFile(path, "utf8")));
+
+  const loaded = await loadConfig({ cwd, home });
+  expect(loaded.config.providers.custom?.apiKey).toBe("recover-me");
+  expect(loaded.sources).toContain(`${path}.bak`);
+
+  await writeFile(`${path}.bak`, tamper(await readFile(`${path}.bak`, "utf8")));
+  await expect(loadConfig({ cwd, home })).rejects.toThrow(/authentic|decrypt|integrity|invalid/i);
 });
 
 it("accepts stdio and Streamable HTTP MCP server configurations", () => {
@@ -172,7 +278,7 @@ it("merges CLI, project, env, global, and defaults in precedence order", async (
   const loaded = await loadConfig({ cwd, home, cli: { maxSubagents: 5 } });
 
   expect(loaded.config.maxSubagents).toBe(5);
-  expect(loaded.config.permissionMode).toBe("safe");
+  expect(loaded.config.permissionMode).toBe("default");
   expect(loaded.config.loop).toEqual({ maxCycles: 30, maxTokens: 1_000_000, isolation: "auto" });
 });
 

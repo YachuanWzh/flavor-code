@@ -11,6 +11,7 @@ import {
 import type { SlashCompletion } from "../../src/ui/slash-completion.js";
 import type { MentionCompletion } from "../../src/ui/mention-completion.js";
 import { createTranscriptState, transcriptReducer, type TranscriptTurn } from "../../src/ui/transcript.js";
+import { TaskProgressPanel, type TaskBlock } from "../../src/ui/task-progress.js";
 import { WelcomeCard } from "../../src/ui/welcome.js";
 
 const turn = (id: number, prompt: string, assistantText: string): TranscriptTurn => ({
@@ -435,6 +436,61 @@ describe("TerminalLayout", () => {
     expect(output).toContain("subagent: Worker A");
     expect(output).toContain("Worker B");
     expect(output.match(/⠋/gu)).toHaveLength(1);
+  });
+
+  it("keeps every task available instead of slicing the list to six rows", () => {
+    const active: TranscriptTurn = {
+      id: 1,
+      prompt: "implement",
+      assistantText: "",
+      statusLines: [],
+      blocks: Array.from({ length: 8 }, (_, index) => ({
+        kind: "status" as const,
+        id: `subagent:worker-${index + 1}`,
+        state: "info" as const,
+        text: `· subagent: Worker ${index + 1} · pending`,
+        task: { subject: `Worker ${index + 1}`, activeForm: `Worker ${index + 1}`, role: "subagent" as const },
+      })),
+    };
+    const output = renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={[]} active={active}
+      input="next request" promptCursor={12} columns={80} rows={40} activeSession
+    />, { columns: 80 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(output).toContain("Worker 7");
+    expect(output).not.toContain("Worker 8");
+    expect(output).not.toContain("... and 2 more");
+    const panel = TaskProgressPanel({ blocks: active.blocks as TaskBlock[], interactive: true, maxHeight: 8 });
+    const scroll = React.Children.toArray(panel?.props.children)[1] as React.ReactElement<{ children?: React.ReactNode }>;
+    expect(React.Children.count(scroll.props.children)).toBe(8);
+  });
+
+  it("bounds wrapped task descriptions so the prompt stays inside a short viewport", () => {
+    const active: TranscriptTurn = {
+      id: 1,
+      prompt: "implement",
+      assistantText: "",
+      statusLines: [],
+      blocks: Array.from({ length: 6 }, (_, index) => ({
+        kind: "status" as const,
+        id: `subagent:long-${index + 1}`,
+        state: "info" as const,
+        text: `· subagent: ${"Long delegated task description ".repeat(3)}${index + 1} · pending`,
+        task: {
+          subject: `Long task ${index + 1}`,
+          activeForm: `${"Long delegated task description ".repeat(3)}${index + 1}`,
+          role: "subagent" as const,
+        },
+      })),
+    };
+    const output = renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={[]} active={active}
+      input="next request" promptCursor={12} columns={40} rows={12} activeSession
+    />, { columns: 40 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(output).toContain("next request");
+    expect(output).toContain("Ctrl+C cancel");
+    expect(output.split("\n").length).toBeLessThanOrEqual(12);
   });
 
   it("renders the hint dimmed in parentheses next to the status text", () => {

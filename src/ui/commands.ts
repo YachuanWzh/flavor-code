@@ -23,7 +23,7 @@ export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string>
   mcp: "Manage MCP servers",
 };
 
-export type PermissionCommandMode = "safe" | "workspace" | "full";
+export type PermissionCommandMode = PermissionMode;
 export type ModelRole = "main" | "subagent";
 export type McpSlashCommand =
   | { name: "mcp"; action: "status" }
@@ -69,10 +69,11 @@ export function parseSlashCommand(
   }
   if (name === "permissions") {
     const [mode, ...extra] = args;
-    if ((mode !== "safe" && mode !== "workspace" && mode !== "full") || extra.length > 0) {
-      return { name: "invalid", command: name, message: "Use /permissions <safe|workspace|full>." };
+    const normalized = normalizePermissionMode(mode);
+    if (typeof normalized !== "string" || !(PERMISSION_MODES as readonly string[]).includes(normalized) || extra.length > 0) {
+      return { name: "invalid", command: name, message: `Use /permissions <${PERMISSION_MODES.join("|")}>.` };
     }
-    return { name, mode };
+    return { name, mode: normalized as PermissionMode };
   }
   if (name === "audit") {
     const toolFilter = args.length > 0 ? args.join(" ") : undefined;
@@ -123,3 +124,4 @@ function editDistance(left: string, right: string): number {
   }
   return previous[right.length] ?? left.length;
 }
+import { normalizePermissionMode, PERMISSION_MODES, type PermissionMode } from "../config/schema.js";

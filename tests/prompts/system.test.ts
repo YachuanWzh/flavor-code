@@ -6,7 +6,7 @@ const base: Omit<SystemPromptOptions, "agent" | "toolNames"> = {
   languageInstruction: "Always reply in Simplified Chinese.",
   workspace: "C:\\repo\nignored",
   model: "openai:gpt-5",
-  permissionMode: "workspace",
+  permissionMode: "default",
   environment: {
     date: "2026-07-13",
     platform: "win32",
@@ -97,7 +97,7 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("- OS version: Windows 11");
     expect(prompt).toContain("- Shell: powershell");
     expect(prompt).toContain("- Model: openai:gpt-5");
-    expect(prompt).toContain("- Permission mode: workspace");
+    expect(prompt).toContain("- Permission mode: default");
   });
 
   it("omits a blank language preference", () => {

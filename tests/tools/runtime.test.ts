@@ -39,6 +39,73 @@ function fixture(decision: "allow" | "deny" | "ask" = "allow") {
 }
 
 describe("ToolRuntime", () => {
+  it("uses auto classification for unresolved main-agent permission decisions", async () => {
+    const f = fixture();
+    let executions = 0;
+    const tool = { ...f.tool, name: "WebFetch", execute: async () => { executions += 1; return "done"; } };
+    const decisions = ["allow", "deny"] as const;
+    let classifications = 0;
+    const runtime = new ToolRuntime({
+      tools: [tool], hooks: f.hooks,
+      permissions: new PermissionEngine({ workspace: f.workspace, mode: "auto" }),
+      classify: async () => ({ decision: decisions[classifications++] ?? "ask", reason: "classified" }),
+    });
+
+    await expect(runtime.execute({ name: "WebFetch", input: { path: "https://example.com" } }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: true });
+    await expect(runtime.execute({ name: "WebFetch", input: { path: "https://example.com" } }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: false, error: { code: "permission_denied" } });
+    expect(classifications).toBe(2);
+    expect(executions).toBe(1);
+  });
+
+  it("never sends deterministically forbidden commands to the auto classifier", async () => {
+    const f = fixture();
+    let classifications = 0;
+    const runtime = new ToolRuntime({
+      tools: [createShellTool(f.workspace)], hooks: f.hooks,
+      permissions: new PermissionEngine({ workspace: f.workspace, mode: "auto" }),
+      classify: async () => { classifications += 1; return { decision: "allow" }; },
+    });
+
+    await expect(runtime.execute(
+      { name: "Shell", input: { command: "rm", args: ["-rf", "/"], cwd: "." } },
+      { agent: "main" },
+    )).resolves.toMatchObject({ ok: false, error: { code: "permission_denied" } });
+    expect(classifications).toBe(0);
+  });
+
+  it("falls back to normal approval when auto classification is unavailable", async () => {
+    const f = fixture();
+    const tool = { ...f.tool, name: "WebFetch" };
+    let approvals = 0;
+    const runtime = new ToolRuntime({
+      tools: [tool], hooks: f.hooks,
+      permissions: new PermissionEngine({ workspace: f.workspace, mode: "auto" }),
+      classify: async () => { throw new Error("classifier offline"); },
+      approve: async () => { approvals += 1; return "once" as const; },
+    });
+
+    await expect(runtime.execute({ name: "WebFetch", input: { path: "https://example.com" } }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: true });
+    expect(approvals).toBe(1);
+  });
+
+  it("bubbles subagent approval requests through the parent approval callback", async () => {
+    const f = fixture();
+    let approvals = 0;
+    const runtime = new ToolRuntime({
+      tools: [f.tool], hooks: f.hooks,
+      permissions: new PermissionEngine({ workspace: f.workspace, mode: "bubble" }),
+      approve: async () => { approvals += 1; return "once" as const; },
+    });
+
+    await expect(runtime.execute(
+      { name: "Test", input: { path: join(f.workspace, "x") } },
+      { agent: "subagent" },
+    )).resolves.toMatchObject({ ok: true });
+    expect(approvals).toBe(1);
+  });
   it("exposes and validates a tool definition without side effects", () => {
     const f = fixture();
     const runtime = new ToolRuntime({ tools: [f.tool], hooks: f.hooks, permissions: f.permissions });

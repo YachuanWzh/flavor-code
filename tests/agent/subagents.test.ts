@@ -291,14 +291,14 @@ describe("LocalHarness", () => {
     const harness = harnessFixture(() => contextFixture());
     harness.setModel("main", "fake:new-main");
     harness.setModel("subagent", "fake:new-child");
-    harness.setPermissionMode("full");
+    harness.setPermissionMode("bypassPermissions");
     expect(harness.mainModelId).toBe("fake:new-main");
     expect(harness.subagentModelId).toBe("fake:new-child");
-    expect(harness.permissionMode).toBe("full");
+    expect(harness.permissionMode).toBe("bypassPermissions");
     expect(harness.createSubagent(node("fresh")).modelId).toBe("fake:new-child");
   });
 
-  it("creates isolated cheaper subagents without Task and with workspace permissions", async () => {
+  it("creates isolated cheaper subagents without Task and with bubble permissions", async () => {
     const hooks = new HookBus();
     const adapter: ModelAdapter = { async *stream() { yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } }; } };
     const registry = new ModelRegistry().register("fake", adapter);
@@ -468,7 +468,7 @@ describe("LocalHarness", () => {
     expect(() => harness.createSubagent(node("late"))).toThrow("disposed");
   });
 
-  it("runs child loops with the cheap model, subagent identity, no Task tool, and no approval callback", async () => {
+  it("runs child loops with the cheap model, subagent identity, no Task tool, and bubbled approval", async () => {
     const requests: Array<{ model: string; tools: string[]; messages: string[] }> = [];
     let cheapCalls = 0;
     const adapter: ModelAdapter = {
@@ -504,8 +504,8 @@ describe("LocalHarness", () => {
 
     expect(requests.map((request) => request.model)).toEqual(["cheap", "cheap"]);
     expect(requests.every((request) => !request.tools.includes("Task"))).toBe(true);
-    expect(requests[1]?.messages.join("\n")).toContain("approval_required");
-    expect(approvals).toBe(0);
+    expect(requests[1]?.messages.join("\n")).not.toContain("approval_required");
+    expect(approvals).toBe(1);
   });
 });
 

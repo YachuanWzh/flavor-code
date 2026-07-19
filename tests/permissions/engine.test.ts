@@ -6,12 +6,47 @@ import { describe, expect, it } from "vitest";
 import { getToolCategory, PermissionEngine } from "../../src/permissions/engine.js";
 
 describe("PermissionEngine", () => {
+  it("implements the six canonical permission modes", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-canonical-permissions-"));
+    const outside = mkdtempSync(join(tmpdir(), "flavor-canonical-outside-"));
+    const localWrite = { agent: "main" as const, tool: "Write", paths: [join(workspace, "x")] };
+    const outsideWrite = { agent: "main" as const, tool: "Write", paths: [join(outside, "x")] };
+    const routine = { agent: "main" as const, tool: "Shell", command: "npm test", cwd: workspace };
+
+    expect(new PermissionEngine({ workspace, mode: "default" }).decide(localWrite).decision).toBe("ask");
+    expect(new PermissionEngine({ workspace, mode: "default" }).decide(routine).decision).toBe("ask");
+
+    expect(new PermissionEngine({ workspace, mode: "acceptEdits" }).decide(localWrite).decision).toBe("allow");
+    expect(new PermissionEngine({ workspace, mode: "acceptEdits" }).decide(outsideWrite).decision).toBe("ask");
+    expect(new PermissionEngine({ workspace, mode: "acceptEdits" }).decide(routine).decision).toBe("allow");
+
+    const plan = new PermissionEngine({ workspace, mode: "plan" });
+    expect(plan.decide({ agent: "main", tool: "Read", paths: [join(workspace, "x")] }).decision).toBe("allow");
+    expect(plan.decide(localWrite).decision).toBe("deny");
+    expect(plan.decide(routine).decision).toBe("deny");
+    expect(plan.decide({ agent: "main", tool: "WebFetch" }).decision).toBe("deny");
+
+    const bypass = new PermissionEngine({ workspace, mode: "bypassPermissions" });
+    expect(bypass.decide(outsideWrite).decision).toBe("allow");
+    expect(bypass.decide({ agent: "main", tool: "Delete", paths: [join(workspace, "x")] }).decision).toBe("allow");
+    expect(bypass.decide({ agent: "main", tool: "Shell", command: "rm -rf /" }).decision).toBe("deny");
+
+    expect(new PermissionEngine({ workspace, mode: "auto" }).decide(localWrite).decision).toBe("allow");
+    expect(new PermissionEngine({ workspace, mode: "auto" })
+      .decide({ agent: "main", tool: "WebFetch" })).toMatchObject({
+        decision: "ask", reason: expect.stringMatching(/classif/i),
+      });
+
+    const bubble = new PermissionEngine({ workspace, mode: "bubble" });
+    expect(bubble.decide({ agent: "subagent", tool: "Read", paths: [join(workspace, "x")] }).decision).toBe("allow");
+    expect(bubble.decide({ agent: "subagent", tool: "Write", paths: [join(workspace, "x")] }).decision).toBe("ask");
+  });
   it("updates the main permission mode for subsequent decisions", () => {
     const engine = new PermissionEngine({ workspace: process.cwd(), mode: "safe" });
     const request = { agent: "main" as const, tool: "Shell", command: "npm", args: ["test"], cwd: process.cwd() };
     expect(engine.decide(request).decision).toBe("ask");
-    engine.setMode("workspace");
-    expect(engine.mode).toBe("workspace");
+    engine.setMode("acceptEdits");
+    expect(engine.mode).toBe("acceptEdits");
     expect(engine.decide(request).decision).toBe("allow");
   });
 
@@ -58,7 +93,7 @@ describe("PermissionEngine", () => {
     const workspace = join(root, "workspace");
     const outside = join(root, "outside");
     mkdirSync(workspace); mkdirSync(outside);
-    const engine = new PermissionEngine({ workspace, mode: "workspace" });
+    const engine = new PermissionEngine({ workspace, mode: "default" });
     expect(engine.decide({ agent: "main", tool: "Write", paths: [`${workspace}${sep}..${sep}outside${sep}x`] }).decision).toBe("deny");
     if (process.platform === "win32") {
       const forwardSlashTraversal = `${workspace.replaceAll("\\", "/")}/../outside/x`;
@@ -71,7 +106,7 @@ describe("PermissionEngine", () => {
 
   it("classifies routine, network, and forbidden shell commands", () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-workspace-"));
-    const engine = new PermissionEngine({ workspace, mode: "workspace" });
+    const engine = new PermissionEngine({ workspace, mode: "acceptEdits" });
     expect(engine.decide({ agent: "main", tool: "Shell", command: "npm test" }).decision).toBe("allow");
     expect(engine.decide({ agent: "main", tool: "Shell", command: "npm run build" }).decision).toBe("allow");
     expect(engine.decide({ agent: "main", tool: "Shell", command: "curl https://example.com" }).decision).toBe("ask");
@@ -156,6 +191,20 @@ describe("PermissionEngine", () => {
     expect(engine.decide({ agent: "subagent", tool: "Shell", cwd: workspace, command: `pytest ${join(workspace, "tests")}` }).decision).toBe("allow");
     expect(engine.decide({ agent: "subagent", tool: "Shell", cwd: workspace, command: "pytest ambiguous-target" }).decision).toBe("ask");
     expect(engine.decide({ agent: "subagent", tool: "Shell", cwd: workspace, command: "make test" }).decision).toBe("ask");
+  });
+
+  it("checks main-agent routine-command cwd and path arguments before fast-path approval", () => {
+    const root = mkdtempSync(join(tmpdir(), "flavor-main-command-paths-"));
+    const workspace = join(root, "workspace");
+    const outside = join(root, "outside");
+    mkdirSync(workspace); mkdirSync(outside);
+    for (const mode of ["acceptEdits", "auto"] as const) {
+      const engine = new PermissionEngine({ workspace, mode });
+      expect(engine.decide({ agent: "main", tool: "Shell", cwd: outside, command: "npm test" }).decision).toBe("deny");
+      expect(engine.decide({ agent: "main", tool: "Shell", cwd: workspace, command: `npm test -- --config ${outside}` }).decision).toBe("deny");
+      expect(engine.decide({ agent: "main", tool: "Shell", cwd: workspace, command: "pytest ambiguous-target" }).decision).toBe("ask");
+      expect(engine.decide({ agent: "main", tool: "Shell", cwd: workspace, command: "npm test" }).decision).toBe("allow");
+    }
   });
 
   it("does not auto-allow cmd indirections or unproven wrappers in full mode", () => {

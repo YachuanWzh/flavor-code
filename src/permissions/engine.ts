@@ -1,9 +1,9 @@
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, parse, relative, resolve, sep } from "node:path";
 
-import type { FlavorConfig } from "../config/schema.js";
+import { normalizePermissionMode, type LegacyPermissionMode, type PermissionMode } from "../config/schema.js";
 
-export type PermissionMode = FlavorConfig["permissionMode"];
+export type { PermissionMode } from "../config/schema.js";
 export type PermissionDecision = { decision: "allow" | "deny" | "ask"; reason?: string };
 
 export interface PermissionRequest {
@@ -17,7 +17,7 @@ export interface PermissionRequest {
 
 export interface PermissionEngineOptions {
   workspace: string;
-  mode?: PermissionMode;
+  mode?: PermissionMode | LegacyPermissionMode;
 }
 
 const CONTROL_TOOLS = new Set(["TaskPlan", "TaskUpdate", "AskUserQuestion", "TodoWrite", "TaskOutput"]);
@@ -55,12 +55,12 @@ export class PermissionEngine {
   constructor(options: PermissionEngineOptions) {
     const root = resolve(options.workspace);
     this.#workspace = existsSync(root) ? realpathSync.native(root) : root;
-    this.#mode = options.mode ?? "workspace";
+    this.#mode = canonicalMode(options.mode ?? "default");
   }
 
   get mode(): PermissionMode { return this.#mode; }
 
-  setMode(mode: PermissionMode): void { this.#mode = mode; }
+  setMode(mode: PermissionMode | LegacyPermissionMode): void { this.#mode = canonicalMode(mode); }
 
   decide(request: PermissionRequest): PermissionDecision {
     if (request.tool === "Task") return request.agent === "main"
@@ -83,25 +83,31 @@ export class PermissionEngine {
     }
 
     const inside = paths.every((path) => classifyPath(this.#workspace, path).inside);
+    if (this.#mode === "plan") {
+      return READ_TOOLS.has(request.tool)
+        ? { decision: "allow" }
+        : { decision: "deny", reason: "Plan mode is read-only" };
+    }
     if (READ_TOOLS.has(request.tool)) {
-      if (this.#mode === "safe" || this.#mode === "full" || inside) return { decision: "allow" };
-      return { decision: "ask", reason: "Read is outside the workspace" };
+      return { decision: "allow" };
     }
     if (DESTRUCTIVE_TOOLS.has(request.tool)) {
-      return { decision: "ask", reason: "Destructive operation requires approval" };
+      if (request.agent === "main" && this.#mode === "bypassPermissions") return { decision: "allow" };
+      return ask(this.#mode, "Destructive operation requires approval");
     }
     if (WRITE_TOOLS.has(request.tool)) {
-      if (this.#mode === "safe") return { decision: "ask", reason: "Safe mode requires approval for writes" };
-      if (this.#mode === "full") return { decision: "allow" };
-      if (inside) return { decision: "ask", reason: "Write requires approval" };
-      return { decision: "ask", reason: "Write is outside the workspace" };
+      if (request.agent === "main" && this.#mode === "bypassPermissions") return { decision: "allow" };
+      if (inside && (this.#mode === "acceptEdits" || this.#mode === "auto")) return { decision: "allow" };
+      return ask(this.#mode, inside ? "Write requires approval" : "Write is outside the workspace");
     }
     if (SHELL_TOOLS.has(request.tool)) return this.#shellDecision(request);
     if (isNetworkTool(request.tool)) {
-      if (request.agent === "subagent") return { decision: "ask", reason: "Subagent network access requires main-Agent approval" };
-      return this.#mode === "full" ? { decision: "allow" } : { decision: "ask", reason: "Network access requires approval" };
+      if (request.agent === "subagent") return ask(this.#mode, "Subagent network access requires main-Agent approval");
+      return this.#mode === "bypassPermissions"
+        ? { decision: "allow" }
+        : ask(this.#mode, "Network access requires approval");
     }
-    return { decision: "ask", reason: `Unknown tool: ${request.tool}` };
+    return ask(this.#mode, `Unknown tool: ${request.tool}`);
   }
 
   #shellDecision(request: PermissionRequest): PermissionDecision {
@@ -123,15 +129,35 @@ export class PermissionEngine {
       return { decision: "allow" };
     }
     if (analysis.destructive) {
-      return this.#mode === "full"
+      return this.#mode === "bypassPermissions" || this.#mode === "auto"
         ? { decision: "deny", reason: "Explicitly forbidden high-risk command" }
-        : { decision: "ask", reason: "Risky shell command requires approval" };
+        : ask(this.#mode, "Risky shell command requires approval");
     }
-    if (analysis.wrapped || analysis.opaque) return { decision: "ask", reason: "Shell wrapper requires approval" };
-    if (this.#mode === "full") return { decision: "allow" };
-    if (this.#mode === "workspace" && isRoutineCommand(analysis.command)) return { decision: "allow" };
-    return { decision: "ask", reason: "Shell command requires approval" };
+    if (analysis.wrapped || analysis.opaque) return ask(this.#mode, "Shell wrapper requires approval");
+    if (this.#mode === "bypassPermissions") return { decision: "allow" };
+    if ((this.#mode === "acceptEdits" || this.#mode === "auto") && isRoutineCommand(analysis.command)) {
+      const cwd = request.cwd ?? this.#workspace;
+      const cwdClassification = classifyPath(this.#workspace, cwd);
+      if (cwdClassification.escape || !cwdClassification.inside) {
+        return { decision: "deny", reason: "Routine command cwd must remain in the workspace" };
+      }
+      const argumentDecision = assessRoutineArguments(analysis.command, cwd, this.#workspace);
+      if (argumentDecision === "deny") return { decision: "deny", reason: "Routine command arguments escape the workspace" };
+      if (argumentDecision === "ask") return ask(this.#mode, "Ambiguous routine command arguments require approval");
+      return { decision: "allow" };
+    }
+    return ask(this.#mode, "Shell command requires approval");
   }
+}
+
+function canonicalMode(mode: PermissionMode | LegacyPermissionMode): PermissionMode {
+  return normalizePermissionMode(mode) as PermissionMode;
+}
+
+function ask(mode: PermissionMode, reason: string): PermissionDecision {
+  return mode === "auto"
+    ? { decision: "ask", reason: `Auto classification required: ${reason}` }
+    : { decision: "ask", reason };
 }
 
 function isNetworkTool(name: string): boolean {

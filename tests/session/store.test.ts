@@ -28,7 +28,7 @@ function document(root: string): SessionDocument {
       results: { a: { taskId: "a", status: "completed", summary: "done", filesChanged: [], commandsRun: [], verification: [], artifacts: [], risks: [], suggestedNextSteps: [] } },
     },
     models: { main: "local:large", subagent: "local:small" },
-    permissionMode: "workspace",
+    permissionMode: "default",
   };
 }
 

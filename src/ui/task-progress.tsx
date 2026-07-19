@@ -1,6 +1,6 @@
-import React, { useRef } from "react";
+import React, { useRef, type Ref } from "react";
 
-import { Box, Text } from "../claude-ink/index.js";
+import { Box, ScrollBox, Text, type ScrollBoxHandle } from "../claude-ink/index.js";
 import { useAnimationFrame } from "../claude-ink/hooks/use-animation-frame.js";
 import type { TranscriptBlock } from "./transcript.js";
 import { statusPresentation } from "./task-progress-model.js";
@@ -60,18 +60,36 @@ export type TaskBlock = Extract<TranscriptBlock, { kind: "status" }>;
 export interface TaskProgressPanelProps {
   blocks: TaskBlock[];
   interactive: boolean;
-  maxVisible?: number;
+  maxHeight?: number;
+  scrollRef?: Ref<ScrollBoxHandle>;
+  onHoverChange?: (hovered: boolean) => void;
 }
 
-export function TaskProgressPanel({ blocks, interactive, maxVisible = 8 }: TaskProgressPanelProps): React.JSX.Element | null {
-  if (blocks.length === 0) return null;
-  const visible = blocks.slice(0, maxVisible);
-  const overflow = blocks.length - visible.length;
-  return <Box flexDirection="column" flexShrink={0} marginTop={1}>
+export function TaskProgressPanel({
+  blocks,
+  interactive,
+  maxHeight = 8,
+  scrollRef,
+  onHoverChange,
+}: TaskProgressPanelProps): React.JSX.Element | null {
+  if (blocks.length === 0 || maxHeight <= 0) return null;
+  return <Box
+    flexDirection="column"
+    flexShrink={0}
+    maxHeight={maxHeight}
+    onMouseEnter={() => onHoverChange?.(true)}
+    onMouseLeave={() => onHoverChange?.(false)}
+  >
     <Text dimColor>── task progress ──</Text>
-    {visible.map((block) => (
-      <TaskStatusLine key={block.id} block={block} interactive={interactive} />
-    ))}
-    {overflow > 0 ? <Text dimColor>  ... and {overflow} more</Text> : null}
+    {maxHeight > 1 ? <ScrollBox
+      {...(scrollRef === undefined ? {} : { ref: scrollRef })}
+      flexDirection="column"
+      flexShrink={1}
+      maxHeight={maxHeight - 1}
+    >
+      {blocks.map((block) => (
+        <TaskStatusLine key={block.id} block={block} interactive={interactive} />
+      ))}
+    </ScrollBox> : null}
   </Box>;
 }

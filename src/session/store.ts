@@ -4,6 +4,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
+import { PermissionModeSchema } from "../config/schema.js";
 import { TaskGraphSchema } from "../agent/planner.js";
 import { SubagentResultSchema } from "../agent/subagents.js";
 import { TaskPlanSchema, normalizeAbandonedPlan } from "../agent/task-plan.js";
@@ -42,7 +43,7 @@ const SessionBaseSchema = z.object({
     results: z.record(z.string(), SubagentResultSchema),
   }).strict(),
   models: z.object({ main: z.string().min(1).max(1_024), subagent: z.string().min(1).max(1_024) }).strict(),
-  permissionMode: z.enum(["safe", "workspace", "full"]),
+  permissionMode: PermissionModeSchema,
 }).strict();
 
 const SessionDocumentV1Schema = SessionBaseSchema.extend({
@@ -112,7 +113,7 @@ export class SessionStore {
       await handle?.close().catch(() => undefined);
       await rm(temporary, { force: true }).catch(() => undefined);
     }
-    void this.#prune().catch(() => undefined);
+    await this.#prune().catch(() => undefined);
   }
 
   async load(sessionId?: string): Promise<SessionDocument> {

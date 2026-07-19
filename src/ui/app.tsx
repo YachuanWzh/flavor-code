@@ -28,6 +28,7 @@ import {
   type TranscriptTurn,
 } from "./transcript.js";
 import { wrapPromptInput } from "./wrap-prompt.js";
+import { charWidth } from "./char-width.js";
 import { TaskProgressPanel, TaskStatusLine } from "./task-progress.js";
 import type { FileChangePresentation, FileDiffLine } from "../tools/types.js";
 import { fileDiffLineStyle } from "./file-diff-style.js";
@@ -132,6 +133,8 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   const [rows, setRows] = useState(stdout?.rows ?? 24);
   const [transcript, dispatch] = useReducer(transcriptReducer, undefined, createTranscriptState);
   const scrollRef = useRef<ScrollBoxHandle>(null);
+  const taskScrollRef = useRef<ScrollBoxHandle>(null);
+  const taskPanelHovered = useRef(false);
   const runtimeRef = useRef<ProductionRuntime | undefined>(undefined);
   const closing = useRef(false);
   const textBuf = useRef<{ pending: string; timer: ReturnType<typeof setTimeout> | null }>({ pending: "", timer: null });
@@ -276,7 +279,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   useInput((character, key) => {
     const terminalAction = classifyTerminalInput(key);
     if (terminalAction?.type === "scroll") {
-      const scroll = scrollRef.current;
+      const scroll = selectWheelScrollTarget(scrollRef.current, taskScrollRef.current, taskPanelHovered.current);
       if (scroll !== null) {
         if (terminalAction.rows < 0) scrollUp(scroll, -terminalAction.rows);
         else scrollDown(scroll, terminalAction.rows);
@@ -379,7 +382,14 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
       return;
     }
     if (key.backspace) {
-      updatePrompt({ type: "backspace" }, input, promptCursor, setInput, setPromptCursor);
+      const next = editPromptWithPastedBlocks(
+        { text: input, cursor: promptCursor },
+        { type: "backspace" },
+        pastedBlocks,
+      );
+      setInput(next.text);
+      setPromptCursor(next.cursor);
+      setPastedBlocks(next.pastedBlocks);
       setSlashSelection(0); setDismissedSlashInput(undefined);
       setMentionSelection(0); setDismissedMentionInput(undefined);
     } else if (key.delete) {
@@ -425,11 +435,14 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     input={input}
     pastedBlocks={pastedBlocks}
     promptCursor={promptCursor}
+    onPromptCursorChange={setPromptCursor}
     columns={columns}
     rows={rows}
     activeSession={transcript.active !== undefined}
     completedSlashTokenLength={completedTokenLength}
     scrollRef={scrollRef}
+    taskScrollRef={taskScrollRef}
+    onTaskPanelHoverChange={(hovered) => { taskPanelHovered.current = hovered; }}
     {...(slashCompletion === null ? {} : { completion: slashCompletion })}
     {...(mentionCompletion === null ? {} : { mentionCompletion, onMentionSelect: selectMention })}
     {...(approval === undefined ? {} : { approval })}
@@ -461,6 +474,7 @@ export interface TerminalLayoutProps {
   input: string;
   pastedBlocks?: readonly PastedBlock[];
   promptCursor: number;
+  onPromptCursorChange?: (cursor: number) => void;
   columns: number;
   rows?: number;
   activeSession: boolean;
@@ -471,11 +485,14 @@ export interface TerminalLayoutProps {
   approval?: { tool: string; reason?: string };
   questions?: readonly Question[];
   scrollRef?: React.Ref<ScrollBoxHandle>;
+  taskScrollRef?: React.Ref<ScrollBoxHandle>;
+  onTaskPanelHoverChange?: (hovered: boolean) => void;
 }
 
 export function TerminalLayout({
   model, workspaceName, completed, active, input, pastedBlocks = [], promptCursor, columns, rows = 24, activeSession, approval,
   questions, completion, mentionCompletion, onMentionSelect, completedSlashTokenLength: tokenLength = 0, scrollRef,
+  taskScrollRef, onTaskPanelHoverChange, onPromptCursorChange,
 }: TerminalLayoutProps): React.JSX.Element {
   const dividerWidth = Math.max(1, columns - 1);
   const showWelcome = completed.length === 0 && active === undefined;
@@ -493,18 +510,16 @@ export function TerminalLayout({
     ),
   };
 
-  const MAX_TASK_VISIBLE = 6;
-  const taskPanelRows = activeTaskBlocks.length === 0 ? 0
-    : 1 + Math.min(activeTaskBlocks.length, MAX_TASK_VISIBLE) + (activeTaskBlocks.length > MAX_TASK_VISIBLE ? 1 : 0);
-
   const questionRows = questions === undefined ? 0
     : questions.length === 1 ? 4 + questions[0]!.options.length
     : 3 + questions.length * 2;
 
-  const fixedBottomRows = (approval === undefined ? 0 : 3) + questionRows + menuRows + taskPanelRows + 2;
-  const bottomMaxRows = Math.min(rows, Math.max(Math.floor(rows / 2), fixedBottomRows + 1));
+  const fixedBottomRows = (approval === undefined ? 0 : 3) + questionRows + menuRows + 2;
+  const taskPanelRows = taskPanelViewportRows(rows, fixedBottomRows, activeTaskBlocks.length > 0);
+  const availableBottomRows = Math.max(1, rows - taskPanelRows - 1);
+  const bottomMaxRows = Math.min(availableBottomRows, Math.max(Math.floor(rows / 2), fixedBottomRows + 1));
   const promptMaxLines = Math.max(1, bottomMaxRows - fixedBottomRows);
-  return <Box flexGrow={1} width="100%" flexDirection="column" overflow="hidden">
+  return <Box height={rows} width="100%" flexDirection="column" overflow="hidden">
     <ScrollBox {...(scrollRef === undefined ? {} : { ref: scrollRef })} flexGrow={1} flexDirection="column" stickyScroll>
       {showWelcome
         ? <WelcomeCard model={model} workspaceName={workspaceName} columns={columns} />
@@ -523,7 +538,13 @@ export function TerminalLayout({
         </Box>
       )}
     </ScrollBox>
-    <TaskProgressPanel blocks={activeTaskBlocks} interactive={activeSession} maxVisible={MAX_TASK_VISIBLE} />
+    <TaskProgressPanel
+      blocks={activeTaskBlocks}
+      interactive={activeSession}
+      maxHeight={taskPanelRows}
+      {...(taskScrollRef === undefined ? {} : { scrollRef: taskScrollRef })}
+      {...(onTaskPanelHoverChange === undefined ? {} : { onHoverChange: onTaskPanelHoverChange })}
+    />
     <Box flexDirection="column" flexShrink={0} maxHeight={bottomMaxRows} width="100%" overflowY="hidden">
       {approval === undefined ? null : <Box flexDirection="column" marginBottom={1}>
         <Text color="magenta">┌─ approval · {approval.tool}</Text>
@@ -548,6 +569,7 @@ export function TerminalLayout({
         columns={columns}
         maxVisibleLines={promptMaxLines}
         completedSlashTokenLength={tokenLength}
+        {...(onPromptCursorChange === undefined ? {} : { onCursorChange: onPromptCursorChange })}
       />
       <Text dimColor wrap="truncate-end">{activeSession
         ? "Ctrl+C cancel · Ctrl+C again exit"
@@ -658,6 +680,22 @@ function jumpScroll(scroll: ScrollBoxHandle, delta: number): void {
   } else {
     scroll.scrollTo(Math.max(0, target));
   }
+}
+
+export function selectWheelScrollTarget(
+  transcript: ScrollBoxHandle | null,
+  tasks: ScrollBoxHandle | null,
+  taskPanelHovered: boolean,
+): ScrollBoxHandle | null {
+  return taskPanelHovered && tasks !== null ? tasks : transcript;
+}
+
+export function taskPanelViewportRows(rows: number, reservedBottomRows: number, hasTasks: boolean): number {
+  if (!hasTasks) return 0;
+  const terminalRows = Math.max(0, Math.floor(rows));
+  const reserved = Math.max(0, Math.floor(reservedBottomRows));
+  const available = Math.max(0, terminalRows - reserved - 1);
+  return Math.min(8, Math.max(1, Math.floor(terminalRows / 3)), available);
 }
 
 function scrollDown(scroll: ScrollBoxHandle, amount: number): void {
@@ -789,13 +827,14 @@ function CompactProgressLine({ progress }: { progress: number }): React.JSX.Elem
   </Box>;
 }
 
-function PromptLine({
+export function PromptLine({
   input,
   pastedBlocks,
   cursor,
   columns,
   maxVisibleLines,
   completedSlashTokenLength: tokenLength = 0,
+  onCursorChange,
 }: {
   input: string;
   pastedBlocks: readonly PastedBlock[];
@@ -803,6 +842,7 @@ function PromptLine({
   columns: number;
   maxVisibleLines?: number;
   completedSlashTokenLength?: number;
+  onCursorChange?: (cursor: number) => void;
 }): React.JSX.Element {
   // The prompt container consumes one column of padding on each side. Feed
   // only its inner width to the wrapper so Yoga does not wrap the Text a
@@ -829,7 +869,19 @@ function PromptLine({
       const points = [...line];
       const cursorCol = wrap.cursor.column;
       const styledCount = Math.max(0, Math.min(points.length, tokenLength - (lineStarts[lineIndex] ?? 0)));
-      return <Box key={lineIndex}>
+      return <Box
+        key={lineIndex}
+        {...(onCursorChange === undefined ? {} : {
+          onClick: (event: ClickEvent) => {
+            onCursorChange(promptCursorFromClick(input, pastedBlocks, {
+              columns: innerColumns,
+              lineIndex,
+              localColumn: event.localCol,
+            }));
+            event.stopImmediatePropagation();
+          },
+        })}
+      >
         <Text color="yellow" bold>{lineIndex === 0 ? "❯ " : "  "}</Text>
         <PromptLineContent points={points} cursor={cursorCol} cursorVisible={isCursorLine} styledCount={styledCount} />
       </Box>;
@@ -837,12 +889,24 @@ function PromptLine({
   </Box>;
 }
 
-export function pastedDraftPresentation(
+interface PastedDraftMatch {
+  sourceStartPoint: number;
+  sourceEndPoint: number;
+  displayStartPoint: number;
+  displayEndPoint: number;
+  label: string;
+}
+
+interface PastedDraftModel extends PromptEditState {
+  matches: PastedDraftMatch[];
+}
+
+function pastedDraftModel(
   input: string,
   cursor: number,
   blocks: readonly PastedBlock[],
-): PromptEditState {
-  const matches: Array<{
+): PastedDraftModel {
+  const sourceMatches: Array<{
     start: number;
     end: number;
     startPoint: number;
@@ -857,9 +921,9 @@ export function pastedDraftPresentation(
     let start = input.indexOf(block.text);
     while (start >= 0) {
       const end = start + block.text.length;
-      const overlaps = matches.some((match) => start < match.end && end > match.start);
+      const overlaps = sourceMatches.some((match) => start < match.end && end > match.start);
       if (!overlaps) {
-        matches.push({
+        sourceMatches.push({
           start,
           end,
           startPoint: [...input.slice(0, start)].length,
@@ -872,13 +936,24 @@ export function pastedDraftPresentation(
     }
   }
 
-  if (matches.length === 0) return { text: input, cursor };
-  matches.sort((left, right) => left.start - right.start);
+  if (sourceMatches.length === 0) return { text: input, cursor, matches: [] };
+  sourceMatches.sort((left, right) => left.start - right.start);
 
   let text = "";
   let sourceOffset = 0;
-  for (const match of matches) {
-    text += input.slice(sourceOffset, match.start) + match.label;
+  const matches: PastedDraftMatch[] = [];
+  for (const match of sourceMatches) {
+    text += input.slice(sourceOffset, match.start);
+    const displayStartPoint = [...text].length;
+    text += match.label;
+    const displayEndPoint = [...text].length;
+    matches.push({
+      sourceStartPoint: match.startPoint,
+      sourceEndPoint: match.endPoint,
+      displayStartPoint,
+      displayEndPoint,
+      label: match.label,
+    });
     sourceOffset = match.end;
   }
   text += input.slice(sourceOffset);
@@ -886,16 +961,84 @@ export function pastedDraftPresentation(
   let pointDelta = 0;
   let mappedCursor = cursor;
   for (const match of matches) {
-    const labelLength = [...match.label].length;
-    if (cursor <= match.startPoint) break;
-    if (cursor < match.endPoint) {
-      return { text, cursor: match.startPoint + pointDelta + labelLength };
+    const labelLength = match.displayEndPoint - match.displayStartPoint;
+    if (cursor <= match.sourceStartPoint) break;
+    if (cursor < match.sourceEndPoint) {
+      mappedCursor = match.displayEndPoint;
+      break;
     }
-    pointDelta += labelLength - (match.endPoint - match.startPoint);
+    pointDelta += labelLength - (match.sourceEndPoint - match.sourceStartPoint);
     mappedCursor = cursor + pointDelta;
   }
 
-  return { text, cursor: mappedCursor };
+  return { text, cursor: mappedCursor, matches };
+}
+
+export function pastedDraftPresentation(
+  input: string,
+  cursor: number,
+  blocks: readonly PastedBlock[],
+): PromptEditState {
+  const model = pastedDraftModel(input, cursor, blocks);
+  return { text: model.text, cursor: model.cursor };
+}
+
+export interface PromptClickPosition {
+  columns: number;
+  lineIndex: number;
+  localColumn: number;
+}
+
+function codePointIndexAtVisualColumn(line: string, targetColumn: number): number {
+  const points = [...line];
+  const target = Math.max(0, targetColumn);
+  let visualColumn = 0;
+
+  for (let index = 0; index < points.length; index += 1) {
+    const width = charWidth(points[index]!.codePointAt(0) ?? 0);
+    if (target <= visualColumn) return index;
+    if (target < visualColumn + width) {
+      return target - visualColumn < width / 2 ? index : index + 1;
+    }
+    visualColumn += width;
+  }
+
+  return points.length;
+}
+
+function sourceCursorFromDisplayed(model: PastedDraftModel, displayedCursor: number): number {
+  let sourceOffset = 0;
+  let displayOffset = 0;
+
+  for (const match of model.matches) {
+    if (displayedCursor < match.displayStartPoint) {
+      return sourceOffset + displayedCursor - displayOffset;
+    }
+    if (displayedCursor <= match.displayEndPoint) return match.sourceEndPoint;
+    sourceOffset = match.sourceEndPoint;
+    displayOffset = match.displayEndPoint;
+  }
+
+  return sourceOffset + displayedCursor - displayOffset;
+}
+
+export function promptCursorFromClick(
+  input: string,
+  blocks: readonly PastedBlock[],
+  position: PromptClickPosition,
+): number {
+  const model = pastedDraftModel(input, 0, blocks);
+  const wrap = wrapPromptInput(model.text, 0, { columns: position.columns, indent: 2 });
+  const lineIndex = Math.max(0, Math.min(wrap.lines.length - 1, position.lineIndex));
+  const beforeLine = wrap.lines
+    .slice(0, lineIndex)
+    .reduce((total, line) => total + [...line].length, 0);
+  const withinLine = codePointIndexAtVisualColumn(
+    wrap.lines[lineIndex] ?? "",
+    position.localColumn - 2,
+  );
+  const sourceCursor = sourceCursorFromDisplayed(model, beforeLine + withinLine);
+  return Math.max(0, Math.min([...input].length, sourceCursor));
 }
 
 function PromptLineContent({
@@ -922,6 +1065,7 @@ function PromptLineContent({
 }
 
 export interface PromptEditState { text: string; cursor: number }
+export interface PastedPromptEditState extends PromptEditState { pastedBlocks: PastedBlock[] }
 export type PromptEdit = { type: "insert"; value: string } | { type: "backspace" | "delete" | "left" | "right" };
 export function editPrompt(state: PromptEditState, edit: PromptEdit): PromptEditState {
   const points = [...state.text];
@@ -938,6 +1082,31 @@ export function editPrompt(state: PromptEditState, edit: PromptEdit): PromptEdit
   }
   if (edit.type === "delete") { points.splice(cursor, 1); return { text: points.join(""), cursor }; }
   return { text: state.text, cursor };
+}
+
+export function editPromptWithPastedBlocks(
+  state: PromptEditState,
+  edit: PromptEdit,
+  pastedBlocks: readonly PastedBlock[],
+): PastedPromptEditState {
+  const points = [...state.text];
+  const cursor = Math.max(0, Math.min(points.length, state.cursor));
+  const latest = pastedBlocks.at(-1);
+
+  if (edit.type === "backspace" && latest !== undefined) {
+    const pastedPoints = [...latest.text];
+    const start = cursor - pastedPoints.length;
+    if (start >= 0 && points.slice(start, cursor).join("") === latest.text) {
+      points.splice(start, pastedPoints.length);
+      return {
+        text: points.join(""),
+        cursor: start,
+        pastedBlocks: pastedBlocks.slice(0, -1),
+      };
+    }
+  }
+
+  return { ...editPrompt({ text: state.text, cursor }, edit), pastedBlocks: [...pastedBlocks] };
 }
 
 export interface HistoryNavigationState { history: readonly string[]; cursor: number }

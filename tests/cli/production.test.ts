@@ -333,7 +333,7 @@ describe("production runtime", () => {
         results: {},
       },
       models: { main: "local:large", subagent: "local:small" },
-      permissionMode: "workspace",
+      permissionMode: "default",
     });
     const outputs: unknown[] = [];
     const runtime = await createProductionRuntime({
@@ -356,6 +356,72 @@ describe("production runtime", () => {
     await runtime.dispose();
   });
 
+  it("clears delegated state when TaskPlan replaces the main plan", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-replan-")); roots.push(workspace);
+    const pluginRoot = join(workspace, ".flavor", "plugins", "replan-model");
+    await mkdir(pluginRoot, { recursive: true });
+    await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
+      providers: { capture: { type: "plugin", defaultModel: "main", cheapModel: "child" } },
+      agents: { main: { model: "capture:main" }, subagent: { model: "capture:child" } },
+    }));
+    await writeFile(join(pluginRoot, "flavor-plugin.json"), JSON.stringify({
+      name: "replan-model", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
+      contributes: { commands: [], tools: [], hooks: [], skillRoots: [], modelAdapters: [{ name: "capture" }] },
+    }));
+    await writeFile(join(pluginRoot, "index.mjs"), `export function activate(ctx) {
+      let calls = 0;
+      ctx.registerModelAdapter("capture", { async *stream() {
+        if (calls++ === 0) {
+          yield { type: "tool-call", id: "replace-plan", name: "TaskPlan", input: { tasks: [{
+            id: "implement", subject: "Implement new requirement", activeForm: "Implementing new requirement",
+            status: "pending", dependencies: [],
+          }] } };
+        }
+        yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
+      }});
+    }`);
+    const store = new SessionStore({ workspace });
+    await store.save({
+      version: 2,
+      sessionId: "old-plan-session",
+      createdAt: "2026-07-19T01:00:00.000Z",
+      updatedAt: "2026-07-19T01:01:00.000Z",
+      workspace: { path: workspace },
+      conversation: { messages: [] },
+      tasks: {
+        plan: { tasks: [{
+          id: "inspect", subject: "Inspect old requirement", activeForm: "Inspecting old requirement",
+          status: "completed", dependencies: [],
+        }] },
+        graph: { nodes: [{
+          id: "old-worker", description: "Old delegated work", dependencies: [], expectedOutputs: [], verification: [],
+        }] },
+        states: { "old-worker": "completed" },
+        results: { "old-worker": {
+          taskId: "old-worker", status: "completed", summary: "old work complete",
+          filesChanged: [], commandsRun: [], verification: [], artifacts: [], risks: [], suggestedNextSteps: [],
+        } },
+      },
+      models: { main: "capture:main", subagent: "capture:child" },
+      permissionMode: "default",
+    });
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, resumeSession: "old-plan-session",
+      approvalPolicy: "deny", output: () => {},
+    });
+
+    await runtime.session.start();
+    await runtime.session.submit("The requirement changed; replan it");
+
+    expect(runtime.services.tasks()).toEqual({
+      plan: { tasks: [expect.objectContaining({ id: "implement" })] },
+      graph: undefined,
+      states: {},
+      results: {},
+    });
+    await runtime.dispose();
+  });
+
   it("saves lifecycle state and resumes only when explicitly requested", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-")); roots.push(workspace);
     await mkdir(join(workspace, ".flavor"), { recursive: true });
@@ -364,19 +430,19 @@ describe("production runtime", () => {
     }));
     const first = await createProductionRuntime({ workspace, home: workspace, environment: {}, output: () => {} });
     await first.session.start();
-    first.services.setPermissionMode("safe");
+    await first.services.setPermissionMode("acceptEdits");
     await first.session.submit("persist me");
     await first.session.close(); await first.dispose();
     const saved = await new SessionStore({ workspace }).load();
     expect(saved.conversation.messages.some((message) => message.role === "user" && message.content === "persist me")).toBe(true);
-    expect(saved.permissionMode).toBe("safe");
+    expect(saved.permissionMode).toBe("acceptEdits");
 
     const fresh = await createProductionRuntime({ workspace, home: workspace, environment: {}, output: () => {} });
     expect(fresh.restoredMessages).toEqual([]);
-    expect(fresh.services.permissionMode()).toBe("workspace");
+    expect(fresh.services.permissionMode()).toBe("default");
     await fresh.dispose();
     const resumed = await createProductionRuntime({ workspace, home: workspace, environment: {}, resumeSession: saved.sessionId, output: () => {} });
-    expect(resumed.services.permissionMode()).toBe("safe");
+    expect(resumed.services.permissionMode()).toBe("acceptEdits");
     expect(resumed.sessionId).toBe(saved.sessionId);
     await resumed.dispose();
   });

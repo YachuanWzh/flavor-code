@@ -11,7 +11,7 @@ export const MAIN_TASK_TOOL_NAMES = new Set(["Task", "TaskPlan", "TaskUpdate", "
 
 export interface TaskPlanToolOptions {
   getPlan(): TaskPlan | undefined;
-  commit(plan: TaskPlan): void | Promise<void>;
+  commit(plan: TaskPlan, operation: "replace" | "update"): void | Promise<void>;
 }
 
 export function createTaskPlanTools(options: TaskPlanToolOptions): readonly [
@@ -26,7 +26,7 @@ export function createTaskPlanTools(options: TaskPlanToolOptions): readonly [
     execute: async (input, signal) => {
       signal.throwIfAborted();
       const plan = TaskPlanSchema.parse(input);
-      await options.commit(plan);
+      await options.commit(plan, "replace");
       return plan;
     },
   };
@@ -41,7 +41,7 @@ export function createTaskPlanTools(options: TaskPlanToolOptions): readonly [
       const plan = options.getPlan();
       if (plan === undefined) throw new Error("No task plan exists; create one with TaskPlan first");
       const next = updatePlanTask(plan, input);
-      await options.commit(next);
+      await options.commit(next, "update");
       return next;
     },
   };

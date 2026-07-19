@@ -263,8 +263,7 @@ function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot, include
   const blocks = turn.blocks.filter((block) => {
     if (block.kind !== "status") return true;
     if (!block.id.startsWith("task:") && !block.id.startsWith("subagent:")) return true;
-    if (ids.has(block.id)) return true;
-    return block.state === "completed" || block.state === "failed" || block.state === "cancelled";
+    return ids.has(block.id);
   });
   for (const block of taskBlocks) {
     const index = blocks.findIndex((current) => current.kind === "status" && current.id === block.id);

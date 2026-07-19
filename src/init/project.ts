@@ -559,7 +559,7 @@ async function createExampleFlavorConfig(cwd: string, resolvedBaseURL?: string):
       subagent: { model: "anthropic:deepseek-v4-flash" },
     },
     maxSubagents: 3,
-    permissionMode: "workspace",
+    permissionMode: "default",
     language: "zh-CN",
   };
   await writeFile(configPath, JSON.stringify(example, null, 2) + "\n");

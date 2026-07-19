@@ -1,6 +1,15 @@
 import { expect, it } from "vitest";
 import { EventEmitter } from "node:events";
-import { completionKeyAction, editPrompt, navigateHistory, slashKeyAction } from "../../src/ui/app.js";
+import {
+  completionKeyAction,
+  editPrompt,
+  editPromptWithPastedBlocks,
+  navigateHistory,
+  selectWheelScrollTarget,
+  slashKeyAction,
+  taskPanelViewportRows,
+} from "../../src/ui/app.js";
+import type { ScrollBoxHandle } from "../../src/claude-ink/index.js";
 import type { SlashCompletion } from "../../src/ui/slash-completion.js";
 import { installSigintHandler } from "../../src/ui/signals.js";
 
@@ -30,6 +39,22 @@ it("uses only up and down navigation to recall submitted queries", () => {
 
   const cleared = navigateHistory({ history, cursor: older.cursor }, "down");
   expect(cleared).toEqual({ cursor: 1, input: "two", promptCursor: 3 });
+});
+
+it("backspace removes the latest pasted block when the cursor is directly after it", () => {
+  const olderPaste = "older pasted line\nolder second line";
+  const pasted = "first pasted line\nsecond pasted line";
+  const prefix = `${olderPaste} keep `;
+
+  expect(editPromptWithPastedBlocks(
+    { text: `${prefix}${pasted}`, cursor: [...`${prefix}${pasted}`].length },
+    { type: "backspace" },
+    [{ id: 1, text: olderPaste }, { id: 2, text: pasted }],
+  )).toEqual({
+    text: prefix,
+    cursor: [...prefix].length,
+    pastedBlocks: [{ id: 1, text: olderPaste }],
+  });
 });
 
 it("routes selection keys to an open slash menu only", () => {
@@ -71,4 +96,20 @@ it("routes selection keys only while a completion menu is open", () => {
     { upArrow: true, downArrow: false, tab: false, escape: false },
     false,
   )).toBeNull();
+});
+
+it("routes wheel input to the hovered task panel and otherwise to the transcript", () => {
+  const transcript = { name: "transcript" } as unknown as ScrollBoxHandle;
+  const tasks = { name: "tasks" } as unknown as ScrollBoxHandle;
+
+  expect(selectWheelScrollTarget(transcript, tasks, true)).toBe(tasks);
+  expect(selectWheelScrollTarget(transcript, tasks, false)).toBe(transcript);
+  expect(selectWheelScrollTarget(transcript, null, true)).toBe(transcript);
+});
+
+it("caps task progress at one third of the terminal while reserving prompt rows", () => {
+  expect(taskPanelViewportRows(24, 2, true)).toBe(8);
+  expect(taskPanelViewportRows(12, 2, true)).toBe(4);
+  expect(taskPanelViewportRows(6, 4, true)).toBe(1);
+  expect(taskPanelViewportRows(24, 2, false)).toBe(0);
 });

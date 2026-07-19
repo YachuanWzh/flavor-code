@@ -321,8 +321,15 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
 
   for (const tool of createTaskPlanTools({
     getPlan: () => taskPlan,
-    commit: async (next) => {
+    commit: async (next, operation) => {
       taskPlan = next;
+      if (operation === "replace") {
+        taskGraph = undefined;
+        taskStates = {};
+        taskResults = {};
+        for (const key of Object.keys(subagentStartedAt)) delete subagentStartedAt[key];
+        for (const key of Object.keys(subagentElapsedMs)) delete subagentElapsedMs[key];
+      }
       await publishTaskState();
     },
   })) tools.push(tool as ToolDefinition<unknown>);
@@ -390,7 +397,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         languageInstruction: languageInstruction(language),
         workspace,
         model: agent === "main" ? harness.mainModelId : contextModelId,
-        permissionMode: agent === "subagent" ? "workspace" : harness.permissionMode,
+        permissionMode: agent === "subagent"
+          ? (harness.permissionMode === "plan" ? "plan" : "bubble")
+          : harness.permissionMode,
         toolNames: new Set(agentTools.map((tool) => tool.name)),
         environment: promptEnvironment,
       }),
@@ -539,7 +548,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
           languageInstruction: languageInstruction(language),
           workspace: input.workspace,
           model: agent === "main" ? loopHarness.mainModelId : contextModelId,
-          permissionMode: agent === "subagent" ? "workspace" : loopHarness.permissionMode,
+          permissionMode: agent === "subagent"
+            ? (loopHarness.permissionMode === "plan" ? "plan" : "bubble")
+            : loopHarness.permissionMode,
           toolNames: new Set(agentTools.map((tool) => tool.name)),
           environment: loopEnvironment,
         }),
@@ -965,6 +976,7 @@ async function* runMain(
   let additionalContext: string | undefined;
   try {
     if (setupError !== undefined) {
+      harness.main.context.append({ role: "user", content: prompt });
       yield { type: "error", error: { code: "unknown", message: setupError } };
       return;
     }

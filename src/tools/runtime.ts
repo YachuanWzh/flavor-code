@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import type { HookBus } from "../hooks/bus.js";
 import { type PermissionEngine, type PermissionRequest, getToolCategory, type ToolCategory } from "../permissions/engine.js";
+import type { PermissionClassifier } from "../permissions/classifier.js";
 import { getToolPresentation, type ToolCall, type ToolContext, type ToolDefinition, type ToolResult } from "./types.js";
 import { message } from "../utils/error.js";
 
@@ -17,6 +18,8 @@ export interface ToolRuntimeOptions {
   hooks: HookBus;
   permissions: PermissionEngine;
   approve?: ApprovalCallback;
+  /** Classifies unresolved main-agent calls in auto mode. Failures fall back to approval. */
+  classify?: PermissionClassifier;
   /** Categories that should skip the approval callback. Destructive is never added. */
   alwaysAllowed?: ToolCategory[];
 }
@@ -41,6 +44,7 @@ export class ToolRuntime {
   readonly #hooks: HookBus;
   readonly #permissions: PermissionEngine;
   readonly #approve: ApprovalCallback | undefined;
+  readonly #classify: PermissionClassifier | undefined;
   readonly #alwaysAllowed: Set<string>;
   readonly #disposeSchemas: Array<() => void>;
   #disposed = false;
@@ -50,6 +54,7 @@ export class ToolRuntime {
     this.#hooks = options.hooks;
     this.#permissions = options.permissions;
     this.#approve = options.approve;
+    this.#classify = options.classify;
     this.#alwaysAllowed = new Set(options.alwaysAllowed ?? []);
     this.#disposeSchemas = [
       this.#hooks.registerPayloadSchema("PreToolUse", PreToolUsePayload),
@@ -154,9 +159,27 @@ export class ToolRuntime {
         tool: tool.name,
         ...(tool.permissions?.(input) ?? { paths: tool.paths(input) }),
       };
-      const permission = this.#permissions.decide(request);
+      let permission = this.#permissions.decide(request);
       if (permission.decision === "deny") {
         return this.#fail(tool.name, input, context.agent, "permission_denied", permission.reason ?? "Tool use denied");
+      }
+      if (
+        permission.decision === "ask" && context.agent === "main"
+        && this.#permissions.mode === "auto" && this.#classify !== undefined
+      ) {
+        try {
+          const classified = await this.#classify(request, signal);
+          if (classified.decision === "deny") {
+            return this.#fail(tool.name, input, context.agent, "permission_denied", classified.reason ?? "Auto classifier denied tool use");
+          }
+          if (classified.decision === "allow") permission = classified;
+          else {
+            const reason = classified.reason ?? permission.reason;
+            permission = { decision: "ask", ...(reason === undefined ? {} : { reason }) };
+          }
+        } catch {
+          // Classifier unavailability is fail-safe: retain the normal approval request.
+        }
       }
       if (pre.decision === "ask" || permission.decision === "ask") {
         const reason = [pre.reason, permission.reason].filter((value): value is string => value !== undefined).join("\n") || "Approval required";
@@ -181,7 +204,7 @@ export class ToolRuntime {
             const category = getToolCategory(tool.name);
             if (category !== "destructive") this.#alwaysAllowed.add(category);
           }
-        } else if (context.agent !== "main") {
+        } else if (context.agent !== "main" && this.#permissions.mode !== "bubble") {
           return this.#fail(tool.name, input, context.agent, "approval_required", reason);
         } else if (signal.aborted) {
           throw signal.reason;

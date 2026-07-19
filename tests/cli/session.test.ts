@@ -15,7 +15,7 @@ function services(events: string[], outputs: string[]): SessionServices {
     workspace: "/work",
     mainModel: () => "openai:gpt-test",
     subagentModel: () => "openai:gpt-cheap",
-    permissionMode: () => "workspace",
+    permissionMode: () => "default",
     run: async function* (_prompt, signal) {
       yield { type: "text", text: "hel" };
       if (signal.aborted) return;

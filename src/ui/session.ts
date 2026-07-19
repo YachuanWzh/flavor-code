@@ -43,7 +43,7 @@ export interface SessionServices {
 
 const HELP = [
   "/model <main|subagent> <provider:model>  switch a model",
-  "/permissions <safe|workspace|full>      set main tool permissions",
+  "/permissions <default|acceptEdits|plan|bypassPermissions|auto|bubble>",
   "/login                                  authenticate via OAuth PKCE",
   "/init  /config  /skills  /plugins  /hooks  /tasks",
   "/compact  /clear  /help  /exit",
@@ -164,7 +164,7 @@ export class FlavorSession {
       this.#notice(`${command.role} model set to ${command.modelId}.`);
     } else if (command.name === "permissions") {
       await this.#services.setPermissionMode(command.mode);
-      this.#notice(`Main permissions set to ${command.mode}. Child agents remain workspace-limited.`);
+      this.#notice(`Main permissions set to ${command.mode}. Child approvals use bubble mode unless plan mode is active.`);
     } else if (command.name === "plugin") {
       this.#notice(format(await this.#services.runPluginCommand(command.command, command.args, signal)));
     } else if (command.name === "skill") {

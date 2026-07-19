@@ -7,11 +7,13 @@ describe("createTaskPlanTools", () => {
   it("creates and updates plans through main planning tools", async () => {
     let plan: TaskPlan | undefined;
     const published: TaskPlan[] = [];
+    const operations: string[] = [];
     const [planTool, updateTool] = createTaskPlanTools({
       getPlan: () => plan,
-      commit: async (next) => {
+      commit: async (next, operation) => {
         plan = next;
         published.push(next);
+        operations.push(operation);
       },
     });
     const signal = new AbortController().signal;
@@ -27,6 +29,7 @@ describe("createTaskPlanTools", () => {
 
     expect(planTool.name).toBe("TaskPlan");
     expect(updateTool.name).toBe("TaskUpdate");
+    expect(operations).toEqual(["replace", "update"]);
     expect(published.at(-1)?.tasks[0]).toMatchObject({ status: "completed", result: "done" });
   });
 
