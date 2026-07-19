@@ -650,7 +650,19 @@ function OpenProjectState({ onOpen }: { onOpen(): void }): React.JSX.Element {
 function LoadingState(): React.JSX.Element { return <div className="loading-state"><FlavorMark /><span>正在准备桌面工作区…</span></div>; }
 
 function FlavorMark(): React.JSX.Element {
-  return <svg className="flavor-mark" viewBox="0 0 36 36" aria-hidden="true"><path d="M8 17.5C8 11.7 12.5 7 18 7s10 4.7 10 10.5c0 2.7-1 5.1-2.7 7l1 3.8-4-1.2A9.5 9.5 0 0 1 18 28c-5.5 0-10-4.7-10-10.5Z"/><circle cx="14.5" cy="17" r="1.4"/><circle cx="21.5" cy="17" r="1.4"/><path className="mark-smile" d="M14 21c2.4 1.7 5.6 1.7 8 0"/></svg>;
+  return (
+    <svg className="flavor-mark" viewBox="0 0 36 36" aria-hidden="true">
+      <path d="M8 17.5C8 11.7 12.5 7 18 7s10 4.7 10 10.5c0 2.7-1 5.1-2.7 7l1 3.8-4-1.2A9.5 9.5 0 0 1 18 28c-5.5 0-10-4.7-10-10.5Z"/>
+      {/* Left eye: < */}
+      <path d="M16 15l-2 2l2 2" fill="none" stroke="#1979c9" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+      {/* Right eye: > */}
+      <path d="M20 15l2 2l-2 2" fill="none" stroke="#1979c9" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+      {/* Smile */}
+      <path className="mark-smile" d="M14 23c2.5 1.5 5.5 1.5 8 0"/>
+      {/* Tongue */}
+      <ellipse cx="22" cy="24" rx="1.2" ry="0.9" fill="#f472b6" stroke="#ec4899" strokeWidth="0.3" transform="rotate(15 22 24)"/>
+    </svg>
+  );
 }
 
 function errorMessage(value: unknown): string { return value instanceof Error ? value.message : String(value); }

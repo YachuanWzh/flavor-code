@@ -16,7 +16,8 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "npm run build:cli && npm run build:desktop",
+    "build": "npm run build:icons && npm run build:cli && npm run build:desktop",
+    "build:icons": "node scripts/build-icons.mjs",
     "build:cli": "tsup && node -e \"require('fs').cpSync('src/init/codeisland','dist/codeisland',{recursive:true})\"",
     "build:desktop": "npm run build:desktop:main && npm run build:desktop:renderer",
     "build:desktop:main": "tsup --config tsup.desktop.config.ts",
@@ -35,6 +36,7 @@
     "appId": "dev.flavorcode.desktop",
     "productName": "Flavor Code",
     "asar": true,
+    "icon": "assets/icon",
     "directories": {
       "output": "release"
     },

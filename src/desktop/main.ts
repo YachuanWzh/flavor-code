@@ -2,7 +2,7 @@ import { readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell } from "electron";
 
 import {
   AnswerQuestionsInputSchema,
@@ -153,6 +153,14 @@ async function createWindow(): Promise<void> {
       webSecurity: true,
     },
   });
+  // 设置窗口图标（开发模式）
+  if (!app.isPackaged) {
+    const iconPath = join(app.getAppPath(), "assets", "icon.png");
+    const icon = nativeImage.createFromPath(iconPath);
+    console.log("Setting icon from:", iconPath, "isEmpty:", icon.isEmpty());
+    mainWindow.setIcon(icon);
+  }
+
   mainWindow.setMenuBarVisibility(false);
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (isSafeExternalUrl(url)) void shell.openExternal(url);
