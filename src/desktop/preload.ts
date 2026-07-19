@@ -15,6 +15,7 @@ const api: FlavorDesktopApi = {
   interrupt: () => ipcRenderer.invoke(DESKTOP_CHANNELS.interrupt),
   resolveApproval: (decision) => ipcRenderer.invoke(DESKTOP_CHANNELS.resolveApproval, { decision }),
   answerQuestions: (answers) => ipcRenderer.invoke(DESKTOP_CHANNELS.answerQuestions, { answers }),
+  listFiles: () => ipcRenderer.invoke(DESKTOP_CHANNELS.listFiles),
   onEvent(listener) {
     const handler = (_event: Electron.IpcRendererEvent, value: DesktopEvent) => listener(value);
     ipcRenderer.on(DESKTOP_CHANNELS.event, handler);

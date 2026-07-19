@@ -109,6 +109,9 @@ function installIpcHandlers(): void {
   ipcMain.handle(DESKTOP_CHANNELS.answerQuestions, async (_event, value) => {
     controller.answerQuestions(AnswerQuestionsInputSchema.parse(value).answers);
   });
+  ipcMain.handle(DESKTOP_CHANNELS.listFiles, async () => {
+    return controller.listWorkspaceFiles();
+  });
 }
 
 function applicationMenu(): Menu {

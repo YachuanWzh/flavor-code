@@ -1,4 +1,8 @@
-import { basename } from "node:path";
+function basename(path: string): string {
+  const normalized = path.replaceAll("\\", "/");
+  const index = normalized.lastIndexOf("/");
+  return index < 0 ? path : normalized.slice(index + 1);
+}
 
 export interface MentionCompletion {
   query: string;
@@ -76,7 +80,7 @@ export function completeMentionSelection(
   input: string,
   cursor: number,
   path: string,
-): { text: string; cursor: number } {
+): { text: string; cursor: number; span?: { start: number; end: number } } {
   const points = [...input];
   const token = mentionTokenAtCursor(input, cursor);
   const safeCursor = Math.max(0, Math.min(points.length, cursor));
@@ -89,6 +93,7 @@ export function completeMentionSelection(
   return {
     text: prefix + inserted + suffix,
     cursor: [...prefix + inserted].length,
+    span: { start: [...prefix].length, end: [...prefix + inserted].length },
   };
 }
 

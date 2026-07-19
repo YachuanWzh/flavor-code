@@ -9,5 +9,6 @@ export const DESKTOP_CHANNELS = {
   interrupt: "desktop:interrupt",
   resolveApproval: "desktop:resolve-approval",
   answerQuestions: "desktop:answer-questions",
+  listFiles: "desktop:list-files",
   event: "desktop:event",
 } as const;

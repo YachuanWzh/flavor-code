@@ -53,7 +53,7 @@ describe("mention completion", () => {
 
   it("replaces only the active token and escapes spaces", () => {
     expect(completeMentionSelection("review @my later", 10, "docs/my notes.md"))
-      .toEqual({ text: "review @docs/my\\ notes.md later", cursor: 26 });
+      .toEqual({ text: "review @docs/my\\ notes.md later", cursor: 26, span: { start: 7, end: 26 } });
   });
 
   it("highlights all text in the selected row like the reference", () => {

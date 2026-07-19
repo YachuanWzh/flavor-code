@@ -19,3 +19,7 @@ FLAVOR.md
 .superharness/
 .flavor/audit.jsonl
 .flavor/loops
+# superharness ralph runtime state (per-task tracking + retry)
+.claude/superharness/ralph/
+# superharness brainstorm mind-map session state (transient)
+.claude/superharness/brainstorm/

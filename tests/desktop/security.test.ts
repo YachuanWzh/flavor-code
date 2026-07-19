@@ -22,7 +22,7 @@ describe("desktop security helpers", () => {
   it("keeps the preload channel surface explicit", () => {
     expect(Object.values(DESKTOP_CHANNELS).sort()).toEqual([
       "desktop:answer-questions", "desktop:bootstrap", "desktop:choose-workspace", "desktop:delete-session", "desktop:event",
-      "desktop:interrupt", "desktop:open-workspace", "desktop:resolve-approval", "desktop:show-app-menu", "desktop:start-session", "desktop:submit",
+      "desktop:interrupt", "desktop:list-files", "desktop:open-workspace", "desktop:resolve-approval", "desktop:show-app-menu", "desktop:start-session", "desktop:submit",
     ].sort());
   });
 

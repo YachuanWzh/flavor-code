@@ -81,6 +81,7 @@ export interface FlavorDesktopApi {
   interrupt(): Promise<void>;
   resolveApproval(decision: "allow" | "deny"): Promise<void>;
   answerQuestions(answers: Record<number, string>): Promise<void>;
+  listFiles(): Promise<readonly string[]>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
 }
 

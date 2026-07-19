@@ -8,6 +8,7 @@ import type { Question } from "../tools/ask-user-question.js";
 import type { SessionOutput } from "../ui/session.js";
 import { message } from "../utils/error.js";
 import type { ApprovalDecision } from "../tools/runtime.js";
+import { createGlobTool, type SearchResult } from "../tools/search.js";
 import type { DesktopEvent, DesktopSessionSummary, DesktopSnapshot, SessionStartedPayload } from "./contracts.js";
 
 export interface RuntimeLike {
@@ -158,6 +159,19 @@ export class DesktopRuntimeController {
       this.#busy = false;
       if (this.#workspace !== undefined) this.#sessions = await this.#listSessions(this.#workspace).catch(() => this.#sessions);
       this.#publishSnapshot();
+    }
+  }
+
+  async listWorkspaceFiles(): Promise<readonly string[]> {
+    const workspace = this.#workspace;
+    if (workspace === undefined) return [];
+    try {
+      const controller = new AbortController();
+      const glob = createGlobTool(workspace, { defaultLimit: 10_000 });
+      const result = await glob.execute({ pattern: "**", limit: 10_000 }, controller.signal) as SearchResult<string>;
+      return result.matches.map((path) => path.replaceAll("\\", "/"));
+    } catch {
+      return [];
     }
   }
 

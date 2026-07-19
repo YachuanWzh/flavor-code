@@ -188,6 +188,30 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
   white-space: nowrap;
   user-select: none;
 }
+.composer-input-row .mention-tag {
+  flex-shrink: 0;
+  height: 22px;
+  margin: 16px 4px 0 4px;
+  padding: 0 8px;
+  border-radius: 5px;
+  background: #f0eee8;
+  color: #6b5e3e;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  font-weight: 520;
+  line-height: 22px;
+  white-space: nowrap;
+  user-select: none;
+}
+.composer-plain-text {
+  flex-shrink: 0;
+  margin: 16px 0 0 17px;
+  color: #1c2430;
+  font-size: 14px;
+  line-height: 22px;
+  white-space: pre;
+  user-select: none;
+}
 .composer-tools { display: flex; align-items: center; min-height: 45px; padding: 4px 8px 8px 10px; gap: 9px; }
 .attach-button { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; background: transparent; color: #697681; cursor: pointer; font-size: 20px; }
 .attach-button:hover { background: #f0f4f7; }
@@ -344,6 +368,92 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 }
 .slash-count { color: #909ca7; font-size: 10px; }
 @keyframes slash-dropdown-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ---- mention completion dropdown ---- */
+.mention-dropdown-backdrop { position: fixed; inset: 0; z-index: 50; }
+.mention-dropdown {
+  position: absolute;
+  z-index: 55;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  margin-bottom: 6px;
+  overflow: hidden;
+  border: 1px solid #d5dfe8;
+  border-radius: 13px;
+  background: #fff;
+  box-shadow: 0 14px 42px rgba(25, 38, 52, .14), 0 2px 6px rgba(25, 38, 52, .08);
+  animation: mention-dropdown-in .12s ease;
+}
+.mention-dropdown-header {
+  display: flex;
+  align-items: center;
+  padding: 7px 12px;
+  gap: 6px;
+  border-bottom: 1px solid #e7edf3;
+  color: #8f9ba7;
+  font-size: 10px;
+  font-weight: 600;
+}
+.mention-dropdown-header span { flex: 1; }
+.mention-dropdown-header kbd {
+  padding: 1px 5px;
+  border: 1px solid #e0e6ed;
+  border-radius: 4px;
+  background: #f8fafb;
+  color: #8895a1;
+  font-size: 9px;
+  line-height: 1.3;
+}
+.mention-dropdown-list { max-height: 234px; overflow-y: auto; padding: 5px; scrollbar-width: thin; scrollbar-color: #ced7e0 transparent; }
+.mention-item {
+  display: grid;
+  grid-template-columns: 16px 20px minmax(0, 1fr);
+  align-items: center;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 7px;
+  gap: 8px;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+}
+.mention-item:hover { background: #f4f8fb; }
+.mention-item-selected { background: #ecf5fd; color: #1a4b77; }
+.mention-item-marker {
+  color: #b9c8d6;
+  font-size: 13px;
+}
+.mention-item-selected .mention-item-marker { color: #4a9fe8; }
+.mention-item-icon {
+  font-size: 12px;
+  opacity: 0.7;
+}
+.mention-item-path {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+}
+.mention-item-path mark {
+  background: transparent;
+  color: var(--sky);
+  font-weight: 700;
+}
+.mention-dropdown-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 3px 10px;
+  border-top: 1px solid #edf1f5;
+}
+.mention-count { color: #909ca7; font-size: 10px; }
+@keyframes mention-dropdown-in {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
 }

@@ -14,6 +14,14 @@ import {
   moveSlashSelection,
   type SlashCompletion,
 } from "../../ui/slash-completion.js";
+import { MentionCompletionDropdown } from "./mention-completion-dropdown.js";
+import {
+  buildMentionCandidates,
+  completeMentionSelection,
+  deriveMentionCompletion,
+  moveMentionSelection,
+  type MentionCompletion,
+} from "../../ui/mention-completion.js";
 import { COMMAND_DESCRIPTIONS, MVP_COMMANDS } from "../../ui/commands.js";
 
 const EMPTY_SNAPSHOT: DesktopSnapshot = { sessions: [], diagnostics: [] };
@@ -35,6 +43,10 @@ export function DesktopApp(): React.JSX.Element {
   const [modelDraft, setModelDraft] = useState("");
   const [slashSelection, setSlashSelection] = useState(0);
   const [dismissedSlashInput, setDismissedSlashInput] = useState<string>();
+  const [mentionCandidates, setMentionCandidates] = useState<string[]>([]);
+  const [mentionSelection, setMentionSelection] = useState(0);
+  const [dismissedMentionInput, setDismissedMentionInput] = useState<string>();
+  const [mentionSpan, setMentionSpan] = useState<{ start: number; end: number }>();
   const [cursorPos, setCursorPos] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -49,6 +61,17 @@ export function DesktopApp(): React.JSX.Element {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [transcript]);
 
+  useEffect(() => {
+    let cancelled = false;
+    window.flavorDesktop.listFiles().then((files) => {
+      if (cancelled) return;
+      setMentionCandidates(buildMentionCandidates(files));
+    }).catch(() => {
+      // File discovery is optional; failure must not block the UI.
+    });
+    return () => { cancelled = true; };
+  }, [snapshot.workspace]);
+
   const busy = snapshot.activeSession?.busy ?? false;
   const groups = useMemo(() => groupSessions(snapshot.sessions), [snapshot.sessions]);
   const slashCompletion = useMemo(() => {
@@ -56,6 +79,12 @@ export function DesktopApp(): React.JSX.Element {
     if (dismissedSlashInput === input) return null;
     return deriveSlashCompletion(input, cursorPos, SLASH_CANDIDATES, slashSelection);
   }, [input, cursorPos, slashSelection, dismissedSlashInput, busy, snapshot.approval, snapshot.questions]);
+  const mentionCompletion = useMemo(() => {
+    if (busy || snapshot.approval !== undefined || snapshot.questions !== undefined) return null;
+    if (dismissedMentionInput === input) return null;
+    if (slashCompletion !== null) return null;
+    return deriveMentionCompletion(input, cursorPos, mentionCandidates, mentionSelection);
+  }, [input, cursorPos, mentionSelection, dismissedMentionInput, busy, snapshot.approval, snapshot.questions, mentionCandidates, slashCompletion]);
   const completedTokenLen = slashCompletion === null
     ? completedSlashTokenLength(input, SLASH_CANDIDATES, false)
     : 0;
@@ -85,6 +114,33 @@ export function DesktopApp(): React.JSX.Element {
       return moveSlashSelection(value, delta, count);
     });
   }, [slashCompletion]);
+
+  const handleMentionSelect = useCallback((path: string) => {
+    const next = completeMentionSelection(input, cursorPos, path);
+    setInput(next.text);
+    setDismissedMentionInput(next.text);
+    setMentionSelection(0);
+    setMentionSpan(next.span);
+    setCursorPos(next.cursor);
+    setTimeout(() => {
+      const el = inputRef.current;
+      if (el !== null) {
+        el.focus();
+        el.setSelectionRange(el.value.length, el.value.length);
+      }
+    }, 0);
+  }, [input, cursorPos]);
+
+  const handleMentionDismiss = useCallback(() => {
+    setDismissedMentionInput(input);
+  }, [input]);
+
+  const handleMentionMove = useCallback((delta: -1 | 1) => {
+    setMentionSelection((value) => {
+      const count = mentionCompletion?.items.length ?? 0;
+      return moveMentionSelection(value, delta, count);
+    });
+  }, [mentionCompletion]);
 
   const chooseWorkspace = async () => {
     setError(undefined);
@@ -229,6 +285,10 @@ export function DesktopApp(): React.JSX.Element {
         slashCompletion={slashCompletion} onSlashSelect={handleSlashSelect}
         onSlashDismiss={handleSlashDismiss}
         onSlashMove={handleSlashMove}
+        mentionCompletion={mentionCompletion} onMentionSelect={handleMentionSelect}
+        onMentionDismiss={handleMentionDismiss}
+        onMentionMove={handleMentionMove}
+        mentionSpan={mentionSpan} setMentionSpan={setMentionSpan}
         completedTokenLen={completedTokenLen}
         cursorPos={cursorPos} setCursorPos={setCursorPos} />
     </main>
@@ -306,6 +366,12 @@ interface ComposerProps {
   onSlashSelect(name: string): void;
   onSlashDismiss(): void;
   onSlashMove(delta: -1 | 1): void;
+  mentionCompletion: MentionCompletion | null;
+  onMentionSelect(path: string): void;
+  onMentionDismiss(): void;
+  onMentionMove(delta: -1 | 1): void;
+  mentionSpan?: { start: number; end: number };
+  setMentionSpan(value: { start: number; end: number } | undefined): void;
   completedTokenLen: number;
   cursorPos: number;
   setCursorPos(value: number): void;
@@ -313,21 +379,45 @@ interface ComposerProps {
 
 function Composer(props: ComposerProps): React.JSX.Element {
   const disabled = props.snapshot.workspace === undefined;
-  const menuOpen = props.slashCompletion !== null;
-  const tagText = props.completedTokenLen > 0
+  const slashMenuOpen = props.slashCompletion !== null;
+  const mentionMenuOpen = props.mentionCompletion !== null;
+  const menuOpen = slashMenuOpen || mentionMenuOpen;
+  const hasSlashTag = props.completedTokenLen > 0;
+  const slashTagText = hasSlashTag
     ? props.input.slice(0, props.completedTokenLen)
     : undefined;
-  const tagDisplayText = tagText?.startsWith("/") ? tagText.slice(1).trim() : tagText?.trim();
-  const textareaText = tagText !== undefined
+  const slashTagDisplay = slashTagText?.startsWith("/") ? slashTagText.slice(1).trim() : slashTagText?.trim();
+
+  // Compute mention tag segments
+  const span = hasSlashTag ? undefined : props.mentionSpan;
+  const hasMentionTag = span !== undefined
+    && span.start >= 0 && span.end > span.start
+    && span.start < props.input.length && span.end <= props.input.length
+    && props.input.slice(span.start, span.end) === props.input.slice(span.start, span.end);
+  const mentionBefore = hasMentionTag ? props.input.slice(0, span!.start) : "";
+  const mentionTagText = hasMentionTag ? props.input.slice(span!.start, span!.end) : "";
+  const mentionAfter = hasMentionTag ? props.input.slice(span!.end) : "";
+  const mentionTagDisplay = mentionTagText.startsWith("@") ? mentionTagText.slice(1).trim() : mentionTagText;
+
+  // textarea value: after slash tag / after mention tag / full input
+  const textareaValue = hasSlashTag
     ? props.input.slice(props.completedTokenLen)
-    : props.input;
-  const hasTag = tagText !== undefined;
+    : hasMentionTag
+      ? mentionAfter
+      : props.input;
+
+  // Calculate the prefix length (text before textarea) for cursor mapping
+  const textareaPrefixLen = hasSlashTag
+    ? slashTagText!.length
+    : hasMentionTag
+      ? span!.start + mentionTagText.length
+      : 0;
 
   const fullCursorFromTextarea = (textareaPos: number): number =>
-    hasTag ? tagText!.length + textareaPos : textareaPos;
+    textareaPrefixLen + textareaPos;
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (menuOpen) {
+    if (slashMenuOpen) {
       if (event.key === "ArrowDown") { event.preventDefault(); props.onSlashMove(1); return; }
       if (event.key === "ArrowUp") { event.preventDefault(); props.onSlashMove(-1); return; }
       if (event.key === "Tab" || event.key === "Enter") {
@@ -338,68 +428,117 @@ function Composer(props: ComposerProps): React.JSX.Element {
       }
       if (event.key === "Escape") { event.preventDefault(); props.onSlashDismiss(); return; }
     }
-    // Backspace at beginning of textarea when a tag exists: remove the tag
+    if (mentionMenuOpen) {
+      if (event.key === "ArrowDown") { event.preventDefault(); props.onMentionMove(1); return; }
+      if (event.key === "ArrowUp") { event.preventDefault(); props.onMentionMove(-1); return; }
+      if (event.key === "Tab" || event.key === "Enter") {
+        event.preventDefault();
+        const selected = props.mentionCompletion?.items[props.mentionCompletion?.selectedIndex ?? 0];
+        if (selected !== undefined) props.onMentionSelect(selected);
+        return;
+      }
+      if (event.key === "Escape") { event.preventDefault(); props.onMentionDismiss(); return; }
+    }
+    // Remove tag on backspace at textarea boundary
     const target = event.target as HTMLTextAreaElement;
-    const selectionStart = target.selectionStart;
-    const selectionEnd = target.selectionEnd;
-    if (event.key === "Backspace" && hasTag && selectionStart === 0 && selectionStart === selectionEnd && !menuOpen) {
-      event.preventDefault();
-      props.setInput(textareaText);
-      props.setCursorPos(0);
-      return;
+    const selStart = target.selectionStart;
+    const selEnd = target.selectionEnd;
+    if (event.key === "Backspace" && selStart === 0 && selStart === selEnd && !menuOpen) {
+      if (hasSlashTag) {
+        event.preventDefault();
+        props.setInput(props.input.slice(props.completedTokenLen));
+        props.setCursorPos(0);
+        return;
+      }
+      if (hasMentionTag) {
+        event.preventDefault();
+        const newInput = mentionBefore + mentionAfter;
+        props.setInput(newInput);
+        props.setMentionSpan(undefined);
+        props.setCursorPos(mentionBefore.length);
+        return;
+      }
     }
     if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); props.onSend(); }
+  };
+
+  const handleTextareaChange = (val: string, selStart: number) => {
+    let full: string;
+    if (hasSlashTag) {
+      full = slashTagText! + val;
+    } else if (hasMentionTag) {
+      full = mentionBefore + mentionTagText + val;
+    } else {
+      full = val;
+    }
+    // If user edited into the mention span, dissolve the tag
+    if (hasMentionTag) {
+      const expectedPrefix = mentionBefore + mentionTagText;
+      if (!full.startsWith(expectedPrefix)) {
+        props.setMentionSpan(undefined);
+      }
+    }
+    props.setInput(full);
+    props.setCursorPos(fullCursorFromTextarea(selStart));
+  };
+
+  const handleTextareaSelect = (selStart: number) => {
+    props.setCursorPos(fullCursorFromTextarea(selStart));
   };
 
   const textarea = (
     <textarea
       ref={props.inputRef}
       className="composer-textarea"
-      value={textareaText}
-      onChange={(event) => {
-        const val = event.target.value;
-        const full = hasTag ? tagText + val : val;
-        props.setInput(full);
-        props.setCursorPos(fullCursorFromTextarea(event.target.selectionStart));
-      }}
-      onSelect={(event) => {
-        props.setCursorPos(fullCursorFromTextarea((event.target as HTMLTextAreaElement).selectionStart));
-      }}
+      value={textareaValue}
+      onChange={(event) => handleTextareaChange(event.target.value, event.target.selectionStart)}
+      onSelect={(event) => handleTextareaSelect((event.target as HTMLTextAreaElement).selectionStart)}
       onKeyDown={onKeyDown}
-      onClick={(event) => {
-        props.setCursorPos(fullCursorFromTextarea((event.target as HTMLTextAreaElement).selectionStart));
-      }}
-      placeholder={disabled ? "先打开一个项目" : hasTag ? "" : "给 Flavor 一个任务，或输入 / 查看命令"}
+      onClick={(event) => handleTextareaSelect((event.target as HTMLTextAreaElement).selectionStart)}
+      placeholder={disabled ? "先打开一个项目" : (hasSlashTag || hasMentionTag) ? "" : "给 Flavor 一个任务，或输入 / 查看命令"}
       disabled={disabled}
       rows={1}
     />
   );
 
+  const inputRow = hasSlashTag
+    ? (
+      <div className="composer-input-row">
+        <span className="slash-tag">{slashTagDisplay}</span>
+        {textarea}
+      </div>
+    )
+    : hasMentionTag
+      ? (
+        <div className="composer-input-row">
+          {mentionBefore.length > 0 && <span className="composer-plain-text">{mentionBefore}</span>}
+          <span className="mention-tag">{mentionTagDisplay}</span>
+          {textarea}
+        </div>
+      )
+      : textarea;
+
   return <div className="composer-wrap">
-    {menuOpen && <SlashCompletionDropdown
+    {slashMenuOpen && <SlashCompletionDropdown
       completion={props.slashCompletion!}
       onSelect={props.onSlashSelect}
       onDismiss={props.onSlashDismiss}
     />}
-    <div className={`composer${hasTag ? " has-tag" : ""}`} data-busy={props.busy}>
-      {hasTag ? (
-        <div className="composer-input-row">
-          <span className="slash-tag">{tagDisplayText}</span>
-          {textarea}
-        </div>
-      ) : textarea}
+    {mentionMenuOpen && <MentionCompletionDropdown
+      completion={props.mentionCompletion!}
+      onSelect={props.onMentionSelect}
+      onDismiss={props.onMentionDismiss}
+    />}
+    <div className={`composer${hasSlashTag || hasMentionTag ? " has-tag" : ""}`} data-busy={props.busy}>
+      {inputRow}
     <div className="composer-tools">
       <button className="attach-button" title="在提示中输入 @ 引用项目文件"
         onClick={() => {
-          if (hasTag) {
-            props.setInput(tagText + textareaText + "@");
-            setTimeout(() => {
-              const el = props.inputRef.current;
-              if (el !== null) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
-            }, 0);
-          } else {
-            props.setInput(`${props.input}${props.input ? " " : ""}@`);
-          }
+          props.setInput(`${props.input}${props.input ? " " : ""}@`);
+          setTimeout(() => {
+            const el = props.inputRef.current;
+            if (el !== null) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+          }, 0);
         }} disabled={disabled}>＋</button>
       <div className="composer-context"><span className="context-item">▱ {workspaceName(props.snapshot.workspace)}</span><span className="context-item">▣ 本地</span></div>
       <div className="composer-controls">
