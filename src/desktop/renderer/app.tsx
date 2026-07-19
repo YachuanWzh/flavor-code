@@ -1,13 +1,25 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { PermissionMode } from "../../config/schema.js";
 import { createTranscriptState, transcriptReducer, type TranscriptBlock, type TranscriptState, type TranscriptTurn } from "../../ui/transcript.js";
 import type { DesktopEvent, DesktopSnapshot, DesktopSessionSummary } from "../contracts.js";
 import { applyDesktopOutput, groupSessions, permissionLabel, sessionTitle, STARTER_PROMPTS, workspaceName } from "./view-model.js";
 import { MarkdownContent } from "./markdown.js";
+import { SlashCompletionDropdown } from "./slash-completion-dropdown.js";
+import {
+  buildSlashCandidates,
+  completeSlashSelection,
+  completedSlashTokenLength,
+  deriveSlashCompletion,
+  moveSlashSelection,
+  type SlashCompletion,
+} from "../../ui/slash-completion.js";
+import { COMMAND_DESCRIPTIONS, MVP_COMMANDS } from "../../ui/commands.js";
 
 const EMPTY_SNAPSHOT: DesktopSnapshot = { sessions: [], diagnostics: [] };
 const PERMISSIONS: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions", "auto", "bubble"];
+const BUILTIN_SLASH_CANDIDATES = MVP_COMMANDS.map((name) => ({ name, description: COMMAND_DESCRIPTIONS[name] }));
+const SLASH_CANDIDATES = buildSlashCandidates(BUILTIN_SLASH_CANDIDATES, [], []);
 
 export function DesktopApp(): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<DesktopSnapshot>(EMPTY_SNAPSHOT);
@@ -21,6 +33,9 @@ export function DesktopApp(): React.JSX.Element {
   const [pendingDelete, setPendingDelete] = useState<DesktopSessionSummary>();
   const [deletingSession, setDeletingSession] = useState(false);
   const [modelDraft, setModelDraft] = useState("");
+  const [slashSelection, setSlashSelection] = useState(0);
+  const [dismissedSlashInput, setDismissedSlashInput] = useState<string>();
+  const [cursorPos, setCursorPos] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -36,6 +51,40 @@ export function DesktopApp(): React.JSX.Element {
 
   const busy = snapshot.activeSession?.busy ?? false;
   const groups = useMemo(() => groupSessions(snapshot.sessions), [snapshot.sessions]);
+  const slashCompletion = useMemo(() => {
+    if (busy || snapshot.approval !== undefined || snapshot.questions !== undefined) return null;
+    if (dismissedSlashInput === input) return null;
+    return deriveSlashCompletion(input, cursorPos, SLASH_CANDIDATES, slashSelection);
+  }, [input, cursorPos, slashSelection, dismissedSlashInput, busy, snapshot.approval, snapshot.questions]);
+  const completedTokenLen = slashCompletion === null
+    ? completedSlashTokenLength(input, SLASH_CANDIDATES, false)
+    : 0;
+
+  const handleSlashSelect = useCallback((name: string) => {
+    const next = completeSlashSelection(input, cursorPos, name);
+    setInput(next.text);
+    setDismissedSlashInput(next.text);
+    setSlashSelection(0);
+    setCursorPos(next.cursor);
+    setTimeout(() => {
+      const el = inputRef.current;
+      if (el !== null) {
+        el.focus();
+        el.setSelectionRange(el.value.length, el.value.length);
+      }
+    }, 0);
+  }, [input, cursorPos]);
+
+  const handleSlashDismiss = useCallback(() => {
+    setDismissedSlashInput(input);
+  }, [input]);
+
+  const handleSlashMove = useCallback((delta: -1 | 1) => {
+    setSlashSelection((value) => {
+      const count = slashCompletion?.items.length ?? 0;
+      return moveSlashSelection(value, delta, count);
+    });
+  }, [slashCompletion]);
 
   const chooseWorkspace = async () => {
     setError(undefined);
@@ -176,7 +225,12 @@ export function DesktopApp(): React.JSX.Element {
       {snapshot.diagnostics.length > 0 && <details className="diagnostics"><summary>{snapshot.diagnostics.length} 条启动提示</summary><pre>{snapshot.diagnostics.join("\n")}</pre></details>}
       <Composer input={input} setInput={setInput} onSend={() => void send()} busy={busy}
         onInterrupt={() => void window.flavorDesktop.interrupt()} inputRef={inputRef} snapshot={snapshot}
-        modelDraft={modelDraft} setModelDraft={setModelDraft} setModel={setModel} setPermission={setPermission} />
+        modelDraft={modelDraft} setModelDraft={setModelDraft} setModel={setModel} setPermission={setPermission}
+        slashCompletion={slashCompletion} onSlashSelect={handleSlashSelect}
+        onSlashDismiss={handleSlashDismiss}
+        onSlashMove={handleSlashMove}
+        completedTokenLen={completedTokenLen}
+        cursorPos={cursorPos} setCursorPos={setCursorPos} />
     </main>
     </div>
 
@@ -248,16 +302,105 @@ interface ComposerProps {
   input: string; setInput(value: string): void; onSend(): void; busy: boolean; onInterrupt(): void;
   inputRef: React.RefObject<HTMLTextAreaElement | null>; snapshot: DesktopSnapshot;
   modelDraft: string; setModelDraft(value: string): void; setModel(): void; setPermission(mode: PermissionMode): void;
+  slashCompletion: SlashCompletion | null;
+  onSlashSelect(name: string): void;
+  onSlashDismiss(): void;
+  onSlashMove(delta: -1 | 1): void;
+  completedTokenLen: number;
+  cursorPos: number;
+  setCursorPos(value: number): void;
 }
 
 function Composer(props: ComposerProps): React.JSX.Element {
   const disabled = props.snapshot.workspace === undefined;
-  return <div className="composer-wrap"><div className="composer" data-busy={props.busy}>
-    <textarea ref={props.inputRef} value={props.input} onChange={(event) => props.setInput(event.target.value)}
-      onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); props.onSend(); } }}
-      placeholder={disabled ? "先打开一个项目" : "给 Flavor 一个任务，或输入 / 查看命令"} disabled={disabled} rows={1} />
+  const menuOpen = props.slashCompletion !== null;
+  const tagText = props.completedTokenLen > 0
+    ? props.input.slice(0, props.completedTokenLen)
+    : undefined;
+  const tagDisplayText = tagText?.startsWith("/") ? tagText.slice(1).trim() : tagText?.trim();
+  const textareaText = tagText !== undefined
+    ? props.input.slice(props.completedTokenLen)
+    : props.input;
+  const hasTag = tagText !== undefined;
+
+  const fullCursorFromTextarea = (textareaPos: number): number =>
+    hasTag ? tagText!.length + textareaPos : textareaPos;
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (menuOpen) {
+      if (event.key === "ArrowDown") { event.preventDefault(); props.onSlashMove(1); return; }
+      if (event.key === "ArrowUp") { event.preventDefault(); props.onSlashMove(-1); return; }
+      if (event.key === "Tab" || event.key === "Enter") {
+        event.preventDefault();
+        const selected = props.slashCompletion?.items[props.slashCompletion?.selectedIndex ?? 0];
+        if (selected !== undefined) props.onSlashSelect(selected.name);
+        return;
+      }
+      if (event.key === "Escape") { event.preventDefault(); props.onSlashDismiss(); return; }
+    }
+    // Backspace at beginning of textarea when a tag exists: remove the tag
+    const target = event.target as HTMLTextAreaElement;
+    const selectionStart = target.selectionStart;
+    const selectionEnd = target.selectionEnd;
+    if (event.key === "Backspace" && hasTag && selectionStart === 0 && selectionStart === selectionEnd && !menuOpen) {
+      event.preventDefault();
+      props.setInput(textareaText);
+      props.setCursorPos(0);
+      return;
+    }
+    if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); props.onSend(); }
+  };
+
+  const textarea = (
+    <textarea
+      ref={props.inputRef}
+      className="composer-textarea"
+      value={textareaText}
+      onChange={(event) => {
+        const val = event.target.value;
+        const full = hasTag ? tagText + val : val;
+        props.setInput(full);
+        props.setCursorPos(fullCursorFromTextarea(event.target.selectionStart));
+      }}
+      onSelect={(event) => {
+        props.setCursorPos(fullCursorFromTextarea((event.target as HTMLTextAreaElement).selectionStart));
+      }}
+      onKeyDown={onKeyDown}
+      onClick={(event) => {
+        props.setCursorPos(fullCursorFromTextarea((event.target as HTMLTextAreaElement).selectionStart));
+      }}
+      placeholder={disabled ? "先打开一个项目" : hasTag ? "" : "给 Flavor 一个任务，或输入 / 查看命令"}
+      disabled={disabled}
+      rows={1}
+    />
+  );
+
+  return <div className="composer-wrap">
+    {menuOpen && <SlashCompletionDropdown
+      completion={props.slashCompletion!}
+      onSelect={props.onSlashSelect}
+      onDismiss={props.onSlashDismiss}
+    />}
+    <div className={`composer${hasTag ? " has-tag" : ""}`} data-busy={props.busy}>
+      {hasTag ? (
+        <div className="composer-input-row">
+          <span className="slash-tag">{tagDisplayText}</span>
+          {textarea}
+        </div>
+      ) : textarea}
     <div className="composer-tools">
-      <button className="attach-button" title="在提示中输入 @ 引用项目文件" onClick={() => props.setInput(`${props.input}${props.input ? " " : ""}@`)} disabled={disabled}>＋</button>
+      <button className="attach-button" title="在提示中输入 @ 引用项目文件"
+        onClick={() => {
+          if (hasTag) {
+            props.setInput(tagText + textareaText + "@");
+            setTimeout(() => {
+              const el = props.inputRef.current;
+              if (el !== null) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+            }, 0);
+          } else {
+            props.setInput(`${props.input}${props.input ? " " : ""}@`);
+          }
+        }} disabled={disabled}>＋</button>
       <div className="composer-context"><span className="context-item">▱ {workspaceName(props.snapshot.workspace)}</span><span className="context-item">▣ 本地</span></div>
       <div className="composer-controls">
         <details className="model-menu"><summary>{shortModel(props.snapshot.activeSession?.mainModel)}⌄</summary><div className="popover">

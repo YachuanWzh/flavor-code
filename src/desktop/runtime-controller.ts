@@ -119,9 +119,9 @@ export class DesktopRuntimeController {
       approvalPolicy: "prompt",
       ...(resumeSession === undefined ? {} : { resumeSession }),
       output: (event) => this.#emit({ type: "session-output", event }),
-      onApprovalChange: () => queueMicrotask(() => {
+      onApprovalChange: () => {
         if (this.#runtime !== undefined) this.#publishSnapshot();
-      }),
+      },
     });
     this.#runtime = runtime;
     await runtime.session.start();
