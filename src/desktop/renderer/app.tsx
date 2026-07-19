@@ -51,6 +51,27 @@ export function DesktopApp(): React.JSX.Element {
   const [cursorPos, setCursorPos] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const userScrolledUp = useRef(false);
+
+  // Track wheel scrolling: pause auto-scroll when user scrolls up, resume when they scroll back to bottom
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const handleWheel = (e: WheelEvent) => {
+      if (e.deltaY < 0) {
+        userScrolledUp.current = true;
+      } else {
+        requestAnimationFrame(() => {
+          const container = scrollRef.current;
+          if (!container) return;
+          const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 8;
+          if (atBottom) userScrolledUp.current = false;
+        });
+      }
+    };
+    el.addEventListener("wheel", handleWheel, { passive: true });
+    return () => el.removeEventListener("wheel", handleWheel);
+  }, []);
 
   useEffect(() => {
     const unsubscribe = window.flavorDesktop.onEvent((event) => handleEvent(event, setSnapshot, setTranscript, setError));
@@ -59,6 +80,7 @@ export function DesktopApp(): React.JSX.Element {
   }, []);
 
   useEffect(() => {
+    if (userScrolledUp.current) return;
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [transcript]);
 
