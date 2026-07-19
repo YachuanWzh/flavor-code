@@ -136,7 +136,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   const closing = useRef(false);
   const textBuf = useRef<{ pending: string; timer: ReturnType<typeof setTimeout> | null }>({ pending: "", timer: null });
 
-  useTerminalTitle("flavor");
+  useTerminalTitle("Flavor Code");
 
   const flushText = (): void => {
     const t = textBuf.current;
