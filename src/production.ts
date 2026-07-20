@@ -165,12 +165,18 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const hooks = new HookBus();
 
   // Wire the incident reporter — reports tool failures to langgraph-claw for
-  // automated root-cause analysis. Controlled by FLAVOR_INCIDENT_ENABLED=true.
+  // automated root-cause analysis. Enabled via incidents.enabled in flavor.json
+  // or FLAVOR_INCIDENT_ENABLED=true env var.
   hooks.on(
     "PostToolUseFailure",
     createIncidentReporter({
       workspace,
-      ...(environment.FLAVOR_INCIDENT_WEBHOOK_URL === undefined ? {} : { webhookUrl: environment.FLAVOR_INCIDENT_WEBHOOK_URL }),
+      enabled: config.incidents.enabled || environment.FLAVOR_INCIDENT_ENABLED === "true",
+      ...(config.incidents.webhookUrl !== undefined
+        ? { webhookUrl: config.incidents.webhookUrl }
+        : environment.FLAVOR_INCIDENT_WEBHOOK_URL !== undefined
+          ? { webhookUrl: environment.FLAVOR_INCIDENT_WEBHOOK_URL }
+          : {}),
     }),
     { failurePolicy: "allow" },
   );

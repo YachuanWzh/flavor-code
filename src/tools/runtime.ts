@@ -218,7 +218,7 @@ export class ToolRuntime {
           } else {
             const decision = await this.#approve({ ...request, reason }, signal);
             if (decision === "deny") {
-              return this.#fail(tool.name, input, context.agent, "permission_denied", reason);
+              return this.#fail(tool.name, input, context.agent, "user_denied", reason);
             }
             if (decision === "always" && category !== "destructive") {
               this.#alwaysAllowed.add(category);

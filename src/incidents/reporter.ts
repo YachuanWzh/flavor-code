@@ -40,6 +40,7 @@ const LEVEL_MAP: Record<string, string> = {
   approval_required: "P2",
   unknown_tool: "P1",
   invalid_input: "P2",
+  user_denied: "P1",
 };
 
 const SEVERITY_MAP: Record<string, string> = {

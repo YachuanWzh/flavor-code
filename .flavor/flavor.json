@@ -23,5 +23,9 @@
   },
   "maxSubagents": 3,
   "permissionMode": "workspace",
-  "language": "zh-CN"
+  "language": "zh-CN",
+  "incidents": {
+    "enabled": true,
+    "webhookUrl": "http://localhost:8000"
+  }
 }

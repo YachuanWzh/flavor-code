@@ -122,6 +122,12 @@ export const FlavorConfigSchema = z.object({
       });
     })
     .prefault({}),
+  incidents: z
+    .object({
+      enabled: z.boolean().default(false),
+      webhookUrl: z.string().url().optional(),
+    })
+    .prefault({}),
 });
 
 export type FlavorConfig = z.infer<typeof FlavorConfigSchema>;
