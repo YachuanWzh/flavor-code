@@ -34,6 +34,10 @@ function logStartup(step: string, detail?: string): void {
   } catch { /* ignore logging errors */ }
 }
 
+// GPU 进程沙箱在部分 Windows 环境下会崩溃（exit_code=-2147483645），
+// 导致打包后的 exe 无法显示窗口。开发模式通过 --no-sandbox 绕过。
+app.commandLine.appendSwitch("disable-gpu-sandbox");
+
 logStartup("module-loaded", `moduleDirectory=${moduleDirectory}, packaged=${app.isPackaged}`);
 
 const controller = new DesktopRuntimeController({
