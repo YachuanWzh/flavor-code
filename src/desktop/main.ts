@@ -1,6 +1,7 @@
+import { appendFileSync } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell } from "electron";
 
@@ -24,6 +25,16 @@ const developmentUrl = process.env.FLAVOR_DESKTOP_DEV_URL;
 let mainWindow: BrowserWindow | undefined;
 let appMenu: Menu | undefined;
 let quitting = false;
+
+function logStartup(step: string, detail?: string): void {
+  try {
+    const logPath = join(dirname(process.execPath), "flavor-code-startup.log");
+    const ts = new Date().toISOString();
+    appendFileSync(logPath, `[${ts}] ${step}${detail ? ` | ${detail}` : ""}\n`);
+  } catch { /* ignore logging errors */ }
+}
+
+logStartup("module-loaded", `moduleDirectory=${moduleDirectory}, packaged=${app.isPackaged}`);
 
 const controller = new DesktopRuntimeController({
   emit(event: DesktopEvent) {
@@ -135,7 +146,7 @@ function applicationMenu(): Menu {
 }
 
 async function createWindow(): Promise<void> {
-  const rendererUrl = developmentUrl ?? pathToFileURL(join(app.getAppPath(), "dist", "desktop-renderer", "index.html")).href;
+  const rendererPath = join(app.getAppPath(), "dist", "desktop-renderer", "index.html");
   mainWindow = new BrowserWindow({
     title: "Flavor Code",
     width: 1280,
@@ -149,7 +160,7 @@ async function createWindow(): Promise<void> {
       preload: join(moduleDirectory, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
+      sandbox: false,
       webSecurity: true,
     },
   });
@@ -166,13 +177,7 @@ async function createWindow(): Promise<void> {
     if (isSafeExternalUrl(url)) void shell.openExternal(url);
     return { action: "deny" };
   });
-  mainWindow.webContents.on("will-navigate", (event, url) => {
-    const current = mainWindow?.webContents.getURL();
-    if (!isTrustedNavigation(url, current ?? "", rendererUrl)) {
-      event.preventDefault();
-      if (isSafeExternalUrl(url)) void shell.openExternal(url);
-    }
-  });
+
   mainWindow.once("ready-to-show", () => mainWindow?.show());
   mainWindow.on("close", (event) => {
     if (quitting) return;
@@ -183,7 +188,24 @@ async function createWindow(): Promise<void> {
       app.quit();
     });
   });
-  await mainWindow.loadURL(rendererUrl);
+
+  // 加载内容并获取实际渲染 URL，用于导航守卫
+  let rendererUrl: string;
+  if (developmentUrl) {
+    rendererUrl = developmentUrl;
+    await mainWindow.loadURL(developmentUrl);
+  } else {
+    await mainWindow.loadFile(rendererPath);
+    rendererUrl = mainWindow.webContents.getURL();
+  }
+
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    const current = mainWindow?.webContents.getURL();
+    if (!isTrustedNavigation(url, current ?? "", rendererUrl)) {
+      event.preventDefault();
+      if (isSafeExternalUrl(url)) void shell.openExternal(url);
+    }
+  });
 }
 
 app.whenReady().then(async () => {

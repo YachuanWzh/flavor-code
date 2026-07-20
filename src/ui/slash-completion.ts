@@ -65,12 +65,6 @@ export function completedSlashTokenLength(
   let tokenEnd = whitespace < 0 ? points.length : whitespace;
   const name = points.slice(1, tokenEnd).join("");
   const matches = candidates.some((candidate) => candidate.name === name);
-  if (matches) {
-    // Consume any trailing whitespace immediately after the command token
-    while (tokenEnd < points.length && /\s/u.test(points[tokenEnd])) {
-      tokenEnd++;
-    }
-  }
   return matches ? tokenEnd : 0;
 }
 
@@ -125,7 +119,7 @@ export function completeSlashSelection(
   const tokenEndOffset = points.slice(safeCursor).findIndex((point) => /\s/u.test(point));
   const tokenEnd = tokenEndOffset < 0 ? points.length : safeCursor + tokenEndOffset;
   const suffix = points.slice(tokenEnd).join("").replace(/^\s*/u, "");
-  const prefix = suffix.length > 0 ? `/${name} ` : `/${name}`;
+  const prefix = `/${name} `;
   return { text: prefix + suffix, cursor: [...prefix].length };
 }
 

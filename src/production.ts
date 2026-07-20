@@ -20,6 +20,7 @@ import { summarizeWithModel } from "./context/summarizer.js";
 import { LocalHarness } from "./harness/local.js";
 import { HookBus } from "./hooks/bus.js";
 import { HOOK_EVENT_NAMES, type HookEventName } from "./hooks/types.js";
+import { createIncidentReporter } from "./incidents/reporter.js";
 import { initializeFlavor } from "./init/project.js";
 import { LoopOrchestrator, type LoopRuntimeEvent } from "./loop/orchestrator.js";
 import { prepareLoopWorkspace } from "./loop/isolation.js";
@@ -162,6 +163,18 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     environment.OPENAI_API_KEY, environment.ANTHROPIC_API_KEY,
   ].filter((value): value is string => typeof value === "string" && value.length > 0);
   const hooks = new HookBus();
+
+  // Wire the incident reporter — reports tool failures to langgraph-claw for
+  // automated root-cause analysis. Controlled by FLAVOR_INCIDENT_ENABLED=true.
+  hooks.on(
+    "PostToolUseFailure",
+    createIncidentReporter({
+      workspace,
+      ...(environment.FLAVOR_INCIDENT_WEBHOOK_URL === undefined ? {} : { webhookUrl: environment.FLAVOR_INCIDENT_WEBHOOK_URL }),
+    }),
+    { failurePolicy: "allow" },
+  );
+
   const registry = new ModelRegistry();
   const diagnostics: string[] = [];
   const approvals = new ApprovalBridge(options.onApprovalChange);
