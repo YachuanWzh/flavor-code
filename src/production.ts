@@ -435,9 +435,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         signal,
         ...(onProgress === undefined ? {} : { onProgress }),
       }),
-      ...(agent === "main"
-        ? { onCompactProgress: (progress: number) => options.output({ type: "compact-progress", progress }) }
-        : {}),
+      onCompactProgress: (progress: number) => options.output({ type: "compact-progress", progress }),
       hooks,
     });
   };
