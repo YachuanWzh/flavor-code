@@ -21,6 +21,7 @@ export interface SessionServices {
   run(prompt: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
   runSkill(skill: string, prompt: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
   runLoop(goal: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
+  runGoal(goal: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
   mcp(command: McpSlashCommand, signal: AbortSignal): Promise<string>;
   setModel(role: ModelRole, modelId: string): void | Promise<void>;
   setPermissionMode(mode: PermissionMode): void | Promise<void>;
@@ -48,6 +49,7 @@ const HELP = [
   "/init  /config  /skills  /plugins  /hooks  /tasks",
   "/compact  /clear  /help  /exit",
   "/loop <goal>                            run a verified autonomous loop",
+  "/goal <objective>                       run a goal pipeline with adversarial verification",
   "/mcp [status|tools|reconnect|enable|disable]  manage MCP servers",
 ].join("\n");
 
@@ -171,6 +173,8 @@ export class FlavorSession {
       for await (const event of this.#services.runSkill(command.skill, command.prompt, signal)) this.#services.output(event);
     } else if (command.name === "loop") {
       for await (const event of this.#services.runLoop(command.goal, signal)) this.#services.output(event);
+    } else if (command.name === "goal") {
+      for await (const event of this.#services.runGoal(command.goal, signal)) this.#services.output(event);
     } else if (command.name === "mcp") {
       this.#notice(await this.#services.mcp(command, signal));
     } else if (command.name === "compact") {

@@ -1,7 +1,7 @@
 export const MVP_COMMANDS = [
   "model", "init", "config", "login", "permissions", "skills", "plugins", "hooks",
   "tasks", "compact", "clear", "help", "exit", "audit",
-  "loop", "mcp",
+  "loop", "goal", "mcp",
 ] as const;
 
 export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string> = {
@@ -20,6 +20,7 @@ export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string>
   exit: "Exit Flavor",
   audit: "Query tool failure audit log",
   loop: "Run a verified autonomous loop toward a goal",
+  goal: "Run a goal pipeline with adversarial verification",
   mcp: "Manage MCP servers",
 };
 
@@ -36,8 +37,9 @@ export type SlashCommand =
   | { name: "plugin"; command: string; args: string[] }
   | { name: "skill"; skill: string; prompt: string }
   | { name: "loop"; goal: string }
+  | { name: "goal"; goal: string }
   | McpSlashCommand
-  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop" | "mcp"> }
+  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop" | "goal" | "mcp"> }
   | { name: "audit"; toolFilter?: string | undefined }
   | { name: "unknown"; input: string; suggestions: string[] }
   | { name: "invalid"; command: string; message: string };
@@ -82,6 +84,11 @@ export function parseSlashCommand(
   if (name === "loop") {
     const goal = args.join(" ").trim();
     if (!goal) return { name: "invalid", command: name, message: "Use /loop <goal>." };
+    return { name, goal };
+  }
+  if (name === "goal") {
+    const goal = args.join(" ").trim();
+    if (!goal) return { name: "invalid", command: name, message: "Use /goal <objective>." };
     return { name, goal };
   }
   if (name === "mcp") {

@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+﻿import { readFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir, release as osRelease, version as osVersion } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
@@ -23,6 +23,7 @@ import { HOOK_EVENT_NAMES, type HookEventName } from "./hooks/types.js";
 import { createIncidentReporter } from "./incidents/reporter.js";
 import { initializeFlavor } from "./init/project.js";
 import { LoopOrchestrator, type LoopRuntimeEvent } from "./loop/orchestrator.js";
+import { GoalOrchestrator } from "./goal/orchestrator.js";
 import { prepareLoopWorkspace } from "./loop/isolation.js";
 import { LoopStore } from "./loop/store.js";
 import type { LoopStatus } from "./loop/types.js";
@@ -649,6 +650,18 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     fingerprint: workspaceFingerprint,
     idFactory: () => `loop-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`,
   });
+  const goalOrchestrator = new GoalOrchestrator({
+    workspace,
+    registry,
+    plannerModelId: mainModel,
+    classifierModelId: mainModel,
+    skepticCount: 3,
+    maxRounds: 5,
+    maxStallStreak: 2,
+    runWorker: ({ workspace: goalWorkspace, prompt, signal }) =>
+      runLoopWorker({ workspace: goalWorkspace, prompt, signal }),
+  });
+
 
   const services: SessionServices = {
     hooks, workspace,
@@ -660,6 +673,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       runExplicitSkill(harness, skills, skill, prompt, signal, selectedModels.mainError), persist,
     ),
     runLoop: (goal, signal) => runLoopSession(loopOrchestrator, goal, signal),
+    runGoal: (goal, signal) => runGoalSession(goalOrchestrator, goal, signal),
     mcp: async (command, signal) => {
       signal.throwIfAborted();
       const manager = mcpManager!;
@@ -1343,4 +1357,61 @@ function attachCleanupError(primary: unknown, cleanup: unknown): void {
   if ((typeof primary !== "object" && typeof primary !== "function") || primary === null || !Object.isExtensible(primary)) return;
   try { Object.defineProperty(primary, "cleanupError", { value: cleanup, configurable: true }); }
   catch { /* Preserve the primary error even when diagnostics cannot be attached. */ }
+}
+
+async function* runGoalSession(
+  orchestrator: GoalOrchestrator, goal: string, signal: AbortSignal,
+): AsyncIterable<AgentEvent> {
+  for await (const event of orchestrator.run({ goal, signal })) {
+    if (event.type === "goal-plan-created") {
+      yield { type: "warning", message: `Goal plan created (${event.plan.kind}) with ${event.plan.criteria.length} acceptance criteria.` };
+      yield { type: "warning", message: `Plan file: ${event.planPath}` };
+      if (event.plan.approach) {
+        yield { type: "warning", message: `Approach: ${event.plan.approach}` };
+      }
+      continue;
+    }
+    if (event.type === "goal-plan-failed") {
+      yield { type: "error", error: { code: "unknown", message: event.reason } };
+      yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
+      return;
+    }
+    if (event.type === "goal-worker-start") {
+      yield { type: "warning", message: `Goal round ${event.round}: executing...` };
+      continue;
+    }
+    if (event.type === "goal-verification-start") {
+      yield { type: "warning", message: `Goal round ${event.round}: verification panel (${3} skeptics) auditing...` };
+      continue;
+    }
+    if (event.type === "goal-verdict") {
+      if (event.outcome.type === "achieved") {
+        yield { type: "warning", message: `Verdict: ACHIEVED. ${event.outcome.summary}` };
+      } else if (event.outcome.type === "not_achieved") {
+        yield { type: "warning", message: `Verdict: NOT ACHIEVED. ${event.outcome.summary}` };
+      } else {
+        yield { type: "warning", message: `Verdict: BLOCKED. ${event.outcome.reason}` };
+      }
+      continue;
+    }
+    if (event.type === "goal-complete") {
+      yield { type: "warning", message: `Goal complete! ${event.summary}` };
+      yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
+      return;
+    }
+    if (event.type === "goal-failed") {
+      yield { type: "error", error: { code: "unknown", message: event.reason } };
+      yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
+      return;
+    }
+    if (event.type === "goal-paused") {
+      yield { type: "warning", message: `Goal paused: ${event.reason}` };
+      continue;
+    }
+    if (event.type === "goal-stalled") {
+      yield { type: "warning", message: `Goal stalled: ${event.reason}` };
+      continue;
+    }
+  }
+  yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
 }

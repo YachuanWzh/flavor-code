@@ -9,7 +9,7 @@
 
 `flavor-code` 是一个同时提供终端界面与 Electron 桌面应用的 AI 编程助手。它接入大语言模型（OpenAI GPT、Anthropic Claude 或任何兼容服务），能理解你的项目结构，在工作区范围内安全操作文件，甚至能把复杂任务拆成多块，分给多个"小助手"并行处理。
 
-当前版本：**0.4.0**
+当前版本：**0.5.0**
 
 ## 它能做什么
 
@@ -25,6 +25,7 @@
 - **插件和 Skill** — 通过插件扩展功能，通过 Skill（技能包）教它新的工作流
 - **审计日志** — 所有工具执行失败都会被记录到 `.flavor/audit.jsonl`
 - **事故上报与 RCA** — 工具执行失败自动上报到 langgraph-claw 告警管道，P0 级错误触发自动根因分析（Auto-RCA）
+- **对抗性审查（/goal）** — 分离"规划 - 执行 - 审查"三角色，3 个独立 AI 质疑者多数投票验证目标是否达成，不通过则打回重做
 
 ---
 
@@ -228,6 +229,40 @@ export FLAVOR_INCIDENT_WEBHOOK_URL="http://localhost:8000"
 - `isolation: "auto"` 对只读目标使用当前目录，对代码修改或不明确目标使用独立 Git worktree；不能安全隔离时进入 `needs_human`。
 - 运行状态与证据写入 `.flavor/loops/<loop-id>/`。Ctrl+C 可取消；不会自动 merge、push 或 deploy。
 
+### 对抗性审查（/goal）
+
+`/goal` 提供了一套结构化、多角色对抗验证的质量门禁机制：
+
+```text
+/goal 修复项目里所有的 TypeScript 类型错误，并确保 npm test 全部通过
+```
+
+**核心思路：干活的和审查的是不同角色。** 流水线分为三个阶段：
+
+1. **Planner（规划者）**：将自然语言目标翻译为结构化验收标准（gating 门槛 + evidence 证据），写入 `.flavor/goal-plan.md`
+2. **Worker（执行者）**：在验收标准约束下执行代码变更并自我验证
+3. **Skeptic Panel（质疑团）**：3 个独立 AI 并行审查工作成果——默认立场是"我不信，证明给我看"
+
+```mermaid
+flowchart LR
+    A["/goal objective"] --> B["Planner<br/>生成验收契约"]
+    B --> C["Worker<br/>执行代码变更"]
+    C --> D["Skeptic Panel<br/>3 AI 对抗审查"]
+    D -->|多数通过| E["✓ goal-complete"]
+    D -->|打回重做| C
+    D -->|不可修复| F["✗ goal-blocked"]
+```
+
+**关键机制：**
+
+- **多数投票**：3 个 Skeptic 独立审查，≥2 个确认才算通过
+- **精准反馈**：打回重做时附带具体缺陷清单（哪条验收标准、什么问题、是否模型可修复）
+- **停滞熔断**：连续 2 轮修复后 gap 指纹不变 → 自动熔断（`goal-stalled`），避免烧钱死循环
+- **契约清晰**：Planner 只描述结果不指定实现，Skeptic 只审查契约不许发明新需求
+- **Fail-open**：Skeptic 解析失败按"不通过"处理，宁可多跑一轮也不错过问题
+
+当前硬编码参数：`skepticCount: 3`、`maxRounds: 5`、`maxStallStreak: 2`。
+
 ---
 
 ## PKCE 认证配置
@@ -372,7 +407,7 @@ MVP 已支持：
 - 项目切换、新建会话、历史会话分组、恢复与安全删除
 - 消息流式输出、Markdown、思考过程、工具调用、Diff 和子 Agent 状态展示
 - 权限确认、Agent 提问、任务取消，以及模型和权限模式切换
-- 全部 `/` 命令，以及 Skills、Plugins、MCP 和 `/loop` 等现有运行时能力
+- 全部 `/` 命令，以及 Skills、Plugins、MCP、`/loop` 和 `/goal` 等现有运行时能力
 - 接近 Codex 的三栏工作台与单层自绘顶栏，并适配窄窗口显示
 
 从源码运行或打包：
@@ -387,7 +422,7 @@ npm run desktop:dist     # 生成 Windows NSIS 安装包
 Windows 打包产物位于：
 
 - 免安装目录：`release/win-unpacked/Flavor Code.exe`
-- NSIS 安装包：`release/Flavor-Code-0.4.0-x64.exe`
+- NSIS 安装包：`release/Flavor-Code-0.5.0-x64.exe`
 
 模型配置仍读取全局 `~/.flavor-code/flavor.json`、项目 `.flavor/flavor.json`、`.env` 和环境变量，因此 CLI 与桌面端可以共享配置与会话。生产版桌面窗口启用了 `contextIsolation` 和 Chromium 沙箱，关闭了渲染进程的 Node.js 集成；文件、命令和 Agent 操作只通过显式 IPC 接口进入主进程。Windows 的 `desktop:dev` 为兼容工作区内 Chromium 子进程启动，仅在本地开发启动器中使用 `--no-sandbox`，打包产物不携带该参数。
 
@@ -453,6 +488,7 @@ Flavor 的压缩是分层执行的：
 | `/clear` | 清空终端显示 |
 | `/mcp [status\|tools\|reconnect\|enable\|disable]` | 管理 MCP 服务器 |
 | `/loop <goal>` | 启动经验证的前台自治循环 |
+| `/goal <objective>` | 启动对抗性审查流水线（Plan → Execute → Verify） |
 | `/help` | 显示帮助 |
 | `/exit` | 退出 |
 
@@ -546,6 +582,7 @@ Flavor 相关的文件都放在 `.flavor/` 目录下：
 ```
 .flavor/
 ├── flavor.json        # 项目级配置
+├── goal-plan.md       # /goal 生成的验收契约
 ├── sessions/          # 会话存档（v2 JSONL 格式）
 │   └── session-xxx.jsonl
 ├── audit.jsonl        # 工具失败审计日志
@@ -608,6 +645,7 @@ npm run smoke:install  # 验证打包和安装
 - Provider 适配层与错误标准化
 - **PKCE 到 SSE 全链路（OAuth 授权 → API 网关 → 流式代理）**
 - **事故上报与 RCA（PostToolUseFailure → langgraph-claw → 自动根因分析）**
+- **对抗性审查流水线（Plan → Execute → Skeptic Panel 多数投票 → 停滞检测熔断）**
 - 权限引擎决策树与 Shell 安全分析
 - Hook 事件总线（19 个事件）
 - Skill 渐进加载与资源安全
