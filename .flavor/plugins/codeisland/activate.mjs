@@ -7,12 +7,13 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const bridgePath = join(__dirname, "bridge.mjs");
 const BLOCKING_TIMEOUT_MS = 86_400_000;
 const FIRE_TIMEOUT_MS = 10_000;
+const bridgeEnvironment = { ...process.env, ELECTRON_RUN_AS_NODE: "1" };
 
 function relay(event, signal) {
   if (event.type !== "PermissionRequest") {
     const child = spawn(process.execPath, [bridgePath], {
       stdio: ["pipe", "ignore", "ignore"],
-      env: process.env,
+      env: bridgeEnvironment,
       windowsHide: true,
       detached: true,
     });
@@ -23,7 +24,7 @@ function relay(event, signal) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [bridgePath], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: process.env,
+      env: bridgeEnvironment,
       windowsHide: true,
     });
     let stdout = "";
