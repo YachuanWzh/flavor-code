@@ -28,6 +28,7 @@ function fakeRuntime(output: (event: SessionOutput) => void): RuntimeLike {
       permissionMode: () => "default" as const,
       setModel: vi.fn((role: "main" | "subagent", modelId: string) => { if (role === "main") mainModel = modelId; }),
       finishTask: vi.fn(async () => "Task completed; review 1 memory candidate."),
+      refreshMemory: vi.fn(async () => undefined),
       questions: { pending: undefined, answer: vi.fn() },
     },
     approvals: { pending: undefined, resolve: vi.fn() },
@@ -80,16 +81,20 @@ describe("DesktopRuntimeController", () => {
       delete: vi.fn(async () => true),
     };
     const loadMemoryManager = vi.fn(async () => memory);
+    const runtime = fakeRuntime(() => undefined);
     const controller = new DesktopRuntimeController({
-      home: "C:\\Users\\demo", listSessions: async () => [], loadMemoryManager, emit: () => undefined,
+      home: "C:\\Users\\demo", listSessions: async () => [], loadMemoryManager,
+      createRuntime: async () => runtime, emit: () => undefined,
     });
 
     await controller.openWorkspace("C:\\work");
+    await controller.startSession();
     expect(await controller.listMemory()).toEqual(expect.objectContaining({ entries: [existing] }));
     expect(await controller.createMemory({ type: "project", content: "Use npm." })).toEqual(existing);
     expect(await controller.updateMemory(existing.id, { type: "project", content: "Use pnpm." })).toEqual(updated);
     expect(await controller.deleteMemory(updated.id)).toBe(true);
     expect(loadMemoryManager).toHaveBeenCalledWith("C:\\work", "C:\\Users\\demo");
+    expect(runtime.services.refreshMemory).toHaveBeenCalledTimes(3);
   });
 
   it("opens a workspace, lists its sessions and starts a resumable runtime", async () => {

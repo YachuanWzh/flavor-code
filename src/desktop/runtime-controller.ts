@@ -35,6 +35,7 @@ export interface RuntimeLike {
     permissionMode(): PermissionMode;
     setModel(role: "main" | "subagent", modelId: string): void | Promise<void>;
     finishTask(): Promise<string>;
+    refreshMemory?(): Promise<void>;
     reloadSkills?(): Promise<void>;
     questions: { readonly pending: readonly Question[] | undefined; answer(answers: Record<number, string>): void };
   };
@@ -287,15 +288,21 @@ export class DesktopRuntimeController {
   }
 
   async createMemory(candidate: MemoryCandidate): Promise<MemoryEntry> {
-    return this.#requireMemoryManager().remember(candidate);
+    const entry = await this.#requireMemoryManager().remember(candidate);
+    await this.#runtime?.services.refreshMemory?.();
+    return entry;
   }
 
   async updateMemory(id: string, candidate: MemoryCandidate): Promise<MemoryEntry> {
-    return this.#requireMemoryManager().update(id, candidate);
+    const entry = await this.#requireMemoryManager().update(id, candidate);
+    await this.#runtime?.services.refreshMemory?.();
+    return entry;
   }
 
   async deleteMemory(id: string): Promise<boolean> {
-    return this.#requireMemoryManager().delete(id);
+    const deleted = await this.#requireMemoryManager().delete(id);
+    if (deleted) await this.#runtime?.services.refreshMemory?.();
+    return deleted;
   }
 
   async switchModel(modelId: string): Promise<DesktopSnapshot> {

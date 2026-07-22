@@ -38,6 +38,7 @@ export interface SessionServices {
   cancelActiveTask(): void | Promise<void>;
   clearContext(): void | Promise<void>;
   memory(): Promise<string>;
+  refreshMemory?(): Promise<void>;
   remember(type: MemoryType, text: string): Promise<string>;
   forget(query: string): Promise<string>;
   finishTask(): Promise<string>;

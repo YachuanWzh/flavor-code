@@ -78,6 +78,37 @@ describe("production long-term memory", () => {
     await runtime.dispose();
   });
 
+  it("always injects full user memory as the final cacheable system section", async () => {
+    const root = await workspace({ autoExtract: false });
+    const store = new MemoryStore({ workspace: root, maxEntries: 200, maxEntryChars: 1000 });
+    await store.rememberForTask("user-profile", {
+      type: "user", summary: "Address preference", content: "Always address the user as 亚川 in every response.",
+      topicKey: "user.address", keywords: ["亚川", "address"],
+      scores: { durability: 3, futureUtility: 3, authority: 3, nonDerivability: 3 },
+    });
+    const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
+
+    await runtime.session.submit("What is the weather like?");
+
+    const requests = (globalThis as { __flavorMemoryRequests?: Array<Array<{ role: string; content: string; cacheBreakpoint?: boolean }>> })
+      .__flavorMemoryRequests ?? [];
+    const main = requests.find((messages) => messages.some((message) => message.content === "What is the weather like?"));
+    const system = main?.filter((message) => message.role === "system") ?? [];
+    expect(system.at(-1)).toEqual({
+      role: "system",
+      content: expect.stringContaining("Always address the user as 亚川 in every response."),
+      cacheBreakpoint: true,
+    });
+
+    await runtime.services.remember("user", "Prefer concise answers.");
+    await runtime.session.submit("Tell me something unrelated.");
+    const latest = [...requests].reverse().find((messages) =>
+      messages.some((message) => message.content === "Tell me something unrelated."));
+    expect(latest?.filter((message) => message.role === "system").at(-1)?.content)
+      .toContain("Prefer concise answers.");
+    await runtime.dispose();
+  });
+
   it("stages extracted memory, writes only after confirmation, and exposes it to the next runtime", async () => {
     const root = await workspace({ autoExtract: true, autoExtractMinChars: 200 });
     const first = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });

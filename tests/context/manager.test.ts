@@ -66,14 +66,19 @@ describe("ContextManager", () => {
   });
 
   it("pins ordered system sections before project and task context", () => {
-    const context = createContext({ system: ["first section", "second section"], memory: "durable project facts" });
+    const context = createContext({
+      system: ["first section", "second section"],
+      memory: "durable project facts",
+      userMemory: "Always address the user as 亚川.",
+    });
 
-    expect(context.messagesForModel().slice(0, 5)).toEqual([
+    expect(context.messagesForModel().slice(0, 6)).toEqual([
       { role: "system", content: "first section" },
       { role: "system", content: "second section" },
       { role: "system", content: "FLAVOR.md\nproject guidance" },
       { role: "system", content: "Long-term memory\ndurable project facts" },
       { role: "system", content: "Task state\nin progress" },
+      { role: "system", content: "User memory\nAlways address the user as 亚川.", cacheBreakpoint: true },
     ]);
   });
 

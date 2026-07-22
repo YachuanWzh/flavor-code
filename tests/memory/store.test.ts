@@ -74,6 +74,23 @@ describe("MemoryStore", () => {
     expect((await memory.references())[0]).toMatchObject({ recallTotal: 1, recalls: { "consumer-task": "2026-07-22T00:00:00.000Z" } });
   });
 
+  it("returns every full user preference separately from relevance-based recall", async () => {
+    const memory = await store();
+    await memory.rememberForTask("user-profile", {
+      type: "user", summary: "Address preference", content: "Always address the user as 亚川.",
+      topicKey: "user.address", keywords: ["亚川", "address"],
+      scores: { durability: 3, futureUtility: 3, authority: 3, nonDerivability: 3 },
+    });
+    await memory.remember({ type: "user", content: "Use Chinese for every answer." });
+
+    expect(await memory.userContext()).toContain("Always address the user as 亚川.");
+    expect(await memory.userContext()).toContain("Use Chinese for every answer.");
+    const recalled = await memory.recall("Always address the user as 亚川", {
+      taskId: "consumer-task", topK: 5, maxChars: 1_000,
+    });
+    expect(recalled).toEqual({ references: [] });
+  });
+
   it("normalizes, de-duplicates, bounds, and forgets entries by text or id", async () => {
     const memory = await store({ maxEntries: 2 });
 

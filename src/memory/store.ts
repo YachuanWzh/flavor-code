@@ -66,6 +66,17 @@ export class MemoryStore {
     return (await this.references()).map((reference) => ({ id: reference.id, type: reference.type, content: reference.summary }));
   }
 
+  async userContext(): Promise<string | undefined> {
+    const references = (await this.references()).filter((reference) => reference.type === "user");
+    if (references.length === 0) return undefined;
+    const contents = await Promise.all(references.map(async (reference) =>
+      this.#readTaskItem(reference).catch(() => reference.summary)));
+    return [
+      "Persistent user preferences. Apply them in every response unless they conflict with current user instructions or system rules.",
+      ...contents.map((content) => `- ${content}`),
+    ].join("\n");
+  }
+
   async remember(candidate: MemoryCandidate): Promise<{ entry: MemoryEntry; added: boolean }> {
     const now = new Date();
     const content = normalizeMemoryContent(candidate.content);
@@ -169,7 +180,8 @@ export class MemoryStore {
   }> {
     assertTaskId(options.taskId);
     const now = options.now ?? new Date();
-    const ranked = rankMemoryReferences(await this.references(), query, {
+    const references = (await this.references()).filter((reference) => reference.type !== "user");
+    const ranked = rankMemoryReferences(references, query, {
       now, topK: options.topK, maxChars: options.maxChars,
     });
     const lines = [

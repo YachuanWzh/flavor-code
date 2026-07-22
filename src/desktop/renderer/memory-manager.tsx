@@ -149,7 +149,7 @@ export function MemoryManagerView({ onClose, onError }: MemoryManagerViewProps):
                 <div><p>{creating ? "新记忆" : `记忆 ${selected?.id}`}</p><h2>{creating ? "记录一件以后仍有用的事" : TYPE_COPY[draft.type].label}</h2></div>
                 <span className="memory-type-seal" data-type={draft.type}>{draft.type}</span>
               </div>
-              <div className="memory-priority-note"><span>i</span><p>记忆是历史背景，不是强制指令。新建或修改后，从下一个新会话开始生效。</p></div>
+              <div className="memory-priority-note"><span>i</span><p>记忆是历史背景，不是强制指令。新建或修改后，从下一次模型请求开始生效。</p></div>
               <div className="memory-form">
                 <fieldset><legend>记忆类型</legend><div className="memory-type-options">
                   {MEMORY_TYPES.map((type) => <label key={type} data-type={type} data-selected={draft.type === type}>
