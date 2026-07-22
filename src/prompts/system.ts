@@ -88,7 +88,7 @@ function toolsSection(toolNames: ReadonlySet<string>): string {
   addToolRule(rules, toolNames, "LspFindRefs", "Use `LspFindRefs` to find all references to a symbol using the Language Server Protocol. Prefer this over Grep when you need precise semantic results.");
   addToolRule(rules, toolNames, "LspHover", "Use `LspHover` to get type information and documentation for a symbol at a cursor position.");
   addToolRule(rules, toolNames, "LspDiagnostics", "Use `LspDiagnostics` to read compiler and linter errors for a file. Always run this before claiming a code change is correct.");
-  addToolRule(rules, toolNames, "AskUserQuestion", "Use `AskUserQuestion` only when a material ambiguity cannot be resolved safely from local context. Ask focused questions with mutually exclusive choices, then continue from the answer.");
+  addToolRule(rules, toolNames, "AskUserQuestion", "Use `AskUserQuestion` only when a material ambiguity cannot be resolved safely from local context. Ask focused questions with mutually exclusive agent-provided choices; the UI adds a final custom-input choice automatically. Then continue from the answer.");
   addToolRule(rules, toolNames, "TodoWrite", "Use `TodoWrite` to track non-trivial multi-step implementation work. Keep at most one item in progress and update status as work changes.");
   addToolRule(rules, toolNames, "TaskPlan", "Use `TaskPlan` before complex work with several dependent implementation or verification steps. Skip it for straightforward requests.");
   addToolRule(rules, toolNames, "TaskUpdate", "Use `TaskUpdate` to mark each planned task in progress before starting and completed only after successful verification.");

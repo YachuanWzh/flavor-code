@@ -72,4 +72,11 @@ describe("parseSlashCommand", () => {
     });
     expect(parseSlashCommand("/mcp remove docs")).toMatchObject({ name: "invalid", command: "mcp" });
   });
+
+  it("parses explicit task completion without arguments", () => {
+    expect(parseSlashCommand("/finish")).toEqual({ name: "finish" });
+    expect(parseSlashCommand("/finish now")).toEqual({
+      name: "invalid", command: "finish", message: "/finish does not accept arguments.",
+    });
+  });
 });

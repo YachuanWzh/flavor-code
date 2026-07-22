@@ -13,6 +13,7 @@ import { createGlobTool, type SearchResult } from "../tools/search.js";
 import { SkillManager, type ManagedSkill, type ManagedSkillSummary, type SkillDraft } from "../skills/manager.js";
 import { createProjectMemoryManager, type MemoryManagerLike, type MemorySnapshot } from "../memory/manager.js";
 import type { MemoryCandidate, MemoryEntry } from "../memory/types.js";
+import type { MemoryReviewItem } from "../memory/review.js";
 import { ProjectMcpConfigManager, type ManagedMcpServer, type ProjectMcpConfigManagerLike } from "../mcp/config-manager.js";
 import { DEFAULT_DESKTOP_MODELS, loadDesktopModels, saveDesktopModel } from "./model-config.js";
 import type { AddDesktopModelInput, DesktopEvent, DesktopModelOption, DesktopModelMutationResult, DesktopSessionSummary, DesktopSnapshot, McpServerDraft, SessionStartedPayload } from "./contracts.js";
@@ -33,12 +34,18 @@ export interface RuntimeLike {
     subagentModel(): string;
     permissionMode(): PermissionMode;
     setModel(role: "main" | "subagent", modelId: string): void | Promise<void>;
+    finishTask(): Promise<string>;
     reloadSkills?(): Promise<void>;
     questions: { readonly pending: readonly Question[] | undefined; answer(answers: Record<number, string>): void };
   };
   readonly approvals: {
     readonly pending: DesktopSnapshot["approval"];
     resolve(decision: ApprovalDecision): void;
+  };
+  readonly memoryReviews: {
+    readonly pending: readonly MemoryReviewItem[];
+    accept(id: string): Promise<boolean>;
+    dismiss(id: string): boolean;
   };
   dispose(): Promise<void>;
 }
@@ -117,6 +124,7 @@ export class DesktopRuntimeController {
         },
         ...(runtime.approvals.pending === undefined ? {} : { approval: runtime.approvals.pending }),
         ...(runtime.services.questions.pending === undefined ? {} : { questions: runtime.services.questions.pending }),
+        ...(runtime.memoryReviews.pending.length === 0 ? {} : { memoryReviews: runtime.memoryReviews.pending }),
       }),
       diagnostics: runtime?.diagnostics ?? [],
       models: this.#models,
@@ -202,6 +210,26 @@ export class DesktopRuntimeController {
       return result.matches.map((path) => path.replaceAll("\\", "/"));
     } catch {
       return [];
+    }
+  }
+
+  async finishTask(): Promise<string> {
+    const runtime = this.#runtime;
+    if (runtime === undefined) throw new Error("Start a session before finishing a task");
+    if (this.#busy) throw new Error("Wait for the active task before finishing it");
+    this.#busy = true;
+    this.#publishSnapshot();
+    try {
+      const result = await runtime.services.finishTask();
+      this.#emit({ type: "session-output", event: { type: "notice", message: result } });
+      return result;
+    } catch (error) {
+      this.#emit({ type: "runtime-error", message: message(error) });
+      throw error;
+    } finally {
+      this.#busy = false;
+      if (this.#workspace !== undefined) this.#sessions = await this.#listSessions(this.#workspace).catch(() => this.#sessions);
+      this.#publishSnapshot();
     }
   }
 
@@ -302,6 +330,14 @@ export class DesktopRuntimeController {
 
   answerQuestions(answers: Record<number, string>): void {
     this.#runtime?.services.questions.answer(answers);
+  }
+
+  async resolveMemoryReview(id: string, decision: "accept" | "dismiss"): Promise<void> {
+    const reviews = this.#runtime?.memoryReviews;
+    if (reviews === undefined) return;
+    if (decision === "accept") await reviews.accept(id);
+    else reviews.dismiss(id);
+    this.#publishSnapshot();
   }
 
   async dispose(): Promise<void> {

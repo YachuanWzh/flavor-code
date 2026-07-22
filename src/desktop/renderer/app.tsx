@@ -245,6 +245,13 @@ export function DesktopApp(): React.JSX.Element {
     try { setSnapshot(await window.flavorDesktop.switchModel(modelId)); }
     catch (cause) { setError(errorMessage(cause)); }
   };
+
+  const finishTask = async () => {
+    if (busy || snapshot.activeSession === undefined) return;
+    setError(undefined);
+    try { await window.flavorDesktop.finishTask(); }
+    catch (cause) { setError(errorMessage(cause)); }
+  };
   const addModel = async (draft: AddDesktopModelInput): Promise<void> => {
     setError(undefined);
     try {
@@ -333,7 +340,11 @@ export function DesktopApp(): React.JSX.Element {
         <div className="workspace-breadcrumb">
           <span>{workspaceName(snapshot.workspace)}</span>
         </div>
-        <div className="header-actions"><button title="更多选项">•••</button></div>
+        <div className="header-actions">
+          <button className="finish-task-button" onClick={() => void finishTask()}
+            disabled={busy || snapshot.activeSession === undefined} title="评估并完成当前任务">完成任务</button>
+          <button title="更多选项">•••</button>
+        </div>
       </header>
 
       <div className="conversation-scroll" ref={scrollRef}>
@@ -366,6 +377,12 @@ export function DesktopApp(): React.JSX.Element {
 
     {snapshot.approval !== undefined && <ApprovalSheet approval={snapshot.approval} onResolve={(decision) => void window.flavorDesktop.resolveApproval(decision)} />}
     {snapshot.questions !== undefined && <QuestionSheet questions={snapshot.questions} onAnswer={(answers) => void window.flavorDesktop.answerQuestions(answers)} />}
+    {snapshot.memoryReviews !== undefined && snapshot.memoryReviews.length > 0 && <MemoryReviewRail
+      reviews={snapshot.memoryReviews}
+      onResolve={(id, decision) => {
+        void window.flavorDesktop.resolveMemoryReview(id, decision).catch((cause) => setError(errorMessage(cause)));
+      }}
+    />}
     {pendingDelete !== undefined && <DeleteSessionSheet session={pendingDelete} deleting={deletingSession}
       onCancel={() => setPendingDelete(undefined)} onDelete={() => void deletePendingSession()} />}
   </div>;
@@ -711,16 +728,42 @@ function ApprovalSheet({ approval, onResolve }: { approval: NonNullable<DesktopS
   </section></div>;
 }
 
-function QuestionSheet({ questions, onAnswer }: { questions: NonNullable<DesktopSnapshot["questions"]>; onAnswer(answers: Record<number, string>): void }): React.JSX.Element {
+export function QuestionSheet({ questions, onAnswer }: { questions: NonNullable<DesktopSnapshot["questions"]>; onAnswer(answers: Record<number, string>): void }): React.JSX.Element {
   const [answers, setAnswers] = useState<Record<number, string>>({});
-  const ready = questions.every((_question, index) => answers[index]);
+  const [custom, setCustom] = useState<Record<number, boolean>>({});
+  const ready = questions.every((_question, index) => Boolean(answers[index]?.trim()));
   return <div className="modal-layer"><section className="question-sheet" role="dialog" aria-modal="true"><p className="sheet-kicker">Flavor 需要确认</p>
     {questions.map((question, index) => <fieldset key={`${question.header}-${index}`}><legend>{question.header}</legend><p>{question.question}</p><div className="question-options">
-      {question.options.map((option) => <button data-selected={answers[index] === option.label} key={option.label} onClick={() => setAnswers((current) => ({ ...current, [index]: option.label }))}>
+      {question.options.map((option) => <button data-selected={!custom[index] && answers[index] === option.label} key={option.label} onClick={() => {
+        setCustom((current) => ({ ...current, [index]: false }));
+        setAnswers((current) => ({ ...current, [index]: option.label }));
+      }}>
         <strong>{option.label}</strong><span>{option.description}</span>
-      </button>)}</div></fieldset>)}
+      </button>)}
+      <button data-selected={custom[index] === true} onClick={() => {
+        setCustom((current) => ({ ...current, [index]: true }));
+        setAnswers((current) => ({ ...current, [index]: "" }));
+      }}><strong>其他（自定义输入）</strong><span>键入你自己的回答</span></button>
+      {custom[index] === true && <input className="question-custom-input" autoFocus value={answers[index] ?? ""}
+        onChange={(event) => setAnswers((current) => ({ ...current, [index]: event.target.value }))}
+        placeholder="请输入回答" aria-label={`${question.header} 自定义回答`} />}
+    </div></fieldset>)}
     <div className="sheet-actions"><button className="primary" disabled={!ready} onClick={() => onAnswer(answers)}>继续</button></div>
   </section></div>;
+}
+
+export function MemoryReviewRail({ reviews, onResolve }: {
+  reviews: NonNullable<DesktopSnapshot["memoryReviews"]>;
+  onResolve(id: string, decision: "accept" | "dismiss"): void;
+}): React.JSX.Element {
+  return <aside className="memory-review-rail" aria-label="长期记忆写入确认">
+    <header><div><p>待确认</p><h2>长期记忆候选</h2></div><span>{reviews.length}</span></header>
+    <p className="memory-review-warning">以下内容由模型生成，确认前不会写入长期记忆，也不会影响后续会话。</p>
+    <div className="memory-review-list">{reviews.map((review) => <article key={review.id}>
+      <small>{review.type}</small><p>{review.content}</p>
+      <div><button onClick={() => onResolve(review.id, "dismiss")}>忽略</button><button className="primary" onClick={() => onResolve(review.id, "accept")}>保存</button></div>
+    </article>)}</div>
+  </aside>;
 }
 
 function WelcomeState({ project, onStart }: { project: string; onStart(prompt: string): void }): React.JSX.Element {

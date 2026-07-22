@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildMemoryExtractionPrompt, parseMemoryCandidates } from "../../src/memory/extractor.js";
+import { buildMemoryExtractionPrompt, parseMemoryCandidates, parseScoredMemoryCandidates } from "../../src/memory/extractor.js";
 
 describe("memory extraction", () => {
   it("builds a bounded prompt with taxonomy and exclusion rules", () => {
@@ -35,5 +35,23 @@ describe("memory extraction", () => {
       .toThrow(/JSON/i);
     expect(() => parseMemoryCandidates('{"memories":"wrong"}', { maxEntryChars: 100 }))
       .toThrow(/memories/i);
+  });
+
+  it("lets the host enforce the four-dimensional score threshold", () => {
+    const raw = JSON.stringify({ memories: [
+      {
+        type: "project", summary: "Use pnpm", content: "Use pnpm for repository scripts.",
+        topicKey: "project.package-manager", keywords: ["pnpm", "scripts"],
+        scores: { durability: 3, futureUtility: 3, authority: 3, nonDerivability: 1 },
+      },
+      {
+        type: "feedback", summary: "Temporary wording", content: "Use a different sentence in this answer.",
+        topicKey: "answer.wording", keywords: ["wording"],
+        scores: { durability: 1, futureUtility: 2, authority: 3, nonDerivability: 3 },
+      },
+    ] });
+
+    expect(parseScoredMemoryCandidates(raw, { maxEntryChars: 200, scoreThreshold: 9, maxCandidates: 3 }))
+      .toEqual([expect.objectContaining({ type: "project", summary: "Use pnpm", topicKey: "project.package-manager" })]);
   });
 });

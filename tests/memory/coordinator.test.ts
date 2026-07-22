@@ -9,45 +9,56 @@ import { MemoryStore } from "../../src/memory/store.js";
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
-async function fixture(generate: (prompt: string, signal: AbortSignal) => Promise<string>, minChars = 1) {
+async function fixture(generate: (prompt: string, signal: AbortSignal) => Promise<string>, minChars = 200) {
   const workspace = await mkdtemp(join(tmpdir(), "flavor-memory-coordinator-")); roots.push(workspace);
   const store = new MemoryStore({ workspace, maxEntries: 20, maxEntryChars: 200 });
-  return { store, coordinator: new MemoryCoordinator({ store, generate, minChars, maxEntryChars: 200 }) };
+  const review = vi.fn();
+  return { store, review, coordinator: new MemoryCoordinator({
+    review, generate, minChars, maxEntryChars: 200, scoreThreshold: 9, maxCandidates: 3,
+  }) };
 }
 
 describe("MemoryCoordinator", () => {
-  it("queues extraction, writes parsed candidates, and flushes deterministically", async () => {
-    const generate = vi.fn(async (_prompt: string, _signal: AbortSignal) =>
-      '{"memories":[{"type":"project","content":"Use pnpm."}]}');
-    const { store, coordinator } = await fixture(generate);
+  it("queues extraction for review without writing and flushes deterministically", async () => {
+    const generate = vi.fn(async (_prompt: string, _signal: AbortSignal) => JSON.stringify({ memories: [{
+      type: "project", summary: "Use pnpm", content: "Use pnpm.", topicKey: "project.package-manager", keywords: ["pnpm"],
+      scores: { durability: 3, futureUtility: 3, authority: 3, nonDerivability: 2 },
+    }] }));
+    const { store, review, coordinator } = await fixture(generate);
 
-    expect(coordinator.enqueue([
+    expect(await coordinator.finalize("task-one", [
       { role: "user", content: "Remember the package manager." },
-      { role: "assistant", content: "The project uses pnpm." },
-    ])).toBe(true);
-    await coordinator.flush();
+      { role: "assistant", content: `The project uses pnpm. ${"Useful completed task context. ".repeat(8)}` },
+    ])).toEqual({ evaluated: true, candidates: true });
 
     expect(generate).toHaveBeenCalledOnce();
     expect(generate.mock.calls[0]?.[0]).toContain("project uses pnpm");
-    expect(await store.list()).toMatchObject([{ type: "project", content: "Use pnpm." }]);
+    expect(review).toHaveBeenCalledWith("task-one", [expect.objectContaining({ type: "project", content: "Use pnpm." })]);
+    expect(await store.list()).toEqual([]);
   });
 
   it("skips short turns and isolates a failed extraction from later work", async () => {
     const failures: string[] = [];
     let call = 0;
-    const { store, coordinator } = await fixture(async () => {
+    const { store, review, coordinator } = await fixture(async () => {
       call += 1;
       if (call === 1) throw new Error("provider offline");
-      return '{"memories":[{"type":"feedback","content":"Do not commit automatically."}]}';
-    }, 20);
+      return JSON.stringify({ memories: [{
+        type: "feedback", summary: "Do not commit", content: "Do not commit automatically.", topicKey: "agent.git.commit", keywords: ["commit"],
+        scores: { durability: 3, futureUtility: 3, authority: 3, nonDerivability: 3 },
+      }] });
+    }, 200);
     coordinator.onError = (error) => failures.push(error instanceof Error ? error.message : String(error));
 
-    expect(coordinator.enqueue([{ role: "user", content: "short" }])).toBe(false);
-    expect(coordinator.enqueue([{ role: "user", content: "This turn is long enough to fail once." }])).toBe(true);
-    expect(coordinator.enqueue([{ role: "user", content: "This later turn must still be processed." }])).toBe(true);
-    await coordinator.flush();
+    expect(await coordinator.finalize("short-task", [{ role: "user", content: "short" }]))
+      .toEqual({ evaluated: true, candidates: false });
+    await expect(coordinator.finalize("failed-task", [{ role: "user", content: `This task is long enough to fail once. ${"context ".repeat(30)}` }]))
+      .resolves.toEqual({ evaluated: false, candidates: false });
+    await expect(coordinator.finalize("later-task", [{ role: "user", content: `This later completed task must still be processed. ${"context ".repeat(30)}` }]))
+      .resolves.toEqual({ evaluated: true, candidates: true });
 
     expect(failures).toEqual(["provider offline"]);
-    expect(await store.list()).toMatchObject([{ type: "feedback", content: "Do not commit automatically." }]);
+    expect(review).toHaveBeenCalledWith("later-task", [expect.objectContaining({ type: "feedback", content: "Do not commit automatically." })]);
+    expect(await store.list()).toEqual([]);
   });
 });

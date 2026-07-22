@@ -37,6 +37,13 @@ const CompactBoundarySchema = z.object({
   compactedAt: IsoDateSchema,
 }).strict();
 const StateSchema = z.enum(["pending", "running", "completed", "failed", "blocked", "cancelled"]);
+const MemoryLifecycleSchema = z.object({
+  status: z.enum(["active", "completed", "abandoned"]),
+  taskId: z.string().regex(/^memory-[A-Za-z0-9._-]{1,120}$/).optional(),
+  messageStart: z.number().int().min(0).max(50_000).optional(),
+  finalizedAt: IsoDateSchema.optional(),
+  transcriptHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+}).strict();
 
 const SessionBaseSchema = z.object({
   sessionId: SessionIdSchema,
@@ -51,6 +58,7 @@ const SessionBaseSchema = z.object({
   }).strict(),
   models: z.object({ main: z.string().min(1).max(1_024), subagent: z.string().min(1).max(1_024) }).strict(),
   permissionMode: PermissionModeSchema,
+  memory: MemoryLifecycleSchema.optional(),
 }).strict();
 
 const SessionDocumentV1Schema = SessionBaseSchema.extend({

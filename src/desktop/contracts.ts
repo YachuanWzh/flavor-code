@@ -8,6 +8,7 @@ import type { SessionOutput } from "../ui/session.js";
 import type { ManagedSkill, ManagedSkillSummary, SkillDraft } from "../skills/manager.js";
 import { MEMORY_TYPES, type MemoryCandidate, type MemoryEntry } from "../memory/types.js";
 import type { MemorySnapshot } from "../memory/manager.js";
+import type { MemoryReviewItem } from "../memory/review.js";
 import type { ManagedMcpServer } from "../mcp/config-manager.js";
 export { DESKTOP_CHANNELS } from "./channels.js";
 
@@ -27,6 +28,10 @@ export const SubmitInputSchema = z.object({ prompt: z.string().trim().min(1).max
 export const ResolveApprovalInputSchema = z.object({ decision: z.enum(["allow", "deny", "always"]) }).strict();
 export const AnswerQuestionsInputSchema = z.object({
   answers: z.record(z.coerce.number().int().min(0).max(3), z.string().min(1).max(10_000)),
+}).strict();
+export const ResolveMemoryReviewInputSchema = z.object({
+  id: z.string().max(64).regex(/^memory-review-[1-9][0-9]*$/, "Invalid memory review id"),
+  decision: z.enum(["accept", "dismiss"]),
 }).strict();
 const SkillNameInput = z.string().trim().min(1).max(64).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 export const SkillNameInputSchema = z.object({ name: SkillNameInput }).strict();
@@ -124,6 +129,7 @@ export interface DesktopSnapshot {
   };
   approval?: DesktopApproval;
   questions?: readonly Question[];
+  memoryReviews?: readonly MemoryReviewItem[];
   diagnostics: readonly string[];
   models: readonly DesktopModelOption[];
 }
@@ -153,9 +159,11 @@ export interface FlavorDesktopApi {
   deleteSession(sessionId: string): Promise<DesktopSnapshot>;
   showAppMenu(menu: "file" | "edit" | "view" | "help", x: number, y: number): Promise<void>;
   submit(prompt: string): Promise<void>;
+  finishTask(): Promise<string>;
   interrupt(): Promise<void>;
   resolveApproval(decision: "allow" | "deny" | "always"): Promise<void>;
   answerQuestions(answers: Record<number, string>): Promise<void>;
+  resolveMemoryReview(id: string, decision: "accept" | "dismiss"): Promise<void>;
   listFiles(): Promise<readonly string[]>;
   listSkills(): Promise<readonly ManagedSkillSummary[]>;
   getSkill(name: string): Promise<ManagedSkill>;

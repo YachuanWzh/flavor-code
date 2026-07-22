@@ -91,7 +91,7 @@ export function createAskUserQuestionTool(
   return {
     name: "AskUserQuestion",
     description:
-      "Ask the user one or more clarifying questions to disambiguate a task before proceeding. Use this when the user's intent is unclear, when multiple valid approaches exist, or when a decision requires user preference. Each question has a header, a question body, and up to 4 options.",
+      "Ask the user one or more clarifying questions to disambiguate a task before proceeding. Use this when the user's intent is unclear, when multiple valid approaches exist, or when a decision requires user preference. Each question has a header, a question body, and up to 4 agent-provided options. The UI always appends a final custom-input choice, so do not add an Other option yourself.",
     inputSchema: AskUserQuestionInput,
     paths: () => [],
     summarize: (input) => {

@@ -46,6 +46,23 @@ function document(root: string): SessionDocument {
 }
 
 describe("SessionStore", () => {
+  it("round-trips task-memory lifecycle metadata", async () => {
+    const root = await workspace();
+    const store = new SessionStore({ workspace: root });
+    const saved = document(root);
+    saved.memory = {
+      status: "completed",
+      taskId: "memory-task-20260712",
+      messageStart: 4,
+      finalizedAt: "2026-07-12T02:00:00.000Z",
+      transcriptHash: "a".repeat(64),
+    };
+
+    await store.save(saved);
+
+    await expect(store.load(saved.sessionId)).resolves.toMatchObject({ memory: saved.memory });
+  });
+
   it("deletes one saved session without touching the remaining history", async () => {
     const root = await workspace();
     const store = new SessionStore({ workspace: root });

@@ -20,6 +20,7 @@ import { isDestructiveTool } from "../permissions/engine.js";
 import { AssistantText } from "./assistant-text.js";
 import type { SessionOutput } from "./session.js";
 import type { Question } from "../tools/ask-user-question.js";
+import type { MemoryReviewItem } from "../memory/review.js";
 import { createSessionInterruptHandler, installSigintHandler } from "./signals.js";
 import {
   createTranscriptState,
@@ -129,6 +130,9 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   const [mentionSelection, setMentionSelection] = useState(0);
   const [dismissedMentionInput, setDismissedMentionInput] = useState<string>();
   const [revision, setRevision] = useState(0);
+  const [questionIndex, setQuestionIndex] = useState(0);
+  const [questionAnswers, setQuestionAnswers] = useState<Record<number, string>>({});
+  const [customQuestionActive, setCustomQuestionActive] = useState(false);
   const [columns, setColumns] = useState(stdout?.columns ?? 80);
   const [rows, setRows] = useState(stdout?.rows ?? 24);
   const [transcript, dispatch] = useReducer(transcriptReducer, undefined, createTranscriptState);
@@ -255,6 +259,12 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
 
   const approval = runtime?.approvals.pending;
   const questions = runtime?.services.questions.pending;
+  const memoryReviews = runtime?.memoryReviews.pending ?? [];
+  useEffect(() => {
+    setQuestionIndex(0);
+    setQuestionAnswers({});
+    setCustomQuestionActive(false);
+  }, [questions]);
   const derivedSlashCompletion = deriveSlashCompletion(input, promptCursor, slashCandidates, slashSelection);
   const slashCompletion = dismissedSlashInput === input || transcript.active !== undefined || approval !== undefined || questions !== undefined
     ? null
@@ -310,24 +320,56 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
       }
       return;
     }
+    const pendingMemory = active?.memoryReviews.pending[0];
+    if (pendingMemory !== undefined && key.ctrl && (character.toLowerCase() === "y" || character.toLowerCase() === "n")) {
+      if (character.toLowerCase() === "y") {
+        void active!.memoryReviews.accept(pendingMemory.id).catch((error) => {
+          dispatch({ type: "submit-error", message: safeUiError(error) });
+        });
+      } else active!.memoryReviews.dismiss(pendingMemory.id);
+      return;
+    }
     const qs = active?.services.questions.pending;
     if (qs !== undefined && qs.length > 0) {
       const questionsService = active!.services.questions;
-      if (key.escape) { questionsService.cancel(); return; }
-      // Single-question: digits 1-4 pick the option directly.
-      if (qs.length === 1) {
-        const question = qs[0]!;
+      const currentIndex = Math.min(questionIndex, qs.length - 1);
+      const question = qs[currentIndex]!;
+      const commitQuestionAnswer = (answer: string): void => {
+        const next = { ...questionAnswers, [currentIndex]: answer };
+        setInput(""); setPromptCursor(0); setCustomQuestionActive(false);
+        if (currentIndex === qs.length - 1) {
+          setQuestionAnswers({}); setQuestionIndex(0);
+          questionsService.answer(next);
+        } else {
+          setQuestionAnswers(next); setQuestionIndex(currentIndex + 1);
+        }
+      };
+      if (key.escape) {
+        if (customQuestionActive) {
+          setCustomQuestionActive(false); setInput(""); setPromptCursor(0);
+        } else questionsService.cancel();
+        return;
+      }
+      if (customQuestionActive) {
+        if (key.return) {
+          const answer = input.trim();
+          if (answer) commitQuestionAnswer(answer);
+          return;
+        }
+        // Let the ordinary prompt editor below collect the custom answer.
+      } else {
         const digit = parseInt(character, 10);
         if (digit >= 1 && digit <= question.options.length) {
-          questionsService.answer({ 0: question.options[digit - 1]!.label });
+          commitQuestionAnswer(question.options[digit - 1]!.label);
+          return;
         }
-      } else {
-        // Multiple questions: for now, only cancel (multi-question needs a real dialog).
-        if (parseInt(character, 10) >= 1) {
-          questionsService.cancel("Multiple-question UI is not yet supported; please ask questions one at a time.");
+        if (digit === question.options.length + 1) {
+          setCustomQuestionActive(true); setInput(""); setPromptCursor(0);
+          return;
         }
+        if (!key.ctrl && !key.meta && character) setCustomQuestionActive(true);
+        else return;
       }
-      return;
     }
     const menuAction = slashKeyAction(key, slashCompletion);
     if (menuAction?.type === "select" && slashCompletion !== null) {
@@ -447,6 +489,10 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     {...(mentionCompletion === null ? {} : { mentionCompletion, onMentionSelect: selectMention })}
     {...(approval === undefined ? {} : { approval })}
     {...(questions === undefined ? {} : { questions })}
+    memoryReviews={memoryReviews}
+    questionIndex={questionIndex}
+    questionAnswers={questionAnswers}
+    customQuestionActive={customQuestionActive}
   />;
 }
 
@@ -484,6 +530,10 @@ export interface TerminalLayoutProps {
   onMentionSelect?: (path: string) => void;
   approval?: { tool: string; reason?: string };
   questions?: readonly Question[];
+  memoryReviews?: readonly MemoryReviewItem[];
+  questionIndex?: number;
+  questionAnswers?: Readonly<Record<number, string>>;
+  customQuestionActive?: boolean;
   scrollRef?: React.Ref<ScrollBoxHandle>;
   taskScrollRef?: React.Ref<ScrollBoxHandle>;
   onTaskPanelHoverChange?: (hovered: boolean) => void;
@@ -491,7 +541,8 @@ export interface TerminalLayoutProps {
 
 export function TerminalLayout({
   model, workspaceName, completed, active, input, pastedBlocks = [], promptCursor, columns, rows = 24, activeSession, approval,
-  questions, completion, mentionCompletion, onMentionSelect, completedSlashTokenLength: tokenLength = 0, scrollRef,
+  questions, memoryReviews = [], questionIndex = 0, questionAnswers = {}, customQuestionActive = false,
+  completion, mentionCompletion, onMentionSelect, completedSlashTokenLength: tokenLength = 0, scrollRef,
   taskScrollRef, onTaskPanelHoverChange, onPromptCursorChange,
 }: TerminalLayoutProps): React.JSX.Element {
   const dividerWidth = Math.max(1, columns - 1);
@@ -511,10 +562,10 @@ export function TerminalLayout({
   };
 
   const questionRows = questions === undefined ? 0
-    : questions.length === 1 ? 4 + questions[0]!.options.length
-    : 3 + questions.length * 2;
+    : 4 + (questions[questionIndex]?.options.length ?? 0) + questions.length * 2;
+  const memoryReviewRows = memoryReviews.length === 0 ? 0 : 5;
 
-  const fixedBottomRows = (approval === undefined ? 0 : 3) + questionRows + menuRows + 2;
+  const fixedBottomRows = (approval === undefined ? 0 : 3) + questionRows + memoryReviewRows + menuRows + 2;
   const taskPanelRows = taskPanelViewportRows(rows, fixedBottomRows, activeTaskBlocks.length > 0);
   const availableBottomRows = Math.max(1, rows - taskPanelRows - 1);
   const bottomMaxRows = Math.min(availableBottomRows, Math.max(Math.floor(rows / 2), fixedBottomRows + 1));
@@ -555,8 +606,9 @@ export function TerminalLayout({
               }
       </Box>}
       {!questions || questions.length === 0 ? null : (
-        <QuestionCards questions={questions} />
+        <QuestionCards questions={questions} activeIndex={questionIndex} answers={questionAnswers} customActive={customQuestionActive} />
       )}
+      {memoryReviews.length === 0 ? null : <MemoryReviewCards reviews={memoryReviews} />}
       {completion === undefined ? null : <SlashMenu completion={completion} />}
       {mentionCompletion === undefined ? null : (
         <MentionMenu completion={mentionCompletion} {...(onMentionSelect === undefined ? {} : { onSelect: onMentionSelect })} />
@@ -582,28 +634,44 @@ export function TerminalLayout({
   </Box>;
 }
 
-function QuestionCards({ questions }: { questions: readonly Question[] }): React.JSX.Element {
+function QuestionCards({ questions, activeIndex, answers, customActive }: {
+  questions: readonly Question[];
+  activeIndex: number;
+  answers: Readonly<Record<number, string>>;
+  customActive: boolean;
+}): React.JSX.Element {
   return (
     <Box flexDirection="column" marginBottom={1}>
       {questions.map((q, qi) => (
         <Box key={qi} flexDirection="column" marginBottom={qi < questions.length - 1 ? 1 : 0}>
           <Text bold color="cyan">┌─ {q.header}</Text>
           <Text wrap="truncate-end" color="cyanBright">│ {q.question}</Text>
-          {q.options.map((opt, oi) => (
+          {qi < activeIndex ? <Text color="green">│  ✓ {answers[qi]}</Text> : qi > activeIndex ? null : q.options.map((opt, oi) => (
             <Text key={oi} color="cyan">
               │  <Text bold color="green">{oi + 1}</Text>. {opt.label}
               <Text dimColor>  {opt.description}</Text>
             </Text>
           ))}
-          <Text dimColor color="cyan">{questions.length === 1 ? "└─" : "│"}{" "}
-            {questions.length === 1
-              ? `Press 1-${q.options.length} to choose, Esc to dismiss`
-              : "Esc to dismiss (multi-question not yet supported)"}
-          </Text>
+          {qi === activeIndex ? <>
+            <Text color="cyan">│  <Text bold color="green">{q.options.length + 1}</Text>. Custom input<Text dimColor>  Type your own answer</Text></Text>
+            <Text dimColor color="cyan">└─ {customActive
+              ? "Type below and press Enter; Esc returns to choices"
+              : `Press 1-${q.options.length + 1} to choose; Esc dismisses`}</Text>
+          </> : null}
         </Box>
       ))}
     </Box>
   );
+}
+
+function MemoryReviewCards({ reviews }: { reviews: readonly MemoryReviewItem[] }): React.JSX.Element {
+  const review = reviews[0]!;
+  return <Box flexDirection="column" marginBottom={1}>
+    <Text bold color="yellow">┌─ Long-term memory requires confirmation ({reviews.length})</Text>
+    <Text color="yellowBright" wrap="truncate-end">│ [{review.type}] {review.content}</Text>
+    <Text dimColor>│ Model-generated content is not stored until you approve it.</Text>
+    <Text color="yellow">└─ <Text bold>Ctrl+Y</Text> save / <Text bold>Ctrl+N</Text> ignore (conversation remains available)</Text>
+  </Box>;
 }
 
 function SlashMenu({ completion }: { completion: SlashCompletion }): React.JSX.Element {

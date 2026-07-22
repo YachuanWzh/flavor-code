@@ -1,6 +1,6 @@
 export const MVP_COMMANDS = [
   "model", "init", "config", "login", "permissions", "skills", "plugins", "hooks",
-  "tasks", "compact", "clear", "help", "exit", "audit",
+  "tasks", "finish", "compact", "clear", "help", "exit", "audit",
   "loop", "goal", "mcp",
   "memory", "remember", "forget",
 ] as const;
@@ -15,6 +15,7 @@ export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string>
   plugins: "List loaded plugins",
   hooks: "Show plugin hook status",
   tasks: "Show task planning status",
+  finish: "Complete this task and evaluate long-term memory",
   compact: "Compact the conversation context",
   clear: "Clear the transcript",
   help: "Show available commands",

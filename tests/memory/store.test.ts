@@ -34,6 +34,46 @@ describe("MemoryStore", () => {
     expect(parsed.every((entry) => /^[a-f0-9]{12}$/.test(entry.id))).toBe(true);
   });
 
+  it("stores accepted task memories as typed files referenced by a V2 routing index", async () => {
+    const memory = await store();
+    const result = await memory.rememberForTask("task-20260722", {
+      type: "project", summary: "Use pnpm", content: "Use pnpm for repository scripts.",
+      topicKey: "project.package-manager", keywords: ["pnpm", "scripts"],
+      scores: { durability: 3, futureUtility: 3, authority: 3, nonDerivability: 2 },
+    }, new Date("2026-07-22T00:00:00.000Z"));
+
+    expect(result.added).toBe(true);
+    const index = await readFile(memory.path, "utf8");
+    expect(index).toContain("# Flavor Project Memory Index");
+    expect(index).toContain("[project] Use pnpm");
+    const task = await readFile(join(memory.workspace, ".flavor", "memory", "tasks", "task-20260722.md"), "utf8");
+    expect(task).toContain("## project");
+    expect(task).toContain("Use pnpm for repository scripts.");
+    expect(await memory.list()).toEqual([expect.objectContaining({ type: "project", content: "Use pnpm" })]);
+  });
+
+  it("suppresses high-confidence duplicates and counts a recall once per task", async () => {
+    const memory = await store();
+    const candidate = {
+      type: "project" as const, summary: "Use pnpm for scripts", content: "Use pnpm for repository scripts.",
+      topicKey: "project.package-manager", keywords: ["pnpm", "scripts"],
+      scores: { durability: 3, futureUtility: 3, authority: 3, nonDerivability: 2 },
+    };
+    expect((await memory.rememberForTask("task-one", candidate)).added).toBe(true);
+    expect((await memory.rememberForTask("task-two", { ...candidate, content: "Use pnpm for all repository scripts." })).added).toBe(false);
+
+    const first = await memory.recall("pnpm repository scripts", {
+      taskId: "consumer-task", topK: 5, maxChars: 1_000, now: new Date("2026-07-22T00:00:00.000Z"),
+    });
+    const second = await memory.recall("pnpm repository scripts", {
+      taskId: "consumer-task", topK: 5, maxChars: 1_000, now: new Date("2026-07-22T01:00:00.000Z"),
+    });
+
+    expect(first.context).toContain("Use pnpm for repository scripts.");
+    expect(second.context).toContain("Use pnpm for repository scripts.");
+    expect((await memory.references())[0]).toMatchObject({ recallTotal: 1, recalls: { "consumer-task": "2026-07-22T00:00:00.000Z" } });
+  });
+
   it("normalizes, de-duplicates, bounds, and forgets entries by text or id", async () => {
     const memory = await store({ maxEntries: 2 });
 
@@ -92,7 +132,7 @@ describe("MemoryStore", () => {
     ]);
 
     expect((await first.list()).map((entry) => entry.content).sort()).toEqual(["Convention A", "Convention B"]);
-    expect(await readFile(first.path, "utf8")).toContain("## reference");
+    expect(await readFile(first.path, "utf8")).toContain("## References");
   });
 
   it("recovers a malformed primary file from the protected backup", async () => {

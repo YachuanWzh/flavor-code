@@ -25,6 +25,47 @@ const turn = (id: number, prompt: string, assistantText: string): TranscriptTurn
 const stripAnsi = (value: string): string => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/gu, "");
 
 describe("TerminalLayout", () => {
+  it("renders an implicit custom answer after agent-provided AskUser choices", () => {
+    const output = stripAnsi(renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[]}
+      input=""
+      promptCursor={0}
+      columns={90}
+      rows={24}
+      activeSession
+      questions={[{
+        header: "Approach",
+        question: "Which approach should I use?",
+        options: [{ label: "A", description: "Use approach A" }, { label: "B", description: "Use approach B" }],
+      }]}
+    />, { columns: 90 }));
+
+    expect(output).toContain("1. A");
+    expect(output).toContain("2. B");
+    expect(output).toContain("3. Custom input");
+  });
+
+  it("renders model-generated memory as pending confirmation instead of stored state", () => {
+    const output = stripAnsi(renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[]}
+      input=""
+      promptCursor={0}
+      columns={100}
+      rows={24}
+      activeSession={false}
+      memoryReviews={[{ id: "memory-review-1", type: "project", content: "Use pnpm." }]}
+    />, { columns: 100 }));
+
+    expect(output).toContain("Long-term memory requires confirmation");
+    expect(output).toContain("Use pnpm.");
+    expect(output).toContain("Ctrl+Y");
+    expect(output).toContain("Ctrl+N");
+  });
+
   it("renders the Flavor brand mark with the sky-blue truecolor accent", () => {
     const wide = WelcomeCard({ model: "model", workspaceName: "workspace", columns: 96 });
     const wideLayout = wide.props.children as React.ReactElement<{ children?: React.ReactNode }>;

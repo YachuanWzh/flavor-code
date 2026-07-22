@@ -30,8 +30,8 @@ async function workspace(memory: Record<string, unknown>): Promise<string> {
       globalThis.__flavorMemoryRequests ??= [];
       globalThis.__flavorMemoryRequests.push(request.messages);
       const text = request.messages.map((message) => message.content).join("\\n");
-      if (text.includes("Extract only durable facts")) {
-        yield { type: "text", text: '{"memories":[{"type":"project","content":"Use pnpm for all repository scripts."}]}' };
+      if (text.includes("Evaluate this completed coding task")) {
+        yield { type: "text", text: '{"memories":[{"type":"project","summary":"Use pnpm for repository scripts","content":"Use pnpm for all repository scripts.","topicKey":"project.package-manager","keywords":["pnpm","scripts","package manager"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":2}}]}' };
       } else {
         yield { type: "text", text: "Acknowledged. This response is deliberately long enough to qualify for automatic durable memory extraction." };
       }
@@ -48,39 +48,68 @@ describe("production long-term memory", () => {
     await store.remember({ type: "feedback", content: "Do not commit automatically." });
     const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
 
-    await runtime.session.submit("Inspect the workspace.");
+    await runtime.session.submit("Should I commit these changes automatically?");
 
     const requests = (globalThis as { __flavorMemoryRequests?: Array<Array<{ role: string; content: string }>> })
       .__flavorMemoryRequests ?? [];
-    const main = requests.find((messages) => messages.some((message) => message.content.includes("Inspect the workspace")));
+    const main = requests.find((messages) => messages.some((message) => message.content.includes("Should I commit")));
     expect(main?.some((message) => message.role === "system"
       && message.content.includes("Do not commit automatically."))).toBe(true);
     await runtime.dispose();
   });
 
-  it("extracts after a completed turn, flushes on close, and exposes it to the next runtime", async () => {
-    const root = await workspace({ autoExtract: true, autoExtractMinChars: 20 });
+  it("stages extracted memory, writes only after confirmation, and exposes it to the next runtime", async () => {
+    const root = await workspace({ autoExtract: true, autoExtractMinChars: 200 });
     const first = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
 
-    await first.session.submit("Please remember our stable package-manager convention for future independent sessions.");
-    await first.session.close();
+    await first.session.submit(`Please remember our stable package-manager convention for future independent sessions. ${"This task has useful durable context. ".repeat(8)}`);
+
+    const store = new MemoryStore({ workspace: root, maxEntries: 200, maxEntryChars: 1000 });
+    expect(await store.list()).toEqual([]);
+    expect(first.memoryReviews.pending).toEqual([]);
+    await first.services.finishTask();
+    const extractionCount = ((globalThis as { __flavorMemoryRequests?: Array<Array<{ content: string }>> })
+      .__flavorMemoryRequests ?? []).filter((messages) => messages.some((message) => message.content.includes("Evaluate this completed coding task"))).length;
+    await first.services.finishTask();
+    expect(((globalThis as { __flavorMemoryRequests?: Array<Array<{ content: string }>> })
+      .__flavorMemoryRequests ?? []).filter((messages) => messages.some((message) => message.content.includes("Evaluate this completed coding task")))).toHaveLength(extractionCount);
+    expect(first.memoryReviews.pending).toMatchObject([{ type: "project", content: "Use pnpm for all repository scripts." }]);
+    await first.memoryReviews.accept(first.memoryReviews.pending[0]!.id);
     await first.dispose();
 
-    const stored = await new MemoryStore({ workspace: root, maxEntries: 200, maxEntryChars: 1000 }).list();
-    expect(stored).toMatchObject([{ type: "project", content: "Use pnpm for all repository scripts." }]);
+    const stored = await store.list();
+    expect(stored).toMatchObject([{ type: "project", content: "Use pnpm for repository scripts" }]);
 
     const second = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
-    await second.session.submit("What should I inspect?");
+    await second.session.submit("Which package manager should repository scripts use?");
     const requests = (globalThis as { __flavorMemoryRequests?: Array<Array<{ role: string; content: string }>> })
       .__flavorMemoryRequests ?? [];
-    const latestMain = [...requests].reverse().find((messages) => messages.some((message) => message.content === "What should I inspect?"));
+    const latestMain = [...requests].reverse().find((messages) => messages.some((message) => message.content === "Which package manager should repository scripts use?"));
     expect(latestMain?.some((message) => message.role === "system"
       && message.content.includes("Use pnpm for all repository scripts."))).toBe(true);
     await second.dispose();
   });
 
+  it("evaluates only the current task when multiple tasks share one session", async () => {
+    const root = await workspace({ autoExtract: true, autoExtractMinChars: 200 });
+    const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
+
+    await runtime.session.submit(`FIRST_TASK_MARKER ${"first durable task context ".repeat(10)}`);
+    await runtime.services.finishTask();
+    await runtime.session.submit(`SECOND_TASK_MARKER ${"second durable task context ".repeat(10)}`);
+    await runtime.services.finishTask();
+
+    const extractions = ((globalThis as { __flavorMemoryRequests?: Array<Array<{ content: string }>> })
+      .__flavorMemoryRequests ?? []).filter((messages) => messages.some((message) => message.content.includes("Evaluate this completed coding task")));
+    expect(extractions).toHaveLength(2);
+    const secondPrompt = extractions[1]!.map((message) => message.content).join("\n");
+    expect(secondPrompt).toContain("SECOND_TASK_MARKER");
+    expect(secondPrompt).not.toContain("FIRST_TASK_MARKER");
+    await runtime.dispose();
+  });
+
   it("does not read, inject, or extract memory when disabled", async () => {
-    const root = await workspace({ enabled: false, autoExtract: true, autoExtractMinChars: 1 });
+    const root = await workspace({ enabled: false, autoExtract: true, autoExtractMinChars: 200 });
     const store = new MemoryStore({ workspace: root, maxEntries: 200, maxEntryChars: 1000 });
     await store.remember({ type: "project", content: "Invisible memory." });
     const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
@@ -91,7 +120,24 @@ describe("production long-term memory", () => {
     const requests = (globalThis as { __flavorMemoryRequests?: Array<Array<{ role: string; content: string }>> })
       .__flavorMemoryRequests ?? [];
     expect(requests.some((messages) => messages.some((message) => message.content.includes("Invisible memory.")))).toBe(false);
-    expect(requests.some((messages) => messages.some((message) => message.content.includes("Extract only durable facts")))).toBe(false);
+    expect(requests.some((messages) => messages.some((message) => message.content.includes("Evaluate this completed coding task")))).toBe(false);
+    await runtime.dispose();
+  });
+
+  it("does not auto-extract in non-interactive mode because no user can confirm the write", async () => {
+    const root = await workspace({ autoExtract: true, autoExtractMinChars: 200 });
+    const runtime = await createProductionRuntime({
+      workspace: root, home: root, environment: {}, output: () => {}, approvalPolicy: "deny",
+    });
+
+    await runtime.session.submit("This is long enough to otherwise produce a durable memory candidate.");
+    await runtime.session.close();
+
+    const requests = (globalThis as { __flavorMemoryRequests?: Array<Array<{ role: string; content: string }>> })
+      .__flavorMemoryRequests ?? [];
+    expect(requests.some((messages) => messages.some((message) => message.content.includes("Evaluate this completed coding task")))).toBe(false);
+    expect(runtime.memoryReviews.pending).toEqual([]);
+    expect(await new MemoryStore({ workspace: root, maxEntries: 200, maxEntryChars: 1000 }).list()).toEqual([]);
     await runtime.dispose();
   });
 });

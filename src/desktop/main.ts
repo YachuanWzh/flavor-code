@@ -16,6 +16,7 @@ import {
   MemoryCandidateInputSchema,
   McpServerNameInputSchema,
   ResolveApprovalInputSchema,
+  ResolveMemoryReviewInputSchema,
   StartSessionInputSchema,
   SkillDraftInputSchema,
   SkillNameInputSchema,
@@ -129,12 +130,17 @@ function installIpcHandlers(): void {
     const { prompt } = SubmitInputSchema.parse(value);
     void controller.submit(prompt).catch(() => undefined);
   });
+  ipcMain.handle(DESKTOP_CHANNELS.finishTask, async () => controller.finishTask());
   ipcMain.handle(DESKTOP_CHANNELS.interrupt, async () => controller.interrupt());
   ipcMain.handle(DESKTOP_CHANNELS.resolveApproval, async (_event, value) => {
     controller.resolveApproval(ResolveApprovalInputSchema.parse(value).decision);
   });
   ipcMain.handle(DESKTOP_CHANNELS.answerQuestions, async (_event, value) => {
     controller.answerQuestions(AnswerQuestionsInputSchema.parse(value).answers);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.resolveMemoryReview, async (_event, value) => {
+    const input = ResolveMemoryReviewInputSchema.parse(value);
+    await controller.resolveMemoryReview(input.id, input.decision);
   });
   ipcMain.handle(DESKTOP_CHANNELS.listFiles, async () => {
     return controller.listWorkspaceFiles();

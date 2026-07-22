@@ -10,6 +10,7 @@ import {
   SaveMcpServerInputSchema,
   OpenWorkspaceInputSchema,
   ResolveApprovalInputSchema,
+  ResolveMemoryReviewInputSchema,
   StartSessionInputSchema,
   SkillDraftInputSchema,
   SkillNameInputSchema,
@@ -26,6 +27,8 @@ describe("desktop IPC contracts", () => {
     expect(ResolveApprovalInputSchema.parse({ decision: "allow" })).toEqual({ decision: "allow" });
     expect(ResolveApprovalInputSchema.parse({ decision: "always" })).toEqual({ decision: "always" });
     expect(AnswerQuestionsInputSchema.parse({ answers: { 0: "Electron" } })).toEqual({ answers: { 0: "Electron" } });
+    expect(ResolveMemoryReviewInputSchema.parse({ id: "memory-review-1", decision: "accept" }))
+      .toEqual({ id: "memory-review-1", decision: "accept" });
     expect(DeleteSessionInputSchema.parse({ sessionId: "session-1" })).toEqual({ sessionId: "session-1" });
     expect(AppMenuInputSchema.parse({ menu: "file", x: 12, y: 36 })).toEqual({ menu: "file", x: 12, y: 36 });
     expect(SkillNameInputSchema.parse({ name: "code-review" })).toEqual({ name: "code-review" });
@@ -52,6 +55,7 @@ describe("desktop IPC contracts", () => {
     expect(() => SubmitInputSchema.parse({ prompt: "   " })).toThrow();
     expect(() => ResolveApprovalInputSchema.parse({ decision: "never" })).toThrow();
     expect(() => AnswerQuestionsInputSchema.parse({ answers: { 10: "x" } })).toThrow();
+    expect(() => ResolveMemoryReviewInputSchema.parse({ id: "../outside", decision: "accept" })).toThrow();
     expect(() => DeleteSessionInputSchema.parse({ sessionId: "../outside" })).toThrow();
     expect(() => AppMenuInputSchema.parse({ menu: "window", x: -1, y: 36 })).toThrow();
     expect(() => SkillNameInputSchema.parse({ name: "../escape" })).toThrow();

@@ -34,6 +34,7 @@ function services(events: string[], outputs: string[]): SessionServices {
     memory: async () => "memory contents",
     remember: async () => "remembered",
     forget: async () => "forgotten",
+    finishTask: async () => "Task completed; no durable memory candidates.",
     pluginCommands: () => [], runPluginCommand: async () => undefined,
     output: (event) => outputs.push(event.type === "text" ? event.text : event.type === "notice" ? event.message : event.type),
     questions,
@@ -224,5 +225,19 @@ describe("FlavorSession", () => {
     expect(forget).toHaveBeenCalledWith("pnpm");
     expect(outputs).toContain("Remembered project memory abc123.");
     expect(outputs).toContain("Forgot 1 memory entry.");
+  });
+
+  it("finalizes task memory only through the explicit finish command", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const finishTask = vi.fn(async () => "Task completed; review 2 memory candidates.");
+    Object.assign(base, { finishTask });
+    base.run = async function* () { throw new Error("ordinary run must not be called"); };
+    const session = new FlavorSession(base);
+
+    await session.submit("/finish");
+
+    expect(finishTask).toHaveBeenCalledOnce();
+    expect(outputs).toContain("Task completed; review 2 memory candidates.");
   });
 });

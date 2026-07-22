@@ -27,9 +27,11 @@ function fakeRuntime(output: (event: SessionOutput) => void): RuntimeLike {
       subagentModel: () => "openai:gpt-5-mini",
       permissionMode: () => "default" as const,
       setModel: vi.fn((role: "main" | "subagent", modelId: string) => { if (role === "main") mainModel = modelId; }),
+      finishTask: vi.fn(async () => "Task completed; review 1 memory candidate."),
       questions: { pending: undefined, answer: vi.fn() },
     },
     approvals: { pending: undefined, resolve: vi.fn() },
+    memoryReviews: { pending: [], accept: vi.fn(async () => true), dismiss: vi.fn(() => true) },
     dispose: vi.fn(async () => undefined),
   };
 }
@@ -129,7 +131,7 @@ describe("DesktopRuntimeController", () => {
     expect(first.dispose).toHaveBeenCalledOnce();
   });
 
-  it("forwards permission and question answers only to an active runtime", async () => {
+  it("forwards permission, question, and memory-review answers only to an active runtime", async () => {
     const runtime = fakeRuntime(() => undefined);
     const controller = new DesktopRuntimeController({
       home: "C:\\Users\\demo", createRuntime: async () => runtime, listSessions: async () => [], emit: () => undefined,
@@ -139,9 +141,32 @@ describe("DesktopRuntimeController", () => {
     controller.resolveApproval("deny");
     controller.resolveApproval("allow");
     controller.answerQuestions({ 0: "Continue" });
+    await controller.resolveMemoryReview("memory-review-1", "accept");
+    await controller.resolveMemoryReview("memory-review-2", "dismiss");
     expect(runtime.approvals.resolve).toHaveBeenCalledWith("deny");
     expect(runtime.approvals.resolve).toHaveBeenCalledWith("once");
     expect(runtime.services.questions.answer).toHaveBeenCalledWith({ 0: "Continue" });
+    expect(runtime.memoryReviews.accept).toHaveBeenCalledWith("memory-review-1");
+    expect(runtime.memoryReviews.dismiss).toHaveBeenCalledWith("memory-review-2");
+  });
+
+  it("finishes the active task and publishes the result as a non-blocking notice", async () => {
+    const events: unknown[] = [];
+    const runtime = fakeRuntime(() => undefined);
+    const controller = new DesktopRuntimeController({
+      home: "C:\\Users\\demo", createRuntime: async () => runtime, listSessions: async () => [],
+      emit: (event) => events.push(event),
+    });
+    await controller.openWorkspace("C:\\work");
+    await controller.startSession();
+
+    await expect(controller.finishTask()).resolves.toBe("Task completed; review 1 memory candidate.");
+
+    expect(runtime.services.finishTask).toHaveBeenCalledOnce();
+    expect(events).toContainEqual({
+      type: "session-output",
+      event: { type: "notice", message: "Task completed; review 1 memory candidate." },
+    });
   });
 
   it("disposes an active session before deleting it and publishes the remaining history", async () => {

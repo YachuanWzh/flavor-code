@@ -79,6 +79,7 @@ describe("AskUserQuestion tool", () => {
   it("exposes name and paths correctly", () => {
     const tool = createAskUserQuestionTool(handler({}));
     expect(tool.name).toBe("AskUserQuestion");
+    expect(tool.description).toContain("custom-input choice");
     expect(tool.paths({ questions: [] })).toEqual([]);
   });
 });

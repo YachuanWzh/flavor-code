@@ -40,6 +40,7 @@ export interface SessionServices {
   memory(): Promise<string>;
   remember(type: MemoryType, text: string): Promise<string>;
   forget(query: string): Promise<string>;
+  finishTask(): Promise<string>;
   pluginCommands(): readonly string[];
   runPluginCommand(name: string, args: readonly string[], signal: AbortSignal): Promise<unknown>;
   output(event: SessionOutput): void;
@@ -52,7 +53,7 @@ const HELP = [
   "/permissions <default|acceptEdits|plan|bypassPermissions|auto|bubble>",
   "/login                                  authenticate via OAuth PKCE",
   "/init  /config  /skills  /plugins  /hooks  /tasks",
-  "/memory  /remember [type] <text>  /forget <text-or-id>",
+  "/memory  /remember [type] <text>  /forget <text-or-id>  /finish",
   "/compact  /clear  /help  /exit",
   "/loop <goal>                            run a verified autonomous loop",
   "/goal <objective>                       run a goal pipeline with adversarial verification",
@@ -189,6 +190,8 @@ export class FlavorSession {
       this.#notice(await this.#services.remember(command.type, command.text));
     } else if (command.name === "forget") {
       this.#notice(await this.#services.forget(command.query));
+    } else if (command.name === "finish") {
+      this.#notice(await this.#services.finishTask());
     } else if (command.name === "compact") {
       this.#notice(await this.#services.compact(signal) ? "Context compacted." : "Context does not need compaction.");
     } else if (command.name === "init") {
