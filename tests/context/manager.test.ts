@@ -4,6 +4,67 @@ import { HookBus } from "../../src/hooks/bus.js";
 import { ContextManager, estimateTokens } from "../../src/context/manager.js";
 
 describe("ContextManager", () => {
+  it("forks an isolated byte-identical visible prefix and freezes dynamic system sections", () => {
+    let system = ["共享系统提示", "stable section"] as readonly string[];
+    const parent = createContext({ system: () => system });
+    parent.append({ role: "user", content: "父消息：你好 👋" });
+    parent.append({ role: "assistant", content: "父回复" });
+
+    const child = parent.fork();
+    const parentPrefix = parent.messagesForModel();
+    const childPrefix = child.messagesForModel();
+    const promptBytes = (messages: ReturnType<ContextManager["messagesForModel"]>) => Buffer.from(JSON.stringify(
+      messages.map(({ cacheBreakpoint: _cacheBreakpoint, ...message }) => message),
+    ), "utf8");
+
+    expect(promptBytes(childPrefix).equals(promptBytes(parentPrefix))).toBe(true);
+    expect(childPrefix.at(-1)?.cacheBreakpoint).toBe(true);
+
+    system = ["changed after fork"];
+    child.append({ role: "user", content: "child directive" });
+    expect(child.messagesForModel()[0]?.content).toBe("共享系统提示");
+    expect(parent.messagesForModel()[0]?.content).toBe("changed after fork");
+    expect(parent.snapshot().messages.at(-1)?.content).toBe("父回复");
+    expect(child.snapshot().messages.at(-1)?.content).toBe("child directive");
+  });
+
+  it("marks a system-only fork boundary without changing its text", () => {
+    const parent = new ContextManager({
+      system: "system instructions",
+      toolOutputChars: 100,
+      summarize: async () => "summary",
+      hooks: new HookBus(),
+    });
+
+    const child = parent.fork();
+
+    expect(child.messagesForModel()).toEqual([
+      { role: "system", content: "system instructions", cacheBreakpoint: true },
+    ]);
+  });
+
+  it("preserves a compact continuation and deeply isolates inherited tool inputs", async () => {
+    const parent = createContext({ compactAtChars: 1, recentTurns: 0 });
+    parent.append({ role: "user", content: "old request" });
+    await parent.compact();
+    parent.append({
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "call", name: "Read", input: { path: "before.ts" } }],
+    });
+    parent.append({ role: "tool", content: "result", toolCallId: "call" });
+
+    const child = parent.fork();
+    const inheritedCall = child.messagesForModel().find((message) => message.toolCalls)?.toolCalls?.[0];
+    (inheritedCall!.input as { path: string }).path = "after.ts";
+
+    expect(parent.snapshot().compact?.summary).toBe("summary");
+    expect(child.snapshot().compact).toEqual(parent.snapshot().compact);
+    expect((parent.messagesForModel().find((message) => message.toolCalls)?.toolCalls?.[0]?.input as { path: string }).path)
+      .toBe("before.ts");
+    expect(child.messagesForModel().at(-1)?.cacheBreakpoint).toBe(true);
+  });
+
   it("pins ordered system sections before project and task context", () => {
     const context = createContext({ system: ["first section", "second section"] });
 

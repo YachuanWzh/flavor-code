@@ -37,6 +37,12 @@ export function buildSystemPrompt(options: SystemPromptOptions): string[] {
     .filter((section) => section.length > 0);
 }
 
+export function buildSubagentDirective(): string {
+  return `${roleSection("subagent")}
+
+The conversation above is an immutable snapshot inherited from the parent Agent. Treat the task below as the only new assignment. Task delegation is unavailable in this child context.`;
+}
+
 function identitySection(): string {
   return `# Identity
 
@@ -116,7 +122,7 @@ function roleSection(agent: PromptAgentRole): string {
 Treat the assigned task as self-contained. The caller may not share its full conversation, so rely on the briefing and inspect the workspace for required context. Use absolute paths because working directories may change between shell calls. Do not delegate to another agent. Stay within the assigned scope, verify your own work, and return a concise handoff covering what changed, key findings, verification, and any blocker the caller must resolve.`;
   return `# Main agent
 
-Own the user's request end to end. Collaborate when a choice materially changes the result, but use sound judgment for ordinary in-scope implementation details. Keep the user informed at meaningful milestones, synthesize any child-agent results yourself, and do not stop while safe, relevant work remains.`;
+Own the user's request end to end. Collaborate when a choice materially changes the result, but use sound judgment for ordinary in-scope implementation details. Keep the user informed at meaningful milestones, synthesize any child-agent results yourself, and do not stop while safe, relevant work remains. A forked child receives an explicit Subagent directive after the inherited conversation; in that case, follow that narrower directive for the child assignment.`;
 }
 
 function environmentSection(options: SystemPromptOptions): string {

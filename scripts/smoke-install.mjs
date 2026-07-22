@@ -28,7 +28,7 @@ try {
   await access(binary);
   const binaryOptions = { cwd: prefix, windowsHide: true };
   const version = await exec(process.execPath, [installedCli, "--version"], binaryOptions);
-  if (version.stdout.trim() !== "0.7.0") throw new Error(`Unexpected installed version: ${version.stdout.trim()}`);
+  if (version.stdout.trim() !== "0.8.0") throw new Error(`Unexpected installed version: ${version.stdout.trim()}`);
   const help = await exec(process.execPath, [installedCli, "--help"], {
     ...binaryOptions,
     env: { ...process.env, OPENAI_API_KEY: "", ANTHROPIC_API_KEY: "", NO_PROXY: "*" },

@@ -46,6 +46,11 @@ export interface CompactBoundary {
 
 export type CompactReason = "manual" | "reactive";
 
+export type ContextForkOptions = Partial<Pick<
+  ContextManagerOptions,
+  "summarize" | "onCompactProgress" | "hooks"
+>>;
+
 export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
@@ -67,6 +72,8 @@ export class ContextManager {
   #estimatedTokensAtLastRecordedUsage: number | undefined;
   #consecutiveAutoCompactFailures = 0;
   #lastCompactProgress: number | undefined;
+  #forkPinnedBoundary = false;
+  #forkCompactBoundary = false;
 
   constructor(options: ContextManagerOptions) {
     if (options.compactAtChars !== undefined && options.compactAtChars <= 0) throw new Error("compactAtChars must be positive");
@@ -99,6 +106,42 @@ export class ContextManager {
     this.#lastRecordedInputTokens = undefined;
     this.#estimatedTokensAtLastRecordedUsage = undefined;
     this.#consecutiveAutoCompactFailures = 0;
+    this.#forkPinnedBoundary = false;
+    this.#forkCompactBoundary = false;
+  }
+
+  /**
+   * Create an isolated child context whose model-visible prefix is identical to
+   * this context at the instant of the fork. Dynamic system sources are frozen
+   * so later parent changes cannot rewrite the child's reusable prefix.
+   */
+  fork(options: ContextForkOptions = {}): ContextManager {
+    const onCompactProgress = options.onCompactProgress ?? this.#onCompactProgress;
+    const child = new ContextManager({
+      system: resolveSystemSections(this.#system),
+      ...(this.#flavor === undefined ? {} : { flavor: this.#flavor }),
+      ...(this.#taskState === undefined ? {} : { taskState: this.#taskState }),
+      compactAtChars: this.#compactAtChars,
+      toolOutputChars: this.#toolOutputChars,
+      compaction: this.#compaction,
+      ...(this.#recentTurns === undefined ? {} : { recentTurns: this.#recentTurns }),
+      summarize: options.summarize ?? this.#summarize,
+      ...(onCompactProgress === undefined ? {} : { onCompactProgress }),
+      hooks: options.hooks ?? this.#hooks,
+    });
+    child.#compact = this.#compact === undefined ? undefined : { ...this.#compact };
+    child.#messages = this.#messages.map((message) => {
+      const { cacheBreakpoint: _cacheBreakpoint, ...copy } = cloneForkMessage(message);
+      return copy;
+    });
+    if (child.#messages.length > 0) {
+      child.#messages[child.#messages.length - 1]!.cacheBreakpoint = true;
+    } else if (child.#compact !== undefined) {
+      child.#forkCompactBoundary = true;
+    } else if (child.#pinnedMessages().length > 0) {
+      child.#forkPinnedBoundary = true;
+    }
+    return child;
   }
 
   append(message: ModelMessage): void {
@@ -137,12 +180,20 @@ export class ContextManager {
     this.#lastRecordedInputTokens = undefined;
     this.#estimatedTokensAtLastRecordedUsage = undefined;
     this.#consecutiveAutoCompactFailures = 0;
+    this.#forkPinnedBoundary = false;
+    this.#forkCompactBoundary = false;
   }
 
   messagesForModel(): ModelMessage[] {
+    const pinned = this.#pinnedMessages();
+    if (this.#forkPinnedBoundary && pinned.length > 0) pinned[pinned.length - 1]!.cacheBreakpoint = true;
     return [
-      ...this.#pinnedMessages(),
-      ...(this.#compact === undefined ? [] : [{ role: "user" as const, content: compactContinuationMessage(this.#compact.summary) }]),
+      ...pinned,
+      ...(this.#compact === undefined ? [] : [{
+        role: "user" as const,
+        content: compactContinuationMessage(this.#compact.summary),
+        ...(this.#forkCompactBoundary ? { cacheBreakpoint: true } : {}),
+      }]),
       ...this.#messages.map(cloneMessage),
     ];
   }
@@ -339,6 +390,18 @@ function cloneMessage(message: ModelMessage): ModelMessage {
   return {
     ...message,
     ...(message.toolCalls === undefined ? {} : { toolCalls: message.toolCalls.map((call) => ({ ...call })) }),
+  };
+}
+
+function cloneForkMessage(message: ModelMessage): ModelMessage {
+  return {
+    ...message,
+    ...(message.toolCalls === undefined ? {} : {
+      toolCalls: message.toolCalls.map((call) => ({
+        ...call,
+        input: structuredClone(call.input),
+      })),
+    }),
   };
 }
 

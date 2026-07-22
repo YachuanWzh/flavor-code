@@ -38,6 +38,7 @@ describe("buildSystemPrompt", () => {
     ]);
     expect(sections.join("\n\n")).toContain("You are Flavor");
     expect(sections.join("\n\n")).toContain("verify the result before claiming completion");
+    expect(sections.join("\n\n")).toContain("forked child receives an explicit Subagent directive");
   });
 
   it("emits guidance only for tools that are actually available", () => {

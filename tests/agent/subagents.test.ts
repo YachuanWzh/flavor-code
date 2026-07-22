@@ -372,6 +372,61 @@ describe("LocalHarness", () => {
     harness.dispose();
   });
 
+  it("passes the selected parent context to every subagent context factory", () => {
+    const received: Array<ContextManager | undefined> = [];
+    const harness = harnessFixture((_agent, _tools, _model, parentContext) => {
+      received.push(parentContext);
+      return contextFixture();
+    });
+    const frozenBatchParent = contextFixture();
+
+    harness.createSubagent(node("default-parent")).dispose();
+    harness.createSubagent(node("batch-parent"), frozenBatchParent).dispose();
+
+    expect(received).toEqual([undefined, harness.main.context, frozenBatchParent]);
+    harness.dispose();
+  });
+
+  it("keeps sibling request prefixes byte-identical and appends only each child directive", async () => {
+    const requests: Array<{ messages: unknown[] }> = [];
+    const hooks = new HookBus();
+    const adapter: ModelAdapter = {
+      async *stream(request) {
+        requests.push({ messages: request.messages });
+        yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
+      },
+    };
+    const harness = new LocalHarness({
+      registry: new ModelRegistry().register("fake", adapter),
+      hooks,
+      workspace: process.cwd(),
+      mainModelId: "fake:main",
+      subagentModelId: "fake:child",
+      tools: [],
+      createContext: (agent, _tools, _model, parentContext) => agent === "main"
+        ? contextFixture(hooks)
+        : parentContext!.fork(),
+    });
+    harness.main.context.append({ role: "user", content: "shared parent request" });
+    harness.main.context.append({ role: "assistant", content: "shared parent answer" });
+    const frozen = harness.main.context.fork();
+
+    for (const id of ["one", "two"]) {
+      await harness.runSubagent(node(id), async (child) => {
+        for await (const _event of child.loop.run({ prompt: `directive:${id}` })) { /* consume */ }
+      }, undefined, frozen);
+    }
+
+    const withoutDirective = requests.map(({ messages }) => messages.slice(0, -1));
+    expect(Buffer.from(JSON.stringify(withoutDirective[0])).equals(Buffer.from(JSON.stringify(withoutDirective[1])))).toBe(true);
+    expect(requests.map(({ messages }) => messages.at(-1))).toEqual([
+      { role: "user", content: "directive:one" },
+      { role: "user", content: "directive:two" },
+    ]);
+    expect((requests[0]?.messages.at(-2) as { cacheBreakpoint?: boolean })?.cacheBreakpoint).toBe(true);
+    harness.dispose();
+  });
+
   it("passes each role's exact tool definitions to its context factory", () => {
     const hooks = new HookBus();
     const adapter: ModelAdapter = { async *stream() { yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } }; } };
@@ -519,7 +574,12 @@ function contextFixture(hooks = new HookBus()): ContextManager {
   });
 }
 
-function harnessFixture(createContext: (agent: "main" | "subagent") => ContextManager): LocalHarness {
+function harnessFixture(createContext: (
+  agent: "main" | "subagent",
+  tools: readonly ToolDefinition<unknown>[],
+  modelId: string,
+  parentContext?: ContextManager,
+) => ContextManager): LocalHarness {
   const hooks = new HookBus();
   const adapter: ModelAdapter = { async *stream() { yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } }; } };
   return new LocalHarness({

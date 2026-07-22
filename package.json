@@ -1,6 +1,7 @@
 {
   "name": "flavor-code",
-  "version": "0.7.0",
+  "version": "0.8.0",
+  "author": "YachuanWzh",
   "type": "module",
   "main": "dist/desktop/main.js",
   "bin": {

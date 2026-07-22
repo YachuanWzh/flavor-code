@@ -3,6 +3,8 @@ export interface ModelMessage {
   content: string;
   toolCallId?: string;
   toolCalls?: ModelToolCall[];
+  /** Provider-neutral marker for the end of a byte-stable reusable prompt prefix. */
+  cacheBreakpoint?: boolean;
 }
 
 export interface ModelToolCall {

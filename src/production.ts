@@ -15,7 +15,7 @@ import { createTaskPlanTools } from "./agent/task-tools.js";
 import { updatePlanTask, type TaskPlan } from "./agent/task-plan.js";
 import type { AgentEvent, TaskSnapshot } from "./agent/types.js";
 import { loadConfig, setProjectMcpServerDisabled } from "./config/load.js";
-import { ContextManager, type ContextSnapshot } from "./context/manager.js";
+import { ContextManager, type CompactProgressCallback, type ContextSnapshot } from "./context/manager.js";
 import { summarizeWithModel } from "./context/summarizer.js";
 import { LocalHarness } from "./harness/local.js";
 import { HookBus } from "./hooks/bus.js";
@@ -31,13 +31,13 @@ import { inferVerificationPlan, runVerificationPlan } from "./loop/verifier.js";
 import { AnthropicModelAdapter } from "./models/anthropic.js";
 import { OpenAIModelAdapter } from "./models/openai.js";
 import { ModelRegistry, parseModelId } from "./models/registry.js";
-import type { ModelAdapter } from "./models/types.js";
+import type { ModelAdapter, ModelMessage } from "./models/types.js";
 import { connectMcpServers, McpManager, type McpClientFactory, type McpServerSummary } from "./mcp/client.js";
 import { connectSdkMcpClient } from "./mcp/sdk.js";
 import { OAuthCallbackAuthProvider } from "./auth/oauth.js";
 import { createFileTokenStore } from "./auth/store.js";
 import type { PermissionRequest } from "./permissions/engine.js";
-import { buildSystemPrompt, type PromptEnvironment } from "./prompts/system.js";
+import { buildSubagentDirective, buildSystemPrompt, type PromptEnvironment } from "./prompts/system.js";
 import type { ApprovalDecision } from "./tools/runtime.js";
 import { PluginHost } from "./plugins/host.js";
 import type { PluginCommandHandler } from "./plugins/types.js";
@@ -381,6 +381,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         taskStates[node.id] = "pending";
       }
       await publishTaskState();
+      const subagentParentContext = harness.main.context.fork();
       const scheduler = new SubagentScheduler({
         hooks,
         maxSubagents: config.maxSubagents,
@@ -389,7 +390,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
           taskStates[result.taskId] = result.status;
           await publishTaskState();
         },
-        execute: (task, execution) => runChild(harness, skills, task, execution.attempt, execution.signal),
+        execute: (task, execution) => runChild(
+          harness, skills, task, execution.attempt, execution.signal, subagentParentContext,
+        ),
       });
       return scheduler.run(graph, signal);
     },
@@ -407,6 +410,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     agent: "main" | "subagent",
     agentTools: readonly ToolDefinition<unknown>[],
     contextModelId: string,
+    parentContext?: ContextManager,
   ) => {
     const taskState = serializedTaskState();
     const language = resolveLanguage(config.language);
@@ -415,6 +419,17 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       toolOutputChars,
       ...compaction
     } = config.context;
+    const summarize = (messages: readonly ModelMessage[], signal: AbortSignal, onProgress?: CompactProgressCallback) => summarizeWithModel({
+      registry,
+      modelId: () => agent === "main" ? harness.mainModelId : harness.subagentModelId,
+      messages,
+      signal,
+      ...(onProgress === undefined ? {} : { onProgress }),
+    });
+    const onCompactProgress = (progress: number) => emitOutput({ type: "compact-progress" as const, progress });
+    if (agent === "subagent" && parentContext !== undefined) {
+      return parentContext.fork({ summarize, onCompactProgress, hooks });
+    }
     return new ContextManager({
       system: () => buildSystemPrompt({
         agent,
@@ -432,14 +447,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       ...(compactAtChars === undefined ? {} : { compactAtChars }),
       toolOutputChars,
       compaction,
-      summarize: (messages, signal, onProgress) => summarizeWithModel({
-        registry,
-        modelId: () => agent === "main" ? harness.mainModelId : harness.subagentModelId,
-        messages,
-        signal,
-        ...(onProgress === undefined ? {} : { onProgress }),
-      }),
-      onCompactProgress: (progress: number) => emitOutput({ type: "compact-progress", progress }),
+      summarize,
+      onCompactProgress,
       hooks,
     });
   };
@@ -1081,18 +1090,21 @@ async function* persistAfter<T>(source: AsyncIterable<T>, persist: () => Promise
 
 async function runChild(
   harness: LocalHarness, skills: SkillRegistry, task: TaskNode, attempt: 1 | 2, signal: AbortSignal,
+  parentContext: ContextManager,
 ): Promise<unknown> {
   return harness.runSubagent(task, async (child, childSignal) => {
     const skill = await skills.match(task.description);
-    const additionalContext = skill === undefined ? undefined : `Matched skill: ${skill.name}\n${await skills.loadBody(skill)}`;
+    const skillContext = skill === undefined ? undefined : `Matched skill: ${skill.name}\n${await skills.loadBody(skill)}`;
     const repair = attempt === 2 ? " Your previous response was invalid. Return only one strict JSON object." : "";
     const prompt = [
+      buildSubagentDirective(),
+      ...(skillContext === undefined ? [] : [skillContext]),
       `Complete task ${task.id}: ${task.description}`,
       `Expected outputs: ${task.expectedOutputs.join("; ")}`,
       `Verification: ${task.verification.join("; ")}`,
       `For completed work, finish by calling TaskOutput. Otherwise return only JSON matching these fields: ${Object.keys(SubagentResultSchema.shape).join(", ")}.${repair}`,
     ].join("\n");
-    for await (const event of child.loop.run({ prompt, signal: childSignal, ...(additionalContext ? { additionalContext } : {}) })) {
+    for await (const event of child.loop.run({ prompt, signal: childSignal })) {
       if (event.type === "error") throw new Error(event.error.message);
       if (event.type === "tool-end" && event.name === "TaskOutput" && event.result.ok) {
         const completed = subagentResultFromTaskOutput(task.id, event.result.output);
@@ -1100,7 +1112,7 @@ async function runChild(
       }
     }
     return parseFinalSubagentMessage(child.context.snapshot().messages);
-  }, signal);
+  }, signal, parentContext);
 }
 
 async function registerConfiguredAdapters(

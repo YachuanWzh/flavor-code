@@ -24,6 +24,7 @@ export interface LocalHarnessOptions {
     agent: "main" | "subagent",
     tools: readonly ToolDefinition<unknown>[],
     modelId: string,
+    parentContext?: ContextManager,
   ): ContextManager;
   permissionMode?: PermissionMode;
   approve?: ApprovalCallback;
@@ -101,10 +102,10 @@ export class LocalHarness {
     modelTools.splice(0, modelTools.length, ...nextModelTools);
   }
 
-  createSubagent(task: TaskNode): SubagentHarness {
+  createSubagent(task: TaskNode, parentContext: ContextManager = this.main.context): SubagentHarness {
     if (this.#disposed) throw new Error("LocalHarness is disposed");
     const tools = this.#toolsForAgent("subagent").filter((tool) => !MAIN_TASK_TOOL_NAMES.has(tool.name));
-    const context = this.#options.createContext("subagent", tools, this.#subagentModelId);
+    const context = this.#options.createContext("subagent", tools, this.#subagentModelId, parentContext);
     this.#claimContext(context);
     const profile = this.#createProfile(this.#subagentModelId, tools, "subagent", context, this.#options.approve);
     let disposed = false;
@@ -129,9 +130,10 @@ export class LocalHarness {
     task: TaskNode,
     execute: (harness: SubagentHarness, signal: AbortSignal) => Promise<T>,
     signal: AbortSignal = new AbortController().signal,
+    parentContext: ContextManager = this.main.context,
   ): Promise<T> {
     if (this.#disposed) throw new Error("LocalHarness is disposed");
-    const child = this.createSubagent(task);
+    const child = this.createSubagent(task, parentContext);
     try {
       signal.throwIfAborted();
       return await execute(child, signal);

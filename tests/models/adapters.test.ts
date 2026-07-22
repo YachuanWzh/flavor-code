@@ -144,6 +144,28 @@ describe("OpenAIModelAdapter", () => {
     );
   });
 
+  it("keeps OpenAI automatic caching input free of provider-neutral metadata", async () => {
+    const stream = vi.fn(() => events());
+    const client = { responses: { stream } };
+
+    await collect(new OpenAIModelAdapter({ client: asOpenAIClient(client) }).stream({
+      ...request,
+      messages: [
+        { role: "system", content: "shared system" },
+        { role: "user", content: "shared history", cacheBreakpoint: true },
+        { role: "user", content: "child directive" },
+      ],
+    }));
+
+    expect(stream).toHaveBeenCalledWith(expect.objectContaining({
+      input: [
+        { role: "system", content: "shared system" },
+        { role: "user", content: "shared history" },
+        { role: "user", content: "child directive" },
+      ],
+    }), { signal });
+  });
+
   it("turns provider stream errors into stable error events", async () => {
     const client = {
       responses: {
@@ -601,6 +623,57 @@ describe("AnthropicModelAdapter", () => {
       }),
       { signal },
     );
+  });
+
+  it("maps a fork cache boundary to the exact Anthropic content block", async () => {
+    const stream = vi.fn(() => events());
+    const client = { messages: { create: stream } };
+    const mappingRequest: ModelRequest = {
+      ...request,
+      messages: [
+        { role: "system", content: "shared system" },
+        { role: "user", content: "shared parent history", cacheBreakpoint: true },
+        { role: "user", content: "child-only directive" },
+      ],
+    };
+
+    await collect(new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream(mappingRequest));
+
+    expect(stream).toHaveBeenCalledWith(expect.objectContaining({
+      system: "shared system",
+      messages: [
+        {
+          role: "user",
+          content: [{
+            type: "text",
+            text: "shared parent history",
+            cache_control: { type: "ephemeral" },
+          }],
+        },
+        { role: "user", content: "child-only directive" },
+      ],
+    }), { signal });
+  });
+
+  it("supports an Anthropic cache boundary on a system-only fork", async () => {
+    const stream = vi.fn(() => events());
+    const client = { messages: { create: stream } };
+
+    await collect(new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream({
+      ...request,
+      messages: [
+        { role: "system", content: "first" },
+        { role: "system", content: "last shared system", cacheBreakpoint: true },
+        { role: "user", content: "child directive" },
+      ],
+    }));
+
+    expect(stream).toHaveBeenCalledWith(expect.objectContaining({
+      system: [
+        { type: "text", text: "first" },
+        { type: "text", text: "last shared system", cache_control: { type: "ephemeral" } },
+      ],
+    }), { signal });
   });
 });
 
