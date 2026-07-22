@@ -47,3 +47,31 @@ it("prints task snapshots as static progress without animation", async () => {
   expect(output.join("")).toContain("· Running tests · running");
   expect(output.join("")).not.toMatch(/[⠋⠙⠹⠸]/u);
 });
+
+it("does not replay a restored transcript in print mode", async () => {
+  const output: string[] = [];
+  const createRuntime = async (options: ProductionRuntimeOptions) => ({
+    restoredTranscript: {
+      completed: [{
+        id: 1,
+        prompt: "old prompt",
+        assistantText: "old answer",
+        statusLines: [],
+        blocks: [{ kind: "text", text: "old answer" }],
+      }],
+      nextId: 2,
+    },
+    session: {
+      start: async () => {},
+      submit: async () => { options.output({ type: "text", text: "new answer" }); },
+      close: async () => {},
+    },
+    dispose: async () => {},
+  } as unknown as ProductionRuntime);
+
+  const code = await runPrint("continue", { createRuntime, stdout: (text) => output.push(text), stderr: () => {} }, "saved");
+
+  expect(code).toBe(0);
+  expect(output.join("")).toContain("new answer");
+  expect(output.join("")).not.toMatch(/old prompt|old answer/);
+});

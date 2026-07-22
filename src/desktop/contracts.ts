@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import type { AgentEvent } from "../agent/types.js";
 import type { PermissionMode } from "../config/schema.js";
-import type { RestoredConversationMessage } from "../production.js";
+import type { TranscriptState } from "../ui/transcript.js";
 import type { Question } from "../tools/ask-user-question.js";
 import type { SessionOutput } from "../ui/session.js";
 import type { ManagedSkill, ManagedSkillSummary, SkillDraft } from "../skills/manager.js";
@@ -74,7 +74,7 @@ export interface DesktopSnapshot {
 
 export interface SessionStartedPayload {
   sessionId: string;
-  restoredMessages: readonly RestoredConversationMessage[];
+  restoredTranscript: TranscriptState;
   snapshot: DesktopSnapshot;
 }
 

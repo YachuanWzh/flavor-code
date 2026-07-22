@@ -4,6 +4,7 @@ import type { ToolPresentation } from "../tools/types.js";
 
 export interface TranscriptTurn {
   id: number;
+  kind?: "compaction";
   prompt: string;
   assistantText: string;
   statusLines: string[];
@@ -15,6 +16,19 @@ export interface TranscriptTurn {
 export interface TranscriptHistoryMessage {
   readonly role: "user" | "assistant" | "tool";
   readonly content: string;
+  readonly toolCallId?: string | undefined;
+  readonly toolCalls?: readonly { id: string; name: string; input: unknown }[] | undefined;
+}
+
+export interface TranscriptCompactBoundary {
+  readonly summary: string;
+  readonly compactedAt: string;
+}
+
+export interface TranscriptToolDetails {
+  readonly name: string;
+  readonly input: unknown;
+  readonly result?: import("../tools/types.js").ToolResult;
 }
 
 export type TranscriptBlock =
@@ -29,6 +43,8 @@ export type TranscriptBlock =
     task?: { subject: string; activeForm: string; role: "main" | "subagent" };
     activity?: "model";
     presentation?: ToolPresentation;
+    tool?: TranscriptToolDetails;
+    details?: string;
     progress?: number;
     startedAt?: number;
     elapsedMs?: number;
@@ -42,7 +58,8 @@ export interface TranscriptState {
 }
 
 export type TranscriptAction =
-  | { type: "hydrate"; messages: readonly TranscriptHistoryMessage[] }
+  | { type: "hydrate"; messages: readonly TranscriptHistoryMessage[]; compact?: TranscriptCompactBoundary }
+  | { type: "restore"; state: TranscriptState }
   | { type: "submit"; prompt: string }
   | { type: "session"; event: SessionOutput }
   | { type: "submit-error"; message: string }
@@ -54,7 +71,8 @@ export function createTranscriptState(): TranscriptState {
 }
 
 export function transcriptReducer(state: TranscriptState, action: TranscriptAction): TranscriptState {
-  if (action.type === "hydrate") return hydrateHistory(action.messages);
+  if (action.type === "hydrate") return hydrateHistory(action.messages, action.compact);
+  if (action.type === "restore") return restoreTranscriptState(action.state);
   if (action.type === "clear") return createTranscriptState();
   if (action.type === "submit") {
     const active: TranscriptTurn = {
@@ -120,9 +138,12 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
   if (event.type === "tool-start") return upsertStatus({ ...state, active: withoutModelActivity(state.active) }, {
     kind: "status", id: `tool:${event.id}`, state: "running", text: `${event.name}${event.label ? ` ${event.label}` : ""}`,
     ...(event.hint === undefined ? {} : { hint: event.hint }),
+    tool: { name: event.name, input: event.input },
   });
   if (event.type === "tool-end") {
     const cancelled = !event.result.ok && event.result.error?.code === "cancelled";
+    const previous = state.active.blocks.find((block) => block.kind === "status" && block.id === `tool:${event.id}`);
+    const input = previous?.kind === "status" && previous.tool !== undefined ? previous.tool.input : null;
     return upsertStatus(state, {
       kind: "status",
       id: `tool:${event.id}`,
@@ -132,6 +153,7 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
       ...(event.result.ok && event.result.presentation !== undefined
         ? { presentation: event.result.presentation }
         : {}),
+      tool: { name: event.name, input, result: event.result },
     });
   }
   if (event.type === "notice") return upsertStatus(state, {
@@ -191,8 +213,12 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
   return state;
 }
 
-function hydrateHistory(messages: readonly TranscriptHistoryMessage[]): TranscriptState {
+function hydrateHistory(
+  messages: readonly TranscriptHistoryMessage[],
+  compact?: TranscriptCompactBoundary,
+): TranscriptState {
   const completed: TranscriptTurn[] = [];
+  if (compact !== undefined) completed.push(compactionTurn(compact));
   let turn: TranscriptTurn | undefined;
   for (const message of messages) {
     if (message.role === "user") {
@@ -204,12 +230,30 @@ function hydrateHistory(messages: readonly TranscriptHistoryMessage[]): Transcri
         statusLines: [],
         blocks: [],
       };
-    } else if (message.role === "assistant" && message.content.length > 0 && turn !== undefined) {
-      turn = addText(turn, message.content);
+    } else if (message.role === "assistant" && turn !== undefined) {
+      if (message.content.length > 0) turn = addText(turn, message.content);
+      for (const call of message.toolCalls ?? []) {
+        turn = upsertTurnStatus(turn, {
+          kind: "status",
+          id: `tool:${call.id}`,
+          state: "running",
+          text: call.name,
+          tool: { name: call.name, input: call.input },
+        });
+      }
+    } else if (message.role === "tool" && turn !== undefined) {
+      turn = applyLegacyToolResult(turn, message);
     }
   }
   if (turn !== undefined) completed.push(turn);
   return { completed, nextId: completed.length + 1 };
+}
+
+export function transcriptFromLegacyConversation(
+  messages: readonly TranscriptHistoryMessage[],
+  compact?: TranscriptCompactBoundary,
+): TranscriptState {
+  return hydrateHistory(messages, compact);
 }
 
 function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot, includeTerminal = true): TranscriptTurn {
@@ -336,6 +380,111 @@ function withoutModelActivity(turn: TranscriptTurn, id?: string): TranscriptTurn
     || block.activity !== "model"
     || (id !== undefined && block.id !== id));
   if (blocks.length === turn.blocks.length) return turn;
+  return {
+    ...turn,
+    blocks,
+    statusLines: blocks
+      .filter((block): block is Extract<TranscriptBlock, { kind: "status" }> => block.kind === "status")
+      .map((block) => block.text),
+  };
+}
+
+export function restoreTranscriptState(state: TranscriptState): TranscriptState {
+  const completed = state.completed.map(cloneTurn);
+  if (state.active !== undefined) completed.push(normalizeInterruptedTurn(cloneTurn(state.active)));
+  return {
+    completed,
+    nextId: Math.max(state.nextId, ...completed.map((turn) => turn.id + 1), 1),
+    ...(state.taskSnapshot === undefined ? {} : { taskSnapshot: state.taskSnapshot }),
+  };
+}
+
+function compactionTurn(compact: TranscriptCompactBoundary): TranscriptTurn {
+  const text = `Original execution steps before ${compact.compactedAt} are unavailable.`;
+  return {
+    id: 1,
+    kind: "compaction",
+    prompt: "Earlier execution history was compacted",
+    assistantText: "",
+    statusLines: [text],
+    blocks: [{
+      kind: "status",
+      id: `compact-boundary:${compact.compactedAt}`,
+      state: "info",
+      tone: "warning",
+      text,
+      details: compact.summary,
+    }],
+  };
+}
+
+function applyLegacyToolResult(turn: TranscriptTurn, message: TranscriptHistoryMessage): TranscriptTurn {
+  const id = message.toolCallId;
+  const index = id === undefined ? -1 : turn.blocks.findIndex((block) => block.kind === "status" && block.id === `tool:${id}`);
+  if (index < 0) {
+    return upsertTurnStatus(turn, {
+      kind: "status",
+      id: `orphan-tool:${id ?? turn.blocks.length}`,
+      state: "info",
+      tone: "warning",
+      text: "Orphaned historical tool result",
+      details: message.content,
+    });
+  }
+  const previous = turn.blocks[index]!;
+  if (previous.kind !== "status" || previous.tool === undefined) return turn;
+  const result = parseLegacyToolResult(message.content);
+  const block: Extract<TranscriptBlock, { kind: "status" }> = {
+    ...previous,
+    state: result.ok ? "completed" : "failed",
+    text: `${result.ok ? "✓" : "×"} ${previous.tool.name}`,
+    tool: { ...previous.tool, result },
+  };
+  const blocks = [...turn.blocks];
+  blocks[index] = block;
+  return withBlocks(turn, blocks);
+}
+
+function parseLegacyToolResult(content: string): import("../tools/types.js").ToolResult {
+  let value: unknown = content;
+  try { value = JSON.parse(content); }
+  catch { /* Older providers may have persisted plain-text tool output. */ }
+  if (typeof value === "object" && value !== null && "error" in value) {
+    const candidate = (value as { error?: unknown }).error;
+    if (typeof candidate === "object" && candidate !== null) {
+      const error = candidate as { code?: unknown; message?: unknown };
+      return { ok: false, error: {
+        code: typeof error.code === "string" ? error.code : "unknown",
+        message: typeof error.message === "string" ? error.message : content,
+      } };
+    }
+  }
+  return { ok: true, output: value };
+}
+
+function normalizeInterruptedTurn(turn: TranscriptTurn): TranscriptTurn {
+  const blocks = turn.blocks.flatMap((block): TranscriptBlock[] => {
+    if (block.kind !== "status") return [block];
+    if (block.activity === "model") return [];
+    if (block.state !== "running") return [block];
+    return [{ ...block, state: "cancelled", text: `× ${block.text.replace(/^[✓×·]\s*/, "")}` }];
+  });
+  return withBlocks(turn, blocks);
+}
+
+function cloneTurn(turn: TranscriptTurn): TranscriptTurn {
+  return { ...turn, blocks: turn.blocks.map((block) => ({ ...block })), statusLines: [...turn.statusLines] };
+}
+
+function upsertTurnStatus(turn: TranscriptTurn, block: Extract<TranscriptBlock, { kind: "status" }>): TranscriptTurn {
+  const blocks = [...turn.blocks];
+  const index = blocks.findIndex((item) => item.kind === "status" && item.id === block.id);
+  if (index < 0) blocks.push(block);
+  else blocks[index] = block;
+  return withBlocks(turn, blocks);
+}
+
+function withBlocks(turn: TranscriptTurn, blocks: TranscriptBlock[]): TranscriptTurn {
   return {
     ...turn,
     blocks,

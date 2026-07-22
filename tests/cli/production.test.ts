@@ -314,7 +314,7 @@ describe("production runtime", () => {
     }));
     const store = new SessionStore({ workspace });
     await store.save({
-      version: 2,
+      version: 3,
       sessionId: "planned-session",
       createdAt: "2026-07-13T01:00:00.000Z",
       updatedAt: "2026-07-13T01:01:00.000Z",
@@ -334,6 +334,24 @@ describe("production runtime", () => {
       },
       models: { main: "local:large", subagent: "local:small" },
       permissionMode: "default",
+      timeline: {
+        version: 1,
+        state: {
+          completed: [{
+            id: 1,
+            prompt: "persist me",
+            assistantText: "persisted answer",
+            statusLines: ["✓ Read"],
+            blocks: [
+              { kind: "status", id: "tool:call-1", state: "completed", text: "✓ Read", tool: {
+                name: "Read", input: { path: "a.ts" }, result: { ok: true, output: "hidden tool output" },
+              } },
+              { kind: "text", text: "persisted answer" },
+            ],
+          }],
+          nextId: 2,
+        },
+      },
     });
     const outputs: unknown[] = [];
     const runtime = await createProductionRuntime({
@@ -343,11 +361,13 @@ describe("production runtime", () => {
 
     await runtime.session.start();
 
-    expect(runtime.restoredMessages).toEqual([
-      { role: "user", content: "persist me" },
-      { role: "assistant", content: "persisted answer" },
-      { role: "tool", content: "hidden tool output" },
-    ]);
+    expect(runtime.restoredTranscript.completed[0]).toMatchObject({
+      prompt: "persist me",
+      blocks: [expect.objectContaining({
+        id: "tool:call-1",
+        tool: { name: "Read", input: { path: "a.ts" }, result: { ok: true, output: "hidden tool output" } },
+      }), expect.objectContaining({ kind: "text", text: "persisted answer" })],
+    });
     expect(runtime.services.tasks()).toMatchObject({ plan: { tasks: [{ id: "inspect" }] } });
     expect(outputs).toContainEqual(expect.objectContaining({
       type: "tasks",
@@ -382,7 +402,7 @@ describe("production runtime", () => {
     }`);
     const store = new SessionStore({ workspace });
     await store.save({
-      version: 2,
+      version: 3,
       sessionId: "old-plan-session",
       createdAt: "2026-07-19T01:00:00.000Z",
       updatedAt: "2026-07-19T01:01:00.000Z",
@@ -404,6 +424,7 @@ describe("production runtime", () => {
       },
       models: { main: "capture:main", subagent: "capture:child" },
       permissionMode: "default",
+      timeline: { version: 1, state: { completed: [], nextId: 1 } },
     });
     const runtime = await createProductionRuntime({
       workspace, home: workspace, environment: {}, resumeSession: "old-plan-session",
@@ -420,6 +441,16 @@ describe("production runtime", () => {
       results: {},
     });
     await runtime.dispose();
+    const persisted = await store.load("old-plan-session");
+    expect(persisted.timeline.state.completed.at(-1)?.blocks).toContainEqual(expect.objectContaining({
+      id: "tool:replace-plan",
+      state: "completed",
+      tool: expect.objectContaining({
+        name: "TaskPlan",
+        input: expect.objectContaining({ tasks: [expect.objectContaining({ id: "implement" })] }),
+        result: expect.objectContaining({ ok: true }),
+      }),
+    }));
   });
 
   it("saves lifecycle state and resumes only when explicitly requested", async () => {
@@ -435,10 +466,11 @@ describe("production runtime", () => {
     await first.session.close(); await first.dispose();
     const saved = await new SessionStore({ workspace }).load();
     expect(saved.conversation.messages.some((message) => message.role === "user" && message.content === "persist me")).toBe(true);
+    expect(saved.timeline.state.completed.some((turn) => turn.prompt === "persist me")).toBe(true);
     expect(saved.permissionMode).toBe("acceptEdits");
 
     const fresh = await createProductionRuntime({ workspace, home: workspace, environment: {}, output: () => {} });
-    expect(fresh.restoredMessages).toEqual([]);
+    expect(fresh.restoredTranscript).toEqual({ completed: [], nextId: 1 });
     expect(fresh.services.permissionMode()).toBe("default");
     await fresh.dispose();
     const resumed = await createProductionRuntime({ workspace, home: workspace, environment: {}, resumeSession: saved.sessionId, output: () => {} });

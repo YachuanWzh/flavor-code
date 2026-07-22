@@ -53,6 +53,7 @@ import { createTaskOutputTool } from "./tools/task-output.js";
 import { createTodoWriteTool } from "./tools/todo-write.js";
 import type { ToolDefinition } from "./tools/types.js";
 import { FlavorSession, type SessionOutput, type SessionServices } from "./ui/session.js";
+import { createTranscriptState, restoreTranscriptState, transcriptReducer, type TranscriptState } from "./ui/transcript.js";
 import { MVP_COMMANDS } from "./ui/commands.js";
 import { resolveLanguage, languageInstruction } from "./utils/intl.js";
 import { awaitWithSignal } from "./utils/async.js";
@@ -76,18 +77,13 @@ export interface ProductionRuntimeOptions {
   mcpClientFactory?: McpClientFactory;
 }
 
-export interface RestoredConversationMessage {
-  readonly role: "user" | "assistant" | "tool";
-  readonly content: string;
-}
-
 export interface ProductionRuntime {
   session: FlavorSession;
   services: SessionServices;
   approvals: ApprovalBridge;
   diagnostics: readonly string[];
   sessionId: string;
-  restoredMessages: readonly RestoredConversationMessage[];
+  restoredTranscript: TranscriptState;
   dispose(): Promise<void>;
 }
 
@@ -155,8 +151,14 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const recovered = options.resumeSession === undefined
     ? undefined
     : await sessionStore.load(options.resumeSession === true ? undefined : options.resumeSession);
-  const restoredMessages: readonly RestoredConversationMessage[] = recovered?.conversation.messages
-    .map(({ role, content }) => ({ role, content })) ?? [];
+  let timelineState = recovered === undefined
+    ? createTranscriptState()
+    : restoreTranscriptState(recovered.timeline.state);
+  const restoredTranscript = restoreTranscriptState(timelineState);
+  const emitOutput = (event: SessionOutput): void => {
+    timelineState = transcriptReducer(timelineState, { type: "session", event });
+    options.output(event);
+  };
   const secrets = [
     ...Object.values(config.providers).map((provider) => provider.apiKey),
     ...Object.values(config.mcpServers).flatMap((server) =>
@@ -194,7 +196,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     createReadTool(workspace), createWriteTool(workspace), createEditTool(workspace), createApplyPatchTool(workspace),
     createGlobTool(workspace), createGrepTool(workspace), createShellTool(workspace),
     ...createLspTools(workspace, {
-      onStatus: (message) => options.output({ type: "notice", message }),
+      onStatus: (message) => emitOutput({ type: "notice", message }),
     }),
     ...(options.approvalPolicy === "deny" ? [] : [createAskUserQuestionTool(askUserQuestionHandler)]),
     createTaskOutputTool(),
@@ -298,6 +300,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       results: { ...taskResults },
     },
     models: { main: harness.mainModelId, subagent: harness.subagentModelId }, permissionMode: harness.permissionMode,
+    timeline: { version: 1, state: timelineState },
   });
   let persistFailed = false;
   const persist = (): Promise<void> => {
@@ -306,7 +309,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     ).catch((err) => {
       if (!persistFailed) {
         persistFailed = true;
-        try { options.output({ type: "notice", message: `Session save failed: ${message(err)}. Your conversation may not be preserved.` }); }
+        try { emitOutput({ type: "notice", message: `Session save failed: ${message(err)}. Your conversation may not be preserved.` }); }
         catch { /* Output may be unavailable during shutdown */ }
       }
     });
@@ -337,7 +340,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const publishTaskState = async (): Promise<void> => {
     harness.main.context.updateTaskState(serializedTaskState());
     await persist();
-    options.output({ type: "tasks", snapshot: taskSnapshot() });
+    emitOutput({ type: "tasks", snapshot: taskSnapshot() });
   };
 
   for (const tool of createTaskPlanTools({
@@ -436,7 +439,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         signal,
         ...(onProgress === undefined ? {} : { onProgress }),
       }),
-      onCompactProgress: (progress: number) => options.output({ type: "compact-progress", progress }),
+      onCompactProgress: (progress: number) => emitOutput({ type: "compact-progress", progress }),
       hooks,
     });
   };
@@ -487,7 +490,16 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     await publishTaskState(); return { decision: "allow" };
   });
   hooks.on("SessionStart", () => {
-    if (taskPlan !== undefined || taskGraph !== undefined) options.output({ type: "tasks", snapshot: taskSnapshot() });
+    if (taskPlan !== undefined || taskGraph !== undefined) emitOutput({ type: "tasks", snapshot: taskSnapshot() });
+    return { decision: "allow" };
+  });
+  hooks.on("UserPromptSubmit", (event) => {
+    timelineState = transcriptReducer(timelineState, { type: "submit", prompt: String(event.payload.prompt) });
+    return { decision: "allow" };
+  });
+  hooks.on("Stop", async () => {
+    timelineState = transcriptReducer(timelineState, { type: "finish" });
+    await persist();
     return { decision: "allow" };
   });
   hooks.on("SessionEnd", async () => { await persist(); return { decision: "allow" }; });
@@ -542,7 +554,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       createApplyPatchTool(input.workspace), createGlobTool(input.workspace), createGrepTool(input.workspace),
       createShellTool(input.workspace),
       ...createLspTools(input.workspace, {
-        onStatus: (status) => options.output({ type: "notice", message: status }),
+        onStatus: (status) => emitOutput({ type: "notice", message: status }),
       }),
       createTodoWriteTool(),
       ...mcpTools,
@@ -585,7 +597,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
             compactionOutputTokens += usage.outputTokens;
           },
         }),
-        onCompactProgress: (progress) => options.output({ type: "compact-progress", progress }),
+        onCompactProgress: (progress) => emitOutput({ type: "compact-progress", progress }),
         hooks,
       });
     };
@@ -789,8 +801,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       for (const key of Object.keys(subagentElapsedMs)) delete subagentElapsedMs[key];
       sessionId = `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
       createdAt = new Date().toISOString();
+      timelineState = createTranscriptState();
       await persist();
-      options.output({ type: "tasks", snapshot: { subagents: { states: {} } } });
+      emitOutput({ type: "tasks", snapshot: { subagents: { states: {} } } });
     },
     pluginCommands: () => [...pluginCommands.keys()].sort(),
     runPluginCommand: async (name, args, signal) => {
@@ -799,7 +812,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       signal.throwIfAborted();
       return awaitWithSignal(Promise.resolve(handler(args, { workspace, signal })), signal);
     },
-    output: options.output,
+    output: emitOutput,
     questions,
     async login() {
       // If any provider has an apiKey, user is already authenticated
@@ -855,7 +868,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const session = new FlavorSession(services);
   let disposed = false;
   return {
-    session, services, approvals, restoredMessages,
+    session, services, approvals, restoredTranscript,
     get sessionId() { return sessionId; },
     get diagnostics() { return diagnostics.map((item) => redactSecrets(item, secrets)); },
     async dispose() {

@@ -8,9 +8,16 @@ import { PermissionModeSchema } from "../config/schema.js";
 import { TaskGraphSchema } from "../agent/planner.js";
 import { SubagentResultSchema } from "../agent/subagents.js";
 import { TaskPlanSchema, normalizeAbandonedPlan } from "../agent/task-plan.js";
+import {
+  restoreTranscriptState,
+  transcriptFromLegacyConversation,
+  type TranscriptBlock,
+  type TranscriptState,
+  type TranscriptTurn,
+} from "../ui/transcript.js";
 import { message } from "../utils/error.js";
 
-export const SESSION_VERSION = 2 as const;
+export const SESSION_VERSION = 3 as const;
 export const DEFAULT_MAX_SESSION_BYTES = 5 * 1024 * 1024;
 
 const SessionIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/, "Invalid session id");
@@ -54,12 +61,29 @@ const SessionDocumentV1Schema = SessionBaseSchema.extend({
   }).strict(),
 }).strict();
 
+const ConversationSchema = z.object({
+  compact: CompactBoundarySchema.optional(),
+  messages: z.array(MessageSchema).max(50_000),
+}).strict();
+
+const SessionDocumentV2Schema = SessionBaseSchema.extend({
+  version: z.literal(2),
+  conversation: ConversationSchema,
+}).strict();
+
+const TranscriptStateSchema = z.custom<TranscriptState>(isTranscriptState, "Invalid transcript state");
+const TimelineSchema = z.object({
+  version: z.literal(1),
+  state: TranscriptStateSchema,
+}).strict();
+
 export const SessionDocumentSchema = SessionBaseSchema.extend({
   version: z.literal(SESSION_VERSION),
   conversation: z.object({
     compact: CompactBoundarySchema.optional(),
     messages: z.array(MessageSchema).max(50_000),
   }).strict(),
+  timeline: TimelineSchema,
 }).strict();
 
 export type SessionDocument = z.infer<typeof SessionDocumentSchema>;
@@ -92,13 +116,22 @@ export class SessionStore {
     await this.#assertWorkspace(document.workspace.path);
     await this.#prepareDirectory();
     const target = this.#path(document.sessionId);
-    const { conversation: { messages, compact }, ...meta } = document;
+    const { conversation: { messages, compact }, timeline, ...meta } = document;
     const metaLine = JSON.stringify({
       __meta: true,
       ...meta,
       ...(compact === undefined ? {} : { compact }),
+      timeline: {
+        version: timeline.version,
+        nextId: timeline.state.nextId,
+        ...(timeline.state.taskSnapshot === undefined ? {} : { taskSnapshot: timeline.state.taskSnapshot }),
+      },
     });
-    const lines = [metaLine, ...messages.map((message) => JSON.stringify(message))];
+    const timelineLines = [
+      ...timeline.state.completed.map((turn) => JSON.stringify({ __timeline: true, turn })),
+      ...(timeline.state.active === undefined ? [] : [JSON.stringify({ __timeline: true, active: timeline.state.active })]),
+    ];
+    const lines = [metaLine, ...messages.map((message) => JSON.stringify(message)), ...timelineLines];
     const body = `${lines.join("\n")}\n`;
     if (Buffer.byteLength(body) > this.#maxBytes) throw new Error(`Session exceeds maximum size of ${this.#maxBytes} bytes`);
     const temporary = join(this.#sessions, `.${document.sessionId}.${process.pid}.${randomUUID()}.tmp`);
@@ -149,23 +182,30 @@ export class SessionStore {
     const first = JSON.parse(firstLine) as Record<string, unknown>;
     if (first.__meta === true) {
       const meta = { ...first };
-      const messages = trimmed
+      const records = trimmed
         .split("\n")
         .slice(1)
         .filter((line) => line.length > 0)
         .map((line) => JSON.parse(line) as unknown);
+      const messages = records.filter((record) => !isTimelineRecord(record));
+      const timelineRecords = records.filter(isTimelineRecord);
       const summary = meta.summary;
       const compact = meta.compact;
+      const timeline = meta.timeline;
       delete meta.__meta;
       delete meta.summary;
       delete meta.compact;
+      delete meta.timeline;
       candidate = {
         ...meta,
         conversation: {
           ...(meta.version === 1 && summary !== undefined ? { summary } : {}),
-          ...(meta.version === SESSION_VERSION && compact !== undefined ? { compact } : {}),
+          ...((meta.version === 2 || meta.version === SESSION_VERSION) && compact !== undefined ? { compact } : {}),
           messages,
         },
+        ...(meta.version === SESSION_VERSION ? {
+          timeline: timelineFromRecords(timeline, timelineRecords),
+        } : {}),
       };
     } else {
       candidate = JSON.parse(trimmed) as unknown;
@@ -273,8 +313,26 @@ function normalizeAbandonedTasks(document: SessionDocument): SessionDocument {
       filesChanged: [], commandsRun: [], verification: [], artifacts: [], risks: ["Execution was abandoned"], suggestedNextSteps: [],
     };
   }
+  const restoredTimeline = restoreTranscriptState(document.timeline.state);
+  const priorSnapshot = restoredTimeline.taskSnapshot;
+  const { taskSnapshot: _discardedTaskSnapshot, ...timelineWithoutTaskSnapshot } = restoredTimeline;
+  const hasTaskSnapshot = plan !== undefined || document.tasks.graph !== undefined || Object.keys(states).length > 0;
+  const timelineState: TranscriptState = {
+    ...timelineWithoutTaskSnapshot,
+    ...(hasTaskSnapshot ? {
+      taskSnapshot: {
+        ...(plan === undefined ? {} : { plan }),
+        subagents: {
+          ...(document.tasks.graph === undefined ? {} : { graph: document.tasks.graph }),
+          states: { ...states },
+          ...(priorSnapshot?.subagents.elapsedMs === undefined ? {} : { elapsedMs: priorSnapshot.subagents.elapsedMs }),
+        },
+      },
+    } : {}),
+  };
   return {
     ...document,
+    timeline: { ...document.timeline, state: timelineState },
     tasks: {
       ...document.tasks,
       ...(plan === undefined ? {} : { plan }),
@@ -287,6 +345,17 @@ function normalizeAbandonedTasks(document: SessionDocument): SessionDocument {
 function parseAndMigrateSession(input: unknown): SessionDocument {
   if (typeof input !== "object" || input === null || !("version" in input)) throw new Error("Session version is missing");
   if (input.version === SESSION_VERSION) return SessionDocumentSchema.parse(input);
+  if (input.version === 2) {
+    const legacy = SessionDocumentV2Schema.parse(input);
+    return SessionDocumentSchema.parse({
+      ...legacy,
+      version: SESSION_VERSION,
+      timeline: {
+        version: 1,
+        state: transcriptFromLegacyConversation(legacy.conversation.messages, legacy.conversation.compact),
+      },
+    });
+  }
   if (input.version !== 1) throw new Error(`Unsupported session version: ${String(input.version)}`);
   const legacy = SessionDocumentV1Schema.parse(input);
   const { conversation, ...metadata } = legacy;
@@ -294,16 +363,75 @@ function parseAndMigrateSession(input: unknown): SessionDocument {
   const summary = conversation.summary?.content.startsWith(prefix)
     ? conversation.summary.content.slice(prefix.length).trim()
     : undefined;
+  const compact = summary === undefined || summary.length === 0
+    ? undefined
+    : { summary, compactedAt: legacy.updatedAt };
   return SessionDocumentSchema.parse({
     ...metadata,
     version: SESSION_VERSION,
     conversation: {
-      ...(summary === undefined || summary.length === 0 ? {} : {
-        compact: { summary, compactedAt: legacy.updatedAt },
-      }),
+      ...(compact === undefined ? {} : { compact }),
       messages: conversation.messages,
     },
+    timeline: {
+      version: 1,
+      state: transcriptFromLegacyConversation(conversation.messages, compact),
+    },
   });
+}
+
+function isTimelineRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && (value as Record<string, unknown>).__timeline === true;
+}
+
+function timelineFromRecords(header: unknown, records: readonly Record<string, unknown>[]): unknown {
+  const value = typeof header === "object" && header !== null ? header as Record<string, unknown> : {};
+  const completed = records.filter((record) => "turn" in record).map((record) => record.turn);
+  const activeRecords = records.filter((record) => "active" in record);
+  if (activeRecords.length > 1) throw new Error("Session contains multiple active timeline turns");
+  return {
+    version: value.version,
+    state: {
+      completed,
+      ...(activeRecords.length === 0 ? {} : { active: activeRecords[0]!.active }),
+      nextId: value.nextId,
+      ...(value.taskSnapshot === undefined ? {} : { taskSnapshot: value.taskSnapshot }),
+    },
+  };
+}
+
+function isTranscriptState(value: unknown): value is TranscriptState {
+  if (!isRecord(value) || !Array.isArray(value.completed) || !value.completed.every(isTranscriptTurn)) return false;
+  if (!Number.isSafeInteger(value.nextId) || (value.nextId as number) < 1) return false;
+  if (value.active !== undefined && !isTranscriptTurn(value.active)) return false;
+  return value.taskSnapshot === undefined || isRecord(value.taskSnapshot);
+}
+
+function isTranscriptTurn(value: unknown): value is TranscriptTurn {
+  if (!isRecord(value)) return false;
+  if (!Number.isSafeInteger(value.id) || (value.id as number) < 1) return false;
+  if (value.kind !== undefined && value.kind !== "compaction") return false;
+  if (typeof value.prompt !== "string" || typeof value.assistantText !== "string") return false;
+  if (!Array.isArray(value.statusLines) || !value.statusLines.every((line) => typeof line === "string")) return false;
+  if (!Array.isArray(value.blocks) || !value.blocks.every(isTranscriptBlock)) return false;
+  return true;
+}
+
+function isTranscriptBlock(value: unknown): value is TranscriptBlock {
+  if (!isRecord(value)) return false;
+  if (value.kind === "text") return typeof value.text === "string";
+  if (value.kind !== "status") return false;
+  if (typeof value.id !== "string" || typeof value.text !== "string") return false;
+  if (!["running", "completed", "failed", "cancelled", "info"].includes(String(value.state))) return false;
+  if (value.tool !== undefined) {
+    if (!isRecord(value.tool) || typeof value.tool.name !== "string" || !("input" in value.tool)) return false;
+    if (value.tool.result !== undefined && !isRecord(value.tool.result)) return false;
+  }
+  return value.details === undefined || typeof value.details === "string";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function assertNoSymlink(root: string, target: string): Promise<void> {

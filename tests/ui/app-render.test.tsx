@@ -384,11 +384,12 @@ describe("TerminalLayout", () => {
     expect(output).toContain("─".repeat(20));
   });
 
-  it("renders hydrated conversation history without restored tool output", () => {
+  it("renders restored CLI tools as compact summaries without raw JSON", () => {
     const state = transcriptReducer(createTranscriptState(), { type: "hydrate", messages: [
       { role: "user", content: "restored question" },
+      { role: "assistant", content: "", toolCalls: [{ id: "read-1", name: "Read", input: { path: "notes.md" } }] },
+      { role: "tool", toolCallId: "read-1", content: JSON.stringify("restored tool output") },
       { role: "assistant", content: "restored answer" },
-      { role: "tool", content: "hidden tool output" },
     ] });
     const output = renderToString(<TerminalLayout
       model="model"
@@ -402,7 +403,50 @@ describe("TerminalLayout", () => {
 
     expect(output).toContain("restored question");
     expect(output).toContain("restored answer");
-    expect(output).not.toContain("hidden tool output");
+    expect(output).toContain("✓ Read notes.md");
+    expect(output).not.toContain("Input:");
+    expect(output).not.toContain("Result:");
+    expect(output).not.toContain("restored tool output");
+  });
+
+  it("summarizes shell outcomes without printing stdout and stderr bodies", () => {
+    const turn: TranscriptTurn = {
+      id: 1,
+      prompt: "test",
+      assistantText: "",
+      statusLines: ["✓ Shell"],
+      blocks: [{
+        kind: "status", id: "tool:shell", state: "completed", text: "✓ Shell", hint: "npm test",
+        tool: {
+          name: "Shell",
+          input: { command: "npm", args: ["test"] },
+          result: { ok: true, output: { exitCode: 0, stdout: "very noisy output", stderr: "", truncated: false } },
+        },
+      }],
+    };
+    const output = renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={[turn]} input="" promptCursor={0}
+      columns={100} activeSession={false}
+    />, { columns: 100 });
+
+    expect(output).toContain("✓ Shell");
+    expect(output).toContain("exit 0");
+    expect(output).not.toContain("very noisy output");
+  });
+
+  it("renders a compacted legacy boundary separately from user prompts", () => {
+    const state = transcriptReducer(createTranscriptState(), { type: "hydrate",
+      compact: { summary: "Old work summary", compactedAt: "2026-07-20T10:00:00.000Z" },
+      messages: [{ role: "user", content: "continue" }],
+    });
+    const output = renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={state.completed} input="" promptCursor={0}
+      columns={100} activeSession={false}
+    />, { columns: 100 });
+
+    expect(output).toContain("Earlier execution history was compacted");
+    expect(output).toContain("Old work summary");
+    expect(output).toContain("continue");
   });
 
   it("does not emit application scroll-region or absolute-position escapes", () => {

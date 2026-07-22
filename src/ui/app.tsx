@@ -197,7 +197,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
       onApprovalChange: () => setRevision((value) => value + 1),
     }).then(async (created) => {
       if (disposed) { await created.dispose(); return; }
-      dispatch({ type: "hydrate", messages: created.restoredMessages });
+      dispatch({ type: "restore", state: created.restoredTranscript });
       runtimeRef.current = created;
       setSlashCandidates(buildSlashCandidates(BUILTIN_SLASH_CANDIDATES, created.services.pluginCommands(), []));
       setRuntime(created);
@@ -714,6 +714,14 @@ function TurnSeparator({ width }: { width: number }): React.JSX.Element {
 }
 
 function TurnView({ turn, interactive }: { turn: TranscriptTurn; interactive: boolean }): React.JSX.Element {
+  if (turn.kind === "compaction") {
+    return <Box flexDirection="column" marginBottom={1} borderStyle="round" borderColor="ansi:yellowBright" paddingX={1}>
+      <Text color="ansi:yellowBright" bold>{turn.prompt}</Text>
+      {turn.blocks.map((block, index) => block.kind === "status"
+        ? <StatusBlockView key={block.id} block={block} interactive={interactive} />
+        : <Box key={`${turn.id}-text-${index}`}><AssistantText text={block.text} /></Box>)}
+    </Box>;
+  }
   return <Box flexDirection="column" marginBottom={1}>
     {/* User prompt: left-aligned with white chevron, light gray background */}
     <Box flexDirection="row" backgroundColor="#3a3a3a" paddingX={1} paddingY={0}>
@@ -723,13 +731,7 @@ function TurnView({ turn, interactive }: { turn: TranscriptTurn; interactive: bo
     {/* Model output: indented to create clear visual hierarchy */}
     <Box flexDirection="column" paddingLeft={2} marginTop={1}>
       {turn.blocks.map((block, index) => block.kind === "status"
-        ? block.activity === "model"
-          ? <Box key={block.id}><TaskStatusLine block={block} interactive={interactive} /></Box>
-          : block.task === undefined
-          ? block.state === "completed" && block.presentation !== undefined
-            ? <FileDiffView key={block.id} presentation={block.presentation} />
-            : <Box key={block.id}><StatusLine block={block} interactive={interactive} /></Box>
-          : <Box key={block.id}><TaskStatusLine block={block} interactive={interactive} /></Box>
+        ? <StatusBlockView key={block.id} block={block} interactive={interactive} />
         : <Box key={`${turn.id}-text-${index}`} marginBottom={1}><AssistantText text={block.text} /></Box>)}
     </Box>
   </Box>;
@@ -897,6 +899,72 @@ interface PastedDraftMatch {
   displayStartPoint: number;
   displayEndPoint: number;
   label: string;
+}
+
+function StatusBlockView({
+  block,
+  interactive,
+}: {
+  block: Extract<TranscriptBlock, { kind: "status" }>;
+  interactive: boolean;
+}): React.JSX.Element {
+  const visibleBlock = cliToolTitle(block);
+  const outcome = cliToolOutcome(block);
+  const primary = visibleBlock.activity === "model" || visibleBlock.task !== undefined
+    ? <TaskStatusLine block={visibleBlock} interactive={interactive} />
+    : visibleBlock.state === "completed" && visibleBlock.presentation !== undefined
+      ? <FileDiffView presentation={visibleBlock.presentation} />
+      : <StatusLine block={visibleBlock} interactive={interactive} />;
+  return <Box flexDirection="column">
+    {primary}
+    {outcome === undefined ? null : <Box paddingLeft={2}><Text dimColor>└ {outcome}</Text></Box>}
+    {block.details === undefined ? null : <Box paddingLeft={2}><AssistantText text={block.details} /></Box>}
+  </Box>;
+}
+
+function cliToolTitle(
+  block: Extract<TranscriptBlock, { kind: "status" }>,
+): Extract<TranscriptBlock, { kind: "status" }> {
+  if (block.tool === undefined || block.presentation !== undefined) return block;
+  const input = record(block.tool.input);
+  const path = typeof input?.path === "string" ? basename(input.path) : undefined;
+  if (path === undefined || block.text.includes(path)) return block;
+  return { ...block, text: `${block.text} ${path}` };
+}
+
+function cliToolOutcome(block: Extract<TranscriptBlock, { kind: "status" }>): string | undefined {
+  const result = block.tool?.result;
+  if (result === undefined || block.presentation !== undefined) return undefined;
+  if (!result.ok) return truncateInline(result.error?.message ?? "Tool call failed");
+  const output = record(result.output);
+  if (output === undefined) return undefined;
+  if (typeof output.exitCode === "number" || output.exitCode === null) {
+    const exit = output.exitCode === null ? "no exit code" : `exit ${output.exitCode}`;
+    return output.truncated === true ? `${exit} · output truncated` : exit;
+  }
+  if (typeof output.replacements === "number") return `${output.replacements} replacement${output.replacements === 1 ? "" : "s"}`;
+  if (typeof output.bytes === "number") return `${formatBytes(output.bytes)} written`;
+  if (Array.isArray(output.matches)) return `${output.matches.length} match${output.matches.length === 1 ? "" : "es"}${output.truncated === true ? " · truncated" : ""}`;
+  if (Array.isArray(output.paths)) return `${output.paths.length} file${output.paths.length === 1 ? "" : "s"}${output.truncated === true ? " · truncated" : ""}`;
+  if (Array.isArray(output.files)) return `${output.files.length} file${output.files.length === 1 ? "" : "s"} changed`;
+  return undefined;
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function truncateInline(value: string, maxChars = 180): string {
+  const text = value.replace(/\s+/gu, " ").trim();
+  return text.length <= maxChars ? text : `${text.slice(0, maxChars - 1)}…`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_048_576) return `${(bytes / 1_024).toFixed(bytes < 10_240 ? 1 : 0)} KB`;
+  return `${(bytes / 1_048_576).toFixed(1)} MB`;
 }
 
 interface PastedDraftModel extends PromptEditState {

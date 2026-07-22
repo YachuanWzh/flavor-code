@@ -1,5 +1,7 @@
 # Resume Conversation History Design
 
+> Superseded for interactive resume behavior by `2026-07-22-resume-execution-timeline-design.md`. The newer design persists and restores tool/activity history instead of intentionally omitting it.
+
 ## Goal
 
 When the interactive CLI starts with `--resume`, the transcript viewport displays the retained user and assistant conversation instead of starting blank. The restored model context and session persistence behavior remain unchanged.

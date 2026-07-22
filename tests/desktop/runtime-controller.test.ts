@@ -6,7 +6,10 @@ import type { SessionOutput } from "../../src/ui/session.js";
 function fakeRuntime(output: (event: SessionOutput) => void): RuntimeLike {
   return {
     sessionId: "session-live",
-    restoredMessages: [{ role: "user", content: "earlier" }],
+    restoredTranscript: {
+      completed: [{ id: 1, prompt: "earlier", assistantText: "answer", statusLines: [], blocks: [{ kind: "text", text: "answer" }] }],
+      nextId: 2,
+    },
     diagnostics: [],
     session: {
       active: false,
@@ -52,7 +55,7 @@ describe("DesktopRuntimeController", () => {
     expect(opened.workspace).toBe("C:\\work\\demo");
     expect(opened.sessions).toHaveLength(1);
     expect(createRuntime).toHaveBeenCalledWith(expect.objectContaining({ workspace: "C:\\work\\demo", resumeSession: "session-old" }));
-    expect(started.restoredMessages).toEqual([{ role: "user", content: "earlier" }]);
+    expect(started.restoredTranscript.completed).toEqual([expect.objectContaining({ prompt: "earlier" })]);
     expect(events).toContainEqual({ type: "session-output", event: { type: "text", text: "answer:hello" } });
   });
 

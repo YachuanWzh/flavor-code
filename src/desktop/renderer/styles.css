@@ -146,6 +146,16 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .activity-body { min-width: 0; padding: 0 0 12px 4px; }
 .activity-title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; line-height: 1.45; }
 .activity-title code { max-width: 100%; overflow: hidden; color: #98a2ad; font: 10px/1.4 "Cascadia Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.tool-details, .timeline-details { margin-top: 8px; border: 1px solid #e3e9ee; border-radius: 8px; background: #fafcfd; }
+.tool-details > summary, .timeline-details > summary { padding: 6px 9px; cursor: pointer; color: #71808d; font-size: 10px; font-weight: 600; }
+.tool-details label { display: block; padding: 3px 9px 0; color: #87939e; font-size: 9px; font-weight: 700; text-transform: uppercase; }
+.tool-details pre { max-height: 220px; overflow: auto; margin: 3px 9px 8px; padding: 7px; border-radius: 6px; background: #f2f5f7; color: #465461; font: 10px/1.5 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.timeline-details .markdown-content { padding: 4px 9px 9px; color: #5f6c77; font-size: 11px; }
+.turn[data-kind="compaction"] { padding: 14px; border: 1px solid #ead9b8; border-radius: 13px; background: #fffaf0; }
+.turn[data-kind="compaction"] .user-message { justify-content: flex-start; margin-bottom: 12px; }
+.turn[data-kind="compaction"] .user-message span { max-width: 100%; border: 0; padding: 0; background: transparent; color: #8c6d36; font-size: 12px; font-weight: 650; }
+.turn[data-kind="compaction"] .assistant-avatar { display: none; }
+.turn[data-kind="compaction"] .assistant-message { grid-template-columns: minmax(0, 1fr); }
 .progress-track { width: min(320px, 100%); height: 3px; margin: 8px 0 2px; overflow: hidden; border-radius: 3px; background: #e7edf3; }
 .progress-track i { display: block; height: 100%; background: var(--sky); transition: width .25s ease; }
 .diff-preview { margin: 7px 0 2px; overflow: hidden; border: 1px solid #dde5ec; border-radius: 8px; background: #fbfcfd; }

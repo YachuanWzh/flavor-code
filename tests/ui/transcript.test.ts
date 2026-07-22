@@ -1,27 +1,57 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createTranscriptState, transcriptReducer } from "../../src/ui/transcript.js";
+import { createTranscriptState, restoreTranscriptState, transcriptReducer } from "../../src/ui/transcript.js";
 
 afterEach(() => vi.useRealTimers());
 
 describe("transcriptReducer", () => {
-  it("hydrates retained user and assistant turns without tool output", () => {
+  it("hydrates retained turns and reconstructs tool calls by call id", () => {
     const state = transcriptReducer(createTranscriptState(), { type: "hydrate", messages: [
       { role: "user", content: "first question" },
-      { role: "assistant", content: "checking" },
-      { role: "tool", content: "very long tool output" },
+      { role: "assistant", content: "checking", toolCalls: [{ id: "read-1", name: "Read", input: { path: "notes.md" } }] },
+      { role: "tool", toolCallId: "read-1", content: JSON.stringify({ path: "notes.md", content: "hello" }) },
       { role: "assistant", content: "first answer" },
       { role: "assistant", content: "" },
       { role: "user", content: "second question" },
     ] });
 
     expect(state.completed.map(({ id, prompt, assistantText, blocks }) => ({ id, prompt, assistantText, blocks }))).toEqual([
-      { id: 1, prompt: "first question", assistantText: "checkingfirst answer", blocks: [{ kind: "text", text: "checkingfirst answer" }] },
+      { id: 1, prompt: "first question", assistantText: "checkingfirst answer", blocks: [
+        { kind: "text", text: "checking" },
+        {
+          kind: "status", id: "tool:read-1", state: "completed", text: "✓ Read",
+          tool: {
+            name: "Read",
+            input: { path: "notes.md" },
+            result: { ok: true, output: { path: "notes.md", content: "hello" } },
+          },
+        },
+        { kind: "text", text: "first answer" },
+      ] },
       { id: 2, prompt: "second question", assistantText: "", blocks: [] },
     ]);
     expect(state.active).toBeUndefined();
     expect(state.nextId).toBe(3);
-    expect(JSON.stringify(state)).not.toContain("very long tool output");
+  });
+
+  it("prepends an explicit boundary and summary for legacy compacted history", () => {
+    const state = transcriptReducer(createTranscriptState(), {
+      type: "hydrate",
+      compact: { summary: "Inspected the old implementation and identified two callers.", compactedAt: "2026-07-20T10:00:00.000Z" },
+      messages: [{ role: "user", content: "continue" }],
+    });
+
+    expect(state.completed[0]).toMatchObject({
+      kind: "compaction",
+      prompt: "Earlier execution history was compacted",
+      blocks: [expect.objectContaining({
+        kind: "status",
+        state: "info",
+        tone: "warning",
+        details: "Inspected the old implementation and identified two callers.",
+      })],
+    });
+    expect(state.completed[1]).toMatchObject({ prompt: "continue" });
   });
 
   it("shows a submitted prompt immediately and accumulates streamed text", () => {
@@ -111,7 +141,32 @@ describe("transcriptReducer", () => {
 
     expect(state.active?.statusLines).toEqual(["✓ Read"]);
     expect(state.active?.blocks).toEqual([
-      { kind: "status", id: "tool:1", state: "completed", text: "✓ Read" },
+      {
+        kind: "status", id: "tool:1", state: "completed", text: "✓ Read",
+        tool: { name: "Read", input: {}, result: { ok: true, output: "ok" } },
+      },
+    ]);
+  });
+
+  it("normalizes an interrupted restored turn instead of leaving activity running", () => {
+    const state = restoreTranscriptState({
+      completed: [],
+      active: {
+        id: 1,
+        prompt: "interrupted",
+        assistantText: "",
+        statusLines: ["Flavoring", "Shell npm test"],
+        blocks: [
+          { kind: "status", id: "model:1", state: "running", text: "Flavoring", activity: "model" },
+          { kind: "status", id: "tool:1", state: "running", text: "Shell npm test", tool: { name: "Shell", input: { command: "npm test" } } },
+        ],
+      },
+      nextId: 2,
+    });
+
+    expect(state.active).toBeUndefined();
+    expect(state.completed[0]?.blocks).toEqual([
+      expect.objectContaining({ id: "tool:1", state: "cancelled", tool: expect.objectContaining({ name: "Shell" }) }),
     ]);
   });
 
@@ -211,7 +266,10 @@ describe("transcriptReducer", () => {
 
     expect(state.active?.blocks).toEqual([
       { kind: "text", text: "before" },
-      { kind: "status", id: "tool:1", state: "completed", text: "✓ Edit notes.md", presentation },
+      {
+        kind: "status", id: "tool:1", state: "completed", text: "✓ Edit notes.md", presentation,
+        tool: { name: "Edit", input: {}, result: { ok: true, output: { path: "notes.md" }, presentation } },
+      },
       { kind: "text", text: "after" },
     ]);
   });
@@ -224,7 +282,10 @@ describe("transcriptReducer", () => {
       result: { ok: false, error: { code: "cancelled", message: "stop" } },
     } });
     expect(state.active?.blocks).toEqual([
-      { kind: "status", id: "tool:1", state: "cancelled", text: "× Shell" },
+      {
+        kind: "status", id: "tool:1", state: "cancelled", text: "× Shell",
+        tool: { name: "Shell", input: {}, result: { ok: false, error: { code: "cancelled", message: "stop" } } },
+      },
     ]);
   });
 
@@ -489,7 +550,7 @@ describe("transcriptReducer", () => {
 
     expect(state.active?.blocks).toEqual([
       { kind: "text", text: "before" },
-      { kind: "status", id: "tool:1", state: "running", text: "Read" },
+      { kind: "status", id: "tool:1", state: "running", text: "Read", tool: { name: "Read", input: {} } },
       { kind: "text", text: "after" },
     ]);
   });
@@ -509,7 +570,10 @@ describe("transcriptReducer", () => {
     } });
 
     expect(state.active?.blocks).toEqual([
-      { kind: "status", id: "tool:1", state: "running", text: "Glob", hint: "pattern: **/*.ts" },
+      {
+        kind: "status", id: "tool:1", state: "running", text: "Glob", hint: "pattern: **/*.ts",
+        tool: { name: "Glob", input: {} },
+      },
     ]);
     expect(state.active?.statusLines).toEqual(["Glob"]);
   });
@@ -524,7 +588,10 @@ describe("transcriptReducer", () => {
     } });
 
     expect(state.active?.blocks).toEqual([
-      { kind: "status", id: "tool:1", state: "completed", text: "✓ Glob src", hint: "pattern: **/*.ts" },
+      {
+        kind: "status", id: "tool:1", state: "completed", text: "✓ Glob src", hint: "pattern: **/*.ts",
+        tool: { name: "Glob", input: {}, result: { ok: true, output: {} } },
+      },
     ]);
     expect(state.active?.statusLines).toEqual(["✓ Glob src"]);
   });
@@ -536,7 +603,10 @@ describe("transcriptReducer", () => {
     } });
 
     expect(state.active?.blocks).toEqual([
-      { kind: "status", id: "tool:1", state: "completed", text: "✓ Read" },
+      {
+        kind: "status", id: "tool:1", state: "completed", text: "✓ Read",
+        tool: { name: "Read", input: null, result: { ok: true, output: "x" } },
+      },
     ]);
     expect("hint" in (state.active!.blocks[0] as object)).toBe(false);
   });

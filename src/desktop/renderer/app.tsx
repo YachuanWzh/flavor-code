@@ -182,7 +182,7 @@ export function DesktopApp(): React.JSX.Element {
     try {
       const result = await window.flavorDesktop.startSession(session?.sessionId);
       setSnapshot(result.snapshot);
-      setTranscript(transcriptReducer(createTranscriptState(), { type: "hydrate", messages: result.restoredMessages }));
+      setTranscript(transcriptReducer(createTranscriptState(), { type: "restore", state: result.restoredTranscript }));
       setRailOpen(false);
       setView("conversation");
       setTimeout(() => inputRef.current?.focus(), 0);
@@ -199,7 +199,7 @@ export function DesktopApp(): React.JSX.Element {
         const started = await window.flavorDesktop.startSession();
         current = started.snapshot;
         setSnapshot(current);
-        setTranscript(transcriptReducer(createTranscriptState(), { type: "hydrate", messages: started.restoredMessages }));
+        setTranscript(transcriptReducer(createTranscriptState(), { type: "restore", state: started.restoredTranscript }));
       }
       setTranscript((state) => transcriptReducer(state, { type: "submit", prompt }));
       if (override === undefined) setInput("");
@@ -299,8 +299,8 @@ export function DesktopApp(): React.JSX.Element {
           : transcript.completed.length === 0 && transcript.active === undefined
             ? <WelcomeState project={workspaceName(snapshot.workspace)} onStart={(prompt) => void send(prompt)} />
             : <div className="conversation-column">
-              {transcript.completed.map((turn) => <TurnView key={turn.id} turn={turn} />)}
-              {transcript.active !== undefined && <TurnView turn={transcript.active} active />}
+              {transcript.completed.map((turn) => <DesktopTurnView key={turn.id} turn={turn} />)}
+              {transcript.active !== undefined && <DesktopTurnView turn={transcript.active} active />}
             </div>}
       </div>
 
@@ -354,13 +354,13 @@ function handleEvent(event: DesktopEvent, setSnapshot: React.Dispatch<React.SetS
   if (event.type === "snapshot") setSnapshot(event.snapshot);
   else if (event.type === "session-started") {
     setSnapshot(event.payload.snapshot);
-    setTranscript(transcriptReducer(createTranscriptState(), { type: "hydrate", messages: event.payload.restoredMessages }));
+    setTranscript(transcriptReducer(createTranscriptState(), { type: "restore", state: event.payload.restoredTranscript }));
   } else if (event.type === "session-output") setTranscript((state) => applyDesktopOutput(state, event.event));
   else if (event.type === "runtime-error") setError(event.message);
 }
 
-function TurnView({ turn, active = false }: { turn: TranscriptTurn; active?: boolean }): React.JSX.Element {
-  return <article className="turn" data-active={active}>
+export function DesktopTurnView({ turn, active = false }: { turn: TranscriptTurn; active?: boolean }): React.JSX.Element {
+  return <article className="turn" data-active={active} data-kind={turn.kind ?? "conversation"}>
     <div className="user-message"><span>{turn.prompt}</span></div>
     <div className="assistant-message">
       <div className="assistant-avatar"><FlavorMark /></div>
@@ -380,8 +380,20 @@ function BlockView({ block }: { block: TranscriptBlock }): React.JSX.Element {
     <div className="activity-body"><div className="activity-title"><span>{block.text.replace(/^[·✓×]\s*/, "")}</span>{block.hint && <code>{block.hint}</code>}</div>
       {block.progress !== undefined && <div className="progress-track"><i style={{ width: `${block.progress}%` }} /></div>}
       {block.presentation && <DiffPreview presentation={block.presentation} />}
+      {block.tool && <details className="tool-details"><summary>调用详情</summary>
+        <label>Input</label><pre>{boundedJson(block.tool.input)}</pre>
+        {block.tool.result === undefined ? null : <><label>Result</label><pre>{boundedJson(block.tool.result)}</pre></>}
+      </details>}
+      {block.details && <details className="timeline-details"><summary>压缩摘要</summary><MarkdownContent text={block.details} /></details>}
     </div>
   </div>;
+}
+
+function boundedJson(value: unknown, maxChars = 10_000): string {
+  let text: string;
+  try { text = JSON.stringify(value, null, 2) ?? "undefined"; }
+  catch { text = String(value); }
+  return text.length <= maxChars ? text : `${text.slice(0, maxChars)}…`;
 }
 
 function DiffPreview({ presentation }: { presentation: FileChangePresentation }): React.JSX.Element {

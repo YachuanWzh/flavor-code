@@ -2,10 +2,11 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import type { PermissionMode } from "../config/schema.js";
-import { createProductionRuntime, type ProductionRuntimeOptions, type RestoredConversationMessage } from "../production.js";
+import { createProductionRuntime, type ProductionRuntimeOptions } from "../production.js";
 import { SessionStore } from "../session/store.js";
 import type { Question } from "../tools/ask-user-question.js";
 import type { SessionOutput } from "../ui/session.js";
+import type { TranscriptState } from "../ui/transcript.js";
 import { message } from "../utils/error.js";
 import type { ApprovalDecision } from "../tools/runtime.js";
 import { createGlobTool, type SearchResult } from "../tools/search.js";
@@ -14,7 +15,7 @@ import type { DesktopEvent, DesktopSessionSummary, DesktopSnapshot, SessionStart
 
 export interface RuntimeLike {
   readonly sessionId: string;
-  readonly restoredMessages: readonly RestoredConversationMessage[];
+  readonly restoredTranscript: TranscriptState;
   readonly diagnostics: readonly string[];
   readonly session: {
     readonly active: boolean;
@@ -130,7 +131,7 @@ export class DesktopRuntimeController {
     });
     this.#runtime = runtime;
     await runtime.session.start();
-    const payload = { sessionId: runtime.sessionId, restoredMessages: runtime.restoredMessages, snapshot: this.snapshot() };
+    const payload = { sessionId: runtime.sessionId, restoredTranscript: runtime.restoredTranscript, snapshot: this.snapshot() };
     this.#emit({ type: "session-started", payload });
     this.#publishSnapshot();
     return payload;
