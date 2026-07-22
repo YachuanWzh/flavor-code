@@ -10,12 +10,13 @@ import { loadConfig } from "./config/load.js";
 import { message } from "./utils/error.js";
 import { redactErrorText } from "./utils/redact.js";
 import { staticTaskLines } from "./ui/task-progress-model.js";
+import { SkillManager } from "./skills/manager.js";
 
 export function createProgram(): Command {
   const program = new Command()
     .name("flavor")
     .description("Interactive coding agent")
-    .version("0.5.0")
+    .version("0.6.0")
     .option("-p, --print <prompt>", "run one prompt without the interactive UI")
     .option("--resume [session-id]", "resume a saved session (latest when id is omitted)");
 
@@ -34,6 +35,32 @@ export function createProgram(): Command {
         process.exitCode = 1;
       }
     });
+
+  const skills = program.command("skills").description("List and enable or disable project skills");
+  skills.command("list", { isDefault: true }).description("List skills visible in the current project").action(async () => {
+    try {
+      const entries = await new SkillManager({ workspace: process.cwd(), home: homedir() }).list();
+      if (entries.length === 0) process.stdout.write("No skills found.\n");
+      else for (const skill of entries) {
+        process.stdout.write(`${skill.enabled ? "on " : "off"}  ${skill.name}  [${skill.source}]  ${skill.description}\n`);
+      }
+    } catch (error) {
+      process.stderr.write(`skills: ${safeError(error)}\n`);
+      process.exitCode = 1;
+    }
+  });
+  for (const enabled of [true, false]) {
+    const action = enabled ? "enable" : "disable";
+    skills.command(`${action} <name>`).description(`${enabled ? "Enable" : "Disable"} a skill for this project`).action(async (name: string) => {
+      try {
+        await new SkillManager({ workspace: process.cwd(), home: homedir() }).setEnabled(name, enabled);
+        process.stdout.write(`${enabled ? "Enabled" : "Disabled"} ${name}.\n`);
+      } catch (error) {
+        process.stderr.write(`skills: ${safeError(error)}\n`);
+        process.exitCode = 1;
+      }
+    });
+  }
 
   program.action(async (options: { print?: string; resume?: string | boolean }) => {
     const resumeSession = options.resume === true ? true : typeof options.resume === "string" ? options.resume : undefined;

@@ -9,6 +9,7 @@ import type { SessionOutput } from "../ui/session.js";
 import { message } from "../utils/error.js";
 import type { ApprovalDecision } from "../tools/runtime.js";
 import { createGlobTool, type SearchResult } from "../tools/search.js";
+import { SkillManager, type ManagedSkill, type ManagedSkillSummary, type SkillDraft } from "../skills/manager.js";
 import type { DesktopEvent, DesktopSessionSummary, DesktopSnapshot, SessionStartedPayload } from "./contracts.js";
 
 export interface RuntimeLike {
@@ -26,6 +27,7 @@ export interface RuntimeLike {
     mainModel(): string;
     subagentModel(): string;
     permissionMode(): PermissionMode;
+    reloadSkills?(): Promise<void>;
     questions: { readonly pending: readonly Question[] | undefined; answer(answers: Record<number, string>): void };
   };
   readonly approvals: {
@@ -55,6 +57,7 @@ export class DesktopRuntimeController {
   #workspace: string | undefined;
   #sessions: readonly DesktopSessionSummary[] = [];
   #runtime: RuntimeLike | undefined;
+  #skillManager: SkillManager | undefined;
   #busy = false;
 
   constructor(options: DesktopRuntimeControllerOptions) {
@@ -101,6 +104,7 @@ export class DesktopRuntimeController {
     const workspace = resolve(path);
     if (workspace !== this.#workspace) await this.#disposeRuntime();
     this.#workspace = workspace;
+    this.#skillManager = new SkillManager({ workspace, home: this.#home });
     this.#sessions = await this.#listSessions(workspace);
     return this.#publishSnapshot();
   }
@@ -175,6 +179,36 @@ export class DesktopRuntimeController {
     }
   }
 
+  async listSkills(): Promise<readonly ManagedSkillSummary[]> {
+    return this.#requireSkillManager().list();
+  }
+
+  async getSkill(name: string): Promise<ManagedSkill> {
+    return this.#requireSkillManager().get(name);
+  }
+
+  async createSkill(draft: SkillDraft): Promise<ManagedSkill> {
+    const result = await this.#requireSkillManager().create(draft);
+    await this.#runtime?.services.reloadSkills?.();
+    return result;
+  }
+
+  async updateSkill(name: string, draft: SkillDraft): Promise<ManagedSkill> {
+    const result = await this.#requireSkillManager().update(name, draft);
+    await this.#runtime?.services.reloadSkills?.();
+    return result;
+  }
+
+  async deleteSkill(name: string): Promise<void> {
+    await this.#requireSkillManager().delete(name);
+    await this.#runtime?.services.reloadSkills?.();
+  }
+
+  async setSkillEnabled(name: string, enabled: boolean): Promise<void> {
+    await this.#requireSkillManager().setEnabled(name, enabled);
+    await this.#runtime?.services.reloadSkills?.();
+  }
+
   async interrupt(): Promise<void> {
     this.#runtime?.session.interrupt();
   }
@@ -204,5 +238,10 @@ export class DesktopRuntimeController {
     if (runtime === undefined) return;
     await runtime.session.close();
     await runtime.dispose();
+  }
+
+  #requireSkillManager(): SkillManager {
+    if (this.#skillManager === undefined) throw new Error("Open a project before managing skills");
+    return this.#skillManager;
   }
 }

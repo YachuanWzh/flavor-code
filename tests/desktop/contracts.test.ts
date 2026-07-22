@@ -7,6 +7,9 @@ import {
   OpenWorkspaceInputSchema,
   ResolveApprovalInputSchema,
   StartSessionInputSchema,
+  SkillDraftInputSchema,
+  SkillNameInputSchema,
+  SetSkillEnabledInputSchema,
   SubmitInputSchema,
 } from "../../src/desktop/contracts.js";
 
@@ -20,6 +23,10 @@ describe("desktop IPC contracts", () => {
     expect(AnswerQuestionsInputSchema.parse({ answers: { 0: "Electron" } })).toEqual({ answers: { 0: "Electron" } });
     expect(DeleteSessionInputSchema.parse({ sessionId: "session-1" })).toEqual({ sessionId: "session-1" });
     expect(AppMenuInputSchema.parse({ menu: "file", x: 12, y: 36 })).toEqual({ menu: "file", x: 12, y: 36 });
+    expect(SkillNameInputSchema.parse({ name: "code-review" })).toEqual({ name: "code-review" });
+    expect(SkillDraftInputSchema.parse({ name: "code-review", description: "Review code", body: "Instructions" }))
+      .toEqual({ name: "code-review", description: "Review code", body: "Instructions", disableModelInvocation: false });
+    expect(SetSkillEnabledInputSchema.parse({ name: "code-review", enabled: false })).toEqual({ name: "code-review", enabled: false });
   });
 
   it("rejects blank prompts, unknown approval decisions and oversized question indexes", () => {
@@ -28,5 +35,6 @@ describe("desktop IPC contracts", () => {
     expect(() => AnswerQuestionsInputSchema.parse({ answers: { 10: "x" } })).toThrow();
     expect(() => DeleteSessionInputSchema.parse({ sessionId: "../outside" })).toThrow();
     expect(() => AppMenuInputSchema.parse({ menu: "window", x: -1, y: 36 })).toThrow();
+    expect(() => SkillNameInputSchema.parse({ name: "../escape" })).toThrow();
   });
 });

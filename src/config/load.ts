@@ -240,6 +240,41 @@ export async function setProjectMcpServerDisabled(
   return path;
 }
 
+export async function setProjectSkillDisabled(
+  cwd: string,
+  skillName: string,
+  disabled: boolean,
+  inheritedDisabled: readonly string[] = [],
+): Promise<string> {
+  const directory = join(cwd, ".flavor");
+  const path = join(directory, "flavor.json");
+  await updateProtectedFile<ConfigObject>({
+    path,
+    decode: (raw) => parseConfigObject(path, raw),
+    encode: (value) => `${JSON.stringify(value, null, 2)}\n`,
+    update: (current) => {
+      const projectConfig = { ...(current ?? {}) };
+      const currentSkills = projectConfig["skills"];
+      if (currentSkills !== undefined && !isPlainObject(currentSkills)) {
+        throw new Error(`Configuration field skills in ${path} must be an object`);
+      }
+      const skills: ConfigObject = { ...(currentSkills ?? {}) };
+      const currentDisabled = skills["disabled"];
+      if (currentDisabled !== undefined && (!Array.isArray(currentDisabled)
+        || currentDisabled.some((name) => typeof name !== "string"))) {
+        throw new Error(`Configuration field skills.disabled in ${path} must be a string array`);
+      }
+      const names = new Set((currentDisabled ?? inheritedDisabled) as string[]);
+      if (disabled) names.add(skillName);
+      else names.delete(skillName);
+      skills["disabled"] = [...names].sort();
+      projectConfig["skills"] = skills;
+      return projectConfig;
+    },
+  });
+  return path;
+}
+
 export function redactConfig(config: unknown): unknown {
   if (Array.isArray(config)) {
     return config.map((item) => redactConfig(item));

@@ -10,7 +10,7 @@ describe("flavor CLI", () => {
   it("uses the public command name and package version", () => {
     const program = createProgram();
     expect(program.name()).toBe("flavor");
-    expect(program.version()).toMatch(/^0\.5\.0$/);
+    expect(program.version()).toMatch(/^0\.6\.0$/);
     expect(program.options.find((option) => option.long === "--resume")?.optional).toBe(true);
   });
 
@@ -19,6 +19,6 @@ describe("flavor CLI", () => {
 
     const { stdout } = await execFileAsync(process.execPath, [path.resolve("dist/cli.js"), "--version"]);
 
-    expect(stdout.trim()).toBe("0.5.0");
+    expect(stdout.trim()).toBe("0.6.0");
   });
 });

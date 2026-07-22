@@ -13,6 +13,10 @@ import {
   OpenWorkspaceInputSchema,
   ResolveApprovalInputSchema,
   StartSessionInputSchema,
+  SkillDraftInputSchema,
+  SkillNameInputSchema,
+  UpdateSkillInputSchema,
+  SetSkillEnabledInputSchema,
   SubmitInputSchema,
   type DesktopEvent,
 } from "./contracts.js";
@@ -126,6 +130,24 @@ function installIpcHandlers(): void {
   });
   ipcMain.handle(DESKTOP_CHANNELS.listFiles, async () => {
     return controller.listWorkspaceFiles();
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.listSkills, async () => controller.listSkills());
+  ipcMain.handle(DESKTOP_CHANNELS.getSkill, async (_event, value) => {
+    return controller.getSkill(SkillNameInputSchema.parse(value).name);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.createSkill, async (_event, value) => {
+    return controller.createSkill(SkillDraftInputSchema.parse(value));
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.updateSkill, async (_event, value) => {
+    const input = UpdateSkillInputSchema.parse(value);
+    return controller.updateSkill(input.originalName, input.draft);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.deleteSkill, async (_event, value) => {
+    await controller.deleteSkill(SkillNameInputSchema.parse(value).name);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.setSkillEnabled, async (_event, value) => {
+    const input = SetSkillEnabledInputSchema.parse(value);
+    await controller.setSkillEnabled(input.name, input.enabled);
   });
 }
 

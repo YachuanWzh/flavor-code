@@ -408,6 +408,7 @@ MVP 已支持：
 - 消息流式输出、Markdown、思考过程、工具调用、Diff 和子 Agent 状态展示
 - 权限确认、Agent 提问、任务取消，以及模型和权限模式切换
 - 全部 `/` 命令，以及 Skills、Plugins、MCP、`/loop` 和 `/goal` 等现有运行时能力
+- 可视化 Skill 工作台：项目 Skill 支持新建、查看、编辑、删除，所有来源均可按项目开启或关闭
 - 接近 Codex 的三栏工作台与单层自绘顶栏，并适配窄窗口显示
 
 从源码运行或打包：
@@ -553,6 +554,24 @@ description: Review code for common issues
 ```
 
 当你提问时，Flavor 自动匹配相关 Skill 并加载指导。也可以直接输入 `/code-review` 显式调用。Skill 正文中的资源（`assets/`、`references/`、`scripts/`）只有被显式引用才能被访问。
+
+桌面端点击侧栏“技能”可打开管理工作台。项目 Skill（`.flavor/skills/`）支持完整增删改查；全局和插件提供的 Skill 以只读方式展示，但仍可为当前项目开启或关闭。关闭后，自动匹配、显式调用和 Skill 资源读取都会拒绝该 Skill。状态保存在当前项目的 `.flavor/flavor.json`：
+
+```json
+{
+  "skills": {
+    "disabled": ["code-review"]
+  }
+}
+```
+
+CLI 与桌面端共享这套配置语义，并提供轻量的启停命令：
+
+```bash
+flavor skills list
+flavor skills disable code-review
+flavor skills enable code-review
+```
 
 ---
 

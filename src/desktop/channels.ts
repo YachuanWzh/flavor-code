@@ -10,5 +10,11 @@ export const DESKTOP_CHANNELS = {
   resolveApproval: "desktop:resolve-approval",
   answerQuestions: "desktop:answer-questions",
   listFiles: "desktop:list-files",
+  listSkills: "desktop:list-skills",
+  getSkill: "desktop:get-skill",
+  createSkill: "desktop:create-skill",
+  updateSkill: "desktop:update-skill",
+  deleteSkill: "desktop:delete-skill",
+  setSkillEnabled: "desktop:set-skill-enabled",
   event: "desktop:event",
 } as const;

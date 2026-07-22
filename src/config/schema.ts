@@ -61,9 +61,17 @@ const McpServerNameSchema = z.string()
   .max(32)
   .regex(/^[A-Za-z0-9_-]+$/, "MCP server names may contain only letters, digits, underscores, and hyphens");
 
+export const SkillNameSchema = z.string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "Skill names must use lowercase letters, digits, and single hyphens");
+
 export const FlavorConfigSchema = z.object({
   providers: z.record(z.string(), ProviderConfigSchema).default({}),
   mcpServers: z.record(McpServerNameSchema, McpServerConfigSchema).default({}),
+  skills: z.object({
+    disabled: z.array(SkillNameSchema).max(1_000).default([]),
+  }).prefault({}),
   agents: z
     .object({
       main: z.object({ model: z.string() }).optional(),

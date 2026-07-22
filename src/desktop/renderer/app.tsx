@@ -24,6 +24,7 @@ import {
 } from "../../ui/mention-completion.js";
 import { COMMAND_DESCRIPTIONS, MVP_COMMANDS } from "../../ui/commands.js";
 import type { FileChangePresentation, FileDiffLine } from "../../tools/types.js";
+import { SkillManagerView } from "./skill-manager.js";
 
 const EMPTY_SNAPSHOT: DesktopSnapshot = { sessions: [], diagnostics: [] };
 const PERMISSIONS: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions", "auto", "bubble"];
@@ -49,6 +50,7 @@ export function DesktopApp(): React.JSX.Element {
   const [dismissedMentionInput, setDismissedMentionInput] = useState<string>();
   const [mentionSpan, setMentionSpan] = useState<{ start: number; end: number }>();
   const [cursorPos, setCursorPos] = useState(0);
+  const [view, setView] = useState<"conversation" | "skills">("conversation");
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const userScrolledUp = useRef(false);
@@ -170,7 +172,7 @@ export function DesktopApp(): React.JSX.Element {
     try {
       const next = await window.flavorDesktop.chooseWorkspace();
       if (next !== undefined) {
-        setSnapshot(next); setTranscript(createTranscriptState()); setRailOpen(false);
+        setSnapshot(next); setTranscript(createTranscriptState()); setRailOpen(false); setView("conversation");
       }
     } catch (cause) { setError(errorMessage(cause)); }
   };
@@ -182,6 +184,7 @@ export function DesktopApp(): React.JSX.Element {
       setSnapshot(result.snapshot);
       setTranscript(transcriptReducer(createTranscriptState(), { type: "hydrate", messages: result.restoredMessages }));
       setRailOpen(false);
+      setView("conversation");
       setTimeout(() => inputRef.current?.focus(), 0);
     } catch (cause) { setError(errorMessage(cause)); }
   };
@@ -249,7 +252,7 @@ export function DesktopApp(): React.JSX.Element {
           <span className="action-icon">＋</span><span>新建任务</span><kbd>Ctrl N</kbd>
         </button>
         <button className="rail-action" onClick={() => void chooseWorkspace()}><span className="action-icon">⌂</span><span>打开项目</span></button>
-        <button className="rail-action" onClick={() => void send("/skills")} disabled={snapshot.activeSession === undefined || busy}><span className="action-icon">◇</span><span>技能</span></button>
+        <button className="rail-action" data-active={view === "skills"} onClick={() => { setView("skills"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">◇</span><span>技能</span></button>
         <button className="rail-action" onClick={() => void send("/mcp status")} disabled={snapshot.activeSession === undefined || busy}><span className="action-icon">◎</span><span>MCP 服务</span></button>
       </nav>
       <div className="sessions-scroll">
@@ -282,6 +285,7 @@ export function DesktopApp(): React.JSX.Element {
     </aside>
 
     <main className="workspace-panel">
+      {view === "skills" && snapshot.workspace !== undefined ? <SkillManagerView onClose={() => setView("conversation")} onError={setError} /> : <>
       <header className="workspace-header">
         <button className="mobile-rail-toggle" onClick={() => setRailOpen(true)} aria-label="打开项目栏">☰</button>
         <div className="workspace-breadcrumb">
@@ -314,6 +318,7 @@ export function DesktopApp(): React.JSX.Element {
         mentionSpan={mentionSpan} setMentionSpan={setMentionSpan}
         completedTokenLen={completedTokenLen}
         cursorPos={cursorPos} setCursorPos={setCursorPos} />
+      </>}
     </main>
     </div>
 
@@ -432,7 +437,7 @@ interface ComposerProps {
   onMentionSelect(path: string): void;
   onMentionDismiss(): void;
   onMentionMove(delta: -1 | 1): void;
-  mentionSpan?: { start: number; end: number };
+  mentionSpan?: { start: number; end: number } | undefined;
   setMentionSpan(value: { start: number; end: number } | undefined): void;
   completedTokenLen: number;
   cursorPos: number;

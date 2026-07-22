@@ -29,6 +29,7 @@ export interface SessionServices {
   initialize(): Promise<{ path: string; created: boolean }>;
   config(): unknown;
   skills(): Promise<readonly SkillMetadata[]>;
+  reloadSkills?(): Promise<void>;
   plugins(): readonly unknown[];
   hooksStatus(): readonly unknown[];
   tasks(): unknown;

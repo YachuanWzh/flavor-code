@@ -52,6 +52,7 @@ export interface SkillRegistryOptions {
   maxBodyBytes?: number;
   maxResourceBytes?: number;
   openFile?: SkillFileOpener;
+  disabledNames?: readonly string[];
 }
 
 interface SkillRecord {
@@ -100,9 +101,10 @@ export class SkillRegistry {
     "globalRoots" | "projectRoots" | "maxMetadataBytes" | "maxBodyBytes" | "maxResourceBytes"
   >> & Pick<SkillRegistryOptions, "selector" | "authorizeResource"> & { openFile: SkillFileOpener };
   readonly #records = new Map<string, SkillRecord>();
-  readonly #capabilities = new WeakMap<ResolvedSkillResource, ResolvedResourceRecord>();
+  #capabilities = new WeakMap<ResolvedSkillResource, ResolvedResourceRecord>();
   #diagnostics: SkillDiagnostic[] = [];
   #discovered = false;
+  #disabledNames: Set<string>;
 
   constructor(options: SkillRegistryOptions = {}) {
     this.#options = {
@@ -115,10 +117,23 @@ export class SkillRegistry {
       ...(options.selector === undefined ? {} : { selector: options.selector }),
       ...(options.authorizeResource === undefined ? {} : { authorizeResource: options.authorizeResource }),
     };
+    this.#disabledNames = new Set(options.disabledNames ?? []);
   }
 
   get diagnostics(): readonly SkillDiagnostic[] {
     return [...this.#diagnostics];
+  }
+
+  setDisabledNames(names: readonly string[]): void {
+    this.#disabledNames = new Set(names);
+    this.#capabilities = new WeakMap<ResolvedSkillResource, ResolvedResourceRecord>();
+  }
+
+  async refresh(): Promise<readonly SkillMetadata[]> {
+    this.#records.clear();
+    this.#diagnostics = [];
+    this.#discovered = false;
+    return this.discover();
   }
 
   async discover(): Promise<readonly SkillMetadata[]> {
@@ -192,6 +207,7 @@ export class SkillRegistry {
   async readResource(capability: ResolvedSkillResource): Promise<Buffer> {
     const resolved = this.#capabilities.get(capability);
     if (resolved === undefined) throw new Error("Unknown or forged skill resource capability");
+    if (this.#disabledNames.has(resolved.record.metadata.name)) throw new Error(`Skill is disabled: ${resolved.record.metadata.name}`);
     const file = await openVerifiedFile(
       resolved.path, resolved.record.metadata.root, "Resource", this.#options.openFile, resolved.snapshot,
     );
@@ -300,6 +316,7 @@ export class SkillRegistry {
 
   async #recordFor(skill: SkillMetadata): Promise<SkillRecord> {
     await this.discover();
+    if (this.#disabledNames.has(skill.name)) throw new Error(`Skill is disabled: ${skill.name}`);
     const record = this.#records.get(skill.name);
     if (record === undefined || record.metadata.root !== skill.root || record.metadata.source !== skill.source) {
       throw new Error(`Unknown or stale skill metadata: ${skill.name}`);
@@ -309,6 +326,7 @@ export class SkillRegistry {
 
   #sortedMetadata(): SkillMetadata[] {
     return [...this.#records.values()].map(({ metadata }) => metadata)
+      .filter(({ name }) => !this.#disabledNames.has(name))
       .sort((left, right) => compareCodePoints(left.name, right.name));
   }
 

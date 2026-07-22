@@ -271,6 +271,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     globalRoots: [join(home, ".flavor-code", "skills")],
     projectRoots: [join(workspace, ".flavor", "skills"), ...pluginSkillRoots],
     authorizeResource: async () => true,
+    disabledNames: config.skills.disabled,
   });
   await skills.discover();
   tools.push(createSkillResourceTool(skills));
@@ -719,6 +720,11 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         ...skills.diagnostics.map((item) => `${item.path}: ${item.message}`)].map((item) => redactSecrets(item, secrets)),
     }),
     skills: () => skills.discover(),
+    reloadSkills: async () => {
+      const current = await loadConfig({ cwd: workspace, home, environment });
+      skills.setDisabledNames(current.config.skills.disabled);
+      await skills.refresh();
+    },
     plugins: () => pluginHost.loadedPlugins,
     hooksStatus: () => HOOK_EVENT_NAMES.map((name) => ({ name, pluginHandlers: pluginHooks.filter((item) => item === name).length })),
     tasks: () => ({ plan: taskPlan, graph: taskGraph, states: taskStates, results: taskResults }),

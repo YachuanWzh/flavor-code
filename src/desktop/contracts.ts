@@ -5,6 +5,7 @@ import type { PermissionMode } from "../config/schema.js";
 import type { RestoredConversationMessage } from "../production.js";
 import type { Question } from "../tools/ask-user-question.js";
 import type { SessionOutput } from "../ui/session.js";
+import type { ManagedSkill, ManagedSkillSummary, SkillDraft } from "../skills/manager.js";
 export { DESKTOP_CHANNELS } from "./channels.js";
 
 export const OpenWorkspaceInputSchema = z.object({ path: z.string().trim().min(1).max(32_768) }).strict();
@@ -24,6 +25,19 @@ export const ResolveApprovalInputSchema = z.object({ decision: z.enum(["allow", 
 export const AnswerQuestionsInputSchema = z.object({
   answers: z.record(z.coerce.number().int().min(0).max(3), z.string().min(1).max(10_000)),
 }).strict();
+const SkillNameInput = z.string().trim().min(1).max(64).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+export const SkillNameInputSchema = z.object({ name: SkillNameInput }).strict();
+export const SkillDraftInputSchema = z.object({
+  name: SkillNameInput,
+  description: z.string().trim().min(1).max(4_000),
+  body: z.string().trim().min(1).max(300_000),
+  disableModelInvocation: z.boolean().default(false),
+}).strict();
+export const UpdateSkillInputSchema = z.object({
+  originalName: SkillNameInput,
+  draft: SkillDraftInputSchema,
+}).strict();
+export const SetSkillEnabledInputSchema = z.object({ name: SkillNameInput, enabled: z.boolean() }).strict();
 
 export interface DesktopSessionSummary {
   sessionId: string;
@@ -82,6 +96,12 @@ export interface FlavorDesktopApi {
   resolveApproval(decision: "allow" | "deny" | "always"): Promise<void>;
   answerQuestions(answers: Record<number, string>): Promise<void>;
   listFiles(): Promise<readonly string[]>;
+  listSkills(): Promise<readonly ManagedSkillSummary[]>;
+  getSkill(name: string): Promise<ManagedSkill>;
+  createSkill(draft: SkillDraft): Promise<ManagedSkill>;
+  updateSkill(originalName: string, draft: SkillDraft): Promise<ManagedSkill>;
+  deleteSkill(name: string): Promise<void>;
+  setSkillEnabled(name: string, enabled: boolean): Promise<void>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
 }
 

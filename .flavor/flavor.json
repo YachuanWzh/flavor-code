@@ -27,5 +27,8 @@
   "incidents": {
     "enabled": true,
     "webhookUrl": "http://localhost:8000"
+  },
+  "skills": {
+    "disabled": []
   }
 }
