@@ -6,6 +6,8 @@ import type { TranscriptState } from "../ui/transcript.js";
 import type { Question } from "../tools/ask-user-question.js";
 import type { SessionOutput } from "../ui/session.js";
 import type { ManagedSkill, ManagedSkillSummary, SkillDraft } from "../skills/manager.js";
+import { MEMORY_TYPES, type MemoryCandidate, type MemoryEntry } from "../memory/types.js";
+import type { MemorySnapshot } from "../memory/manager.js";
 export { DESKTOP_CHANNELS } from "./channels.js";
 
 export const OpenWorkspaceInputSchema = z.object({ path: z.string().trim().min(1).max(32_768) }).strict();
@@ -38,6 +40,17 @@ export const UpdateSkillInputSchema = z.object({
   draft: SkillDraftInputSchema,
 }).strict();
 export const SetSkillEnabledInputSchema = z.object({ name: SkillNameInput, enabled: z.boolean() }).strict();
+const MemoryIdInput = z.string().regex(/^[a-f0-9]{12}$/, "Invalid memory id");
+export const MemoryCandidateInputSchema = z.object({
+  type: z.enum(MEMORY_TYPES),
+  content: z.string().trim().min(1).max(20_000),
+}).strict();
+export const UpdateMemoryInputSchema = z.object({
+  id: MemoryIdInput,
+  type: z.enum(MEMORY_TYPES),
+  content: z.string().trim().min(1).max(20_000),
+}).strict();
+export const DeleteMemoryInputSchema = z.object({ id: MemoryIdInput }).strict();
 const ProviderNameInput = z.string().trim().min(1).max(64)
   .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/, "厂商名称只能包含字母、数字、下划线和连字符");
 const ModelNameInput = z.string().trim().min(1).max(256)
@@ -141,6 +154,10 @@ export interface FlavorDesktopApi {
   updateSkill(originalName: string, draft: SkillDraft): Promise<ManagedSkill>;
   deleteSkill(name: string): Promise<void>;
   setSkillEnabled(name: string, enabled: boolean): Promise<void>;
+  listMemory(): Promise<MemorySnapshot>;
+  createMemory(candidate: MemoryCandidate): Promise<MemoryEntry>;
+  updateMemory(id: string, candidate: MemoryCandidate): Promise<MemoryEntry>;
+  deleteMemory(id: string): Promise<boolean>;
   switchModel(modelId: string): Promise<DesktopSnapshot>;
   addModel(input: AddDesktopModelInput): Promise<DesktopModelMutationResult>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;

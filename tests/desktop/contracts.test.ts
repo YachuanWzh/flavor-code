@@ -4,6 +4,8 @@ import {
   AnswerQuestionsInputSchema,
   AppMenuInputSchema,
   DeleteSessionInputSchema,
+  DeleteMemoryInputSchema,
+  MemoryCandidateInputSchema,
   OpenWorkspaceInputSchema,
   ResolveApprovalInputSchema,
   StartSessionInputSchema,
@@ -11,6 +13,7 @@ import {
   SkillNameInputSchema,
   SetSkillEnabledInputSchema,
   SubmitInputSchema,
+  UpdateMemoryInputSchema,
 } from "../../src/desktop/contracts.js";
 
 describe("desktop IPC contracts", () => {
@@ -27,6 +30,11 @@ describe("desktop IPC contracts", () => {
     expect(SkillDraftInputSchema.parse({ name: "code-review", description: "Review code", body: "Instructions" }))
       .toEqual({ name: "code-review", description: "Review code", body: "Instructions", disableModelInvocation: false });
     expect(SetSkillEnabledInputSchema.parse({ name: "code-review", enabled: false })).toEqual({ name: "code-review", enabled: false });
+    expect(MemoryCandidateInputSchema.parse({ type: "project", content: "Use pnpm." }))
+      .toEqual({ type: "project", content: "Use pnpm." });
+    expect(UpdateMemoryInputSchema.parse({ id: "abcdef123456", type: "feedback", content: "Do not commit." }))
+      .toEqual({ id: "abcdef123456", type: "feedback", content: "Do not commit." });
+    expect(DeleteMemoryInputSchema.parse({ id: "abcdef123456" })).toEqual({ id: "abcdef123456" });
   });
 
   it("rejects blank prompts, unknown approval decisions and oversized question indexes", () => {
@@ -36,5 +44,7 @@ describe("desktop IPC contracts", () => {
     expect(() => DeleteSessionInputSchema.parse({ sessionId: "../outside" })).toThrow();
     expect(() => AppMenuInputSchema.parse({ menu: "window", x: -1, y: 36 })).toThrow();
     expect(() => SkillNameInputSchema.parse({ name: "../escape" })).toThrow();
+    expect(() => MemoryCandidateInputSchema.parse({ type: "secret", content: "x" })).toThrow();
+    expect(() => UpdateMemoryInputSchema.parse({ id: "../outside", type: "project", content: "x" })).toThrow();
   });
 });

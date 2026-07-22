@@ -35,6 +35,28 @@ function fakeRuntime(output: (event: SessionOutput) => void): RuntimeLike {
 }
 
 describe("DesktopRuntimeController", () => {
+  it("manages long-term memory through the opened workspace", async () => {
+    const existing = { id: "aaaaaaaaaaaa", type: "project" as const, content: "Use npm." };
+    const updated = { id: "bbbbbbbbbbbb", type: "project" as const, content: "Use pnpm." };
+    const memory = {
+      snapshot: vi.fn(async () => ({ enabled: true, path: "C:\\work\\.flavor\\memory\\MEMORY.md", entries: [existing] })),
+      remember: vi.fn(async () => existing),
+      update: vi.fn(async () => updated),
+      delete: vi.fn(async () => true),
+    };
+    const loadMemoryManager = vi.fn(async () => memory);
+    const controller = new DesktopRuntimeController({
+      home: "C:\\Users\\demo", listSessions: async () => [], loadMemoryManager, emit: () => undefined,
+    });
+
+    await controller.openWorkspace("C:\\work");
+    expect(await controller.listMemory()).toEqual(expect.objectContaining({ entries: [existing] }));
+    expect(await controller.createMemory({ type: "project", content: "Use npm." })).toEqual(existing);
+    expect(await controller.updateMemory(existing.id, { type: "project", content: "Use pnpm." })).toEqual(updated);
+    expect(await controller.deleteMemory(updated.id)).toBe(true);
+    expect(loadMemoryManager).toHaveBeenCalledWith("C:\\work", "C:\\Users\\demo");
+  });
+
   it("opens a workspace, lists its sessions and starts a resumable runtime", async () => {
     const events: unknown[] = [];
     let output!: (event: SessionOutput) => void;

@@ -22,6 +22,10 @@ const api: FlavorDesktopApi = {
   updateSkill: (originalName, draft) => ipcRenderer.invoke(DESKTOP_CHANNELS.updateSkill, { originalName, draft }),
   deleteSkill: (name) => ipcRenderer.invoke(DESKTOP_CHANNELS.deleteSkill, { name }),
   setSkillEnabled: (name, enabled) => ipcRenderer.invoke(DESKTOP_CHANNELS.setSkillEnabled, { name, enabled }),
+  listMemory: () => ipcRenderer.invoke(DESKTOP_CHANNELS.listMemory),
+  createMemory: (candidate) => ipcRenderer.invoke(DESKTOP_CHANNELS.createMemory, candidate),
+  updateMemory: (id, candidate) => ipcRenderer.invoke(DESKTOP_CHANNELS.updateMemory, { id, ...candidate }),
+  deleteMemory: (id) => ipcRenderer.invoke(DESKTOP_CHANNELS.deleteMemory, { id }),
   switchModel: (modelId) => ipcRenderer.invoke(DESKTOP_CHANNELS.switchModel, { modelId }),
   addModel: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.addModel, input),
   onEvent(listener) {

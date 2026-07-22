@@ -10,13 +10,16 @@ import {
   AddDesktopModelInputSchema,
   AppMenuInputSchema,
   DeleteSessionInputSchema,
+  DeleteMemoryInputSchema,
   DESKTOP_CHANNELS,
   OpenWorkspaceInputSchema,
+  MemoryCandidateInputSchema,
   ResolveApprovalInputSchema,
   StartSessionInputSchema,
   SkillDraftInputSchema,
   SkillNameInputSchema,
   UpdateSkillInputSchema,
+  UpdateMemoryInputSchema,
   SetSkillEnabledInputSchema,
   SwitchDesktopModelInputSchema,
   SubmitInputSchema,
@@ -150,6 +153,17 @@ function installIpcHandlers(): void {
   ipcMain.handle(DESKTOP_CHANNELS.setSkillEnabled, async (_event, value) => {
     const input = SetSkillEnabledInputSchema.parse(value);
     await controller.setSkillEnabled(input.name, input.enabled);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.listMemory, async () => controller.listMemory());
+  ipcMain.handle(DESKTOP_CHANNELS.createMemory, async (_event, value) => {
+    return controller.createMemory(MemoryCandidateInputSchema.parse(value));
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.updateMemory, async (_event, value) => {
+    const { id, type, content } = UpdateMemoryInputSchema.parse(value);
+    return controller.updateMemory(id, { type, content });
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.deleteMemory, async (_event, value) => {
+    return controller.deleteMemory(DeleteMemoryInputSchema.parse(value).id);
   });
   ipcMain.handle(DESKTOP_CHANNELS.switchModel, async (_event, value) => {
     return controller.switchModel(SwitchDesktopModelInputSchema.parse(value).modelId);

@@ -23,6 +23,10 @@ describe("parseSlashCommand", () => {
     ["/mcp enable", { name: "mcp", action: "enable", target: "all" }],
     ["/mcp disable docs", { name: "mcp", action: "disable", target: "docs" }],
     ["/config", { name: "config" }], ["/clear", { name: "clear" }],
+    ["/memory", { name: "memory" }],
+    ["/remember project Use pnpm for scripts", { name: "remember", type: "project", text: "Use pnpm for scripts" }],
+    ["/remember Prefer Chinese responses", { name: "remember", type: "project", text: "Prefer Chinese responses" }],
+    ["/forget obsolete convention", { name: "forget", query: "obsolete convention" }],
     ["/loop fix all tests", { name: "loop", goal: "fix all tests" }],
     ["/help", { name: "help" }], ["/exit", { name: "exit" }],
   ])("parses %s", (input, expected) => expect(parseSlashCommand(input)).toEqual(expected));
@@ -57,6 +61,12 @@ describe("parseSlashCommand", () => {
     expect(parseSlashCommand("/permissions reckless")).toMatchObject({ name: "invalid", command: "permissions" });
     expect(parseSlashCommand("/model sidekick foo:bar")).toMatchObject({ name: "invalid", command: "model" });
     expect(parseSlashCommand("/loop")).toEqual({ name: "invalid", command: "loop", message: "Use /loop <goal>." });
+    expect(parseSlashCommand("/remember")).toEqual({
+      name: "invalid", command: "remember", message: "Use /remember [user|feedback|project|reference] <text>.",
+    });
+    expect(parseSlashCommand("/forget")).toEqual({
+      name: "invalid", command: "forget", message: "Use /forget <text-or-id>.",
+    });
     expect(parseSlashCommand("/mcp tools")).toEqual({
       name: "invalid", command: "mcp", message: "Use /mcp [status|tools <server>|reconnect <server>|enable [server|all]|disable [server|all]].",
     });

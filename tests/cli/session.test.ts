@@ -24,12 +24,16 @@ function services(events: string[], outputs: string[]): SessionServices {
     },
     runSkill: async function* () {},
     runLoop: async function* () {},
+    runGoal: async function* () {},
     mcp: async () => "No MCP servers configured.",
     setModel: () => {}, setPermissionMode: () => {}, compact: async () => false,
     initialize: async () => ({ path: "/work/FLAVOR.md", created: true }),
     config: () => ({ providers: { openai: { apiKey: "top-secret", token: "also-secret" } } }),
     skills: async () => [], plugins: () => [], hooksStatus: () => [], tasks: () => [], audit: async () => "", cancelActiveTask: async () => {},
     clearContext: async () => {},
+    memory: async () => "memory contents",
+    remember: async () => "remembered",
+    forget: async () => "forgotten",
     pluginCommands: () => [], runPluginCommand: async () => undefined,
     output: (event) => outputs.push(event.type === "text" ? event.text : event.type === "notice" ? event.message : event.type),
     questions,
@@ -199,5 +203,26 @@ describe("FlavorSession", () => {
 
     expect(mcp).toHaveBeenCalledWith({ name: "mcp", action: "reconnect", target: "filesystem" }, expect.any(AbortSignal));
     expect(outputs).toContain("filesystem  connected  stdio  14 tools");
+  });
+
+  it("dispatches long-term-memory commands without invoking the model", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const remember = vi.fn(async () => "Remembered project memory abc123.");
+    const forget = vi.fn(async () => "Forgot 1 memory entry.");
+    const memory = vi.fn(async () => "# Flavor Project Memory");
+    Object.assign(base, { remember, forget, memory });
+    base.run = async function* () { throw new Error("ordinary run must not be called"); };
+    const session = new FlavorSession(base);
+
+    await session.submit("/remember project Use pnpm for scripts");
+    await session.submit("/memory");
+    await session.submit("/forget pnpm");
+
+    expect(remember).toHaveBeenCalledWith("project", "Use pnpm for scripts");
+    expect(memory).toHaveBeenCalledOnce();
+    expect(forget).toHaveBeenCalledWith("pnpm");
+    expect(outputs).toContain("Remembered project memory abc123.");
+    expect(outputs).toContain("Forgot 1 memory entry.");
   });
 });

@@ -11,12 +11,13 @@ import { message } from "./utils/error.js";
 import { redactErrorText } from "./utils/redact.js";
 import { staticTaskLines } from "./ui/task-progress-model.js";
 import { SkillManager } from "./skills/manager.js";
+import { registerMemoryCommands } from "./memory/cli.js";
 
 export function createProgram(): Command {
   const program = new Command()
     .name("flavor")
     .description("Interactive coding agent")
-    .version("0.8.0")
+    .version("0.9.0")
     .option("-p, --print <prompt>", "run one prompt without the interactive UI")
     .option("--resume [session-id]", "resume a saved session (latest when id is omitted)");
 
@@ -61,6 +62,8 @@ export function createProgram(): Command {
       }
     });
   }
+
+  registerMemoryCommands(program);
 
   program.action(async (options: { print?: string; resume?: string | boolean }) => {
     const resumeSession = options.resume === true ? true : typeof options.resume === "string" ? options.resume : undefined;
@@ -141,6 +144,11 @@ function safeError(error: unknown): string {
 if (process.argv[1]) {
   const scriptPath = fileURLToPath(import.meta.url);
   if (realpathSync(scriptPath) === realpathSync(process.argv[1])) {
-    await createProgram().parseAsync(process.argv);
+    try {
+      await createProgram().parseAsync(process.argv);
+    } catch (error) {
+      process.stderr.write(`flavor: ${safeError(error)}\n`);
+      process.exitCode = 1;
+    }
   }
 }

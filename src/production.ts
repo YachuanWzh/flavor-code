@@ -62,6 +62,8 @@ import { execFileNoThrow } from "./utils/execFileNoThrow.js";
 import { redactSecrets } from "./utils/redact.js";
 import { HallucinationGuard } from "./hallucination/guard.js";
 import { AuditLogger } from "./utils/log.js";
+import { MemoryCoordinator } from "./memory/coordinator.js";
+import { MemoryStore, formatMemoryContext, renderMemoryDocument } from "./memory/store.js";
 
 export interface ProductionRuntimeOptions {
   workspace?: string;
@@ -147,6 +149,11 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const loaded = await loadConfig({ cwd: workspace, home, environment });
   const config = loaded.config;
   const sessionStore = new SessionStore({ workspace, maxSessions: config.maxSessions });
+  const memoryStore = config.memory.enabled ? new MemoryStore({
+    workspace,
+    maxEntries: config.memory.maxEntries,
+    maxEntryChars: config.memory.maxEntryChars,
+  }) : undefined;
   const auditLogger = new AuditLogger(workspace);
   const recovered = options.resumeSession === undefined
     ? undefined
@@ -278,6 +285,14 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   await skills.discover();
   tools.push(createSkillResourceTool(skills));
   const flavor = await optionalText(join(workspace, "FLAVOR.md"));
+  let memoryContext: string | undefined;
+  if (memoryStore !== undefined) {
+    try {
+      memoryContext = formatMemoryContext(await memoryStore.list(), config.memory.maxPromptChars);
+    } catch (error) {
+      diagnostics.push(`Long-term memory load failed: ${message(error)}`);
+    }
+  }
   const selectedModels = selectModels(config, registeredProviders, diagnostics);
   const mainModel = recovered?.models.main ?? selectedModels.main;
   const childModel = recovered?.models.subagent ?? selectedModels.child;
@@ -443,6 +458,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         environment: promptEnvironment,
       }),
       ...(flavor === undefined ? {} : { flavor }),
+      ...(memoryContext === undefined ? {} : { memory: memoryContext }),
       ...(taskState === undefined ? {} : { taskState }),
       ...(compactAtChars === undefined ? {} : { compactAtChars }),
       toolOutputChars,
@@ -502,16 +518,36 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     if (taskPlan !== undefined || taskGraph !== undefined) emitOutput({ type: "tasks", snapshot: taskSnapshot() });
     return { decision: "allow" };
   });
+  const memoryCoordinator = memoryStore !== undefined && config.memory.autoExtract
+    ? new MemoryCoordinator({
+      store: memoryStore,
+      minChars: config.memory.autoExtractMinChars,
+      maxEntryChars: config.memory.maxEntryChars,
+      generate: (prompt, signal) => generateMemoryExtraction(registry, childModel, prompt, signal),
+    })
+    : undefined;
+  if (memoryCoordinator !== undefined) {
+    memoryCoordinator.onError = (error) => diagnostics.push(`Long-term memory extraction failed: ${message(error)}`);
+  }
+  let memoryCursor = harness.main.context.snapshot().messages.length;
   hooks.on("UserPromptSubmit", (event) => {
     timelineState = transcriptReducer(timelineState, { type: "submit", prompt: String(event.payload.prompt) });
     return { decision: "allow" };
   });
-  hooks.on("Stop", async () => {
+  hooks.on("Stop", async (event) => {
     timelineState = transcriptReducer(timelineState, { type: "finish" });
+    await persist();
+    const snapshot = harness.main.context.snapshot().messages;
+    const added = snapshot.slice(memoryCursor);
+    memoryCursor = snapshot.length;
+    if (event.payload.outcome === "completed") memoryCoordinator?.enqueue(added);
+    return { decision: "allow" };
+  });
+  hooks.on("SessionEnd", async () => {
+    await memoryCoordinator?.flush();
     await persist();
     return { decision: "allow" };
   });
-  hooks.on("SessionEnd", async () => { await persist(); return { decision: "allow" }; });
   hooks.on("AfterModelCall", (event) => {
     const {
       modelId, agent, providerError, errorCode, errorMessage, attempt, maxAttempts,
@@ -595,6 +631,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
           environment: loopEnvironment,
         }),
         ...(loopFlavor === undefined ? {} : { flavor: loopFlavor }),
+        ...(memoryContext === undefined ? {} : { memory: memoryContext }),
         ...(compactAtChars === undefined ? {} : { compactAtChars }),
         toolOutputChars,
         compaction,
@@ -802,6 +839,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     },
     clearContext: async () => {
       harness.main.context.clear();
+      memoryCursor = 0;
       taskPlan = undefined;
       taskGraph = undefined;
       taskStates = {};
@@ -813,6 +851,25 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       timelineState = createTranscriptState();
       await persist();
       emitOutput({ type: "tasks", snapshot: { subagents: { states: {} } } });
+    },
+    memory: async () => {
+      if (memoryStore === undefined) return "Long-term memory is disabled.";
+      const entries = await memoryStore.list();
+      return entries.length === 0
+        ? `No long-term memories stored.\nPath: ${memoryStore.path}`
+        : `Path: ${memoryStore.path}\n\n${renderMemoryDocument(entries)}`;
+    },
+    remember: async (type, text) => {
+      if (memoryStore === undefined) return "Long-term memory is disabled.";
+      const result = await memoryStore.remember({ type, content: text });
+      return result.added
+        ? `Remembered ${result.entry.type} memory ${result.entry.id}.`
+        : `Memory already exists or the ${config.memory.maxEntries}-entry limit was reached.`;
+    },
+    forget: async (query) => {
+      if (memoryStore === undefined) return "Long-term memory is disabled.";
+      const removed = await memoryStore.forget(query);
+      return removed === 0 ? "No matching memory found." : `Forgot ${removed} memory ${removed === 1 ? "entry" : "entries"}.`;
     },
     pluginCommands: () => [...pluginCommands.keys()].sort(),
     runPluginCommand: async (name, args, signal) => {
@@ -883,6 +940,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     async dispose() {
       if (disposed) return;
       disposed = true;
+      await memoryCoordinator?.flush();
       await persist();
       await persistTail;
       auditLogger.close();
@@ -1331,6 +1389,30 @@ async function detectGitRepository(workspace: string): Promise<boolean | "unknow
   if (result.code === 0) return result.stdout.trim() === "true";
   if (/not a git repository/i.test(`${result.stderr}\n${result.error ?? ""}`)) return false;
   return "unknown";
+}
+
+async function generateMemoryExtraction(
+  registry: ModelRegistry,
+  modelId: string,
+  prompt: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const { adapter, model } = registry.get(modelId);
+  let output = "";
+  for await (const event of adapter.stream({
+    model,
+    messages: [{ role: "user", content: prompt }],
+    tools: [],
+    signal,
+  })) {
+    if (event.type === "text") output += event.text;
+    else if (event.type === "error") throw new Error(event.error.message);
+    else if (event.type === "tool-call" || event.type === "invalid-tool-call") {
+      throw new Error("Memory extractor attempted an unsupported tool call");
+    }
+  }
+  if (output.trim().length === 0) throw new Error("Memory extractor returned no text");
+  return output;
 }
 
 async function optionalText(path: string): Promise<string | undefined> {

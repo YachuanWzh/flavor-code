@@ -11,6 +11,8 @@ import { message } from "../utils/error.js";
 import type { ApprovalDecision } from "../tools/runtime.js";
 import { createGlobTool, type SearchResult } from "../tools/search.js";
 import { SkillManager, type ManagedSkill, type ManagedSkillSummary, type SkillDraft } from "../skills/manager.js";
+import { createProjectMemoryManager, type MemoryManagerLike, type MemorySnapshot } from "../memory/manager.js";
+import type { MemoryCandidate, MemoryEntry } from "../memory/types.js";
 import { DEFAULT_DESKTOP_MODELS, loadDesktopModels, saveDesktopModel } from "./model-config.js";
 import type { AddDesktopModelInput, DesktopEvent, DesktopModelOption, DesktopModelMutationResult, DesktopSessionSummary, DesktopSnapshot, SessionStartedPayload } from "./contracts.js";
 
@@ -50,6 +52,7 @@ export interface DesktopRuntimeControllerOptions {
   deleteSession?(workspace: string, sessionId: string): Promise<void>;
   loadModels?(workspace: string, home: string): Promise<DesktopModelOption[]>;
   saveModel?(workspace: string, home: string, input: AddDesktopModelInput): Promise<DesktopModelOption>;
+  loadMemoryManager?(workspace: string, home: string): Promise<MemoryManagerLike>;
   emit(event: DesktopEvent): void;
 }
 
@@ -60,11 +63,13 @@ export class DesktopRuntimeController {
   readonly #deleteStoredSession: NonNullable<DesktopRuntimeControllerOptions["deleteSession"]>;
   readonly #loadModels: NonNullable<DesktopRuntimeControllerOptions["loadModels"]>;
   readonly #saveModel: NonNullable<DesktopRuntimeControllerOptions["saveModel"]>;
+  readonly #loadMemoryManager: NonNullable<DesktopRuntimeControllerOptions["loadMemoryManager"]>;
   readonly #emit: (event: DesktopEvent) => void;
   #workspace: string | undefined;
   #sessions: readonly DesktopSessionSummary[] = [];
   #runtime: RuntimeLike | undefined;
   #skillManager: SkillManager | undefined;
+  #memoryManager: MemoryManagerLike | undefined;
   #models: readonly DesktopModelOption[] = DEFAULT_DESKTOP_MODELS;
   #busy = false;
 
@@ -87,6 +92,8 @@ export class DesktopRuntimeController {
     });
     this.#loadModels = options.loadModels ?? loadDesktopModels;
     this.#saveModel = options.saveModel ?? saveDesktopModel;
+    this.#loadMemoryManager = options.loadMemoryManager
+      ?? ((workspace, home) => createProjectMemoryManager({ workspace, home }));
     this.#emit = options.emit;
   }
 
@@ -116,6 +123,7 @@ export class DesktopRuntimeController {
     if (workspace !== this.#workspace) await this.#disposeRuntime();
     this.#workspace = workspace;
     this.#skillManager = new SkillManager({ workspace, home: this.#home });
+    this.#memoryManager = await this.#loadMemoryManager(workspace, this.#home);
     this.#models = await this.#loadModels(workspace, this.#home);
     this.#sessions = await this.#listSessions(workspace);
     return this.#publishSnapshot();
@@ -221,6 +229,22 @@ export class DesktopRuntimeController {
     await this.#runtime?.services.reloadSkills?.();
   }
 
+  async listMemory(): Promise<MemorySnapshot> {
+    return this.#requireMemoryManager().snapshot();
+  }
+
+  async createMemory(candidate: MemoryCandidate): Promise<MemoryEntry> {
+    return this.#requireMemoryManager().remember(candidate);
+  }
+
+  async updateMemory(id: string, candidate: MemoryCandidate): Promise<MemoryEntry> {
+    return this.#requireMemoryManager().update(id, candidate);
+  }
+
+  async deleteMemory(id: string): Promise<boolean> {
+    return this.#requireMemoryManager().delete(id);
+  }
+
   async switchModel(modelId: string): Promise<DesktopSnapshot> {
     if (this.#busy) throw new Error("Stop the active task before switching models");
     if (!this.#models.some((model) => model.id === modelId)) {
@@ -277,5 +301,10 @@ export class DesktopRuntimeController {
   #requireSkillManager(): SkillManager {
     if (this.#skillManager === undefined) throw new Error("Open a project before managing skills");
     return this.#skillManager;
+  }
+
+  #requireMemoryManager(): MemoryManagerLike {
+    if (this.#memoryManager === undefined) throw new Error("Open a project before managing long-term memory");
+    return this.#memoryManager;
   }
 }

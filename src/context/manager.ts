@@ -15,6 +15,7 @@ import {
 export interface ContextManagerOptions {
   system: SystemPromptSource;
   flavor?: string;
+  memory?: string;
   taskState?: string;
   /** @deprecated Prefer token-based compaction policy. */
   compactAtChars?: number;
@@ -58,6 +59,7 @@ export function estimateTokens(text: string): number {
 export class ContextManager {
   readonly #system: SystemPromptSource;
   readonly #flavor: string | undefined;
+  readonly #memory: string | undefined;
   readonly #compactAtChars: number;
   readonly #toolOutputChars: number;
   readonly #recentTurns: number | undefined;
@@ -89,6 +91,7 @@ export class ContextManager {
     if (compaction.maxRecentTokens < compaction.recentTokens) throw new Error("compaction.maxRecentTokens must be at least recentTokens");
     this.#system = options.system;
     this.#flavor = options.flavor;
+    this.#memory = options.memory;
     this.#taskState = options.taskState;
     this.#compactAtChars = options.compactAtChars ?? Number.POSITIVE_INFINITY;
     this.#toolOutputChars = options.toolOutputChars;
@@ -120,6 +123,7 @@ export class ContextManager {
     const child = new ContextManager({
       system: resolveSystemSections(this.#system),
       ...(this.#flavor === undefined ? {} : { flavor: this.#flavor }),
+      ...(this.#memory === undefined ? {} : { memory: this.#memory }),
       ...(this.#taskState === undefined ? {} : { taskState: this.#taskState }),
       compactAtChars: this.#compactAtChars,
       toolOutputChars: this.#toolOutputChars,
@@ -338,6 +342,7 @@ export class ContextManager {
     return [
       ...resolveSystemSections(this.#system).map((content) => ({ role: "system" as const, content })),
       ...(this.#flavor === undefined ? [] : [{ role: "system" as const, content: `FLAVOR.md\n${this.#flavor}` }]),
+      ...(this.#memory === undefined ? [] : [{ role: "system" as const, content: `Long-term memory\n${this.#memory}` }]),
       ...(this.#taskState === undefined ? [] : [{ role: "system" as const, content: `Task state\n${this.#taskState}` }]),
     ];
   }

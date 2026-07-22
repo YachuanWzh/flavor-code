@@ -81,6 +81,16 @@ export const FlavorConfigSchema = z.object({
     .optional(),
   maxSubagents: z.number().int().min(1).max(16).default(3),
   maxSessions: z.number().int().min(1).max(1000).default(50),
+  memory: z
+    .object({
+      enabled: z.boolean().default(true),
+      autoExtract: z.boolean().default(true),
+      autoExtractMinChars: z.number().int().min(0).max(100_000).default(200),
+      maxEntries: z.number().int().min(1).max(10_000).default(200),
+      maxEntryChars: z.number().int().min(32).max(20_000).default(1_000),
+      maxPromptChars: z.number().int().min(256).max(200_000).default(12_000),
+    })
+    .prefault({}),
   permissionMode: PermissionModeSchema,
   language: z
     .string()

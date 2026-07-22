@@ -11,6 +11,20 @@ afterEach(() => {
   delete process.env.CUSTOM_API_KEY;
 });
 
+it("uses bounded long-term-memory defaults and validates overrides", () => {
+  expect(FlavorConfigSchema.parse({}).memory).toEqual({
+    enabled: true,
+    autoExtract: true,
+    autoExtractMinChars: 200,
+    maxEntries: 200,
+    maxEntryChars: 1000,
+    maxPromptChars: 12000,
+  });
+  expect(() => FlavorConfigSchema.parse({ memory: { maxEntries: 0 } })).toThrow();
+  expect(() => FlavorConfigSchema.parse({ memory: { maxEntryChars: 10 } })).toThrow();
+  expect(() => FlavorConfigSchema.parse({ memory: { maxPromptChars: 100 } })).toThrow();
+});
+
 it("uses Claude-style token compaction defaults and accepts explicit overrides", () => {
   expect(FlavorConfigSchema.parse({}).context).toMatchObject({
     windowTokens: 200_000,

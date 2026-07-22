@@ -9,7 +9,7 @@
 
 `flavor-code` 是一个同时提供终端界面与 Electron 桌面应用的 AI 编程助手。它接入大语言模型（OpenAI GPT、Anthropic Claude 或任何兼容服务），能理解你的项目结构，在工作区范围内安全操作文件，甚至能把复杂任务拆成多块，分给多个"小助手"并行处理。
 
-当前版本：**0.8.0**
+当前版本：**0.9.0**
 
 ## 它能做什么
 
@@ -22,6 +22,7 @@
 - **实时进度面板** — 终端里显示任务执行状态：○ 待执行 · ⟳ 执行中 · ✓ 完成 · ✗ 失败
 - **恢复完整时间线** — 聊到一半退出，下次 `--resume` 会恢复消息、工具调用、任务步骤、重试、用量和 Diff；旧的已压缩会话会明确展示压缩摘要边界
 - **长任务不中断** — 上下文快满时自动压缩旧消息并生成工作摘要，检测到活跃进度时自动扩展迭代上限
+- **跨会话长期记忆** — 自动保留少量用户偏好、项目约定和行为反馈，新会话不必重复说明
 - **插件和 Skill** — 通过插件扩展功能，通过 Skill（技能包）教它新的工作流
 - **审计日志** — 所有工具执行失败都会被记录到 `.flavor/audit.jsonl`
 - **事故上报与 RCA** — 工具执行失败自动上报到 langgraph-claw 告警管道，P0 级错误触发自动根因分析（Auto-RCA）
@@ -435,7 +436,7 @@ npm run desktop:dist     # 生成 Windows NSIS 安装包
 Windows 打包产物位于：
 
 - 免安装目录：`release/win-unpacked/Flavor Code.exe`
-- NSIS 安装包：`release/Flavor-Code-0.8.0-x64.exe`
+- NSIS 安装包：`release/Flavor-Code-0.9.0-x64.exe`
 
 模型配置仍读取全局 `~/.flavor-code/flavor.json`、项目 `.flavor/flavor.json`、`.env` 和环境变量，因此 CLI 与桌面端可以共享配置与会话。生产版桌面窗口启用了 `contextIsolation` 和 Chromium 沙箱，关闭了渲染进程的 Node.js 集成；文件、命令和 Agent 操作只通过显式 IPC 接口进入主进程。Windows 的 `desktop:dev` 为兼容工作区内 Chromium 子进程启动，仅在本地开发启动器中使用 `--no-sandbox`，打包产物不携带该参数。
 
@@ -485,6 +486,55 @@ Flavor 的压缩是分层执行的：
 
 ---
 
+## 长期记忆（0.9.0）
+
+Flavor 会把跨会话仍有价值的用户偏好、Agent 反馈、项目约定/决策和外部引用存到 `.flavor/memory/MEMORY.md`。它与 `--resume` 不同：恢复会话只续接指定对话，长期记忆会在每个新会话启动时以有界上下文注入。当前用户指令和仓库现状始终优先于旧记忆。
+
+普通 Agent 回合完成后会使用子 Agent 模型异步提取长期信息；短回合、Slash 命令、敏感信息、瞬时任务状态和可直接从代码推导的内容不会写入。关闭会话时会等待已排队的提取完成。
+
+Electron 桌面端可从左侧“长期记忆”进入记忆工作台，按四种类型筛选、搜索、新建、编辑或删除记忆。修改不会重写正在进行的模型上下文，从下一个新任务开始生效。
+
+交互会话中可以快速维护：
+
+```text
+/memory
+/remember project 所有仓库脚本使用 pnpm
+/remember feedback 不要自动提交代码
+/forget pnpm
+```
+
+CLI 还提供适合终端和自动化脚本的精确 CRUD。先进入项目目录，再执行：
+
+```bash
+flavor memory list
+flavor memory list --json
+flavor memory add project "所有仓库脚本使用 pnpm"
+flavor memory update <12位ID> feedback "不要自动提交代码"
+flavor memory delete <12位ID>
+flavor memory path
+```
+
+`list` 会输出后续更新和删除所需的稳定 ID；更新内容或类型后会生成新的 ID。`--json` 适合由脚本读取。
+
+项目配置支持：
+
+```json
+{
+  "memory": {
+    "enabled": true,
+    "autoExtract": true,
+    "autoExtractMinChars": 200,
+    "maxEntries": 200,
+    "maxEntryChars": 1000,
+    "maxPromptChars": 12000
+  }
+}
+```
+
+存储更新使用文件锁、备份和原子替换；记忆文件是普通 Markdown，可直接审查和编辑。第一版不包含向量检索、跨设备同步或团队共享。
+
+---
+
 ## 内置命令
 
 交互模式下，以 `/` 开头触发命令：
@@ -501,6 +551,9 @@ Flavor 的压缩是分层执行的：
 | `/hooks` | 列出 Hook 状态 |
 | `/tasks` | 显示当前任务计划与进度 |
 | `/audit [toolFilter]` | 查看工具失败审计日志 |
+| `/memory` | 查看长期项目记忆及文件路径 |
+| `/remember [user\|feedback\|project\|reference] <text>` | 保存一条长期记忆（默认 `project`） |
+| `/forget <text-or-id>` | 删除匹配的长期记忆 |
 | `/compact` | 强制压缩上下文 |
 | `/clear` | 清空终端显示 |
 | `/mcp [status\|tools\|reconnect\|enable\|disable]` | 管理 MCP 服务器 |
@@ -620,6 +673,8 @@ Flavor 相关的文件都放在 `.flavor/` 目录下：
 ├── goal-plan.md       # /goal 生成的验收契约
 ├── sessions/          # 会话存档（v2 JSONL 格式）
 │   └── session-xxx.jsonl
+├── memory/            # 跨会话长期记忆
+│   └── MEMORY.md
 ├── audit.jsonl        # 工具失败审计日志
 ├── skills/            # 项目 Skill
 └── plugins/           # 项目插件
@@ -660,7 +715,7 @@ npm run smoke:install  # 验证打包和安装
 后续方向包括（这些是未来规划，非 0.4.0 已交付能力）：
 
 - `/loop` 的后台恢复、调度与并发 loop 管理
-- 后台 Session Memory 持久化记忆系统
+- 长期记忆的全文/语义检索和质量整合
 - 更细粒度的任务恢复与重放
 - IDE 集成（VS Code / JetBrains 扩展）
 - 系统凭据存储（keychain 集成）

@@ -2,6 +2,7 @@ export const MVP_COMMANDS = [
   "model", "init", "config", "login", "permissions", "skills", "plugins", "hooks",
   "tasks", "compact", "clear", "help", "exit", "audit",
   "loop", "goal", "mcp",
+  "memory", "remember", "forget",
 ] as const;
 
 export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string> = {
@@ -22,6 +23,9 @@ export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string>
   loop: "Run a verified autonomous loop toward a goal",
   goal: "Run a goal pipeline with adversarial verification",
   mcp: "Manage MCP servers",
+  memory: "Show long-term project memory",
+  remember: "Add a long-term memory",
+  forget: "Remove matching long-term memories",
 };
 
 export type PermissionCommandMode = PermissionMode;
@@ -38,8 +42,10 @@ export type SlashCommand =
   | { name: "skill"; skill: string; prompt: string }
   | { name: "loop"; goal: string }
   | { name: "goal"; goal: string }
+  | { name: "remember"; type: MemoryType; text: string }
+  | { name: "forget"; query: string }
   | McpSlashCommand
-  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop" | "goal" | "mcp"> }
+  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop" | "goal" | "mcp" | "remember" | "forget"> }
   | { name: "audit"; toolFilter?: string | undefined }
   | { name: "unknown"; input: string; suggestions: string[] }
   | { name: "invalid"; command: string; message: string };
@@ -91,6 +97,20 @@ export function parseSlashCommand(
     if (!goal) return { name: "invalid", command: name, message: "Use /goal <objective>." };
     return { name, goal };
   }
+  if (name === "remember") {
+    const usage = "Use /remember [user|feedback|project|reference] <text>.";
+    if (args.length === 0) return { name: "invalid", command: name, message: usage };
+    const explicitType = (MEMORY_TYPES as readonly string[]).includes(args[0] ?? "");
+    const type = explicitType ? args[0] as MemoryType : "project";
+    const text = args.slice(explicitType ? 1 : 0).join(" ").trim();
+    return text.length === 0 ? { name: "invalid", command: name, message: usage } : { name, type, text };
+  }
+  if (name === "forget") {
+    const query = args.join(" ").trim();
+    return query.length === 0
+      ? { name: "invalid", command: name, message: "Use /forget <text-or-id>." }
+      : { name, query };
+  }
   if (name === "mcp") {
     const usage = "Use /mcp [status|tools <server>|reconnect <server>|enable [server|all]|disable [server|all]].";
     const [action, target, ...extra] = args;
@@ -132,3 +152,4 @@ function editDistance(left: string, right: string): number {
   return previous[right.length] ?? left.length;
 }
 import { normalizePermissionMode, PERMISSION_MODES, type PermissionMode } from "../config/schema.js";
+import { MEMORY_TYPES, type MemoryType } from "../memory/types.js";

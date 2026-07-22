@@ -66,14 +66,30 @@ describe("ContextManager", () => {
   });
 
   it("pins ordered system sections before project and task context", () => {
-    const context = createContext({ system: ["first section", "second section"] });
+    const context = createContext({ system: ["first section", "second section"], memory: "durable project facts" });
 
-    expect(context.messagesForModel().slice(0, 4)).toEqual([
+    expect(context.messagesForModel().slice(0, 5)).toEqual([
       { role: "system", content: "first section" },
       { role: "system", content: "second section" },
       { role: "system", content: "FLAVOR.md\nproject guidance" },
+      { role: "system", content: "Long-term memory\ndurable project facts" },
       { role: "system", content: "Task state\nin progress" },
     ]);
+  });
+
+  it("preserves long-term memory across forks and compaction", async () => {
+    const context = createContext({ memory: "- [project] Use pnpm.", compactAtChars: 1, recentTurns: 0 });
+    context.append({ role: "user", content: "old turn" });
+
+    await context.compact();
+    const child = context.fork();
+
+    expect(context.messagesForModel().map((message) => message.content)).toContain(
+      "Long-term memory\n- [project] Use pnpm.",
+    );
+    expect(child.messagesForModel().map((message) => message.content)).toContain(
+      "Long-term memory\n- [project] Use pnpm.",
+    );
   });
 
   it("resolves system section factories for every model request", () => {

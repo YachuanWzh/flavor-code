@@ -6,6 +6,7 @@ import type { SkillMetadata } from "../skills/registry.js";
 import { parseSlashCommand, type McpSlashCommand, type ModelRole, type SlashCommand } from "./commands.js";
 import type { QuestionBridge } from "../tools/ask-user-question.js";
 import { message } from "../utils/error.js";
+import type { MemoryType } from "../memory/types.js";
 
 export type SessionOutput = AgentEvent
   | { type: "notice"; message: string }
@@ -36,6 +37,9 @@ export interface SessionServices {
   audit(toolFilter?: string): string | Promise<string>;
   cancelActiveTask(): void | Promise<void>;
   clearContext(): void | Promise<void>;
+  memory(): Promise<string>;
+  remember(type: MemoryType, text: string): Promise<string>;
+  forget(query: string): Promise<string>;
   pluginCommands(): readonly string[];
   runPluginCommand(name: string, args: readonly string[], signal: AbortSignal): Promise<unknown>;
   output(event: SessionOutput): void;
@@ -48,6 +52,7 @@ const HELP = [
   "/permissions <default|acceptEdits|plan|bypassPermissions|auto|bubble>",
   "/login                                  authenticate via OAuth PKCE",
   "/init  /config  /skills  /plugins  /hooks  /tasks",
+  "/memory  /remember [type] <text>  /forget <text-or-id>",
   "/compact  /clear  /help  /exit",
   "/loop <goal>                            run a verified autonomous loop",
   "/goal <objective>                       run a goal pipeline with adversarial verification",
@@ -178,6 +183,12 @@ export class FlavorSession {
       for await (const event of this.#services.runGoal(command.goal, signal)) this.#services.output(event);
     } else if (command.name === "mcp") {
       this.#notice(await this.#services.mcp(command, signal));
+    } else if (command.name === "memory") {
+      this.#notice(await this.#services.memory());
+    } else if (command.name === "remember") {
+      this.#notice(await this.#services.remember(command.type, command.text));
+    } else if (command.name === "forget") {
+      this.#notice(await this.#services.forget(command.query));
     } else if (command.name === "compact") {
       this.#notice(await this.#services.compact(signal) ? "Context compacted." : "Context does not need compaction.");
     } else if (command.name === "init") {
