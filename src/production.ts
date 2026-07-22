@@ -63,6 +63,7 @@ import { redactSecrets } from "./utils/redact.js";
 import { HallucinationGuard } from "./hallucination/guard.js";
 import { AuditLogger } from "./utils/log.js";
 import { MemoryCoordinator } from "./memory/coordinator.js";
+import { isExplicitMemoryIntent } from "./memory/intent.js";
 import { MemoryStore, renderMemoryDocument } from "./memory/store.js";
 import { MemoryReviewBridge } from "./memory/review.js";
 
@@ -553,9 +554,18 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     if (taskPlan !== undefined || taskGraph !== undefined) emitOutput({ type: "tasks", snapshot: taskSnapshot() });
     return { decision: "allow" };
   });
-  const memoryCoordinator = memoryStore !== undefined && config.memory.autoExtract && options.approvalPolicy !== "deny"
+  const memoryCoordinator = memoryStore !== undefined
     ? new MemoryCoordinator({
       review: (taskId, candidates) => { memoryReviews.offer(taskId, candidates); },
+      remember: async (taskId, candidates) => {
+        let stored = 0;
+        for (const candidate of candidates) {
+          const result = await memoryStore.rememberForTask(taskId, candidate);
+          if (result.added) stored += 1;
+        }
+        if (stored > 0) memoryHasEntries = true;
+        return stored;
+      },
       minChars: config.memory.autoExtractMinChars,
       maxEntryChars: config.memory.maxEntryChars,
       scoreThreshold: config.memory.scoreThreshold,
@@ -566,6 +576,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   if (memoryCoordinator !== undefined) {
     memoryCoordinator.onError = (error) => diagnostics.push(`Long-term memory extraction failed: ${message(error)}`);
   }
+  let explicitMemoryRequest: { taskId: string; messageStart: number } | undefined;
   hooks.on("UserPromptSubmit", (event) => {
     const prompt = String(event.payload.prompt);
     timelineState = transcriptReducer(timelineState, { type: "submit", prompt });
@@ -575,10 +586,32 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         messageStart: harness.main.context.snapshot().messages.length,
       };
     }
+    if (isExplicitMemoryIntent(prompt)) {
+      explicitMemoryRequest = {
+        taskId: memoryLifecycle.taskId ?? sessionId,
+        messageStart: harness.main.context.snapshot().messages.length,
+      };
+    }
     return { decision: "allow" };
   });
   hooks.on("Stop", async (_event) => {
     timelineState = transcriptReducer(timelineState, { type: "finish" });
+    const explicit = explicitMemoryRequest;
+    explicitMemoryRequest = undefined;
+    if (explicit !== undefined && memoryCoordinator !== undefined) {
+      const result = await memoryCoordinator.rememberExplicit(
+        explicit.taskId, harness.main.context.snapshot().messages.slice(explicit.messageStart),
+      );
+      if (!result.evaluated) {
+        emitOutput({ type: "notice", message: "Explicit long-term-memory request could not be analyzed; nothing was stored." });
+      } else if (result.stored > 0) {
+        emitOutput({ type: "notice", message: `Stored ${result.stored} explicit long-term-memory ${result.stored === 1 ? "entry" : "entries"}.` });
+      } else if (result.candidates) {
+        emitOutput({ type: "notice", message: "The explicit memory already exists or the memory limit was reached." });
+      } else {
+        emitOutput({ type: "notice", message: "The explicit request did not contain durable information that passed the memory safety threshold." });
+      }
+    }
     await persist();
     return { decision: "allow" };
   });
@@ -925,7 +958,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       if (memoryLifecycle.status === "completed" && memoryLifecycle.transcriptHash === transcriptHash) {
         return "Task was already completed and evaluated for long-term memory.";
       }
-      const finalization = memoryCoordinator === undefined
+      const finalization = memoryCoordinator === undefined || !config.memory.autoExtract || options.approvalPolicy === "deny"
         ? { evaluated: true, candidates: false }
         : await memoryCoordinator.finalize(memoryLifecycle.taskId ?? sessionId, messages);
       if (!finalization.evaluated) {

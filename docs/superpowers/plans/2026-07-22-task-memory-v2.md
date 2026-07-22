@@ -34,3 +34,8 @@
 - Update README and the technical design report with plain-language flows and Mermaid diagrams.
 - Bump package metadata to 1.0.1.
 - Run focused tests, full tests, typecheck, complete build and diff checks.
+
+## Task 7: Explicit natural-language remember intent
+
+- Detect affirmative remember phrases locally while rejecting negation, recall questions and `/remember`.
+- Let the cheap model extract only the explicitly requested durable fact, then write directly through the same safety, deduplication and V2 storage layers.

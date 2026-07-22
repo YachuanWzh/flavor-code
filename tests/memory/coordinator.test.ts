@@ -13,8 +13,9 @@ async function fixture(generate: (prompt: string, signal: AbortSignal) => Promis
   const workspace = await mkdtemp(join(tmpdir(), "flavor-memory-coordinator-")); roots.push(workspace);
   const store = new MemoryStore({ workspace, maxEntries: 20, maxEntryChars: 200 });
   const review = vi.fn();
-  return { store, review, coordinator: new MemoryCoordinator({
-    review, generate, minChars, maxEntryChars: 200, scoreThreshold: 9, maxCandidates: 3,
+  const remember = vi.fn(async () => 1);
+  return { store, review, remember, coordinator: new MemoryCoordinator({
+    review, remember, generate, minChars, maxEntryChars: 200, scoreThreshold: 9, maxCandidates: 3,
   }) };
 }
 
@@ -60,5 +61,24 @@ describe("MemoryCoordinator", () => {
     expect(failures).toEqual(["provider offline"]);
     expect(review).toHaveBeenCalledWith("later-task", [expect.objectContaining({ type: "feedback", content: "Do not commit automatically." })]);
     expect(await store.list()).toEqual([]);
+  });
+
+  it("analyzes a short explicit request and writes it without entering the review queue", async () => {
+    const generate = vi.fn(async (_prompt: string, _signal: AbortSignal) => JSON.stringify({ memories: [{
+      type: "user", summary: "Prefer concise answers", content: "The user prefers concise answers.",
+      topicKey: "user.response-style", keywords: ["concise"],
+      scores: { durability: 3, futureUtility: 3, authority: 3, nonDerivability: 2 },
+    }] }));
+    const { coordinator, remember, review } = await fixture(generate);
+
+    await expect(coordinator.rememberExplicit("task-explicit", [
+      { role: "user", content: "请记住我喜欢简洁回答。" },
+      { role: "assistant", content: "好的。" },
+    ])).resolves.toEqual({ evaluated: true, candidates: true, stored: 1 });
+
+    expect(generate).toHaveBeenCalledOnce();
+    expect(generate.mock.calls[0]![0]).toContain("explicitly asked");
+    expect(remember).toHaveBeenCalledWith("task-explicit", [expect.objectContaining({ type: "user" })]);
+    expect(review).not.toHaveBeenCalled();
   });
 });

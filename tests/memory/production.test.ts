@@ -42,6 +42,26 @@ async function workspace(memory: Record<string, unknown>): Promise<string> {
 }
 
 describe("production long-term memory", () => {
+  it("directly analyzes and stores an explicit remember request without waiting for task finish", async () => {
+    const root = await workspace({ autoExtract: false });
+    const notices: string[] = [];
+    const runtime = await createProductionRuntime({
+      workspace: root, home: root, environment: {}, approvalPolicy: "deny",
+      output: (event) => { if (event.type === "notice") notices.push(event.message); },
+    });
+
+    await runtime.session.submit("请帮我记住：仓库脚本统一使用 pnpm。");
+
+    const store = new MemoryStore({ workspace: root, maxEntries: 200, maxEntryChars: 1000 });
+    expect(await store.list()).toMatchObject([{ type: "project", content: "Use pnpm for repository scripts" }]);
+    expect(runtime.memoryReviews.pending).toEqual([]);
+    expect(notices).toContain("Stored 1 explicit long-term-memory entry.");
+    const requests = (globalThis as { __flavorMemoryRequests?: Array<Array<{ content: string }>> })
+      .__flavorMemoryRequests ?? [];
+    expect(requests.some((messages) => messages.some((message) => message.content.includes("explicitly asked")))).toBe(true);
+    await runtime.dispose();
+  });
+
   it("injects pre-existing memory into a fresh independent session", async () => {
     const root = await workspace({ autoExtract: false });
     const store = new MemoryStore({ workspace: root, maxEntries: 200, maxEntryChars: 1000 });

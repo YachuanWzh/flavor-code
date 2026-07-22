@@ -4,6 +4,7 @@ import type { ScoredMemoryCandidate } from "./types.js";
 
 export interface MemoryCoordinatorOptions {
   review(taskId: string, candidates: readonly ScoredMemoryCandidate[]): void | Promise<void>;
+  remember(taskId: string, candidates: readonly ScoredMemoryCandidate[]): number | Promise<number>;
   generate(prompt: string, signal: AbortSignal): Promise<string>;
   minChars: number;
   maxEntryChars: number;
@@ -16,6 +17,10 @@ const MAX_TASK_PROMPT_CHARS = 20_000;
 export interface MemoryFinalizationResult {
   evaluated: boolean;
   candidates: boolean;
+}
+
+export interface ExplicitMemoryResult extends MemoryFinalizationResult {
+  stored: number;
 }
 
 export class MemoryCoordinator {
@@ -32,21 +37,36 @@ export class MemoryCoordinator {
   }
 
   async finalize(taskId: string, messages: readonly ModelMessage[]): Promise<MemoryFinalizationResult> {
+    const result = await this.#evaluate(taskId, messages, false);
+    return { evaluated: result.evaluated, candidates: result.candidates };
+  }
+
+  async rememberExplicit(taskId: string, messages: readonly ModelMessage[]): Promise<ExplicitMemoryResult> {
+    return this.#evaluate(taskId, messages, true);
+  }
+
+  async #evaluate(taskId: string, messages: readonly ModelMessage[], explicit: boolean): Promise<ExplicitMemoryResult> {
     const visible = visibleMessages(messages);
     const visibleChars = visible.reduce((total, message) => total + [...message.content.trim()].length, 0);
-    if (visibleChars < this.#options.minChars || visibleChars === 0) return { evaluated: true, candidates: false };
+    if (visibleChars === 0 || (!explicit && visibleChars < this.#options.minChars)) {
+      return { evaluated: true, candidates: false, stored: 0 };
+    }
     let evaluated = true;
     let accepted = false;
+    let stored = 0;
     const operation = this.#tail.then(async () => {
       this.#controller.signal.throwIfAborted();
-      const raw = await this.#options.generate(buildMemoryExtractionPrompt(boundTaskMessages(visible)), this.#controller.signal);
+      const raw = await this.#options.generate(buildMemoryExtractionPrompt(
+        boundTaskMessages(visible), explicit ? { explicitIntent: true } : {},
+      ), this.#controller.signal);
       const candidates = parseScoredMemoryCandidates(raw, {
         maxEntryChars: this.#options.maxEntryChars,
         scoreThreshold: this.#options.scoreThreshold,
         maxCandidates: this.#options.maxCandidates,
       });
       if (candidates.length > 0) {
-        await this.#options.review(taskId, candidates);
+        if (explicit) stored = await this.#options.remember(taskId, candidates);
+        else await this.#options.review(taskId, candidates);
         accepted = true;
       }
     }).catch((error) => {
@@ -55,7 +75,7 @@ export class MemoryCoordinator {
     });
     this.#tail = operation;
     await operation;
-    return { evaluated, candidates: accepted };
+    return { evaluated, candidates: accepted, stored };
   }
 
   /** @deprecated Automatic per-turn extraction is intentionally disabled in V2. */
