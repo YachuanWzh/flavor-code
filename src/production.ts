@@ -44,6 +44,7 @@ import type { PluginCommandHandler } from "./plugins/types.js";
 import { SkillRegistry } from "./skills/registry.js";
 import { createSkillResourceTool } from "./skills/tool.js";
 import { SESSION_VERSION, SessionStore, type SessionDocument } from "./session/store.js";
+import { ProjectSleepOrganizer, ProjectSleepScheduler } from "./sleep/organizer.js";
 import { createApplyPatchTool, createEditTool, createReadTool, createWriteTool } from "./tools/files.js";
 import { createGlobTool, createGrepTool } from "./tools/search.js";
 import { createShellTool } from "./tools/shell.js";
@@ -286,6 +287,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   await pluginHost.loadAll();
   let harness!: LocalHarness;
   let harnessCreated = false;
+  let sleepScheduler: ProjectSleepScheduler | undefined;
   try {
   mcpManager = await connectMcpServers({
     servers: config.mcpServers,
@@ -1047,6 +1049,19 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       }
     },
   };
+  if (config.sleep) {
+    const sleepOrganizer = new ProjectSleepOrganizer({
+      workspace,
+      sessions: sessionStore,
+      generate: (prompt, signal) => generateSleepReview(registry, childModel, prompt, signal),
+    });
+    sleepScheduler = new ProjectSleepScheduler({
+      enabled: true,
+      organize: (date, signal) => sleepOrganizer.organize(date, signal),
+      onError: (error) => diagnostics.push(`Sleep review failed: ${message(error)}`),
+    });
+    sleepScheduler.start();
+  }
   const session = new FlavorSession(services);
   let disposed = false;
   return {
@@ -1056,6 +1071,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     async dispose() {
       if (disposed) return;
       disposed = true;
+      await sleepScheduler?.dispose();
       await memoryCoordinator?.flush();
       await persist();
       await persistTail;
@@ -1066,7 +1082,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   };
   } catch (primaryError) {
     memoryReviews.dispose();
-    try { await cleanupProduction(approvals, questions, pluginHost, mcpManager, harnessCreated ? harness : undefined); }
+    try {
+      await sleepScheduler?.dispose();
+      await cleanupProduction(approvals, questions, pluginHost, mcpManager, harnessCreated ? harness : undefined);
+    }
     catch (cleanupError) { attachCleanupError(primaryError, cleanupError); }
     throw primaryError;
   }
@@ -1542,6 +1561,30 @@ async function generateMemoryExtraction(
     }
   }
   if (output.trim().length === 0) throw new Error("Memory extractor returned no text");
+  return output;
+}
+
+async function generateSleepReview(
+  registry: ModelRegistry,
+  modelId: string,
+  prompt: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const { adapter, model } = registry.get(modelId);
+  let output = "";
+  for await (const event of adapter.stream({
+    model,
+    messages: [{ role: "user", content: prompt }],
+    tools: [],
+    signal,
+  })) {
+    if (event.type === "text") output += event.text;
+    else if (event.type === "error") throw new Error(event.error.message);
+    else if (event.type === "tool-call" || event.type === "invalid-tool-call") {
+      throw new Error("Sleep reviewer attempted an unsupported tool call");
+    }
+  }
+  if (output.trim().length === 0) throw new Error("Sleep reviewer returned no text");
   return output;
 }
 

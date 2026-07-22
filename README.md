@@ -118,6 +118,7 @@ OPENAI_API_KEY=sk-你的密钥
   "maxSubagents": 3,
   "permissionMode": "default",
   "language": "zh-CN",
+  "sleep": true,
   "maxIterations": {
     "main": 80,
     "subagent": 40,
@@ -131,6 +132,11 @@ OPENAI_API_KEY=sk-你的密钥
   }
 }
 ```
+
+`sleep` 默认是 `false`。项目配置为 `true` 且 Flavor 进程跨过本地零点时，
+Flavor 会调用 subagent/cheap 模型整理刚结束的前一天会话，并将一份
+`日期-摘要.md` 报告写入项目的 `.flavor/sleep/`。前一天没有 session 时不会
+调用模型或生成报告；不同项目的 Flavor 进程各自独立整理自己的 workspace。
 
 - 主 Agent 用大模型，子 Agent 用小模型，兼顾质量和成本
 - `${OPENAI_API_KEY}` 自动从环境变量或 `.env` 取值
@@ -572,6 +578,48 @@ flavor memory path
 
 ---
 
+## 睡眠整理
+
+当 Flavor 进程持续运行跨过本地零点时，如果项目配置了 `"sleep": true`，它会自动调用 cheap 模型回顾前一天的项目会话，并生成一份结构化的 Markdown 回顾报告。
+
+### 配置
+
+在 `.flavor/flavor.json` 中设置：
+
+```json
+{
+  "sleep": true
+}
+```
+
+默认值为 `false`。设为 `true` 后，进程启动即调度零点回调；如果目标日期没有任何 session，不会调用模型或写文件。不同项目的 Flavor 进程各自独立整理自己的 workspace。
+
+### 报告内容
+
+每份报告包含 6 个章节，生成到 `.flavor/sleep/YYYY-MM-DD-摘要.md`：
+
+| 章节 | 说明 |
+|------|------|
+| 当天任务摘要 | 当天完成的主要工作 |
+| 执行情况反思 | 工作方式的回顾和反思 |
+| 关键决策与收获 | 重要的技术决策和经验 |
+| 未决事项与风险 | 尚待解决的问题和潜在风险 |
+| 明日可能规划 | 下一步的工作方向建议 |
+| 涉及会话 | 被审查的所有 session ID 列表 |
+
+报告由宿主渲染 Markdown，模型只负责生成结构化 JSON。文件名中的不安全字符会被规范化，长度最多 60 个中文字符。
+
+### 并发安全
+
+- 同一日期使用排他锁（`.lock` 文件），防止并发进程重复整理
+- 报告通过临时文件 + `fsync` + `rename` 原子写入，不会出现半写文件
+- 获取锁后会再次检查报告是否已存在，消除 TOCTOU 竞态
+- 整理失败（模型错误、解析失败等）不会留下损坏的报告或永久锁文件，下一个零点的定时器保持调度
+
+报告写入 `.flavor/sleep/` 目录，可随时手动查看或删除。
+
+---
+
 ## 内置命令
 
 交互模式下，以 `/` 开头触发命令：
@@ -713,6 +761,8 @@ Flavor 相关的文件都放在 `.flavor/` 目录下：
 │   └── session-xxx.jsonl
 ├── memory/            # 跨会话长期记忆
 │   └── MEMORY.md
+├── sleep/             # 睡眠整理每日报告
+│   └── YYYY-MM-DD-摘要.md
 ├── audit.jsonl        # 工具失败审计日志
 ├── skills/            # 项目 Skill
 └── plugins/           # 项目插件

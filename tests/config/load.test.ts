@@ -11,6 +11,12 @@ afterEach(() => {
   delete process.env.CUSTOM_API_KEY;
 });
 
+it("keeps project sleep review opt-in", () => {
+  expect(FlavorConfigSchema.parse({}).sleep).toBe(false);
+  expect(FlavorConfigSchema.parse({ sleep: true }).sleep).toBe(true);
+  expect(() => FlavorConfigSchema.parse({ sleep: "yes" })).toThrow();
+});
+
 it("uses bounded long-term-memory defaults and validates overrides", () => {
   expect(FlavorConfigSchema.parse({}).memory).toEqual({
     enabled: true,

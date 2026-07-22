@@ -71,6 +71,7 @@ export const SkillNameSchema = z.string()
   .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "Skill names must use lowercase letters, digits, and single hyphens");
 
 export const FlavorConfigSchema = z.object({
+  sleep: z.boolean().default(false),
   providers: z.record(z.string(), ProviderConfigSchema).default({}),
   mcpServers: z.record(McpServerNameSchema, McpServerConfigSchema).default({}),
   skills: z.object({
