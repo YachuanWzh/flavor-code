@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parse } from "dotenv";
-import { FlavorConfigSchema, type FlavorConfig } from "./schema.js";
+import { FlavorConfigSchema, ProviderConfigSchema, type FlavorConfig, type ProviderConfig } from "./schema.js";
 import { readRecoverableFile, updateProtectedFile } from "./protected-file.js";
 import {
   decryptSecretFields,
@@ -269,6 +269,91 @@ export async function setProjectSkillDisabled(
       else names.delete(skillName);
       skills["disabled"] = [...names].sort();
       projectConfig["skills"] = skills;
+      return projectConfig;
+    },
+  });
+  return path;
+}
+
+export async function setGlobalProviderConfig(
+  home: string,
+  providerName: string,
+  provider: ProviderConfig,
+): Promise<string> {
+  const directory = join(home, ".flavor-code");
+  const path = join(directory, "flavor.json");
+  const key = await loadOrCreateConfigKey(directory);
+  const validatedProvider = ProviderConfigSchema.parse(provider);
+  await updateProtectedFile<ConfigObject>({
+    path,
+    decode: (raw) => decryptSecretFields(parseConfigObject(path, raw), key) as ConfigObject,
+    encode: (value) => `${JSON.stringify(encryptSecretFields(value, key), null, 2)}\n`,
+    update: (current) => {
+      const globalConfig = { ...(current ?? {}) };
+      const currentProviders = globalConfig["providers"];
+      if (currentProviders !== undefined && !isPlainObject(currentProviders)) {
+        throw new Error(`Configuration field providers in ${path} must be an object`);
+      }
+      const providers: ConfigObject = { ...(currentProviders ?? {}) };
+      const existing = providers[providerName];
+      if (existing !== undefined && !isPlainObject(existing)) {
+        throw new Error(`Provider ${providerName} in ${path} must be an object`);
+      }
+      const existingModels = isPlainObject(existing) && Array.isArray(existing["models"])
+        ? existing["models"].filter((model): model is string => typeof model === "string")
+        : [];
+      providers[providerName] = {
+        ...(existing ?? {}),
+        ...validatedProvider,
+        ...(validatedProvider.models === undefined
+          ? {}
+          : { models: [...new Set([...existingModels, ...validatedProvider.models])] }),
+      };
+      globalConfig["providers"] = providers;
+      return globalConfig;
+    },
+  });
+  return path;
+}
+
+export async function setProjectProviderConfig(
+  cwd: string,
+  providerName: string,
+  provider: ProviderConfig,
+): Promise<string> {
+  const directory = join(cwd, ".flavor");
+  const path = join(directory, "flavor.json");
+  const validatedProvider = ProviderConfigSchema.parse(provider);
+  const projectProvider: ProviderConfig = { ...validatedProvider };
+  delete projectProvider.apiKey;
+  await updateProtectedFile<ConfigObject>({
+    path,
+    decode: (raw) => parseConfigObject(path, raw),
+    encode: (value) => `${JSON.stringify(value, null, 2)}\n`,
+    update: (current) => {
+      const projectConfig = { ...(current ?? {}) };
+      const currentProviders = projectConfig["providers"];
+      if (currentProviders !== undefined && !isPlainObject(currentProviders)) {
+        throw new Error(`Configuration field providers in ${path} must be an object`);
+      }
+      const providers: ConfigObject = { ...(currentProviders ?? {}) };
+      const existing = providers[providerName];
+      if (existing !== undefined && !isPlainObject(existing)) {
+        throw new Error(`Provider ${providerName} in ${path} must be an object`);
+      }
+      const existingModels = isPlainObject(existing) && Array.isArray(existing["models"])
+        ? existing["models"].filter((model): model is string => typeof model === "string")
+        : [];
+      const nextProvider: ConfigObject = {
+        ...(existing ?? {}),
+        ...projectProvider,
+        ...(projectProvider.models === undefined
+          ? {}
+          : { models: [...new Set([...existingModels, ...projectProvider.models])] }),
+      };
+      delete nextProvider["apiKey"];
+      providers[providerName] = nextProvider;
+      projectConfig["providers"] = providers;
       return projectConfig;
     },
   });

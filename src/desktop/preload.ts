@@ -22,6 +22,8 @@ const api: FlavorDesktopApi = {
   updateSkill: (originalName, draft) => ipcRenderer.invoke(DESKTOP_CHANNELS.updateSkill, { originalName, draft }),
   deleteSkill: (name) => ipcRenderer.invoke(DESKTOP_CHANNELS.deleteSkill, { name }),
   setSkillEnabled: (name, enabled) => ipcRenderer.invoke(DESKTOP_CHANNELS.setSkillEnabled, { name, enabled }),
+  switchModel: (modelId) => ipcRenderer.invoke(DESKTOP_CHANNELS.switchModel, { modelId }),
+  addModel: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.addModel, input),
   onEvent(listener) {
     const handler = (_event: Electron.IpcRendererEvent, value: DesktopEvent) => listener(value);
     ipcRenderer.on(DESKTOP_CHANNELS.event, handler);

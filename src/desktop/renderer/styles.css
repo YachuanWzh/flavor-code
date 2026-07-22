@@ -256,10 +256,40 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .model-menu > summary::-webkit-details-marker { display: none; }
 .popover { position: absolute; right: 0; bottom: 36px; width: 290px; padding: 13px; border: 1px solid #dfe5eb; border-radius: 12px; background: #fff; box-shadow: var(--shadow); }
 .popover label { display: block; margin-bottom: 7px; color: #63717d; font-size: 11px; font-weight: 600; }
-.model-input { display: flex; gap: 6px; }
-.model-input input { min-width: 0; flex: 1; padding: 7px 8px; border: 1px solid #dce3e9; border-radius: 7px; font: 11px "Cascadia Code", Consolas, monospace; }
-.model-input button { padding: 0 10px; border-radius: 7px; background: #25313c; color: #fff; cursor: pointer; font-size: 11px; }
 .popover p { margin: 7px 0 0; color: #98a2ac; font-size: 10px; }
+.model-popover { width: 370px; padding: 8px; }
+.model-popover-heading { display: flex; align-items: center; justify-content: space-between; padding: 4px 5px 9px; gap: 12px; }
+.model-popover-heading > div { display: grid; min-width: 0; gap: 2px; }
+.model-popover-heading strong { color: #2b3742; font-size: 12px; }
+.model-popover-heading span { overflow: hidden; color: #98a2ac; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.model-popover-heading > button { flex: 0 0 auto; padding: 5px 8px; border: 1px solid #d6e2e9; border-radius: 7px; background: #f7fafb; color: #477083; cursor: pointer; font-size: 10px; }
+.model-popover-heading > button:hover:not(:disabled) { border-color: #bcd5e0; background: #eef7fa; }
+.model-popover-heading > button:disabled { opacity: .45; cursor: default; }
+.model-options { display: grid; max-height: 260px; overflow-y: auto; gap: 4px; }
+.model-option { display: flex; align-items: center; width: 100%; padding: 9px 10px; border: 1px solid transparent; border-radius: 9px; background: transparent; color: #34414c; cursor: pointer; text-align: left; }
+.model-option:hover:not(:disabled), .model-option:focus-visible { border-color: #dce6ed; background: #f4f8fa; outline: none; }
+.model-option[aria-selected="true"] { border-color: #c9e2ef; background: #edf7fb; color: #176783; cursor: default; }
+.model-option-copy { display: grid; min-width: 0; gap: 2px; }
+.model-option-copy strong { font: 600 11px "Cascadia Code", Consolas, monospace; }
+.model-option-copy small { color: #89949d; font-size: 9px; }
+.model-option-badge { margin-left: auto; padding: 2px 5px; border-radius: 999px; background: #edf2f5; color: #778691; font-size: 8px; }
+.model-option-state { margin-left: auto; color: #7f9dac; font-size: 12px; }
+.model-option-badge + .model-option-state { margin-left: 8px; }
+.model-option[aria-selected="true"] .model-option-state { color: #2486aa; }
+.model-provider-form { display: grid; padding: 2px 5px 4px; gap: 9px; }
+.model-provider-form label { display: grid; margin: 0; gap: 4px; }
+.model-provider-form label > span { color: #62717d; font-size: 9px; font-weight: 650; }
+.model-provider-form input, .model-provider-form select { box-sizing: border-box; width: 100%; height: 32px; padding: 0 9px; border: 1px solid #dce4ea; border-radius: 7px; background: #fff; color: #33414c; font: 10px "Cascadia Code", Consolas, monospace; }
+.model-provider-form input:focus, .model-provider-form select:focus { border-color: #73b7d0; outline: 2px solid #dff1f7; outline-offset: 0; }
+.model-provider-form input::placeholder { color: #a5aeb6; }
+.model-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.model-provider-form .model-security-note { display: flex; align-items: center; margin: 1px 0; padding: 7px 8px; border-radius: 7px; background: #f0f7fa; color: #68808c; font-size: 9px; line-height: 1.4; }
+.model-security-note span { margin-right: 5px; color: #52a1bf; }
+.model-provider-form .model-form-error { margin: 0; color: #b64747; font-size: 9px; }
+.model-form-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.model-form-actions button { padding: 6px 10px; border: 1px solid #d8e0e6; border-radius: 7px; background: #fff; color: #63717c; cursor: pointer; font-size: 10px; }
+.model-form-actions button.primary { border-color: #263640; background: #263640; color: #fff; }
+.model-form-actions button:disabled { opacity: .45; cursor: default; }
 .send-button { display: grid; place-items: center; width: 31px; height: 31px; border-radius: 50%; background: #222c36; color: #fff; cursor: pointer; font-size: 18px; }
 .send-button:disabled { background: #d9dee3; cursor: default; }
 .stop-button span { width: 9px; height: 9px; border-radius: 2px; background: #fff; }

@@ -7,6 +7,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell } from "e
 
 import {
   AnswerQuestionsInputSchema,
+  AddDesktopModelInputSchema,
   AppMenuInputSchema,
   DeleteSessionInputSchema,
   DESKTOP_CHANNELS,
@@ -17,6 +18,7 @@ import {
   SkillNameInputSchema,
   UpdateSkillInputSchema,
   SetSkillEnabledInputSchema,
+  SwitchDesktopModelInputSchema,
   SubmitInputSchema,
   type DesktopEvent,
 } from "./contracts.js";
@@ -148,6 +150,12 @@ function installIpcHandlers(): void {
   ipcMain.handle(DESKTOP_CHANNELS.setSkillEnabled, async (_event, value) => {
     const input = SetSkillEnabledInputSchema.parse(value);
     await controller.setSkillEnabled(input.name, input.enabled);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.switchModel, async (_event, value) => {
+    return controller.switchModel(SwitchDesktopModelInputSchema.parse(value).modelId);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.addModel, async (_event, value) => {
+    return controller.addModel(AddDesktopModelInputSchema.parse(value));
   });
 }
 

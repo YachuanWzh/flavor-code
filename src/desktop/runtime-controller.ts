@@ -11,7 +11,8 @@ import { message } from "../utils/error.js";
 import type { ApprovalDecision } from "../tools/runtime.js";
 import { createGlobTool, type SearchResult } from "../tools/search.js";
 import { SkillManager, type ManagedSkill, type ManagedSkillSummary, type SkillDraft } from "../skills/manager.js";
-import type { DesktopEvent, DesktopSessionSummary, DesktopSnapshot, SessionStartedPayload } from "./contracts.js";
+import { DEFAULT_DESKTOP_MODELS, loadDesktopModels, saveDesktopModel } from "./model-config.js";
+import type { AddDesktopModelInput, DesktopEvent, DesktopModelOption, DesktopModelMutationResult, DesktopSessionSummary, DesktopSnapshot, SessionStartedPayload } from "./contracts.js";
 
 export interface RuntimeLike {
   readonly sessionId: string;
@@ -28,6 +29,7 @@ export interface RuntimeLike {
     mainModel(): string;
     subagentModel(): string;
     permissionMode(): PermissionMode;
+    setModel(role: "main" | "subagent", modelId: string): void | Promise<void>;
     reloadSkills?(): Promise<void>;
     questions: { readonly pending: readonly Question[] | undefined; answer(answers: Record<number, string>): void };
   };
@@ -46,6 +48,8 @@ export interface DesktopRuntimeControllerOptions {
   createRuntime?(options: RuntimeFactoryOptions): Promise<RuntimeLike>;
   listSessions?(workspace: string): Promise<readonly DesktopSessionSummary[]>;
   deleteSession?(workspace: string, sessionId: string): Promise<void>;
+  loadModels?(workspace: string, home: string): Promise<DesktopModelOption[]>;
+  saveModel?(workspace: string, home: string, input: AddDesktopModelInput): Promise<DesktopModelOption>;
   emit(event: DesktopEvent): void;
 }
 
@@ -54,11 +58,14 @@ export class DesktopRuntimeController {
   readonly #createRuntime: NonNullable<DesktopRuntimeControllerOptions["createRuntime"]>;
   readonly #listSessions: NonNullable<DesktopRuntimeControllerOptions["listSessions"]>;
   readonly #deleteStoredSession: NonNullable<DesktopRuntimeControllerOptions["deleteSession"]>;
+  readonly #loadModels: NonNullable<DesktopRuntimeControllerOptions["loadModels"]>;
+  readonly #saveModel: NonNullable<DesktopRuntimeControllerOptions["saveModel"]>;
   readonly #emit: (event: DesktopEvent) => void;
   #workspace: string | undefined;
   #sessions: readonly DesktopSessionSummary[] = [];
   #runtime: RuntimeLike | undefined;
   #skillManager: SkillManager | undefined;
+  #models: readonly DesktopModelOption[] = DEFAULT_DESKTOP_MODELS;
   #busy = false;
 
   constructor(options: DesktopRuntimeControllerOptions) {
@@ -78,6 +85,8 @@ export class DesktopRuntimeController {
     this.#deleteStoredSession = options.deleteSession ?? (async (workspace, sessionId) => {
       await new SessionStore({ workspace }).delete(sessionId);
     });
+    this.#loadModels = options.loadModels ?? loadDesktopModels;
+    this.#saveModel = options.saveModel ?? saveDesktopModel;
     this.#emit = options.emit;
   }
 
@@ -98,6 +107,7 @@ export class DesktopRuntimeController {
         ...(runtime.services.questions.pending === undefined ? {} : { questions: runtime.services.questions.pending }),
       }),
       diagnostics: runtime?.diagnostics ?? [],
+      models: this.#models,
     };
   }
 
@@ -106,6 +116,7 @@ export class DesktopRuntimeController {
     if (workspace !== this.#workspace) await this.#disposeRuntime();
     this.#workspace = workspace;
     this.#skillManager = new SkillManager({ workspace, home: this.#home });
+    this.#models = await this.#loadModels(workspace, this.#home);
     this.#sessions = await this.#listSessions(workspace);
     return this.#publishSnapshot();
   }
@@ -208,6 +219,28 @@ export class DesktopRuntimeController {
   async setSkillEnabled(name: string, enabled: boolean): Promise<void> {
     await this.#requireSkillManager().setEnabled(name, enabled);
     await this.#runtime?.services.reloadSkills?.();
+  }
+
+  async switchModel(modelId: string): Promise<DesktopSnapshot> {
+    if (this.#busy) throw new Error("Stop the active task before switching models");
+    if (!this.#models.some((model) => model.id === modelId)) {
+      throw new Error(`Model is not configured for Electron: ${modelId}`);
+    }
+    if (this.#runtime === undefined) await this.startSession();
+    await this.#runtime!.services.setModel("main", modelId);
+    return this.#publishSnapshot();
+  }
+
+  async addModel(input: AddDesktopModelInput): Promise<DesktopModelMutationResult> {
+    const workspace = this.#workspace;
+    if (workspace === undefined) throw new Error("Open a project before adding a model");
+    if (this.#busy) throw new Error("Stop the active task before adding a model");
+    const model = await this.#saveModel(workspace, this.#home, input);
+    await this.#disposeRuntime();
+    this.#models = await this.#loadModels(workspace, this.#home);
+    if (!this.#models.some((item) => item.id === model.id)) this.#models = [...this.#models, model];
+    const snapshot = await this.switchModel(model.id);
+    return { model, snapshot };
   }
 
   async interrupt(): Promise<void> {

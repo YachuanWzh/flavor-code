@@ -38,6 +38,39 @@ export const UpdateSkillInputSchema = z.object({
   draft: SkillDraftInputSchema,
 }).strict();
 export const SetSkillEnabledInputSchema = z.object({ name: SkillNameInput, enabled: z.boolean() }).strict();
+const ProviderNameInput = z.string().trim().min(1).max(64)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/, "厂商名称只能包含字母、数字、下划线和连字符");
+const ModelNameInput = z.string().trim().min(1).max(256)
+  .regex(/^\S+$/, "模型名称不能包含空格");
+const HttpUrlInput = z.string().trim().url().max(2_048).refine((value) => {
+  const protocol = new URL(value).protocol;
+  return protocol === "http:" || protocol === "https:";
+}, "Base URL 必须使用 http 或 https");
+
+export const AddDesktopModelInputSchema = z.object({
+  provider: ProviderNameInput,
+  model: ModelNameInput,
+  baseURL: HttpUrlInput,
+  apiKey: z.string().min(1).max(16_384),
+  protocol: z.enum(["openai-compatible", "anthropic"]),
+}).strict();
+export const SwitchDesktopModelInputSchema = z.object({
+  modelId: z.string().trim().min(3).max(1_024).refine((value) => {
+    const separator = value.indexOf(":");
+    return separator > 0 && separator < value.length - 1;
+  }, "模型 ID 必须使用 provider:model 格式"),
+}).strict();
+
+export type AddDesktopModelInput = z.infer<typeof AddDesktopModelInputSchema>;
+
+export interface DesktopModelOption {
+  id: string;
+  provider: string;
+  model: string;
+  label: string;
+  description: string;
+  source: "built-in" | "custom";
+}
 
 export interface DesktopSessionSummary {
   sessionId: string;
@@ -70,6 +103,12 @@ export interface DesktopSnapshot {
   approval?: DesktopApproval;
   questions?: readonly Question[];
   diagnostics: readonly string[];
+  models: readonly DesktopModelOption[];
+}
+
+export interface DesktopModelMutationResult {
+  model: DesktopModelOption;
+  snapshot: DesktopSnapshot;
 }
 
 export interface SessionStartedPayload {
@@ -102,6 +141,8 @@ export interface FlavorDesktopApi {
   updateSkill(originalName: string, draft: SkillDraft): Promise<ManagedSkill>;
   deleteSkill(name: string): Promise<void>;
   setSkillEnabled(name: string, enabled: boolean): Promise<void>;
+  switchModel(modelId: string): Promise<DesktopSnapshot>;
+  addModel(input: AddDesktopModelInput): Promise<DesktopModelMutationResult>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
 }
 

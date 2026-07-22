@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { ApiKeyAuthProvider } from "../../src/auth/types.js";
-import { loadConfig, redactConfig, setProjectMcpServerDisabled } from "../../src/config/load.js";
+import { loadConfig, redactConfig, setGlobalProviderConfig, setProjectMcpServerDisabled, setProjectProviderConfig } from "../../src/config/load.js";
 import { FlavorConfigSchema } from "../../src/config/schema.js";
 
 afterEach(() => {
@@ -172,6 +172,54 @@ it("migrates global plaintext secrets to authenticated envelopes without changin
   expect(persisted).toContain("flavor:v1:");
   const key = await readFile(join(home, ".flavor-code", ".config.key"), "utf8");
   expect(Buffer.from(key.trim(), "base64")).toHaveLength(32);
+});
+
+it("adds global provider models without exposing their API keys on disk", async () => {
+  const root = await mkdtemp(join(tmpdir(), "flavor-provider-save-"));
+  const home = join(root, "home");
+  const cwd = join(root, "repo");
+  const path = join(home, ".flavor-code", "flavor.json");
+
+  await setGlobalProviderConfig(home, "siliconflow", {
+    type: "openai-compatible", baseURL: "https://api.siliconflow.cn/v1", apiKey: "secret-one",
+    defaultModel: "qwen3-coder", models: ["qwen3-coder"],
+  });
+  await setGlobalProviderConfig(home, "siliconflow", {
+    type: "openai-compatible", baseURL: "https://api.siliconflow.cn/v1", apiKey: "secret-two",
+    defaultModel: "deepseek-v3", models: ["deepseek-v3"],
+  });
+
+  const persisted = await readFile(path, "utf8");
+  const loaded = await loadConfig({ cwd, home });
+  expect(persisted).not.toContain("secret-one");
+  expect(persisted).not.toContain("secret-two");
+  expect(persisted).toContain("flavor:v1:");
+  expect(loaded.config.providers.siliconflow).toMatchObject({
+    apiKey: "secret-two", defaultModel: "deepseek-v3", models: ["qwen3-coder", "deepseek-v3"],
+  });
+});
+
+it("lets project provider fields override global fields while inheriting the encrypted global API key", async () => {
+  const root = await mkdtemp(join(tmpdir(), "flavor-provider-precedence-"));
+  const home = join(root, "home");
+  const cwd = join(root, "repo");
+  await setGlobalProviderConfig(home, "custom", {
+    type: "openai-compatible", baseURL: "https://global.example.com/v1", apiKey: "global-secret",
+    defaultModel: "global-model", models: ["global-model"],
+  });
+  await setProjectProviderConfig(cwd, "custom", {
+    type: "anthropic", baseURL: "https://project.example.com", apiKey: "must-not-be-written",
+    defaultModel: "project-model", models: ["project-model"],
+  });
+
+  const loaded = await loadConfig({ cwd, home });
+  const projectRaw = await readFile(join(cwd, ".flavor", "flavor.json"), "utf8");
+  expect(loaded.config.providers.custom).toMatchObject({
+    type: "anthropic", baseURL: "https://project.example.com", apiKey: "global-secret",
+    defaultModel: "project-model", models: ["project-model"],
+  });
+  expect(projectRaw).not.toContain("must-not-be-written");
+  expect(projectRaw).not.toContain("apiKey");
 });
 
 it("recovers a tampered encrypted global configuration from its authenticated backup", async () => {

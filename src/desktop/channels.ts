@@ -16,5 +16,7 @@ export const DESKTOP_CHANNELS = {
   updateSkill: "desktop:update-skill",
   deleteSkill: "desktop:delete-skill",
   setSkillEnabled: "desktop:set-skill-enabled",
+  switchModel: "desktop:switch-model",
+  addModel: "desktop:add-model",
   event: "desktop:event",
 } as const;

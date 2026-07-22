@@ -23,6 +23,7 @@ export const ProviderConfigSchema = z.object({
   apiKey: z.string().optional(),
   defaultModel: z.string().min(1).optional(),
   cheapModel: z.string().min(1).optional(),
+  models: z.array(z.string().min(1)).max(100).optional(),
   maxOutputTokens: z.number().int().positive().optional(),
   // OAuth PKCE fields
   apiType: z.enum(["openai", "anthropic"]).optional(),

@@ -44,7 +44,7 @@ export interface SessionServices {
 }
 
 const HELP = [
-  "/model <main|subagent> <provider:model>  switch a model",
+  "/model <main|subagent> <provider:model>  switch any configured model",
   "/permissions <default|acceptEdits|plan|bypassPermissions|auto|bubble>",
   "/login                                  authenticate via OAuth PKCE",
   "/init  /config  /skills  /plugins  /hooks  /tasks",

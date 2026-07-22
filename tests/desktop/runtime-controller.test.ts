@@ -4,6 +4,7 @@ import { DesktopRuntimeController, type RuntimeLike } from "../../src/desktop/ru
 import type { SessionOutput } from "../../src/ui/session.js";
 
 function fakeRuntime(output: (event: SessionOutput) => void): RuntimeLike {
+  let mainModel = "openai:gpt-5";
   return {
     sessionId: "session-live",
     restoredTranscript: {
@@ -22,9 +23,10 @@ function fakeRuntime(output: (event: SessionOutput) => void): RuntimeLike {
       close: vi.fn(async () => undefined),
     },
     services: {
-      mainModel: () => "openai:gpt-5",
+      mainModel: () => mainModel,
       subagentModel: () => "openai:gpt-5-mini",
       permissionMode: () => "default" as const,
+      setModel: vi.fn((role: "main" | "subagent", modelId: string) => { if (role === "main") mainModel = modelId; }),
       questions: { pending: undefined, answer: vi.fn() },
     },
     approvals: { pending: undefined, resolve: vi.fn() },
@@ -108,5 +110,37 @@ describe("DesktopRuntimeController", () => {
     expect(deleteSession).toHaveBeenCalledWith("C:\\work", "session-live");
     expect(snapshot.activeSession).toBeUndefined();
     expect(snapshot.sessions).toEqual([]);
+  });
+
+  it("persists a custom provider, reloads the runtime and switches to its model", async () => {
+    const first = fakeRuntime(() => undefined);
+    const second = fakeRuntime(() => undefined);
+    const createRuntime = vi.fn()
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(second);
+    const custom = {
+      id: "siliconflow:qwen3-coder", provider: "siliconflow", model: "qwen3-coder",
+      label: "qwen3-coder", description: "siliconflow · OpenAI 兼容 API", source: "custom" as const,
+    };
+    const saveModel = vi.fn(async () => custom);
+    const loadModels = vi.fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([custom]);
+    const controller = new DesktopRuntimeController({
+      home: "C:\\Users\\demo", createRuntime, listSessions: async () => [], saveModel, loadModels, emit: () => undefined,
+    });
+    await controller.openWorkspace("C:\\work");
+    await controller.startSession();
+
+    const result = await controller.addModel({
+      provider: "siliconflow", model: "qwen3-coder", baseURL: "https://api.siliconflow.cn/v1",
+      apiKey: "secret", protocol: "openai-compatible",
+    });
+
+    expect(saveModel).toHaveBeenCalledOnce();
+    expect(first.session.close).toHaveBeenCalledOnce();
+    expect(second.services.setModel).toHaveBeenCalledWith("main", custom.id);
+    expect(result.snapshot.activeSession?.mainModel).toBe(custom.id);
+    expect(result.snapshot.models).toContainEqual(custom);
   });
 });

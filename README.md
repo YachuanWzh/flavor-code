@@ -439,6 +439,8 @@ Windows 打包产物位于：
 
 模型配置仍读取全局 `~/.flavor-code/flavor.json`、项目 `.flavor/flavor.json`、`.env` 和环境变量，因此 CLI 与桌面端可以共享配置与会话。生产版桌面窗口启用了 `contextIsolation` 和 Chromium 沙箱，关闭了渲染进程的 Node.js 集成；文件、命令和 Agent 操作只通过显式 IPC 接口进入主进程。Windows 的 `desktop:dev` 为兼容工作区内 Chromium 子进程启动，仅在本地开发启动器中使用 `--no-sandbox`，打包产物不携带该参数。
 
+Electron 的模型菜单默认提供 `deepseek-v4-pro` 与 `deepseek-v4-flash`，也可以通过“新增”接入 OpenAI 兼容或 Anthropic 协议的其他厂商服务。新增时填写厂商名称、模型名称、Base URL 和 API Key；厂商与模型信息会同时写入全局 `~/.flavor-code/flavor.json` 和项目 `.flavor/flavor.json`，同名字段以项目配置为准。API Key 只写入全局配置并使用本机配置密钥加密，项目配置通过合并继承该密钥，避免明文密钥进入项目仓库。保存后桌面端会新建会话并切换到该模型。CLI 继续沿用通用的 `provider:model` 与现有配置优先级。
+
 ### 交互模式
 
 ```bash

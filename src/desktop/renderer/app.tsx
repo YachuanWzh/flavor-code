@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import type { PermissionMode } from "../../config/schema.js";
 import { createTranscriptState, transcriptReducer, type TranscriptBlock, type TranscriptState, type TranscriptTurn } from "../../ui/transcript.js";
-import type { DesktopEvent, DesktopSnapshot, DesktopSessionSummary } from "../contracts.js";
+import type { AddDesktopModelInput, DesktopEvent, DesktopModelOption, DesktopSnapshot, DesktopSessionSummary } from "../contracts.js";
 import { applyDesktopOutput, groupSessions, permissionLabel, sessionTitle, STARTER_PROMPTS, workspaceName } from "./view-model.js";
 import { MarkdownContent } from "./markdown.js";
 import { SlashCompletionDropdown } from "./slash-completion-dropdown.js";
@@ -26,7 +26,7 @@ import { COMMAND_DESCRIPTIONS, MVP_COMMANDS } from "../../ui/commands.js";
 import type { FileChangePresentation, FileDiffLine } from "../../tools/types.js";
 import { SkillManagerView } from "./skill-manager.js";
 
-const EMPTY_SNAPSHOT: DesktopSnapshot = { sessions: [], diagnostics: [] };
+const EMPTY_SNAPSHOT: DesktopSnapshot = { sessions: [], diagnostics: [], models: [] };
 const PERMISSIONS: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions", "auto", "bubble"];
 const BUILTIN_SLASH_CANDIDATES = MVP_COMMANDS.map((name) => ({ name, description: COMMAND_DESCRIPTIONS[name] }));
 const SLASH_CANDIDATES = buildSlashCandidates(BUILTIN_SLASH_CANDIDATES, [], []);
@@ -42,7 +42,6 @@ export function DesktopApp(): React.JSX.Element {
   const [sessionMenu, setSessionMenu] = useState<string>();
   const [pendingDelete, setPendingDelete] = useState<DesktopSessionSummary>();
   const [deletingSession, setDeletingSession] = useState(false);
-  const [modelDraft, setModelDraft] = useState("");
   const [slashSelection, setSlashSelection] = useState(0);
   const [dismissedSlashInput, setDismissedSlashInput] = useState<string>();
   const [mentionCandidates, setMentionCandidates] = useState<string[]>([]);
@@ -212,9 +211,20 @@ export function DesktopApp(): React.JSX.Element {
   };
 
   const setPermission = (mode: PermissionMode) => void send(`/permissions ${mode}`);
-  const setModel = () => {
-    const value = modelDraft.trim();
-    if (value.includes(":")) { void send(`/model main ${value}`); setModelDraft(""); }
+  const setModel = async (modelId: string): Promise<void> => {
+    setError(undefined);
+    try { setSnapshot(await window.flavorDesktop.switchModel(modelId)); }
+    catch (cause) { setError(errorMessage(cause)); }
+  };
+  const addModel = async (draft: AddDesktopModelInput): Promise<void> => {
+    setError(undefined);
+    try {
+      const result = await window.flavorDesktop.addModel(draft);
+      setSnapshot(result.snapshot);
+    } catch (cause) {
+      setError(errorMessage(cause));
+      throw cause;
+    }
   };
 
   const showAppMenu = (menu: "file" | "edit" | "view" | "help", event: React.MouseEvent<HTMLButtonElement>) => {
@@ -308,7 +318,7 @@ export function DesktopApp(): React.JSX.Element {
       {snapshot.diagnostics.length > 0 && <details className="diagnostics"><summary>{snapshot.diagnostics.length} 条启动提示</summary><pre>{snapshot.diagnostics.join("\n")}</pre></details>}
       <Composer input={input} setInput={setInput} onSend={() => void send()} busy={busy}
         onInterrupt={() => void window.flavorDesktop.interrupt()} inputRef={inputRef} snapshot={snapshot}
-        modelDraft={modelDraft} setModelDraft={setModelDraft} setModel={setModel} setPermission={setPermission}
+        setModel={setModel} addModel={addModel} setPermission={setPermission}
         slashCompletion={slashCompletion} onSlashSelect={handleSlashSelect}
         onSlashDismiss={handleSlashDismiss}
         onSlashMove={handleSlashMove}
@@ -440,7 +450,7 @@ function DiffRow({ line, lineWidth }: { line: FileDiffLine; lineWidth: number })
 interface ComposerProps {
   input: string; setInput(value: string): void; onSend(): void; busy: boolean; onInterrupt(): void;
   inputRef: React.RefObject<HTMLTextAreaElement | null>; snapshot: DesktopSnapshot;
-  modelDraft: string; setModelDraft(value: string): void; setModel(): void; setPermission(mode: PermissionMode): void;
+  setModel(modelId: string): void | Promise<void>; addModel(input: AddDesktopModelInput): Promise<void>; setPermission(mode: PermissionMode): void;
   slashCompletion: SlashCompletion | null;
   onSlashSelect(name: string): void;
   onSlashDismiss(): void;
@@ -621,10 +631,8 @@ function Composer(props: ComposerProps): React.JSX.Element {
         }} disabled={disabled}>＋</button>
       <div className="composer-context"><span className="context-item">▱ {workspaceName(props.snapshot.workspace)}</span><span className="context-item">▣ 本地</span></div>
       <div className="composer-controls">
-        <details className="model-menu"><summary>{shortModel(props.snapshot.activeSession?.mainModel)}⌄</summary><div className="popover">
-          <label>主模型 ID</label><div className="model-input"><input placeholder="provider:model" value={props.modelDraft} onChange={(event) => props.setModelDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") props.setModel(); }} /><button onClick={props.setModel}>切换</button></div>
-          <p>例如 openai:gpt-5</p>
-        </div></details>
+        <ModelMenu models={props.snapshot.models} activeModel={props.snapshot.activeSession?.mainModel} busy={props.busy}
+          onSelect={props.setModel} onAdd={props.addModel} />
         <select aria-label="权限模式" value={props.snapshot.activeSession?.permissionMode ?? "default"} disabled={props.busy || props.snapshot.activeSession === undefined}
           onChange={(event) => props.setPermission(event.target.value as PermissionMode)}>{PERMISSIONS.map((mode) => <option value={mode} key={mode}>{permissionLabel(mode)}</option>)}</select>
         {props.busy ? <button className="send-button stop-button" onClick={props.onInterrupt} title="停止任务"><span /></button>
@@ -707,4 +715,76 @@ function FlavorMark(): React.JSX.Element {
 function errorMessage(value: unknown): string { return value instanceof Error ? value.message : String(value); }
 function shortSessionId(id: string): string { return id.replace(/^session-/, "").slice(0, 17); }
 function shortModel(model?: string): string { if (!model) return "选择模型"; return model.split(":").at(-1) ?? model; }
+
+export function ModelMenu({ models, activeModel, busy, onSelect, onAdd }: {
+  models: readonly DesktopModelOption[];
+  activeModel?: string | undefined;
+  busy: boolean;
+  onSelect(modelId: string): void | Promise<void>;
+  onAdd(input: AddDesktopModelInput): Promise<void>;
+}): React.JSX.Element {
+  const [adding, setAdding] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState<string>();
+  const [draft, setDraft] = useState<AddDesktopModelInput>({
+    provider: "", model: "", baseURL: "", apiKey: "", protocol: "openai-compatible",
+  });
+  const update = <Key extends keyof AddDesktopModelInput>(key: Key, value: AddDesktopModelInput[Key]) => {
+    setDraft((current) => ({ ...current, [key]: value }));
+    setFormError(undefined);
+  };
+  const submit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (saving) return;
+    const form = event.currentTarget;
+    setSaving(true);
+    setFormError(undefined);
+    try {
+      await onAdd(draft);
+      setAdding(false);
+      setDraft({ provider: "", model: "", baseURL: "", apiKey: "", protocol: "openai-compatible" });
+      form.closest("details")?.removeAttribute("open");
+    } catch (cause) { setFormError(errorMessage(cause)); }
+    finally { setSaving(false); }
+  };
+
+  return <details className="model-menu"><summary>{shortModel(activeModel)}⌄</summary><div className="popover model-popover">
+    <div className="model-popover-heading"><div><strong>{adding ? "添加厂商模型" : "切换主模型"}</strong><span>{adding ? "连接 OpenAI 兼容或 Anthropic 服务" : "DeepSeek 默认可用，也可接入其他厂商"}</span></div>
+      {!adding && <button type="button" onClick={() => setAdding(true)} disabled={busy}>＋ 新增</button>}
+    </div>
+    {adding ? <form className="model-provider-form" onSubmit={(event) => void submit(event)}>
+      <div className="model-form-grid">
+        <label><span>厂商名称 / ID</span><input required maxLength={64} placeholder="例如 siliconflow" value={draft.provider}
+          onChange={(event) => update("provider", event.target.value)} pattern="[A-Za-z0-9][A-Za-z0-9_-]*" /></label>
+        <label><span>模型名称</span><input required maxLength={256} placeholder="例如 qwen3-coder" value={draft.model}
+          onChange={(event) => update("model", event.target.value)} /></label>
+      </div>
+      <label><span>接口协议</span><select value={draft.protocol} onChange={(event) => update("protocol", event.target.value as AddDesktopModelInput["protocol"])}>
+        <option value="openai-compatible">OpenAI 兼容 API</option><option value="anthropic">Anthropic API</option>
+      </select></label>
+      <label><span>Base URL</span><input required type="url" maxLength={2048} placeholder="https://api.example.com/v1" value={draft.baseURL}
+        onChange={(event) => update("baseURL", event.target.value)} /></label>
+      <label><span>API Key</span><input required type="password" autoComplete="off" maxLength={16384} placeholder="输入服务密钥" value={draft.apiKey}
+        onChange={(event) => update("apiKey", event.target.value)} /></label>
+      <p className="model-security-note"><span>◆</span> 配置同步到当前项目，密钥只加密保存在本机。保存后会新建会话。</p>
+      {formError !== undefined && <p className="model-form-error" role="alert">{formError}</p>}
+      <div className="model-form-actions"><button type="button" onClick={() => { setAdding(false); setFormError(undefined); }} disabled={saving}>取消</button>
+        <button type="submit" className="primary" disabled={saving || busy}>{saving ? "正在连接…" : "保存并切换"}</button></div>
+    </form> : <div className="model-options" role="listbox" aria-label="主模型">
+      {models.map((model) => {
+        const selected = activeModel === model.id;
+        return <button type="button" role="option" aria-selected={selected} className="model-option" key={model.id}
+          disabled={busy || selected}
+          onClick={(event) => {
+            void onSelect(model.id);
+            event.currentTarget.closest("details")?.removeAttribute("open");
+          }}>
+          <span className="model-option-copy"><strong>{model.label}</strong><small>{model.description}</small></span>
+          {model.source === "custom" && <span className="model-option-badge">自定义</span>}
+          <span className="model-option-state" aria-hidden="true">{selected ? "✓" : "→"}</span>
+        </button>;
+      })}
+    </div>}
+  </div></details>;
+}
 function formatSessionTime(value: string): string { const date = new Date(value); return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }); }
