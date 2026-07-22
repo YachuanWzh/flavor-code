@@ -9,7 +9,7 @@
 
 `flavor-code` 是一个同时提供终端界面与 Electron 桌面应用的 AI 编程助手。它接入大语言模型（OpenAI GPT、Anthropic Claude 或任何兼容服务），能理解你的项目结构，在工作区范围内安全操作文件，甚至能把复杂任务拆成多块，分给多个"小助手"并行处理。
 
-当前版本：**0.5.0**
+当前版本：**0.6.0**
 
 ## 它能做什么
 
@@ -423,7 +423,7 @@ npm run desktop:dist     # 生成 Windows NSIS 安装包
 Windows 打包产物位于：
 
 - 免安装目录：`release/win-unpacked/Flavor Code.exe`
-- NSIS 安装包：`release/Flavor-Code-0.5.0-x64.exe`
+- NSIS 安装包：`release/Flavor-Code-0.6.0-x64.exe`
 
 模型配置仍读取全局 `~/.flavor-code/flavor.json`、项目 `.flavor/flavor.json`、`.env` 和环境变量，因此 CLI 与桌面端可以共享配置与会话。生产版桌面窗口启用了 `contextIsolation` 和 Chromium 沙箱，关闭了渲染进程的 Node.js 集成；文件、命令和 Agent 操作只通过显式 IPC 接口进入主进程。Windows 的 `desktop:dev` 为兼容工作区内 Chromium 子进程启动，仅在本地开发启动器中使用 `--no-sandbox`，打包产物不携带该参数。
 
