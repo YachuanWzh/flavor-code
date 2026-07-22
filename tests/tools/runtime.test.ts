@@ -1,4 +1,5 @@
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
+import { readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -6,7 +7,7 @@ import { z } from "zod";
 
 import { HookBus } from "../../src/hooks/bus.js";
 import { PermissionEngine } from "../../src/permissions/engine.js";
-import { ToolRuntime } from "../../src/tools/runtime.js";
+import { DEFAULT_TOOL_OUTPUT_LIMITS, ToolRuntime } from "../../src/tools/runtime.js";
 import { withToolPresentation, type ToolDefinition } from "../../src/tools/types.js";
 import { createShellTool } from "../../src/tools/shell.js";
 
@@ -39,6 +40,112 @@ function fixture(decision: "allow" | "deny" | "ask" = "allow") {
 }
 
 describe("ToolRuntime", () => {
+  it("uses the documented 50K per-tool and 200K per-turn defaults", () => {
+    expect(DEFAULT_TOOL_OUTPUT_LIMITS).toEqual({ perToolChars: 50_000, perTurnChars: 200_000 });
+  });
+
+  it("persists a per-tool overflow and exposes only a bounded head/tail preview to hooks", async () => {
+    const f = fixture();
+    const complete = "abcdefghijABCDEFGHIJ";
+    const observed: unknown[] = [];
+    const tool = { ...f.tool, execute: async () => complete };
+    f.hooks.on("PostToolUse", (event) => {
+      observed.push(event.payload.output);
+      return { decision: "allow" };
+    });
+    const runtime = new ToolRuntime({
+      tools: [tool], hooks: f.hooks, permissions: f.permissions, workspace: f.workspace,
+      outputLimits: { perToolChars: 10, perTurnChars: 100 },
+    });
+
+    runtime.beginTurn();
+    const result = await runtime.execute(
+      { name: "Test", input: { path: join(f.workspace, "large.txt") } },
+      { agent: "main" },
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      output: {
+        truncated: true,
+        reason: "per_tool_limit",
+        preview: "abcdeFGHIJ",
+        originalChars: 20,
+        previewChars: 10,
+        savedTo: expect.stringContaining(join(".flavor", "tool-results")),
+      },
+    });
+    expect(observed.at(-1)).toEqual(result.output);
+    const savedTo = (result.output as { savedTo: string }).savedTo;
+    await expect(readFile(savedTo, "utf8")).resolves.toBe(complete);
+  });
+
+  it("shares the aggregate budget within a turn and resets it for the next turn", async () => {
+    const f = fixture();
+    const tool = { ...f.tool, execute: async () => "abcdefgh" };
+    const runtime = new ToolRuntime({
+      tools: [tool], hooks: f.hooks, permissions: f.permissions, workspace: f.workspace,
+      outputLimits: { perToolChars: 10, perTurnChars: 12 },
+    });
+    const call = { name: "Test", input: { path: join(f.workspace, "aggregate.txt") } };
+
+    runtime.beginTurn();
+    await expect(runtime.execute(call, { agent: "main" })).resolves.toEqual({ ok: true, output: "abcdefgh" });
+    await expect(runtime.execute(call, { agent: "main" })).resolves.toMatchObject({
+      ok: true,
+      output: {
+        truncated: true,
+        reason: "turn_limit",
+        preview: "abgh",
+        originalChars: 8,
+        previewChars: 4,
+      },
+    });
+    const exhausted = await runtime.execute(call, { agent: "main" });
+    expect(exhausted).toMatchObject({
+      ok: true,
+      output: {
+        truncated: true,
+        reason: "turn_limit",
+        preview: "",
+        originalChars: 8,
+        previewChars: 0,
+        savedTo: expect.stringContaining(join(".flavor", "tool-results")),
+      },
+    });
+    await expect(readFile((exhausted.output as { savedTo: string }).savedTo, "utf8")).resolves.toBe("abcdefgh");
+
+    runtime.beginTurn();
+    await expect(runtime.execute(call, { agent: "main" })).resolves.toEqual({ ok: true, output: "abcdefgh" });
+  });
+
+  it("does not create overflow storage for results within both limits", async () => {
+    const f = fixture();
+    const runtime = new ToolRuntime({
+      tools: [f.tool], hooks: f.hooks, permissions: f.permissions, workspace: f.workspace,
+      outputLimits: { perToolChars: 10, perTurnChars: 20 },
+    });
+
+    runtime.beginTurn();
+    await expect(runtime.execute(
+      { name: "Test", input: { path: join(f.workspace, "small.txt") } }, { agent: "main" },
+    )).resolves.toEqual({ ok: true, output: "done" });
+    const overflowDirectory = join(f.workspace, ".flavor", "tool-results");
+    expect(existsSync(overflowDirectory) ? await readdir(overflowDirectory) : []).toEqual([]);
+  });
+
+  it("rejects invalid output limits", () => {
+    const f = fixture();
+    expect(() => new ToolRuntime({
+      tools: [f.tool], hooks: f.hooks, permissions: f.permissions,
+      outputLimits: { perToolChars: 0 },
+    })).toThrow(/perToolChars.*positive integer/);
+    expect(() => new ToolRuntime({
+      tools: [f.tool], hooks: f.hooks, permissions: f.permissions,
+      outputLimits: { perTurnChars: 1.5 },
+    })).toThrow(/perTurnChars.*positive integer/);
+  });
+
   it("uses auto classification for unresolved main-agent permission decisions", async () => {
     const f = fixture();
     let executions = 0;

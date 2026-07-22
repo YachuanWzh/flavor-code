@@ -481,6 +481,7 @@ export class AgentLoop {
       const stagedMessages: ModelMessage[] = [];
       const stagedResults: Array<{ call: (typeof toolCalls)[number]; result: ToolResult }> = [];
       let turnError: ReturnType<typeof normalizeProviderError> | undefined;
+      this.#options.runtime.beginTurn();
       for (let index = 0; index < toolCalls.length; index += 1) {
         const call = toolCalls[index]!;
         if (request.signal?.aborted) {

@@ -1,4 +1,6 @@
-import { basename } from "node:path";
+import { randomUUID } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
 import { z } from "zod";
 
 import type { HookBus } from "../hooks/bus.js";
@@ -22,7 +24,30 @@ export interface ToolRuntimeOptions {
   classify?: PermissionClassifier;
   /** Categories that should skip the approval callback. Destructive is never added. */
   alwaysAllowed?: ToolCategory[];
+  /** Workspace used for durable overflow files. Defaults to process.cwd(). */
+  workspace?: string;
+  /** Inline tool-result content budgets. */
+  outputLimits?: Partial<ToolOutputLimits>;
 }
+
+export interface ToolOutputLimits {
+  perToolChars: number;
+  perTurnChars: number;
+}
+
+export interface ToolOutputOverflow {
+  truncated: true;
+  reason: "per_tool_limit" | "turn_limit" | "per_tool_and_turn_limit";
+  preview: string;
+  originalChars: number;
+  previewChars: number;
+  savedTo: string;
+}
+
+export const DEFAULT_TOOL_OUTPUT_LIMITS: Readonly<ToolOutputLimits> = Object.freeze({
+  perToolChars: 50_000,
+  perTurnChars: 200_000,
+});
 
 export type ToolInputValidation =
   | { ok: true; input: unknown }
@@ -47,6 +72,9 @@ export class ToolRuntime {
   readonly #classify: PermissionClassifier | undefined;
   readonly #alwaysAllowed: Set<string>;
   readonly #disposeSchemas: Array<() => void>;
+  readonly #workspace: string;
+  readonly #outputLimits: ToolOutputLimits;
+  #turnOutputChars = 0;
   #disposed = false;
 
   constructor(options: ToolRuntimeOptions) {
@@ -56,6 +84,10 @@ export class ToolRuntime {
     this.#approve = options.approve;
     this.#classify = options.classify;
     this.#alwaysAllowed = new Set(options.alwaysAllowed ?? []);
+    this.#workspace = resolve(options.workspace ?? process.cwd());
+    this.#outputLimits = { ...DEFAULT_TOOL_OUTPUT_LIMITS, ...options.outputLimits };
+    validateOutputLimit("perToolChars", this.#outputLimits.perToolChars);
+    validateOutputLimit("perTurnChars", this.#outputLimits.perTurnChars);
     this.#disposeSchemas = [
       this.#hooks.registerPayloadSchema("PreToolUse", PreToolUsePayload),
       this.#hooks.registerPayloadSchema("PermissionRequest", PermissionRequestPayload),
@@ -78,6 +110,12 @@ export class ToolRuntime {
     if (this.#disposed) throw new Error("ToolRuntime is disposed");
     this.#tools.clear();
     for (const tool of tools) this.#tools.set(tool.name, tool);
+  }
+
+  /** Starts the aggregate result budget for one model response's tool calls. */
+  beginTurn(): void {
+    if (this.#disposed) throw new Error("ToolRuntime is disposed");
+    this.#turnOutputChars = 0;
   }
 
   validate(call: ToolCall): ToolInputValidation {
@@ -228,15 +266,50 @@ export class ToolRuntime {
       }
 
       if (signal.aborted) throw signal.reason;
-      const output = await tool.execute(input, signal);
+      const rawOutput = await tool.execute(input, signal);
+      const presentation = getToolPresentation(rawOutput);
+      const output = await this.#limitOutput(tool.name, rawOutput);
       await this.#hooks.emit({
         version: 1, type: "PostToolUse", payload: { tool: tool.name, input, agent: context.agent, output },
       });
-      const presentation = getToolPresentation(output);
       return { ok: true, output, ...(presentation === undefined ? {} : { presentation }) };
     } catch (error) {
       return this.#fail(tool.name, input, context.agent, "tool_error", message(error));
     }
+  }
+
+  async #limitOutput(tool: string, output: unknown): Promise<unknown> {
+    let serialized: string;
+    try { serialized = serializeToolOutput(output); }
+    catch { return output; }
+    const remainingTurnChars = Math.max(0, this.#outputLimits.perTurnChars - this.#turnOutputChars);
+    const previewChars = Math.min(serialized.length, this.#outputLimits.perToolChars, remainingTurnChars);
+    if (previewChars === serialized.length) {
+      this.#turnOutputChars += serialized.length;
+      return output;
+    }
+
+    const perToolExceeded = serialized.length > this.#outputLimits.perToolChars;
+    const turnExceeded = serialized.length > remainingTurnChars;
+    const reason: ToolOutputOverflow["reason"] = perToolExceeded && turnExceeded
+      ? "per_tool_and_turn_limit"
+      : (perToolExceeded ? "per_tool_limit" : "turn_limit");
+    const preview = headTailPreview(serialized, previewChars);
+    // Reserve the inline budget before asynchronous persistence so concurrent callers cannot oversubscribe it.
+    this.#turnOutputChars += preview.length;
+    const directory = join(this.#workspace, ".flavor", "tool-results");
+    await mkdir(directory, { recursive: true });
+    const filename = `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID()}-${safeFilename(tool)}.txt`;
+    const savedTo = join(directory, filename);
+    await writeFile(savedTo, serialized, "utf8");
+    return {
+      truncated: true,
+      reason,
+      preview,
+      originalChars: serialized.length,
+      previewChars: preview.length,
+      savedTo,
+    } satisfies ToolOutputOverflow;
   }
 
   async #fail(tool: string, input: unknown, agent: ToolContext["agent"], code: string, errorMessage: string): Promise<ToolResult> {
@@ -250,4 +323,25 @@ export class ToolRuntime {
     }
     return result;
   }
+}
+
+function validateOutputLimit(name: keyof ToolOutputLimits, value: number): void {
+  if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
+}
+
+function serializeToolOutput(output: unknown): string {
+  if (typeof output === "string") return output;
+  return JSON.stringify(output) ?? String(output);
+}
+
+function headTailPreview(content: string, limit: number): string {
+  if (limit <= 0) return "";
+  const headLength = Math.ceil(limit / 2);
+  const tailLength = Math.floor(limit / 2);
+  return `${content.slice(0, headLength)}${content.slice(content.length - tailLength)}`;
+}
+
+function safeFilename(tool: string): string {
+  const normalized = tool.replaceAll(/[^a-zA-Z0-9._-]/g, "-").replaceAll(/-+/g, "-");
+  return normalized || "tool";
 }

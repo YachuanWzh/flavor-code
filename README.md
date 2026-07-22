@@ -9,7 +9,7 @@
 
 `flavor-code` 是一个同时提供终端界面与 Electron 桌面应用的 AI 编程助手。它接入大语言模型（OpenAI GPT、Anthropic Claude 或任何兼容服务），能理解你的项目结构，在工作区范围内安全操作文件，甚至能把复杂任务拆成多块，分给多个"小助手"并行处理。
 
-当前版本：**0.6.0**
+当前版本：**0.7.0**
 
 ## 它能做什么
 
@@ -26,6 +26,12 @@
 - **审计日志** — 所有工具执行失败都会被记录到 `.flavor/audit.jsonl`
 - **事故上报与 RCA** — 工具执行失败自动上报到 langgraph-claw 告警管道，P0 级错误触发自动根因分析（Auto-RCA）
 - **对抗性审查（/goal）** — 分离"规划 - 执行 - 审查"三角色，3 个独立 AI 质疑者多数投票验证目标是否达成，不通过则打回重做
+
+### 工具结果溢出保护（0.7.0）
+
+工具输出现在会在执行层主动控制大小：单个结果最多内联 50,000 字符，同一模型轮次的全部工具结果共用 200,000 字符预算。超过任一限制时，Flavor 保留头尾预览，并把完整结果写入工作区的 `.flavor/tool-results/`；返回给模型的结果会包含原始字符数、截断原因和可直接交给 `Read` 的绝对文件路径。
+
+这层保护发生在 `PostToolUse` Hook、UI 事件和上下文入库之前，可避免一次异常大的命令、搜索或 MCP 响应挤占模型窗口。上下文管理器原有的 `toolOutputChars` 截断仍然保留，负责保护恢复的历史会话和外部注入消息。
 
 ---
 
@@ -423,7 +429,7 @@ npm run desktop:dist     # 生成 Windows NSIS 安装包
 Windows 打包产物位于：
 
 - 免安装目录：`release/win-unpacked/Flavor Code.exe`
-- NSIS 安装包：`release/Flavor-Code-0.6.0-x64.exe`
+- NSIS 安装包：`release/Flavor-Code-0.7.0-x64.exe`
 
 模型配置仍读取全局 `~/.flavor-code/flavor.json`、项目 `.flavor/flavor.json`、`.env` 和环境变量，因此 CLI 与桌面端可以共享配置与会话。生产版桌面窗口启用了 `contextIsolation` 和 Chromium 沙箱，关闭了渲染进程的 Node.js 集成；文件、命令和 Agent 操作只通过显式 IPC 接口进入主进程。Windows 的 `desktop:dev` 为兼容工作区内 Chromium 子进程启动，仅在本地开发启动器中使用 `--no-sandbox`，打包产物不携带该参数。
 

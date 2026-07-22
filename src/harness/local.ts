@@ -181,6 +181,7 @@ export class LocalHarness {
       tools: definitions,
       hooks: this.#options.hooks,
       permissions,
+      workspace: this.#options.workspace,
       ...((agent === "main" || permissions.mode === "bubble") && approve !== undefined ? { approve } : {}),
       ...(agent === "main" ? {
         classify: createPermissionClassifier({
