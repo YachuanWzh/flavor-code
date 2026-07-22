@@ -8,6 +8,7 @@ import {
   deriveSlashCompletion,
   matchRanges,
   moveSlashSelection,
+  removeCompletedSlashSelection,
   slashCandidatePresentation,
 } from "../../src/ui/slash-completion.js";
 
@@ -42,6 +43,17 @@ describe("slash completion", () => {
     expect(moveSlashSelection(0, -1, 3)).toBe(2);
     expect(moveSlashSelection(2, 1, 3)).toBe(0);
     expect(completeSlashSelection("/de", 3, "deploy")).toEqual({ text: "/deploy ", cursor: 8 });
+    expect(completeSlashSelection("/do", 3, "doctor")).toEqual({ text: "/doctor ", cursor: 8 });
+    expect(completeSlashSelection("/front", 6, "frontend-design"))
+      .toEqual({ text: "/frontend-design ", cursor: 17 });
+  });
+
+  it("removes a completed skill or plugin and its separator with one backspace", () => {
+    expect(removeCompletedSlashSelection("/doctor ", 7, 8)).toEqual({ text: "", cursor: 0 });
+    expect(removeCompletedSlashSelection("/frontend-design ", 16, 17)).toEqual({ text: "", cursor: 0 });
+    expect(removeCompletedSlashSelection("/frontend-design  review", 16, 18))
+      .toEqual({ text: "review", cursor: 0 });
+    expect(removeCompletedSlashSelection("/frontend-design review", 16, 23)).toBeNull();
   });
 
   it("returns case-insensitive highlight ranges", () => {

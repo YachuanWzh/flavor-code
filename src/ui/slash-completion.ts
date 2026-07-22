@@ -123,6 +123,24 @@ export function completeSlashSelection(
   return { text: prefix + suffix, cursor: [...prefix].length };
 }
 
+export function removeCompletedSlashSelection(
+  input: string,
+  tokenLength: number,
+  cursor: number,
+): { text: string; cursor: number } | null {
+  if (tokenLength <= 0) return null;
+  const points = [...input];
+  const safeTokenLength = Math.min(points.length, tokenLength);
+  const safeCursor = Math.max(safeTokenLength, Math.min(points.length, cursor));
+  const textBetweenTokenAndCursor = points.slice(safeTokenLength, safeCursor).join("");
+  if (!/^\s*$/u.test(textBetweenTokenAndCursor)) return null;
+
+  return {
+    text: points.slice(safeCursor).join(""),
+    cursor: 0,
+  };
+}
+
 export function matchRanges(value: string, query: string): Array<[number, number]> {
   if (query.length === 0) return [];
   const normalizedValue = value.toLowerCase();

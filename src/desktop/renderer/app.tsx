@@ -12,6 +12,7 @@ import {
   completedSlashTokenLength,
   deriveSlashCompletion,
   moveSlashSelection,
+  removeCompletedSlashSelection,
   type SlashCompletion,
 } from "../../ui/slash-completion.js";
 import { MentionCompletionDropdown } from "./mention-completion-dropdown.js";
@@ -27,11 +28,11 @@ import type { FileChangePresentation, FileDiffLine } from "../../tools/types.js"
 import { SkillManagerView } from "./skill-manager.js";
 import { MemoryManagerView } from "./memory-manager.js";
 import { McpManagerView } from "./mcp-manager.js";
+import type { ManagedSkillSummary } from "../../skills/manager.js";
 
 const EMPTY_SNAPSHOT: DesktopSnapshot = { sessions: [], diagnostics: [], models: [] };
 const PERMISSIONS: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions", "auto", "bubble"];
 const BUILTIN_SLASH_CANDIDATES = MVP_COMMANDS.map((name) => ({ name, description: COMMAND_DESCRIPTIONS[name] }));
-const SLASH_CANDIDATES = buildSlashCandidates(BUILTIN_SLASH_CANDIDATES, [], []);
 
 export function DesktopApp(): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<DesktopSnapshot>(EMPTY_SNAPSHOT);
@@ -46,6 +47,7 @@ export function DesktopApp(): React.JSX.Element {
   const [deletingSession, setDeletingSession] = useState(false);
   const [slashSelection, setSlashSelection] = useState(0);
   const [dismissedSlashInput, setDismissedSlashInput] = useState<string>();
+  const [skills, setSkills] = useState<readonly ManagedSkillSummary[]>([]);
   const [mentionCandidates, setMentionCandidates] = useState<string[]>([]);
   const [mentionSelection, setMentionSelection] = useState(0);
   const [dismissedMentionInput, setDismissedMentionInput] = useState<string>();
@@ -55,6 +57,11 @@ export function DesktopApp(): React.JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const userScrolledUp = useRef(false);
+  const updateInput = useCallback((value: string) => {
+    setInput(value);
+    setDismissedSlashInput(undefined);
+    setDismissedMentionInput(undefined);
+  }, []);
 
   // Track wheel scrolling: pause auto-scroll when user scrolls up, resume when they scroll back to bottom
   useEffect(() => {
@@ -98,13 +105,33 @@ export function DesktopApp(): React.JSX.Element {
     return () => { cancelled = true; };
   }, [snapshot.workspace]);
 
+  useEffect(() => {
+    let cancelled = false;
+    if (snapshot.workspace === undefined) {
+      setSkills([]);
+      return () => { cancelled = true; };
+    }
+    window.flavorDesktop.listSkills().then((entries) => {
+      if (!cancelled) setSkills(entries);
+    }).catch(() => {
+      // Skill discovery diagnostics are surfaced by the runtime; slash commands remain usable.
+      if (!cancelled) setSkills([]);
+    });
+    return () => { cancelled = true; };
+  }, [snapshot.workspace, view]);
+
   const busy = snapshot.activeSession?.busy ?? false;
   const groups = useMemo(() => groupSessions(snapshot.sessions), [snapshot.sessions]);
+  const slashCandidates = useMemo(() => buildSlashCandidates(
+    BUILTIN_SLASH_CANDIDATES,
+    [],
+    skills.filter((skill) => skill.enabled),
+  ), [skills]);
   const slashCompletion = useMemo(() => {
     if (busy || snapshot.approval !== undefined || snapshot.questions !== undefined) return null;
     if (dismissedSlashInput === input) return null;
-    return deriveSlashCompletion(input, cursorPos, SLASH_CANDIDATES, slashSelection);
-  }, [input, cursorPos, slashSelection, dismissedSlashInput, busy, snapshot.approval, snapshot.questions]);
+    return deriveSlashCompletion(input, cursorPos, slashCandidates, slashSelection);
+  }, [input, cursorPos, slashSelection, dismissedSlashInput, busy, snapshot.approval, snapshot.questions, slashCandidates]);
   const mentionCompletion = useMemo(() => {
     if (busy || snapshot.approval !== undefined || snapshot.questions !== undefined) return null;
     if (dismissedMentionInput === input) return null;
@@ -112,7 +139,7 @@ export function DesktopApp(): React.JSX.Element {
     return deriveMentionCompletion(input, cursorPos, mentionCandidates, mentionSelection);
   }, [input, cursorPos, mentionSelection, dismissedMentionInput, busy, snapshot.approval, snapshot.questions, mentionCandidates, slashCompletion]);
   const completedTokenLen = slashCompletion === null
-    ? completedSlashTokenLength(input, SLASH_CANDIDATES, false)
+    ? completedSlashTokenLength(input, slashCandidates, false)
     : 0;
 
   const handleSlashSelect = useCallback((name: string) => {
@@ -320,7 +347,7 @@ export function DesktopApp(): React.JSX.Element {
       </div>
 
       {snapshot.diagnostics.length > 0 && <details className="diagnostics"><summary>{snapshot.diagnostics.length} 条启动提示</summary><pre>{snapshot.diagnostics.join("\n")}</pre></details>}
-      <Composer input={input} setInput={setInput} onSend={() => void send()} busy={busy}
+      <Composer input={input} setInput={updateInput} onSend={() => void send()} busy={busy}
         onInterrupt={() => void window.flavorDesktop.interrupt()} inputRef={inputRef} snapshot={snapshot}
         setModel={setModel} addModel={addModel} setPermission={setPermission}
         slashCompletion={slashCompletion} onSlashSelect={handleSlashSelect}
@@ -533,18 +560,25 @@ function Composer(props: ComposerProps): React.JSX.Element {
       }
       if (event.key === "Escape") { event.preventDefault(); props.onMentionDismiss(); return; }
     }
-    // Remove tag on backspace at textarea boundary
+    // Remove a completed slash tag when only its separator whitespace precedes the cursor.
     const target = event.target as HTMLTextAreaElement;
     const selStart = target.selectionStart;
     const selEnd = target.selectionEnd;
-    if (event.key === "Backspace" && selStart === 0 && selStart === selEnd && !menuOpen) {
+    if (event.key === "Backspace" && selStart === selEnd && !menuOpen) {
       if (hasSlashTag) {
-        event.preventDefault();
-        props.setInput(props.input.slice(props.completedTokenLen));
-        props.setCursorPos(0);
-        return;
+        const next = removeCompletedSlashSelection(
+          props.input,
+          props.completedTokenLen,
+          fullCursorFromTextarea(selStart),
+        );
+        if (next !== null) {
+          event.preventDefault();
+          props.setInput(next.text);
+          props.setCursorPos(next.cursor);
+          return;
+        }
       }
-      if (hasMentionTag) {
+      if (hasMentionTag && selStart === 0) {
         event.preventDefault();
         const newInput = mentionBefore + mentionAfter;
         props.setInput(newInput);

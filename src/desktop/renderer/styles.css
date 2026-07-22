@@ -234,6 +234,7 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
   white-space: nowrap;
   user-select: none;
 }
+.composer-input-row > .mention-tag:first-child { margin-left: 17px; }
 .composer-plain-text {
   flex-shrink: 0;
   margin: 16px 0 0 17px;
