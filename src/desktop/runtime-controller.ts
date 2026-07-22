@@ -13,8 +13,9 @@ import { createGlobTool, type SearchResult } from "../tools/search.js";
 import { SkillManager, type ManagedSkill, type ManagedSkillSummary, type SkillDraft } from "../skills/manager.js";
 import { createProjectMemoryManager, type MemoryManagerLike, type MemorySnapshot } from "../memory/manager.js";
 import type { MemoryCandidate, MemoryEntry } from "../memory/types.js";
+import { ProjectMcpConfigManager, type ManagedMcpServer, type ProjectMcpConfigManagerLike } from "../mcp/config-manager.js";
 import { DEFAULT_DESKTOP_MODELS, loadDesktopModels, saveDesktopModel } from "./model-config.js";
-import type { AddDesktopModelInput, DesktopEvent, DesktopModelOption, DesktopModelMutationResult, DesktopSessionSummary, DesktopSnapshot, SessionStartedPayload } from "./contracts.js";
+import type { AddDesktopModelInput, DesktopEvent, DesktopModelOption, DesktopModelMutationResult, DesktopSessionSummary, DesktopSnapshot, McpServerDraft, SessionStartedPayload } from "./contracts.js";
 
 export interface RuntimeLike {
   readonly sessionId: string;
@@ -53,6 +54,7 @@ export interface DesktopRuntimeControllerOptions {
   loadModels?(workspace: string, home: string): Promise<DesktopModelOption[]>;
   saveModel?(workspace: string, home: string, input: AddDesktopModelInput): Promise<DesktopModelOption>;
   loadMemoryManager?(workspace: string, home: string): Promise<MemoryManagerLike>;
+  loadMcpManager?(workspace: string): ProjectMcpConfigManagerLike;
   emit(event: DesktopEvent): void;
 }
 
@@ -64,12 +66,14 @@ export class DesktopRuntimeController {
   readonly #loadModels: NonNullable<DesktopRuntimeControllerOptions["loadModels"]>;
   readonly #saveModel: NonNullable<DesktopRuntimeControllerOptions["saveModel"]>;
   readonly #loadMemoryManager: NonNullable<DesktopRuntimeControllerOptions["loadMemoryManager"]>;
+  readonly #loadMcpManager: NonNullable<DesktopRuntimeControllerOptions["loadMcpManager"]>;
   readonly #emit: (event: DesktopEvent) => void;
   #workspace: string | undefined;
   #sessions: readonly DesktopSessionSummary[] = [];
   #runtime: RuntimeLike | undefined;
   #skillManager: SkillManager | undefined;
   #memoryManager: MemoryManagerLike | undefined;
+  #mcpManager: ProjectMcpConfigManagerLike | undefined;
   #models: readonly DesktopModelOption[] = DEFAULT_DESKTOP_MODELS;
   #busy = false;
 
@@ -94,6 +98,7 @@ export class DesktopRuntimeController {
     this.#saveModel = options.saveModel ?? saveDesktopModel;
     this.#loadMemoryManager = options.loadMemoryManager
       ?? ((workspace, home) => createProjectMemoryManager({ workspace, home }));
+    this.#loadMcpManager = options.loadMcpManager ?? ((workspace) => new ProjectMcpConfigManager(workspace));
     this.#emit = options.emit;
   }
 
@@ -124,6 +129,7 @@ export class DesktopRuntimeController {
     this.#workspace = workspace;
     this.#skillManager = new SkillManager({ workspace, home: this.#home });
     this.#memoryManager = await this.#loadMemoryManager(workspace, this.#home);
+    this.#mcpManager = this.#loadMcpManager(workspace);
     this.#models = await this.#loadModels(workspace, this.#home);
     this.#sessions = await this.#listSessions(workspace);
     return this.#publishSnapshot();
@@ -229,6 +235,25 @@ export class DesktopRuntimeController {
     await this.#runtime?.services.reloadSkills?.();
   }
 
+  async listMcpServers(): Promise<readonly ManagedMcpServer[]> {
+    return this.#requireMcpManager().list();
+  }
+
+  async saveMcpServer(originalName: string | undefined, draft: McpServerDraft): Promise<ManagedMcpServer> {
+    const manager = this.#requireMcpManager();
+    return originalName === undefined
+      ? manager.create(draft.name, draft.config)
+      : manager.update(originalName, draft.name, draft.config);
+  }
+
+  async deleteMcpServer(name: string): Promise<void> {
+    await this.#requireMcpManager().delete(name);
+  }
+
+  async setMcpServerEnabled(name: string, enabled: boolean): Promise<ManagedMcpServer> {
+    return this.#requireMcpManager().setEnabled(name, enabled);
+  }
+
   async listMemory(): Promise<MemorySnapshot> {
     return this.#requireMemoryManager().snapshot();
   }
@@ -306,5 +331,10 @@ export class DesktopRuntimeController {
   #requireMemoryManager(): MemoryManagerLike {
     if (this.#memoryManager === undefined) throw new Error("Open a project before managing long-term memory");
     return this.#memoryManager;
+  }
+
+  #requireMcpManager(): ProjectMcpConfigManagerLike {
+    if (this.#mcpManager === undefined) throw new Error("Open a project before managing MCP services");
+    return this.#mcpManager;
   }
 }

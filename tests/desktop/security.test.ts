@@ -22,9 +22,9 @@ describe("desktop security helpers", () => {
   it("keeps the preload channel surface explicit", () => {
     expect(Object.values(DESKTOP_CHANNELS).sort()).toEqual([
       "desktop:add-model", "desktop:answer-questions", "desktop:bootstrap", "desktop:choose-workspace", "desktop:create-memory", "desktop:create-skill",
-      "desktop:delete-memory", "desktop:delete-session", "desktop:delete-skill", "desktop:event", "desktop:get-skill", "desktop:interrupt",
-      "desktop:list-files", "desktop:list-memory", "desktop:list-skills",
-      "desktop:open-workspace", "desktop:resolve-approval", "desktop:set-skill-enabled", "desktop:show-app-menu",
+      "desktop:delete-mcp-server", "desktop:delete-memory", "desktop:delete-session", "desktop:delete-skill", "desktop:event", "desktop:get-skill", "desktop:interrupt",
+      "desktop:list-files", "desktop:list-mcp-servers", "desktop:list-memory", "desktop:list-skills",
+      "desktop:open-workspace", "desktop:resolve-approval", "desktop:save-mcp-server", "desktop:set-mcp-server-enabled", "desktop:set-skill-enabled", "desktop:show-app-menu",
       "desktop:start-session", "desktop:submit", "desktop:switch-model", "desktop:update-memory", "desktop:update-skill",
     ].sort());
   });

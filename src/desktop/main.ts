@@ -14,6 +14,7 @@ import {
   DESKTOP_CHANNELS,
   OpenWorkspaceInputSchema,
   MemoryCandidateInputSchema,
+  McpServerNameInputSchema,
   ResolveApprovalInputSchema,
   StartSessionInputSchema,
   SkillDraftInputSchema,
@@ -21,6 +22,8 @@ import {
   UpdateSkillInputSchema,
   UpdateMemoryInputSchema,
   SetSkillEnabledInputSchema,
+  SaveMcpServerInputSchema,
+  SetMcpServerEnabledInputSchema,
   SwitchDesktopModelInputSchema,
   SubmitInputSchema,
   type DesktopEvent,
@@ -153,6 +156,18 @@ function installIpcHandlers(): void {
   ipcMain.handle(DESKTOP_CHANNELS.setSkillEnabled, async (_event, value) => {
     const input = SetSkillEnabledInputSchema.parse(value);
     await controller.setSkillEnabled(input.name, input.enabled);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.listMcpServers, async () => controller.listMcpServers());
+  ipcMain.handle(DESKTOP_CHANNELS.saveMcpServer, async (_event, value) => {
+    const { originalName, draft } = SaveMcpServerInputSchema.parse(value);
+    return controller.saveMcpServer(originalName, draft);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.deleteMcpServer, async (_event, value) => {
+    await controller.deleteMcpServer(McpServerNameInputSchema.parse(value).name);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.setMcpServerEnabled, async (_event, value) => {
+    const { name, enabled } = SetMcpServerEnabledInputSchema.parse(value);
+    return controller.setMcpServerEnabled(name, enabled);
   });
   ipcMain.handle(DESKTOP_CHANNELS.listMemory, async () => controller.listMemory());
   ipcMain.handle(DESKTOP_CHANNELS.createMemory, async (_event, value) => {

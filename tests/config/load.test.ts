@@ -303,6 +303,9 @@ it("rejects ambiguous or unsafe MCP server configurations", () => {
   expect(() => FlavorConfigSchema.parse({
     mcpServers: { slow: { command: "node", timeoutMs: 0 } },
   })).toThrow();
+  expect(() => FlavorConfigSchema.parse({
+    mcpServers: { ftp: { url: "ftp://mcp.example.com/server" } },
+  })).toThrow();
 });
 
 it("preserves a positive provider output token limit", () => {

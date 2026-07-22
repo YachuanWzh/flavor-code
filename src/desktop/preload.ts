@@ -22,6 +22,12 @@ const api: FlavorDesktopApi = {
   updateSkill: (originalName, draft) => ipcRenderer.invoke(DESKTOP_CHANNELS.updateSkill, { originalName, draft }),
   deleteSkill: (name) => ipcRenderer.invoke(DESKTOP_CHANNELS.deleteSkill, { name }),
   setSkillEnabled: (name, enabled) => ipcRenderer.invoke(DESKTOP_CHANNELS.setSkillEnabled, { name, enabled }),
+  listMcpServers: () => ipcRenderer.invoke(DESKTOP_CHANNELS.listMcpServers),
+  saveMcpServer: (originalName, draft) => ipcRenderer.invoke(DESKTOP_CHANNELS.saveMcpServer, {
+    ...(originalName === undefined ? {} : { originalName }), draft,
+  }),
+  deleteMcpServer: (name) => ipcRenderer.invoke(DESKTOP_CHANNELS.deleteMcpServer, { name }),
+  setMcpServerEnabled: (name, enabled) => ipcRenderer.invoke(DESKTOP_CHANNELS.setMcpServerEnabled, { name, enabled }),
   listMemory: () => ipcRenderer.invoke(DESKTOP_CHANNELS.listMemory),
   createMemory: (candidate) => ipcRenderer.invoke(DESKTOP_CHANNELS.createMemory, candidate),
   updateMemory: (id, candidate) => ipcRenderer.invoke(DESKTOP_CHANNELS.updateMemory, { id, ...candidate }),

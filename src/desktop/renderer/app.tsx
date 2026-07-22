@@ -26,6 +26,7 @@ import { COMMAND_DESCRIPTIONS, MVP_COMMANDS } from "../../ui/commands.js";
 import type { FileChangePresentation, FileDiffLine } from "../../tools/types.js";
 import { SkillManagerView } from "./skill-manager.js";
 import { MemoryManagerView } from "./memory-manager.js";
+import { McpManagerView } from "./mcp-manager.js";
 
 const EMPTY_SNAPSHOT: DesktopSnapshot = { sessions: [], diagnostics: [], models: [] };
 const PERMISSIONS: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions", "auto", "bubble"];
@@ -50,7 +51,7 @@ export function DesktopApp(): React.JSX.Element {
   const [dismissedMentionInput, setDismissedMentionInput] = useState<string>();
   const [mentionSpan, setMentionSpan] = useState<{ start: number; end: number }>();
   const [cursorPos, setCursorPos] = useState(0);
-  const [view, setView] = useState<"conversation" | "skills" | "memory">("conversation");
+  const [view, setView] = useState<"conversation" | "skills" | "memory" | "mcp">("conversation");
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const userScrolledUp = useRef(false);
@@ -265,7 +266,7 @@ export function DesktopApp(): React.JSX.Element {
         <button className="rail-action" onClick={() => void chooseWorkspace()}><span className="action-icon">⌂</span><span>打开项目</span></button>
         <button className="rail-action" data-active={view === "skills"} onClick={() => { setView("skills"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">◇</span><span>技能</span></button>
         <button className="rail-action" data-active={view === "memory"} onClick={() => { setView("memory"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">⌁</span><span>长期记忆</span></button>
-        <button className="rail-action" onClick={() => void send("/mcp status")} disabled={snapshot.activeSession === undefined || busy}><span className="action-icon">◎</span><span>MCP 服务</span></button>
+        <button className="rail-action" data-active={view === "mcp"} onClick={() => { setView("mcp"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">◎</span><span>MCP 服务</span></button>
       </nav>
       <div className="sessions-scroll">
         <div className="rail-section-title">项目</div>
@@ -298,7 +299,8 @@ export function DesktopApp(): React.JSX.Element {
 
     <main className="workspace-panel">
       {view === "skills" && snapshot.workspace !== undefined ? <SkillManagerView onClose={() => setView("conversation")} onError={setError} />
-        : view === "memory" && snapshot.workspace !== undefined ? <MemoryManagerView onClose={() => setView("conversation")} onError={setError} /> : <>
+        : view === "memory" && snapshot.workspace !== undefined ? <MemoryManagerView onClose={() => setView("conversation")} onError={setError} />
+          : view === "mcp" && snapshot.workspace !== undefined ? <McpManagerView onClose={() => setView("conversation")} onError={setError} /> : <>
       <header className="workspace-header">
         <button className="mobile-rail-toggle" onClick={() => setRailOpen(true)} aria-label="打开项目栏">☰</button>
         <div className="workspace-breadcrumb">

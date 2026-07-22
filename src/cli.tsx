@@ -12,12 +12,13 @@ import { redactErrorText } from "./utils/redact.js";
 import { staticTaskLines } from "./ui/task-progress-model.js";
 import { SkillManager } from "./skills/manager.js";
 import { registerMemoryCommands } from "./memory/cli.js";
+import { registerMcpCommands } from "./mcp/cli.js";
 
 export function createProgram(): Command {
   const program = new Command()
     .name("flavor")
     .description("Interactive coding agent")
-    .version("0.9.0")
+    .version("1.0.0")
     .option("-p, --print <prompt>", "run one prompt without the interactive UI")
     .option("--resume [session-id]", "resume a saved session (latest when id is omitted)");
 
@@ -64,6 +65,7 @@ export function createProgram(): Command {
   }
 
   registerMemoryCommands(program);
+  registerMcpCommands(program);
 
   program.action(async (options: { print?: string; resume?: string | boolean }) => {
     const resumeSession = options.resume === true ? true : typeof options.resume === "string" ? options.resume : undefined;

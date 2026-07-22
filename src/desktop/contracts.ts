@@ -1,13 +1,14 @@
 import { z } from "zod";
 
 import type { AgentEvent } from "../agent/types.js";
-import type { PermissionMode } from "../config/schema.js";
+import { McpServerConfigSchema, McpServerNameSchema, type PermissionMode } from "../config/schema.js";
 import type { TranscriptState } from "../ui/transcript.js";
 import type { Question } from "../tools/ask-user-question.js";
 import type { SessionOutput } from "../ui/session.js";
 import type { ManagedSkill, ManagedSkillSummary, SkillDraft } from "../skills/manager.js";
 import { MEMORY_TYPES, type MemoryCandidate, type MemoryEntry } from "../memory/types.js";
 import type { MemorySnapshot } from "../memory/manager.js";
+import type { ManagedMcpServer } from "../mcp/config-manager.js";
 export { DESKTOP_CHANNELS } from "./channels.js";
 
 export const OpenWorkspaceInputSchema = z.object({ path: z.string().trim().min(1).max(32_768) }).strict();
@@ -40,6 +41,13 @@ export const UpdateSkillInputSchema = z.object({
   draft: SkillDraftInputSchema,
 }).strict();
 export const SetSkillEnabledInputSchema = z.object({ name: SkillNameInput, enabled: z.boolean() }).strict();
+const McpServerNameInput = McpServerNameSchema;
+export const McpServerNameInputSchema = z.object({ name: McpServerNameInput }).strict();
+export const SaveMcpServerInputSchema = z.object({
+  originalName: McpServerNameInput.optional(),
+  draft: z.object({ name: McpServerNameInput, config: McpServerConfigSchema }).strict(),
+}).strict();
+export const SetMcpServerEnabledInputSchema = z.object({ name: McpServerNameInput, enabled: z.boolean() }).strict();
 const MemoryIdInput = z.string().regex(/^[a-f0-9]{12}$/, "Invalid memory id");
 export const MemoryCandidateInputSchema = z.object({
   type: z.enum(MEMORY_TYPES),
@@ -75,6 +83,7 @@ export const SwitchDesktopModelInputSchema = z.object({
 }).strict();
 
 export type AddDesktopModelInput = z.infer<typeof AddDesktopModelInputSchema>;
+export type McpServerDraft = z.input<typeof SaveMcpServerInputSchema>["draft"];
 
 export interface DesktopModelOption {
   id: string;
@@ -154,6 +163,10 @@ export interface FlavorDesktopApi {
   updateSkill(originalName: string, draft: SkillDraft): Promise<ManagedSkill>;
   deleteSkill(name: string): Promise<void>;
   setSkillEnabled(name: string, enabled: boolean): Promise<void>;
+  listMcpServers(): Promise<readonly ManagedMcpServer[]>;
+  saveMcpServer(originalName: string | undefined, draft: McpServerDraft): Promise<ManagedMcpServer>;
+  deleteMcpServer(name: string): Promise<void>;
+  setMcpServerEnabled(name: string, enabled: boolean): Promise<ManagedMcpServer>;
   listMemory(): Promise<MemorySnapshot>;
   createMemory(candidate: MemoryCandidate): Promise<MemoryEntry>;
   updateMemory(id: string, candidate: MemoryCandidate): Promise<MemoryEntry>;

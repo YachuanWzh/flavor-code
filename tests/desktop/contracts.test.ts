@@ -6,6 +6,8 @@ import {
   DeleteSessionInputSchema,
   DeleteMemoryInputSchema,
   MemoryCandidateInputSchema,
+  McpServerNameInputSchema,
+  SaveMcpServerInputSchema,
   OpenWorkspaceInputSchema,
   ResolveApprovalInputSchema,
   StartSessionInputSchema,
@@ -35,6 +37,15 @@ describe("desktop IPC contracts", () => {
     expect(UpdateMemoryInputSchema.parse({ id: "abcdef123456", type: "feedback", content: "Do not commit." }))
       .toEqual({ id: "abcdef123456", type: "feedback", content: "Do not commit." });
     expect(DeleteMemoryInputSchema.parse({ id: "abcdef123456" })).toEqual({ id: "abcdef123456" });
+    expect(McpServerNameInputSchema.parse({ name: "remote_docs" })).toEqual({ name: "remote_docs" });
+    expect(SaveMcpServerInputSchema.parse({
+      draft: { name: "local", config: { command: "node", args: ["server.mjs"] } },
+    })).toEqual({ draft: { name: "local", config: {
+      command: "node", args: ["server.mjs"], env: {}, disabled: false, timeoutMs: 60_000,
+    } } });
+    expect(SaveMcpServerInputSchema.parse({
+      originalName: "docs", draft: { name: "docs", config: { url: "https://mcp.example.com/mcp" } },
+    })).toMatchObject({ originalName: "docs", draft: { name: "docs", config: { url: "https://mcp.example.com/mcp" } } });
   });
 
   it("rejects blank prompts, unknown approval decisions and oversized question indexes", () => {
@@ -46,5 +57,12 @@ describe("desktop IPC contracts", () => {
     expect(() => SkillNameInputSchema.parse({ name: "../escape" })).toThrow();
     expect(() => MemoryCandidateInputSchema.parse({ type: "secret", content: "x" })).toThrow();
     expect(() => UpdateMemoryInputSchema.parse({ id: "../outside", type: "project", content: "x" })).toThrow();
+    expect(() => McpServerNameInputSchema.parse({ name: "../outside" })).toThrow();
+    expect(() => SaveMcpServerInputSchema.parse({
+      draft: { name: "mixed", config: { command: "node", url: "https://example.com" } },
+    })).toThrow();
+    expect(() => SaveMcpServerInputSchema.parse({
+      draft: { name: "ftp", config: { url: "ftp://example.com/mcp" } },
+    })).toThrow();
   });
 });

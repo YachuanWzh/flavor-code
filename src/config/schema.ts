@@ -47,7 +47,10 @@ export const McpStdioServerConfigSchema = z.object({
 }).strict();
 
 export const McpHttpServerConfigSchema = z.object({
-  url: z.string().url(),
+  url: z.string().url().refine((value) => {
+    const protocol = new URL(value).protocol;
+    return protocol === "http:" || protocol === "https:";
+  }, "MCP HTTP URLs must use http or https"),
   headers: z.record(z.string(), z.string()).default({}),
   ...McpServerCommonShape,
 }).strict();
@@ -57,7 +60,7 @@ export const McpServerConfigSchema = z.union([
   McpHttpServerConfigSchema,
 ]);
 
-const McpServerNameSchema = z.string()
+export const McpServerNameSchema = z.string()
   .min(1)
   .max(32)
   .regex(/^[A-Za-z0-9_-]+$/, "MCP server names may contain only letters, digits, underscores, and hyphens");
@@ -152,5 +155,6 @@ export const FlavorConfigSchema = z.object({
 export type FlavorConfig = z.infer<typeof FlavorConfigSchema>;
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
+export type McpServerConfigInput = z.input<typeof McpServerConfigSchema>;
 export type McpStdioServerConfig = z.infer<typeof McpStdioServerConfigSchema>;
 export type McpHttpServerConfig = z.infer<typeof McpHttpServerConfigSchema>;

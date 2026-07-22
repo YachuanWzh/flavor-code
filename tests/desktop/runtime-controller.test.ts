@@ -35,6 +35,39 @@ function fakeRuntime(output: (event: SessionOutput) => void): RuntimeLike {
 }
 
 describe("DesktopRuntimeController", () => {
+  it("delegates MCP configuration CRUD to the opened project manager", async () => {
+    const local = {
+      name: "local", transport: "stdio" as const, enabled: true,
+      config: { command: "node", args: [], env: {}, disabled: false, timeoutMs: 60_000 },
+    };
+    const mcp = {
+      path: "C:\\work\\.flavor\\flavor.json",
+      list: vi.fn(async () => [local]),
+      create: vi.fn(async () => local),
+      update: vi.fn(async () => local),
+      setEnabled: vi.fn(async () => ({ ...local, enabled: false })),
+      delete: vi.fn(async () => undefined),
+    };
+    const loadMcpManager = vi.fn(() => mcp);
+    const controller = new DesktopRuntimeController({
+      home: "C:\\Users\\demo", listSessions: async () => [], loadMcpManager, emit: () => undefined,
+    });
+
+    await expect(controller.listMcpServers()).rejects.toThrow(/open a project/i);
+    await controller.openWorkspace("C:\\work");
+    expect(await controller.listMcpServers()).toEqual([local]);
+    await controller.saveMcpServer(undefined, { name: "local", config: { command: "node" } });
+    await controller.saveMcpServer("local", { name: "renamed", config: { command: "bun" } });
+    await controller.setMcpServerEnabled("renamed", false);
+    await controller.deleteMcpServer("renamed");
+
+    expect(loadMcpManager).toHaveBeenCalledWith("C:\\work");
+    expect(mcp.create).toHaveBeenCalledWith("local", { command: "node" });
+    expect(mcp.update).toHaveBeenCalledWith("local", "renamed", { command: "bun" });
+    expect(mcp.setEnabled).toHaveBeenCalledWith("renamed", false);
+    expect(mcp.delete).toHaveBeenCalledWith("renamed");
+  });
+
   it("manages long-term memory through the opened workspace", async () => {
     const existing = { id: "aaaaaaaaaaaa", type: "project" as const, content: "Use npm." };
     const updated = { id: "bbbbbbbbbbbb", type: "project" as const, content: "Use pnpm." };
