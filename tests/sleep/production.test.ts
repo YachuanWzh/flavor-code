@@ -40,6 +40,11 @@ it("wires an enabled project midnight review to the configured cheap model", asy
         decisionsAndLearnings: ["保留项目级隔离"],
         openQuestionsAndRisks: [],
         tomorrowPlan: ["继续验证"],
+        toolUsage: { totalCalls: 3, shell: 1, fileRead: 1, fileWrite: 1, search: 0, lsp: 0, subagent: 0, other: 0 },
+        tokenEstimate: { estimatedInput: 500, estimatedOutput: 100, notes: "测试估算" },
+        humanIntervention: { approvalRequests: 0, questionsAsked: 0, summary: "" },
+        qualityIndicators: { hallucinationAlerts: [], failuresAndRetries: [], codeChangeSummary: "", overallAssessment: "顺利" },
+        knowledgeDeposits: { worthRemembering: [] },
       }) };
       yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
     }});

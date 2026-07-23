@@ -18,7 +18,7 @@ export function createProgram(): Command {
   const program = new Command()
     .name("flavor")
     .description("Interactive coding agent")
-    .version("1.0.1")
+    .version("1.0.2")
     .option("-p, --print <prompt>", "run one prompt without the interactive UI")
     .option("--resume [session-id]", "resume a saved session (latest when id is omitted)");
 

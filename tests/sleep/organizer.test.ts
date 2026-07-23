@@ -49,6 +49,11 @@ const reviewJson = JSON.stringify({
   decisionsAndLearnings: ["保留错误码作为稳定契约"],
   openQuestionsAndRisks: ["需要观察生产环境指标"],
   tomorrowPlan: ["检查发布后的登录成功率"],
+  toolUsage: { totalCalls: 5, shell: 1, fileRead: 2, fileWrite: 1, search: 0, lsp: 0, subagent: 0, other: 1 },
+  tokenEstimate: { estimatedInput: 1000, estimatedOutput: 200, notes: "粗略估算" },
+  humanIntervention: { approvalRequests: 1, questionsAsked: 0, summary: "一次权限确认" },
+  qualityIndicators: { hallucinationAlerts: [], failuresAndRetries: [], codeChangeSummary: "修改了一个文件", overallAssessment: "顺利完成" },
+  knowledgeDeposits: { worthRemembering: [] },
 });
 
 describe("project sleep organizer", () => {
@@ -92,7 +97,7 @@ describe("project sleep organizer", () => {
     expect(names).toEqual(["2026-07-22-登录流程复盘.md"]);
     const report = await readFile(join(root, ".flavor", "sleep", names[0]!), "utf8");
     for (const heading of [
-      "当天任务摘要", "执行情况反思", "关键决策与收获", "未决事项与风险", "明日可能规划", "涉及会话",
+      "当天任务摘要", "执行情况反思", "量化统计", "关键决策与收获", "质量与可信度", "知识沉淀", "未决事项与风险", "明日可能规划", "涉及会话",
     ]) expect(report).toContain(`## ${heading}`);
     expect(report).toContain("session-target");
   });

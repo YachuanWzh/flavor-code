@@ -13,7 +13,7 @@ describe("flavor CLI", () => {
     const manifest = JSON.parse(await readFile("package.json", "utf8")) as { version: string };
     expect(program.name()).toBe("flavor");
     expect(program.version()).toBe(manifest.version);
-    expect(manifest.version).toBe("1.0.1");
+    expect(manifest.version).toBe("1.0.2");
     expect(program.options.find((option) => option.long === "--resume")?.optional).toBe(true);
   });
 
@@ -22,6 +22,6 @@ describe("flavor CLI", () => {
 
     const { stdout } = await execFileAsync(process.execPath, [path.resolve("dist/cli.js"), "--version"]);
 
-    expect(stdout.trim()).toBe("1.0.1");
+    expect(stdout.trim()).toBe("1.0.2");
   });
 });

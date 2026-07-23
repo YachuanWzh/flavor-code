@@ -32,7 +32,7 @@ export interface McpSdkDependencies {
 }
 
 const DEFAULT_DEPENDENCIES: McpSdkDependencies = {
-  createClient: () => new Client({ name: "flavor-code", version: "1.0.1" }) as unknown as SdkClientLike,
+  createClient: () => new Client({ name: "flavor-code", version: "1.0.2" }) as unknown as SdkClientLike,
   createStdioTransport: (options) => new StdioClientTransport(options),
   createHttpTransport: (url, options) => new StreamableHTTPClientTransport(url, options),
   defaultEnvironment: getDefaultEnvironment,
