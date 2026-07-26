@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  activateNextReadyTask,
   TaskPlanSchema,
   normalizeAbandonedPlan,
   updatePlanTask,
@@ -65,6 +66,30 @@ describe("updatePlanTask", () => {
     const plan = TaskPlanSchema.parse({ tasks: [task("a", "in_progress")] });
     expect(updatePlanTask(plan, { taskId: "a", status: "completed", result: "verified" }).tasks[0])
       .toMatchObject({ status: "completed", result: "verified" });
+  });
+});
+
+describe("activateNextReadyTask", () => {
+  it("promotes the first dependency-ready pending task in stable order", () => {
+    const plan = TaskPlanSchema.parse({
+      tasks: [task("a"), task("b", "pending", ["a"]), task("c")],
+    });
+
+    expect(activateNextReadyTask(plan).tasks.map(({ id, status }) => ({ id, status }))).toEqual([
+      { id: "a", status: "in_progress" },
+      { id: "b", status: "pending" },
+      { id: "c", status: "pending" },
+    ]);
+  });
+
+  it("keeps an existing active task and advances after it completes", () => {
+    const active = TaskPlanSchema.parse({
+      tasks: [task("a", "in_progress"), task("b", "pending", ["a"])],
+    });
+    expect(activateNextReadyTask(active)).toEqual(active);
+
+    const completed = updatePlanTask(active, { taskId: "a", status: "completed" });
+    expect(activateNextReadyTask(completed).tasks[1]?.status).toBe("in_progress");
   });
 });
 

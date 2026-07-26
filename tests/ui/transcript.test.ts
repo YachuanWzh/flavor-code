@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createTranscriptState, restoreTranscriptState, transcriptReducer } from "../../src/ui/transcript.js";
+import {
+  createTranscriptState,
+  restoreTranscriptState,
+  transcriptReducer,
+  type TranscriptBlock,
+} from "../../src/ui/transcript.js";
 
 afterEach(() => vi.useRealTimers());
 
@@ -311,6 +316,27 @@ describe("transcriptReducer", () => {
     expect(state.taskSnapshot).toEqual(completed);
   });
 
+  it("archives current task rows but does not carry a closed plan into the next prompt", () => {
+    const snapshot = {
+      plan: { tasks: [{
+        id: "inspect", subject: "Inspect code", activeForm: "Inspecting code",
+        status: "pending" as const, dependencies: [],
+      }] },
+      subagents: { states: {} },
+    };
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "first" });
+    state = transcriptReducer(state, { type: "session", event: { type: "tasks", snapshot } });
+    state = transcriptReducer(state, { type: "session", event: { type: "tasks-cleared" } });
+    state = transcriptReducer(state, { type: "finish" });
+
+    expect(state.completed[0]?.blocks).toContainEqual(expect.objectContaining({ id: "task:inspect" }));
+    expect(state.taskSnapshot).toBeUndefined();
+
+    state = transcriptReducer(state, { type: "submit", prompt: "second" });
+    expect(state.active?.blocks).toEqual([]);
+    expect(state.active?.taskSnapshot).toBeUndefined();
+  });
+
   it("updates planned task rows in place by task id", () => {
     const planTask = {
       id: "inspect", subject: "Inspect code", activeForm: "Inspecting code",
@@ -453,7 +479,9 @@ describe("transcriptReducer", () => {
       type: "tasks",
       snapshot: { subagents: { graph: { nodes }, states: { a: "completed", b: "running" } } },
     } });
-    expect(state.active?.blocks.find((b) => b.kind === "status" && b.id === "subagent:a")?.elapsedMs).toBe(5_000);
+    expect(state.active?.blocks.find(
+      (b): b is Extract<TranscriptBlock, { kind: "status" }> => b.kind === "status" && b.id === "subagent:a",
+    )?.elapsedMs).toBe(5_000);
 
     // Worker B completes at T=12s — worker A's elapsed time must stay frozen at 5s
     vi.setSystemTime(new Date("2026-07-13T00:00:12.000Z"));
@@ -462,8 +490,12 @@ describe("transcriptReducer", () => {
       snapshot: { subagents: { graph: { nodes }, states: { a: "completed", b: "completed" } } },
     } });
 
-    expect(state.active?.blocks.find((b) => b.kind === "status" && b.id === "subagent:a")?.elapsedMs).toBe(5_000);
-    expect(state.active?.blocks.find((b) => b.kind === "status" && b.id === "subagent:b")?.elapsedMs).toBe(12_000);
+    expect(state.active?.blocks.find(
+      (b): b is Extract<TranscriptBlock, { kind: "status" }> => b.kind === "status" && b.id === "subagent:a",
+    )?.elapsedMs).toBe(5_000);
+    expect(state.active?.blocks.find(
+      (b): b is Extract<TranscriptBlock, { kind: "status" }> => b.kind === "status" && b.id === "subagent:b",
+    )?.elapsedMs).toBe(12_000);
   });
 
   it("uses snapshot-provided startedAt and elapsedMs for subagent blocks", () => {
@@ -491,11 +523,15 @@ describe("transcriptReducer", () => {
       },
     } });
 
-    const blockA = state.active?.blocks.find((b) => b.kind === "status" && b.id === "subagent:a");
+    const blockA = state.active?.blocks.find(
+      (b): b is Extract<TranscriptBlock, { kind: "status" }> => b.kind === "status" && b.id === "subagent:a",
+    );
     expect(blockA?.startedAt).toBe(1_000);  // from snapshot.startedAt for terminal task with no prior
     expect(blockA?.elapsedMs).toBe(40_000); // frozen from snapshot.elapsedMs
 
-    const blockB = state.active?.blocks.find((b) => b.kind === "status" && b.id === "subagent:b");
+    const blockB = state.active?.blocks.find(
+      (b): b is Extract<TranscriptBlock, { kind: "status" }> => b.kind === "status" && b.id === "subagent:b",
+    );
     expect(blockB?.startedAt).toBe(5_000);  // from snapshot.startedAt
     expect(blockB?.elapsedMs).toBeUndefined(); // running tasks have no elapsedMs
   });

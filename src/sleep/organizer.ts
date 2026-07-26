@@ -60,6 +60,8 @@ export interface ProjectSleepOrganizerOptions {
 export interface ProjectSleepSchedulerOptions {
   enabled: boolean;
   organize(date: string, signal: AbortSignal): Promise<unknown>;
+  catchUpDates?: (signal: AbortSignal) => Promise<readonly string[]>;
+  retryDelayMs?: number;
   now?: () => Date;
   onError?: (error: unknown) => void;
 }
@@ -116,9 +118,22 @@ export class ProjectSleepOrganizer {
       const documents = await this.#sessionsForDate(date);
       if (documents.length === 0) return { status: "no-sessions", date };
 
-      const raw = await this.#generate(buildSleepPrompt(date, documents, computeSessionStats(documents)), signal);
-      signal.throwIfAborted();
-      const review = parseSleepReview(raw);
+      const basePrompt = buildSleepPrompt(date, documents, computeSessionStats(documents));
+      let review: SleepReview | undefined;
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          const prompt = attempt === 1 ? basePrompt : `${basePrompt}\n\nPrevious output was invalid. Repair it and return strict JSON only.`;
+          const raw = await this.#generate(prompt, signal);
+          signal.throwIfAborted();
+          review = parseSleepReview(raw);
+          break;
+        } catch (error) {
+          signal.throwIfAborted();
+          lastError = error;
+        }
+      }
+      if (review === undefined) throw lastError;
       const filename = `${date}-${filenameSummary(review.title)}.md`;
       const path = join(this.#sleepDirectory, filename);
       const markdown = renderSleepReport(date, review, documents);
@@ -130,11 +145,40 @@ export class ProjectSleepOrganizer {
     }
   }
 
+  async pendingDates(beforeDate: string): Promise<string[]> {
+    assertDateKey(beforeDate);
+    await this.#prepareDirectory();
+    const documents = await Promise.all((await this.#sessions.list())
+      .map((entry) => this.#sessions.load(entry.sessionId)));
+    const dates = new Set<string>();
+    for (const document of documents) {
+      const timestamped = timestampedTurns(document);
+      if (timestamped.length > 0) {
+        for (const turn of timestamped) {
+          const date = localDateKey(new Date(turn.submittedAt!));
+          if (date < beforeDate) dates.add(date);
+        }
+      } else {
+        const date = localDateKey(new Date(document.updatedAt));
+        if (date < beforeDate) dates.add(date);
+      }
+    }
+    const pending: string[] = [];
+    for (const date of [...dates].sort()) {
+      if (!(await this.#hasReport(date))) pending.push(date);
+    }
+    return pending;
+  }
+
   async #sessionsForDate(date: string): Promise<SessionDocument[]> {
     const entries = (await this.#sessions.list())
-      .filter((entry) => localDateKey(new Date(entry.updatedAt)) === date)
       .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt) || a.sessionId.localeCompare(b.sessionId));
-    return Promise.all(entries.map((entry) => this.#sessions.load(entry.sessionId)));
+    const documents = await Promise.all(entries.map((entry) => this.#sessions.load(entry.sessionId)));
+    return documents.filter((document) => {
+      const turns = timestampedTurns(document);
+      if (turns.length === 0) return localDateKey(new Date(document.updatedAt)) === date;
+      return turns.some((turn) => localDateKey(new Date(turn.submittedAt!)) === date);
+    });
   }
 
   async #prepareDirectory(): Promise<void> {
@@ -174,17 +218,28 @@ export class ProjectSleepOrganizer {
 export class ProjectSleepScheduler {
   readonly #enabled: boolean;
   readonly #organize: ProjectSleepSchedulerOptions["organize"];
+  readonly #catchUpDates: ProjectSleepSchedulerOptions["catchUpDates"];
+  readonly #retryDelayMs: number;
   readonly #now: () => Date;
   readonly #onError: ((error: unknown) => void) | undefined;
-  #timer: ReturnType<typeof setTimeout> | undefined;
+  #dailyTimer: ReturnType<typeof setTimeout> | undefined;
+  #retryTimer: ReturnType<typeof setTimeout> | undefined;
+  readonly #queue: string[] = [];
+  readonly #queued = new Set<string>();
   #running: Promise<void> | undefined;
   #controller: AbortController | undefined;
+  #initializing: Promise<void> | undefined;
   #started = false;
   #disposed = false;
 
   constructor(options: ProjectSleepSchedulerOptions) {
     this.#enabled = options.enabled;
     this.#organize = options.organize;
+    this.#catchUpDates = options.catchUpDates;
+    this.#retryDelayMs = options.retryDelayMs ?? 5 * 60_000;
+    if (!Number.isSafeInteger(this.#retryDelayMs) || this.#retryDelayMs < 1) {
+      throw new Error("retryDelayMs must be a positive integer");
+    }
     this.#now = options.now ?? (() => new Date());
     this.#onError = options.onError;
   }
@@ -192,15 +247,29 @@ export class ProjectSleepScheduler {
   start(): void {
     if (this.#started || this.#disposed) return;
     this.#started = true;
-    if (this.#enabled) this.#scheduleNextMidnight();
+    if (!this.#enabled) return;
+    this.#controller = new AbortController();
+    this.#scheduleNextMidnight();
+    if (this.#catchUpDates !== undefined) {
+      this.#initializing = this.#catchUpDates(this.#controller.signal)
+        .then((dates) => {
+          for (const date of dates) this.#enqueue(date);
+        })
+        .catch((error) => {
+          if (!this.#controller?.signal.aborted) this.#onError?.(error);
+        });
+    }
   }
 
   async dispose(): Promise<void> {
     if (this.#disposed) return;
     this.#disposed = true;
-    if (this.#timer !== undefined) clearTimeout(this.#timer);
-    this.#timer = undefined;
+    if (this.#dailyTimer !== undefined) clearTimeout(this.#dailyTimer);
+    if (this.#retryTimer !== undefined) clearTimeout(this.#retryTimer);
+    this.#dailyTimer = undefined;
+    this.#retryTimer = undefined;
     this.#controller?.abort(new Error("Sleep organizer disposed"));
+    await this.#initializing?.catch(() => undefined);
     await this.#running?.catch(() => undefined);
   }
 
@@ -211,23 +280,54 @@ export class ProjectSleepScheduler {
     next.setDate(next.getDate() + 1);
     next.setHours(0, 0, 0, 0);
     const delay = Math.max(1, next.getTime() - now.getTime());
-    this.#timer = setTimeout(() => this.#run(), delay);
-    (this.#timer as { unref?: () => void }).unref?.();
+    const targetDate = localDateKey(now);
+    this.#dailyTimer = setTimeout(() => {
+      this.#dailyTimer = undefined;
+      if (this.#disposed) return;
+      this.#enqueue(targetDate);
+      this.#scheduleNextMidnight();
+    }, delay);
+    (this.#dailyTimer as { unref?: () => void }).unref?.();
   }
 
-  #run(): void {
-    this.#timer = undefined;
-    if (this.#disposed) return;
-    const controller = new AbortController();
-    this.#controller = controller;
-    this.#running = this.#organize(previousLocalDateKey(this.#now()), controller.signal)
-      .then(() => undefined)
-      .catch((error) => { if (!controller.signal.aborted) this.#onError?.(error); })
-      .finally(() => {
-        this.#controller = undefined;
-        this.#running = undefined;
-        if (!this.#disposed) this.#scheduleNextMidnight();
-      });
+  #enqueue(date: string): void {
+    assertDateKey(date);
+    if (this.#queued.has(date)) return;
+    this.#queued.add(date);
+    this.#queue.push(date);
+    this.#queue.sort();
+    if (this.#retryTimer === undefined) this.#drain();
+  }
+
+  #drain(): void {
+    if (this.#disposed || this.#running !== undefined || this.#controller === undefined) return;
+    this.#running = (async () => {
+      while (!this.#disposed && this.#queue.length > 0) {
+        const date = this.#queue[0]!;
+        try {
+          await this.#organize(date, this.#controller!.signal);
+          this.#queue.shift();
+          this.#queued.delete(date);
+        } catch (error) {
+          if (!this.#controller!.signal.aborted) {
+            this.#onError?.(error);
+            this.#scheduleRetry();
+          }
+          break;
+        }
+      }
+    })().finally(() => {
+      this.#running = undefined;
+    });
+  }
+
+  #scheduleRetry(): void {
+    if (this.#disposed || this.#retryTimer !== undefined) return;
+    this.#retryTimer = setTimeout(() => {
+      this.#retryTimer = undefined;
+      this.#drain();
+    }, this.#retryDelayMs);
+    (this.#retryTimer as { unref?: () => void }).unref?.();
   }
 }
 
@@ -235,10 +335,18 @@ function buildSleepPrompt(date: string, documents: readonly SessionDocument[], s
   const modelNames = [...new Set(documents.map((d) => d.models.main))];
   const subagentModels = [...new Set(documents.map((d) => d.models.subagent))];
   const transcript = documents.map((document) => {
-    const messages = document.conversation.messages
-      .filter((item) => item.role === "user" || item.role === "assistant")
-      .map((item) => `${item.role.toUpperCase()}: ${item.content}`)
-      .join("\n\n");
+    const turns = timestampedTurns(document)
+      .filter((turn) => localDateKey(new Date(turn.submittedAt)) === date);
+    const messages = turns.length > 0
+      ? turns.map((turn) => [
+        `USER: ${turn.prompt}`,
+        ...(turn.assistantText.trim() === "" ? [] : [`ASSISTANT: ${turn.assistantText}`]),
+        ...(turn.statusLines.length === 0 ? [] : [`ACTIVITY:\n${turn.statusLines.join("\n")}`]),
+      ].join("\n\n")).join("\n\n")
+      : document.conversation.messages
+        .filter((item) => item.role === "user" || item.role === "assistant")
+        .map((item) => `${item.role.toUpperCase()}: ${item.content}`)
+        .join("\n\n");
     return `SESSION ${document.sessionId}\nUpdated: ${document.updatedAt}\n${messages}`;
   }).join("\n\n---\n\n");
 
@@ -291,6 +399,17 @@ ${statsBlock}
 
 Sessions:
 ${transcript}`;
+}
+
+type TimestampedTurn = SessionDocument["timeline"]["state"]["completed"][number] & { submittedAt: string };
+
+function timestampedTurns(document: SessionDocument): TimestampedTurn[] {
+  const turns = [
+    ...document.timeline.state.completed,
+    ...(document.timeline.state.active === undefined ? [] : [document.timeline.state.active]),
+  ];
+  return turns.filter((turn): turn is TimestampedTurn =>
+    typeof turn.submittedAt === "string" && !Number.isNaN(new Date(turn.submittedAt).getTime()));
 }
 
 function parseSleepReview(raw: string): SleepReview {

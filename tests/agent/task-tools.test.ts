@@ -49,7 +49,32 @@ describe("createTaskPlanTools", () => {
     }] }, signal);
 
     await expect(updateTool.execute({ taskId: "missing", status: "in_progress" }, signal)).rejects.toThrow(/unknown task/i);
-    expect(plan?.tasks[0]?.status).toBe("pending");
+    expect(plan?.tasks[0]?.status).toBe("in_progress");
+  });
+
+  it("automatically activates a pending plan and advances ready work", async () => {
+    let plan: TaskPlan | undefined;
+    const [planTool, updateTool] = createTaskPlanTools({
+      getPlan: () => plan,
+      commit: async (next) => { plan = next; },
+    });
+    const signal = new AbortController().signal;
+
+    await planTool.execute({ tasks: [
+      {
+        id: "inspect", subject: "Inspect code", activeForm: "Inspecting code",
+        status: "pending", dependencies: [],
+      },
+      {
+        id: "verify", subject: "Verify fix", activeForm: "Verifying fix",
+        status: "pending", dependencies: ["inspect"],
+      },
+    ] }, signal);
+
+    expect(plan?.tasks[0]?.status).toBe("in_progress");
+    await updateTool.execute({ taskId: "inspect", status: "in_progress" }, signal);
+    await updateTool.execute({ taskId: "inspect", status: "completed" }, signal);
+    expect(plan?.tasks[1]?.status).toBe("in_progress");
   });
 
   it("requires an existing plan before updating", async () => {

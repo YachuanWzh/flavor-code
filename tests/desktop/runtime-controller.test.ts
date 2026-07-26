@@ -3,10 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 import { DesktopRuntimeController, type RuntimeLike } from "../../src/desktop/runtime-controller.js";
 import type { SessionOutput } from "../../src/ui/session.js";
 
-function fakeRuntime(output: (event: SessionOutput) => void): RuntimeLike {
+function fakeRuntime(output: (event: SessionOutput) => void, sessionId = "session-live"): RuntimeLike {
   let mainModel = "openai:gpt-5";
   return {
-    sessionId: "session-live",
+    sessionId,
     restoredTranscript: {
       completed: [{ id: 1, prompt: "earlier", assistantText: "answer", statusLines: [], blocks: [{ kind: "text", text: "answer" }] }],
       nextId: 2,
@@ -120,7 +120,11 @@ describe("DesktopRuntimeController", () => {
     expect(opened.sessions).toHaveLength(1);
     expect(createRuntime).toHaveBeenCalledWith(expect.objectContaining({ workspace: "C:\\work\\demo", resumeSession: "session-old" }));
     expect(started.restoredTranscript.completed).toEqual([expect.objectContaining({ prompt: "earlier" })]);
-    expect(events).toContainEqual({ type: "session-output", event: { type: "text", text: "answer:hello" } });
+    expect(events).toContainEqual({
+      type: "session-output",
+      sessionId: "session-live",
+      event: { type: "text", text: "answer:hello" },
+    });
   });
 
   it("disposes the current runtime when switching projects", async () => {
@@ -134,6 +138,35 @@ describe("DesktopRuntimeController", () => {
     await controller.openWorkspace("C:\\two");
     expect(first.session.close).toHaveBeenCalledOnce();
     expect(first.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("does not let a previous submission clear the busy state of a newly selected session", async () => {
+    const releases: Array<() => void> = [];
+    let runtimeNumber = 0;
+    const createRuntime = vi.fn(async ({ output }: { output: (event: SessionOutput) => void }) => {
+      const runtime = fakeRuntime(output, `session-${++runtimeNumber}`);
+      runtime.session.submit = vi.fn(async () => new Promise<void>((resolve) => releases.push(resolve)));
+      return runtime;
+    });
+    const controller = new DesktopRuntimeController({
+      home: "C:\\Users\\demo", createRuntime, listSessions: async () => [], emit: () => undefined,
+    });
+    await controller.openWorkspace("C:\\work");
+    await controller.startSession();
+    const oldSubmission = controller.submit("old");
+
+    await controller.startSession();
+    const newSubmission = controller.submit("new");
+    releases[0]!();
+    await oldSubmission;
+
+    expect(controller.snapshot().activeSession).toMatchObject({
+      sessionId: "session-2",
+      busy: true,
+    });
+
+    releases[1]!();
+    await newSubmission;
   });
 
   it("forwards permission, question, and memory-review answers only to an active runtime", async () => {
@@ -170,6 +203,7 @@ describe("DesktopRuntimeController", () => {
     expect(runtime.services.finishTask).toHaveBeenCalledOnce();
     expect(events).toContainEqual({
       type: "session-output",
+      sessionId: "session-live",
       event: { type: "notice", message: "Task completed; review 1 memory candidate." },
     });
   });

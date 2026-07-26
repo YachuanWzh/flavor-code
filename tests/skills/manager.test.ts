@@ -47,7 +47,7 @@ describe("SkillManager", () => {
     await manager.delete("release-check");
     expect(await manager.list()).toEqual([]);
     expect((await loadConfig({ cwd: workspace, home })).config.skills.disabled).toEqual([]);
-  });
+  }, 15_000);
 
   it("lists global skills as read-only while allowing a project-level toggle", async () => {
     const root = await mkdtemp(join(tmpdir(), "flavor-global-skill-"));

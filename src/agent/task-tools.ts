@@ -1,6 +1,7 @@
 import {
   TaskPlanSchema,
   TaskUpdateInputSchema,
+  activateNextReadyTask,
   updatePlanTask,
   type TaskPlan,
   type TaskUpdateInput,
@@ -25,7 +26,7 @@ export function createTaskPlanTools(options: TaskPlanToolOptions): readonly [
     paths: () => [],
     execute: async (input, signal) => {
       signal.throwIfAborted();
-      const plan = TaskPlanSchema.parse(input);
+      const plan = activateNextReadyTask(TaskPlanSchema.parse(input));
       await options.commit(plan, "replace");
       return plan;
     },
@@ -40,7 +41,7 @@ export function createTaskPlanTools(options: TaskPlanToolOptions): readonly [
       signal.throwIfAborted();
       const plan = options.getPlan();
       if (plan === undefined) throw new Error("No task plan exists; create one with TaskPlan first");
-      const next = updatePlanTask(plan, input);
+      const next = activateNextReadyTask(updatePlanTask(plan, input));
       await options.commit(next, "update");
       return next;
     },

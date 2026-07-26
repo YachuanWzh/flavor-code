@@ -94,7 +94,9 @@ export class DesktopRuntimeController {
       return Promise.all(entries.map(async (entry) => {
         try {
           const document = await store.load(entry.sessionId);
-          const preview = document.conversation.messages.find((item) => item.role === "user")?.content.trim();
+          const preview = document.conversation.messages.find((item) => item.role === "user")?.content.trim()
+            ?? document.timeline.state.completed.find((turn) => turn.kind !== "compaction")?.prompt.trim()
+            ?? document.timeline.state.active?.prompt.trim();
           return { ...entry, ...(preview ? { preview } : {}) };
         } catch { return entry; }
       }));
@@ -153,20 +155,34 @@ export class DesktopRuntimeController {
     const workspace = this.#workspace;
     if (workspace === undefined) throw new Error("Open a project before starting a session");
     await this.#disposeRuntime();
+    const bufferedOutput: SessionOutput[] = [];
+    let outputSessionId: string | undefined;
+    let outputReady = false;
     const runtime = await this.#createRuntime({
       workspace,
       home: this.#home,
       approvalPolicy: "prompt",
       ...(resumeSession === undefined ? {} : { resumeSession }),
-      output: (event) => this.#emit({ type: "session-output", event }),
+      output: (event) => {
+        if (!outputReady || outputSessionId === undefined) {
+          bufferedOutput.push(event);
+          return;
+        }
+        this.#emit({ type: "session-output", sessionId: outputSessionId, event });
+      },
       onApprovalChange: () => {
         if (this.#runtime !== undefined) this.#publishSnapshot();
       },
     });
+    outputSessionId = runtime.sessionId;
     this.#runtime = runtime;
     await runtime.session.start();
     const payload = { sessionId: runtime.sessionId, restoredTranscript: runtime.restoredTranscript, snapshot: this.snapshot() };
     this.#emit({ type: "session-started", payload });
+    outputReady = true;
+    for (const event of bufferedOutput) {
+      this.#emit({ type: "session-output", sessionId: runtime.sessionId, event });
+    }
     this.#publishSnapshot();
     return payload;
   }
@@ -192,12 +208,21 @@ export class DesktopRuntimeController {
     try {
       await runtime.session.submit(prompt);
     } catch (error) {
-      this.#emit({ type: "runtime-error", message: message(error) });
+      if (this.#runtime === runtime) {
+        this.#emit({ type: "runtime-error", sessionId: runtime.sessionId, message: message(error) });
+      }
       throw error;
     } finally {
-      this.#busy = false;
-      if (this.#workspace !== undefined) this.#sessions = await this.#listSessions(this.#workspace).catch(() => this.#sessions);
-      this.#publishSnapshot();
+      if (this.#runtime === runtime) {
+        this.#busy = false;
+        const sessions = this.#workspace === undefined
+          ? this.#sessions
+          : await this.#listSessions(this.#workspace).catch(() => this.#sessions);
+        if (this.#runtime === runtime) {
+          this.#sessions = sessions;
+          this.#publishSnapshot();
+        }
+      }
     }
   }
 
@@ -222,15 +247,28 @@ export class DesktopRuntimeController {
     this.#publishSnapshot();
     try {
       const result = await runtime.services.finishTask();
-      this.#emit({ type: "session-output", event: { type: "notice", message: result } });
+      this.#emit({
+        type: "session-output",
+        sessionId: runtime.sessionId,
+        event: { type: "notice", message: result },
+      });
       return result;
     } catch (error) {
-      this.#emit({ type: "runtime-error", message: message(error) });
+      if (this.#runtime === runtime) {
+        this.#emit({ type: "runtime-error", sessionId: runtime.sessionId, message: message(error) });
+      }
       throw error;
     } finally {
-      this.#busy = false;
-      if (this.#workspace !== undefined) this.#sessions = await this.#listSessions(this.#workspace).catch(() => this.#sessions);
-      this.#publishSnapshot();
+      if (this.#runtime === runtime) {
+        this.#busy = false;
+        const sessions = this.#workspace === undefined
+          ? this.#sessions
+          : await this.#listSessions(this.#workspace).catch(() => this.#sessions);
+        if (this.#runtime === runtime) {
+          this.#sessions = sessions;
+          this.#publishSnapshot();
+        }
+      }
     }
   }
 

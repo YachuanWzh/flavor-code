@@ -24,6 +24,7 @@ import { createIncidentReporter } from "./incidents/reporter.js";
 import { initializeFlavor } from "./init/project.js";
 import { LoopOrchestrator, type LoopRuntimeEvent } from "./loop/orchestrator.js";
 import { GoalOrchestrator } from "./goal/orchestrator.js";
+import { GoalStore } from "./goal/store.js";
 import { prepareLoopWorkspace } from "./loop/isolation.js";
 import { LoopStore } from "./loop/store.js";
 import type { LoopStatus } from "./loop/types.js";
@@ -44,7 +45,7 @@ import type { PluginCommandHandler } from "./plugins/types.js";
 import { SkillRegistry } from "./skills/registry.js";
 import { createSkillResourceTool } from "./skills/tool.js";
 import { SESSION_VERSION, SessionStore, type SessionDocument } from "./session/store.js";
-import { ProjectSleepOrganizer, ProjectSleepScheduler } from "./sleep/organizer.js";
+import { ProjectSleepOrganizer, ProjectSleepScheduler, localDateKey } from "./sleep/organizer.js";
 import { createApplyPatchTool, createEditTool, createReadTool, createWriteTool } from "./tools/files.js";
 import { createGlobTool, createGrepTool } from "./tools/search.js";
 import { createShellTool } from "./tools/shell.js";
@@ -626,6 +627,14 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         emitOutput({ type: "notice", message: "The explicit request did not contain durable information that passed the memory safety threshold." });
       }
     }
+    taskPlan = undefined;
+    taskGraph = undefined;
+    taskStates = {};
+    taskResults = {};
+    for (const key of Object.keys(subagentStartedAt)) delete subagentStartedAt[key];
+    for (const key of Object.keys(subagentElapsedMs)) delete subagentElapsedMs[key];
+    harness.main.context.updateTaskState(undefined);
+    emitOutput({ type: "tasks-cleared" });
     await persist();
     return { decision: "allow" };
   });
@@ -794,6 +803,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     fingerprint: workspaceFingerprint,
     idFactory: () => `loop-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`,
   });
+  const goalStore = new GoalStore({ workspace });
   const goalOrchestrator = new GoalOrchestrator({
     workspace,
     registry,
@@ -802,6 +812,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     skepticCount: 3,
     maxRounds: 5,
     maxStallStreak: 2,
+    persistence: goalStore,
+    now: () => new Date().toISOString(),
+    idFactory: () => `goal-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`,
     runWorker: ({ workspace: goalWorkspace, prompt, signal }) =>
       runLoopWorker({ workspace: goalWorkspace, prompt, signal }),
   });
@@ -823,7 +836,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       runExplicitSkill(harness, skills, skill, prompt, signal, selectedModels.mainError), persist,
     ),
     runLoop: (goal, signal) => runLoopSession(loopOrchestrator, goal, signal),
-    runGoal: (goal, signal) => runGoalSession(goalOrchestrator, goal, signal),
+    runGoal: (goal, signal) => persistEach(runGoalSession(goalOrchestrator, goal, signal), persist),
     mcp: async (command, signal) => {
       signal.throwIfAborted();
       const manager = mcpManager!;
@@ -1057,8 +1070,16 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     });
     sleepScheduler = new ProjectSleepScheduler({
       enabled: true,
-      organize: (date, signal) => sleepOrganizer.organize(date, signal),
-      onError: (error) => diagnostics.push(`Sleep review failed: ${message(error)}`),
+      catchUpDates: () => sleepOrganizer.pendingDates(localDateKey(new Date())),
+      organize: async (date, signal) => {
+        await persist();
+        return sleepOrganizer.organize(date, signal);
+      },
+      onError: (error) => {
+        const diagnostic = `Sleep review failed: ${message(error)}`;
+        diagnostics.push(diagnostic);
+        emitOutput({ type: "notice", message: diagnostic });
+      },
     });
     sleepScheduler.start();
   }
@@ -1293,6 +1314,17 @@ async function* runExplicitSkill(
 async function* persistAfter<T>(source: AsyncIterable<T>, persist: () => Promise<void>): AsyncIterable<T> {
   try { for await (const item of source) yield item; }
   finally { await persist(); }
+}
+
+async function* persistEach<T>(source: AsyncIterable<T>, persist: () => Promise<void>): AsyncIterable<T> {
+  try {
+    for await (const item of source) {
+      yield item;
+      await persist();
+    }
+  } finally {
+    await persist();
+  }
 }
 
 async function runChild(
@@ -1572,6 +1604,7 @@ async function generateSleepReview(
 ): Promise<string> {
   const { adapter, model } = registry.get(modelId);
   let output = "";
+  let completed = false;
   for await (const event of adapter.stream({
     model,
     messages: [{ role: "user", content: prompt }],
@@ -1582,8 +1615,12 @@ async function generateSleepReview(
     else if (event.type === "error") throw new Error(event.error.message);
     else if (event.type === "tool-call" || event.type === "invalid-tool-call") {
       throw new Error("Sleep reviewer attempted an unsupported tool call");
+    } else if (event.type === "done") {
+      completed = true;
+      break;
     }
   }
+  if (!completed) throw new Error("Sleep reviewer stream ended without completion");
   if (output.trim().length === 0) throw new Error("Sleep reviewer returned no text");
   return output;
 }
@@ -1643,15 +1680,15 @@ function attachCleanupError(primary: unknown, cleanup: unknown): void {
   catch { /* Preserve the primary error even when diagnostics cannot be attached. */ }
 }
 
-async function* runGoalSession(
+export async function* runGoalSession(
   orchestrator: GoalOrchestrator, goal: string, signal: AbortSignal,
 ): AsyncIterable<AgentEvent> {
   for await (const event of orchestrator.run({ goal, signal })) {
     if (event.type === "goal-plan-created") {
-      yield { type: "warning", message: `Goal plan created (${event.plan.kind}) with ${event.plan.criteria.length} acceptance criteria.` };
-      yield { type: "warning", message: `Plan file: ${event.planPath}` };
+      yield { type: "notice", message: `Goal plan created (${event.plan.kind}) with ${event.plan.criteria.length} acceptance criteria.` };
+      yield { type: "notice", message: `Plan file: ${event.planPath}` };
       if (event.plan.approach) {
-        yield { type: "warning", message: `Approach: ${event.plan.approach}` };
+        yield { type: "notice", message: `Approach: ${event.plan.approach}` };
       }
       continue;
     }
@@ -1661,25 +1698,39 @@ async function* runGoalSession(
       return;
     }
     if (event.type === "goal-worker-start") {
-      yield { type: "warning", message: `Goal round ${event.round}: executing...` };
+      yield { type: "notice", message: `Goal round ${event.round}: executing...` };
+      continue;
+    }
+    if (event.type === "goal-worker-event") {
+      if (event.event.type === "done") {
+        yield {
+          type: "usage",
+          inputTokens: event.event.usage.inputTokens,
+          outputTokens: event.event.usage.outputTokens,
+          totalInputTokens: event.event.usage.inputTokens,
+          totalOutputTokens: event.event.usage.outputTokens,
+        };
+      } else {
+        yield event.event;
+      }
       continue;
     }
     if (event.type === "goal-verification-start") {
-      yield { type: "warning", message: `Goal round ${event.round}: verification panel (${3} skeptics) auditing...` };
+      yield { type: "notice", message: `Goal round ${event.round}: verification panel (${3} skeptics) auditing...` };
       continue;
     }
     if (event.type === "goal-verdict") {
       if (event.outcome.type === "achieved") {
-        yield { type: "warning", message: `Verdict: ACHIEVED. ${event.outcome.summary}` };
+        yield { type: "notice", message: `Verdict: ACHIEVED. ${event.outcome.summary}` };
       } else if (event.outcome.type === "not_achieved") {
-        yield { type: "warning", message: `Verdict: NOT ACHIEVED. ${event.outcome.summary}` };
+        yield { type: "notice", message: `Verdict: NOT ACHIEVED. ${event.outcome.summary}` };
       } else {
-        yield { type: "warning", message: `Verdict: BLOCKED. ${event.outcome.reason}` };
+        yield { type: "notice", message: `Verdict: BLOCKED. ${event.outcome.reason}` };
       }
       continue;
     }
     if (event.type === "goal-complete") {
-      yield { type: "warning", message: `Goal complete! ${event.summary}` };
+      yield { type: "notice", message: `Goal complete! ${event.summary}` };
       yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
       return;
     }
@@ -1689,11 +1740,11 @@ async function* runGoalSession(
       return;
     }
     if (event.type === "goal-paused") {
-      yield { type: "warning", message: `Goal paused: ${event.reason}` };
+      yield { type: "notice", message: `Goal paused: ${event.reason}` };
       continue;
     }
     if (event.type === "goal-stalled") {
-      yield { type: "warning", message: `Goal stalled: ${event.reason}` };
+      yield { type: "notice", message: `Goal stalled: ${event.reason}` };
       continue;
     }
   }

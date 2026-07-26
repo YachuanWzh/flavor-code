@@ -102,6 +102,17 @@ export function updatePlanTask(plan: TaskPlan, input: TaskUpdateInput): TaskPlan
   });
 }
 
+export function activateNextReadyTask(plan: TaskPlan): TaskPlan {
+  const current = TaskPlanSchema.parse(plan);
+  if (current.tasks.some((task) => task.status === "in_progress")) return current;
+  const next = current.tasks.find((task) =>
+    task.status === "pending"
+    && task.dependencies.every((dependency) =>
+      current.tasks.find((candidate) => candidate.id === dependency)?.status === "completed"));
+  if (next === undefined) return current;
+  return updatePlanTask(current, { taskId: next.id, status: "in_progress" });
+}
+
 function isValidTransition(from: PlanTaskStatus, to: PlanTaskStatus): boolean {
   if (from === to) return true;
   if (from === "pending") return to === "in_progress" || to === "blocked" || to === "cancelled";

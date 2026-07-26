@@ -74,7 +74,11 @@ it("wires an enabled project midnight review to the configured cheap model", asy
   try {
     await vi.advanceTimersByTimeAsync(100);
     await vi.waitFor(() => expect((globalThis as { __sleepModels?: string[] }).__sleepModels).toEqual(["cheap"]));
-    const reports = (await readdir(join(workspace, ".flavor", "sleep"))).filter((name) => name.endsWith(".md"));
+    let reports: string[] = [];
+    await vi.waitFor(async () => {
+      reports = (await readdir(join(workspace, ".flavor", "sleep"))).filter((name) => name.endsWith(".md"));
+      expect(reports).toEqual(["2026-07-23-项目复盘.md"]);
+    });
     expect(reports).toEqual(["2026-07-23-项目复盘.md"]);
     expect(await readFile(join(workspace, ".flavor", "sleep", reports[0]!), "utf8"))
       .toContain("## 明日可能规划");
@@ -82,4 +86,3 @@ it("wires an enabled project midnight review to the configured cheap model", asy
     await runtime.dispose();
   }
 });
-

@@ -306,13 +306,13 @@ async function defaultOpenBrowser(url: string): Promise<void> {
       });
       child.unref();
     } else if (platform === "darwin") {
-      const child = exec(`open "${url}"`, { shell: true }, (error) => {
+      const child = exec(`open "${url}"`, { windowsHide: true }, (error) => {
         if (error) reject(new Error(`Failed to open browser: ${error.message}`));
         else resolvePromise();
       });
       child.unref();
     } else {
-      const child = exec(`xdg-open "${url}"`, { shell: true }, (error) => {
+      const child = exec(`xdg-open "${url}"`, { windowsHide: true }, (error) => {
         if (error) reject(new Error(`Failed to open browser: ${error.message}`));
         else resolvePromise();
       });

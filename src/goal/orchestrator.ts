@@ -9,6 +9,7 @@ import { runClassifier, collectEvidence } from "./classifier.js";
 import type {
   AggregatedOutcome,
   GoalRuntimeEvent,
+  GoalState,
   Gap,
   Plan,
 } from "./types.js";
@@ -31,6 +32,7 @@ export interface GoalOrchestratorOptions {
   }): AsyncIterable<AgentEvent>;
   now?(): string;
   idFactory?(): string;
+  persistence?: { save(state: GoalState): Promise<void> };
 }
 
 export class GoalOrchestrator {
@@ -44,8 +46,28 @@ export class GoalOrchestrator {
   }
 
   async *run(request: { goal: string; signal: AbortSignal }): AsyncIterable<GoalRuntimeEvent> {
-    void (this.#options.now?.() as unknown);
-    void (this.#options.idFactory?.() as unknown);
+    const timestamp = (): string => this.#options.now?.() ?? new Date().toISOString();
+    const createdAt = timestamp();
+    let state: GoalState = {
+      id: this.#options.idFactory?.() ?? `goal-${Date.now().toString(36)}`,
+      objective: request.goal,
+      phase: "planning",
+      status: "active",
+      plan: null,
+      planPath: null,
+      verifyRounds: 0,
+      workerRounds: 0,
+      lastGaps: [],
+      gapFingerprint: "",
+      stallStreak: 0,
+      createdAt,
+      updatedAt: createdAt,
+    };
+    const persistState = async (patch?: Partial<GoalState>): Promise<void> => {
+      state = { ...state, ...patch, updatedAt: timestamp() };
+      await this.#options.persistence?.save(state);
+    };
+    await persistState();
     const workspace = this.#options.workspace;
 
     // ─── Phase 1: Planning ───
@@ -60,9 +82,11 @@ export class GoalOrchestrator {
         signal: request.signal,
       });
       planPath = await writePlanFile(workspace, plan);
+      await persistState({ plan, planPath });
       yield { type: "goal-plan-created", plan, planPath };
     } catch (error) {
       const reason = `Goal planning failed: ${message(error)}`;
+      await persistState({ phase: "complete", status: "failed" });
       yield { type: "goal-plan-failed", reason };
       yield { type: "goal-failed", reason };
       return;
@@ -78,9 +102,18 @@ export class GoalOrchestrator {
 
       // Build the worker prompt with plan + prior gaps
       const workerPrompt = buildWorkerPrompt(request.goal, plan, priorGaps, round);
+      await persistState({
+        phase: "executing",
+        status: "active",
+        workerRounds: round,
+        lastGaps: priorGaps,
+        gapFingerprint: priorFingerprint,
+        stallStreak,
+      });
       yield { type: "goal-worker-start", round };
 
       let finalResponse = "";
+      let workerError: string | undefined;
       try {
         for await (const event of this.#options.runWorker({
           goal: request.goal,
@@ -90,15 +123,25 @@ export class GoalOrchestrator {
           priorGaps: formatPriorGaps(priorGaps),
           signal: request.signal,
         })) {
-          // Collect the agent's final text responses
+          yield { type: "goal-worker-event", round, event };
           if (event.type === "text") finalResponse += event.text;
+          if (event.type === "error") {
+            workerError = event.error.message;
+            break;
+          }
         }
       } catch (error) {
-        yield { type: "goal-failed", reason: `Worker error in round ${round}: ${message(error)}` };
+        workerError = message(error);
+      }
+      if (workerError !== undefined) {
+        const reason = `Worker error in round ${round}: ${workerError}`;
+        await persistState({ phase: "complete", status: "failed" });
+        yield { type: "goal-failed", reason };
         return;
       }
 
       // ─── Phase 3: Verification ───
+      await persistState({ phase: "verifying", status: "active", verifyRounds: round });
       yield { type: "goal-verification-start", round };
       const evidence = await collectEvidence(
         workspace,
@@ -132,11 +175,13 @@ export class GoalOrchestrator {
       };
 
       if (outcome.type === "achieved") {
+        await persistState({ phase: "complete", status: "achieved", lastGaps: [] });
         yield { type: "goal-complete", summary: outcome.summary };
         return;
       }
 
       if (outcome.type === "blocked") {
+        await persistState({ phase: "complete", status: "blocked" });
         yield { type: "goal-paused", reason: outcome.reason };
         yield { type: "goal-failed", reason: outcome.reason };
         return;
@@ -146,6 +191,13 @@ export class GoalOrchestrator {
       if (outcome.fingerprint === priorFingerprint) {
         stallStreak++;
         if (stallStreak >= this.#options.maxStallStreak) {
+          await persistState({
+            phase: "complete",
+            status: "failed",
+            lastGaps: outcome.gaps,
+            gapFingerprint: outcome.fingerprint,
+            stallStreak,
+          });
           yield {
             type: "goal-stalled",
             reason: `Same gaps detected for ${stallStreak} consecutive rounds — no progress.`,
@@ -162,9 +214,16 @@ export class GoalOrchestrator {
 
       priorGaps = outcome.gaps;
       priorFingerprint = outcome.fingerprint;
+      await persistState({
+        status: "not_achieved",
+        lastGaps: priorGaps,
+        gapFingerprint: priorFingerprint,
+        stallStreak,
+      });
     }
 
     // Max rounds reached
+    await persistState({ phase: "complete", status: "failed" });
     yield {
       type: "goal-failed",
       reason: `Goal did not converge after ${this.#options.maxRounds} rounds. Last gaps: ${formatPriorGaps(priorGaps)}`,

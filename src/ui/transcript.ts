@@ -5,6 +5,8 @@ import type { ToolPresentation } from "../tools/types.js";
 export interface TranscriptTurn {
   id: number;
   kind?: "compaction";
+  submittedAt?: string;
+  completedAt?: string;
   prompt: string;
   assistantText: string;
   statusLines: string[];
@@ -77,6 +79,7 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
   if (action.type === "submit") {
     const active: TranscriptTurn = {
       id: state.nextId,
+      submittedAt: new Date().toISOString(),
       prompt: action.prompt,
       assistantText: "",
       statusLines: [],
@@ -101,6 +104,10 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
 
   const event = action.event;
   if (event.type === "clear") return createTranscriptState();
+  if (event.type === "tasks-cleared") {
+    const { taskSnapshot: _taskSnapshot, ...rest } = state;
+    return rest;
+  }
   if (event.type === "tasks") {
     const active = state.active === undefined ? undefined : applyTaskSnapshot(state.active, event.snapshot);
     return {
@@ -369,7 +376,10 @@ function finishActive(state: TranscriptState): TranscriptState {
   if (state.active === undefined) return state;
   const active = withoutModelActivity(state.active);
   return {
-    completed: [...state.completed, active],
+    completed: [...state.completed, {
+      ...active,
+      completedAt: active.completedAt ?? new Date().toISOString(),
+    }],
     nextId: state.nextId,
     ...(state.taskSnapshot === undefined ? {} : { taskSnapshot: state.taskSnapshot }),
   };

@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { PermissionMode } from "../../config/schema.js";
 import { createTranscriptState, transcriptReducer, type TranscriptBlock, type TranscriptState, type TranscriptTurn } from "../../ui/transcript.js";
 import type { AddDesktopModelInput, DesktopEvent, DesktopModelOption, DesktopSnapshot, DesktopSessionSummary } from "../contracts.js";
-import { applyDesktopOutput, groupSessions, permissionLabel, sessionTitle, STARTER_PROMPTS, workspaceName } from "./view-model.js";
+import { applyDesktopSessionOutput, groupSessions, permissionLabel, sessionTitle, STARTER_PROMPTS, workspaceName } from "./view-model.js";
 import { MarkdownContent } from "./markdown.js";
 import { SlashCompletionDropdown } from "./slash-completion-dropdown.js";
 import {
@@ -56,6 +56,7 @@ export function DesktopApp(): React.JSX.Element {
   const [view, setView] = useState<"conversation" | "skills" | "memory" | "mcp">("conversation");
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const activeSessionIdRef = useRef<string | undefined>(undefined);
   const userScrolledUp = useRef(false);
   const updateInput = useCallback((value: string) => {
     setInput(value);
@@ -84,8 +85,13 @@ export function DesktopApp(): React.JSX.Element {
   }, []);
 
   useEffect(() => {
-    const unsubscribe = window.flavorDesktop.onEvent((event) => handleEvent(event, setSnapshot, setTranscript, setError));
-    window.flavorDesktop.bootstrap().then(setSnapshot).catch((cause) => setError(errorMessage(cause))).finally(() => setLoading(false));
+    const unsubscribe = window.flavorDesktop.onEvent((event) => {
+      handleEvent(event, activeSessionIdRef, setSnapshot, setTranscript, setError);
+    });
+    window.flavorDesktop.bootstrap().then((next) => {
+      activeSessionIdRef.current = next.activeSession?.sessionId;
+      setSnapshot(next);
+    }).catch((cause) => setError(errorMessage(cause))).finally(() => setLoading(false));
     return unsubscribe;
   }, []);
 
@@ -408,24 +414,37 @@ function AppTitleBar({ railCollapsed, onToggleRail, onMenu }: {
   </header>;
 }
 
-function handleEvent(event: DesktopEvent, setSnapshot: React.Dispatch<React.SetStateAction<DesktopSnapshot>>,
+function handleEvent(event: DesktopEvent, activeSessionId: React.MutableRefObject<string | undefined>,
+  setSnapshot: React.Dispatch<React.SetStateAction<DesktopSnapshot>>,
   setTranscript: React.Dispatch<React.SetStateAction<TranscriptState>>, setError: React.Dispatch<React.SetStateAction<string | undefined>>): void {
-  if (event.type === "snapshot") setSnapshot(event.snapshot);
+  if (event.type === "snapshot") {
+    activeSessionId.current = event.snapshot.activeSession?.sessionId;
+    setSnapshot(event.snapshot);
+  }
   else if (event.type === "session-started") {
+    activeSessionId.current = event.payload.sessionId;
     setSnapshot(event.payload.snapshot);
     setTranscript(transcriptReducer(createTranscriptState(), { type: "restore", state: event.payload.restoredTranscript }));
-  } else if (event.type === "session-output") setTranscript((state) => applyDesktopOutput(state, event.event));
-  else if (event.type === "runtime-error") setError(event.message);
+  } else if (event.type === "session-output") {
+    setTranscript((state) => applyDesktopSessionOutput(state, activeSessionId.current, event));
+  }
+  else if (event.type === "runtime-error"
+    && (event.sessionId === undefined || event.sessionId === activeSessionId.current)) {
+    setError(event.message);
+  }
 }
 
 export function DesktopTurnView({ turn, active = false }: { turn: TranscriptTurn; active?: boolean }): React.JSX.Element {
+  const blocks = active
+    ? turn.blocks
+    : turn.blocks.filter((block) => block.kind !== "status" || block.task === undefined);
   return <article className="turn" data-active={active} data-kind={turn.kind ?? "conversation"}>
     <div className="user-message"><span>{turn.prompt}</span></div>
     <div className="assistant-message">
       <div className="assistant-avatar"><FlavorMark /></div>
       <div className="turn-content">
-        {turn.blocks.map((block, index) => <BlockView block={block} key={block.kind === "status" ? block.id : `text-${index}`} />)}
-        {active && turn.blocks.length === 0 && <div className="thinking-line"><i /><span>正在理解任务…</span></div>}
+        {blocks.map((block, index) => <BlockView block={block} key={block.kind === "status" ? block.id : `text-${index}`} />)}
+        {active && blocks.length === 0 && <div className="thinking-line"><i /><span>正在理解任务…</span></div>}
       </div>
     </div>
   </article>;

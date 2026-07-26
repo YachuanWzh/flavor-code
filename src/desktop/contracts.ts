@@ -148,8 +148,8 @@ export interface SessionStartedPayload {
 export type DesktopEvent =
   | { type: "snapshot"; snapshot: DesktopSnapshot }
   | { type: "session-started"; payload: SessionStartedPayload }
-  | { type: "session-output"; event: SessionOutput }
-  | { type: "runtime-error"; message: string };
+  | { type: "session-output"; sessionId: string; event: SessionOutput }
+  | { type: "runtime-error"; sessionId?: string; message: string };
 
 export interface FlavorDesktopApi {
   bootstrap(): Promise<DesktopSnapshot>;

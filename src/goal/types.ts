@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AgentEvent } from "../agent/types.js";
 
 // ──── Goal State Machine ────
 
@@ -71,21 +72,23 @@ export interface EvidencePacket {
 
 // ──── Goal State (serializable snapshot) ────
 
-export interface GoalState {
-  id: string;
-  objective: string;
-  phase: GoalPhase;
-  status: GoalStatus;
-  plan: Plan | null;
-  planPath: string | null;
-  verifyRounds: number;
-  workerRounds: number;
-  lastGaps: Gap[];
-  gapFingerprint: string;
-  stallStreak: number;
-  createdAt: string;
-  updatedAt: string;
-}
+export const GoalStateSchema = z.object({
+  id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/),
+  objective: z.string().min(1),
+  phase: GoalPhaseSchema,
+  status: GoalStatusSchema,
+  plan: PlanSchema.nullable(),
+  planPath: z.string().nullable(),
+  verifyRounds: z.number().int().min(0),
+  workerRounds: z.number().int().min(0),
+  lastGaps: z.array(GapSchema),
+  gapFingerprint: z.string(),
+  stallStreak: z.number().int().min(0),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+}).strict();
+
+export type GoalState = z.infer<typeof GoalStateSchema>;
 
 // ──── Runtime Events ────
 
@@ -93,6 +96,7 @@ export type GoalRuntimeEvent =
   | { type: "goal-plan-created"; plan: Plan; planPath: string }
   | { type: "goal-plan-failed"; reason: string }
   | { type: "goal-worker-start"; round: number }
+  | { type: "goal-worker-event"; round: number; event: AgentEvent }
   | { type: "goal-verification-start"; round: number }
   | { type: "goal-verdict"; round: number; outcome: AggregatedOutcome; skepticCount: number }
   | { type: "goal-complete"; summary: string }

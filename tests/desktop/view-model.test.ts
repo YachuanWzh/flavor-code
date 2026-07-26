@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { createTranscriptState, transcriptReducer } from "../../src/ui/transcript.js";
-import { applyDesktopOutput, groupSessions, permissionLabel, sessionTitle, STARTER_PROMPTS } from "../../src/desktop/renderer/view-model.js";
+import { applyDesktopOutput, applyDesktopSessionOutput, groupSessions, permissionLabel, sessionTitle, STARTER_PROMPTS } from "../../src/desktop/renderer/view-model.js";
 
 describe("desktop renderer view model", () => {
   it("groups sessions into today, yesterday and earlier", () => {
@@ -32,6 +32,49 @@ describe("desktop renderer view model", () => {
     state = applyDesktopOutput(state, { type: "done", usage: { inputTokens: 1, outputTokens: 1 } });
     expect(state.active).toBeUndefined();
     expect(state.completed[0]?.assistantText).toBe("world");
+  });
+
+  it("ignores delayed output from a session that is no longer active", () => {
+    const state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "new task" });
+    const stale = applyDesktopSessionOutput(state, "session-new", {
+      type: "session-output",
+      sessionId: "session-old",
+      event: { type: "text", text: "stale answer" },
+    });
+    const current = applyDesktopSessionOutput(stale, "session-new", {
+      type: "session-output",
+      sessionId: "session-new",
+      event: { type: "text", text: "current answer" },
+    });
+
+    expect(stale).toBe(state);
+    expect(current.active?.assistantText).toBe("current answer");
+  });
+
+  it("replaces the visible active plan when the runtime switches tasks", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "work" });
+    state = applyDesktopOutput(state, {
+      type: "tasks",
+      snapshot: {
+        plan: { tasks: [{
+          id: "old", subject: "Old task", activeForm: "Working old task", status: "in_progress", dependencies: [],
+        }] },
+        subagents: { states: {} },
+      },
+    });
+    state = applyDesktopOutput(state, {
+      type: "tasks",
+      snapshot: {
+        plan: { tasks: [{
+          id: "new", subject: "New task", activeForm: "Working new task", status: "in_progress", dependencies: [],
+        }] },
+        subagents: { states: {} },
+      },
+    });
+
+    expect(state.active?.blocks).toEqual([
+      expect.objectContaining({ id: "task:new", text: expect.stringContaining("New task") }),
+    ]);
   });
 
   it("provides three actionable starter prompts", () => {

@@ -97,9 +97,37 @@ describe("project sleep organizer", () => {
     expect(names).toEqual(["2026-07-22-登录流程复盘.md"]);
     const report = await readFile(join(root, ".flavor", "sleep", names[0]!), "utf8");
     for (const heading of [
-      "当天任务摘要", "执行情况反思", "量化统计", "关键决策与收获", "质量与可信度", "知识沉淀", "未决事项与风险", "明日可能规划", "涉及会话",
+      "当天任务摘要", "执行情况反思", "关键决策与收获", "未决事项与风险", "明日可能规划", "涉及会话",
     ]) expect(report).toContain(`## ${heading}`);
+    for (const heading of ["量化统计", "质量与可信度", "知识沉淀"]) expect(report).toMatch(new RegExp(`^## .*${heading}$`, "m"));
     expect(report).toContain("session-target");
+  });
+
+  it("assigns timestamped transcript turns to their own local date and includes slash commands", async () => {
+    const root = await workspace();
+    const store = new SessionStore({ workspace: root });
+    const document = session(root, "session-cross-day", new Date(2026, 6, 24, 8, 0), "later context");
+    document.timeline.state = {
+      completed: [{
+        id: 1,
+        prompt: "/goal repair the project",
+        assistantText: "Goal complete",
+        statusLines: ["Goal round 1 executing"],
+        blocks: [{ kind: "text", text: "Goal complete" }],
+        submittedAt: new Date(2026, 6, 22, 21, 30).toISOString(),
+        completedAt: new Date(2026, 6, 22, 22, 0).toISOString(),
+      }],
+      nextId: 2,
+    };
+    await store.save(document);
+    const generate = vi.fn(async (_prompt: string, _signal: AbortSignal) => reviewJson);
+    const organizer = new ProjectSleepOrganizer({ workspace: root, sessions: store, generate });
+
+    await expect(organizer.organize("2026-07-22")).resolves.toMatchObject({
+      status: "written", sessionCount: 1,
+    });
+    expect(generate.mock.calls[0]?.[0]).toContain("/goal repair the project");
+    expect(generate.mock.calls[0]?.[0]).toContain("Goal complete");
   });
 
   it("is idempotent for repeated and concurrent runs in one project", async () => {
@@ -124,13 +152,29 @@ describe("project sleep organizer", () => {
     expect(repeatedResult.status).toBe("exists");
     expect(generate).toHaveBeenCalledTimes(1);
   });
+
+  it("discovers every unreported past session date for startup catch-up", async () => {
+    const root = await workspace();
+    const store = new SessionStore({ workspace: root });
+    await store.save(session(root, "session-one", new Date(2026, 6, 22, 21, 30)));
+    await store.save(session(root, "session-two", new Date(2026, 6, 24, 9, 0)));
+    const organizer = new ProjectSleepOrganizer({
+      workspace: root,
+      sessions: store,
+      generate: async () => reviewJson,
+    });
+
+    await organizer.organize("2026-07-22");
+
+    await expect(organizer.pendingDates("2026-07-26")).resolves.toEqual(["2026-07-24"]);
+  });
 });
 
 describe("project sleep scheduler", () => {
   it("does nothing when disabled", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(2026, 6, 22, 23, 59, 59, 0));
-    const organize = vi.fn(async () => undefined);
+    const organize = vi.fn(async (_date: string, _signal: AbortSignal) => undefined);
     const scheduler = new ProjectSleepScheduler({ enabled: false, organize });
 
     scheduler.start();
@@ -153,5 +197,66 @@ describe("project sleep scheduler", () => {
     expect(vi.getTimerCount()).toBe(1);
     await scheduler.dispose();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("queues startup catch-up dates before waiting for midnight", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 26, 3, 0, 0, 0));
+    const organize = vi.fn(async (_date: string, _signal: AbortSignal) => undefined);
+    const scheduler = new ProjectSleepScheduler({
+      enabled: true,
+      organize,
+      catchUpDates: async () => ["2026-07-23", "2026-07-24", "2026-07-25"],
+    });
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(organize.mock.calls.map(([date]) => date)).toEqual([
+      "2026-07-23", "2026-07-24", "2026-07-25",
+    ]);
+    await scheduler.dispose();
+  });
+
+  it("retries a failed date without losing the next daily timer", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 22, 23, 59, 59, 0));
+    let attempts = 0;
+    const organize = vi.fn(async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("temporary model failure");
+    });
+    const onError = vi.fn();
+    const scheduler = new ProjectSleepScheduler({
+      enabled: true,
+      organize,
+      retryDelayMs: 5_000,
+      onError,
+    });
+    scheduler.start();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(2);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(organize).toHaveBeenCalledTimes(2);
+    expect(organize).toHaveBeenLastCalledWith("2026-07-22", expect.any(AbortSignal));
+    await scheduler.dispose();
+  });
+
+  it("reviews the date captured when scheduled even after a multi-day wake", async () => {
+    vi.useFakeTimers();
+    let now = new Date(2026, 6, 22, 23, 59, 59, 0);
+    vi.setSystemTime(now);
+    const organize = vi.fn(async () => undefined);
+    const scheduler = new ProjectSleepScheduler({ enabled: true, organize, now: () => now });
+    scheduler.start();
+
+    now = new Date(2026, 6, 25, 8, 0, 0, 0);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(organize).toHaveBeenCalledWith("2026-07-22", expect.any(AbortSignal));
+    await scheduler.dispose();
   });
 });

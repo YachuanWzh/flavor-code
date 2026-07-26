@@ -6,6 +6,25 @@ import { DesktopTurnView } from "../../src/desktop/renderer/app.js";
 import type { TranscriptTurn } from "../../src/ui/transcript.js";
 
 describe("desktop restored timeline rendering", () => {
+  it("shows task-plan cards only while their owning turn is active", () => {
+    const turn: TranscriptTurn = {
+      id: 1,
+      prompt: "implement",
+      assistantText: "done",
+      statusLines: ["Build feature · in progress"],
+      blocks: [{
+        kind: "status",
+        id: "task:build",
+        state: "running",
+        text: "Build feature · in progress",
+        task: { subject: "Build feature", activeForm: "Building feature", role: "main" },
+      }],
+    };
+
+    expect(renderToStaticMarkup(<DesktopTurnView turn={turn} active />)).toContain("Build feature");
+    expect(renderToStaticMarkup(<DesktopTurnView turn={turn} />)).not.toContain("Build feature");
+  });
+
   it("renders historical tool input and result in a collapsed details region", () => {
     const turn: TranscriptTurn = {
       id: 1,

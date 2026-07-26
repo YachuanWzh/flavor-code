@@ -84,18 +84,27 @@ export function statusPresentation(
   if (block.state === "completed") {
     return { glyph: "✓", text: `${stripSubagentPrefix(withoutGlyph(block.text), isSubagent)}${duration}`, color: "ansi:green",
       ...(isSubagent ? { badge: "subagent:", badgeColor: "#81c8f2" as Color } : {}),
-      ...(label === undefined ? {} : { statusLabel: label, statusColor }),
+      ...(label === undefined ? {} : {
+        statusLabel: label,
+        ...(statusColor === undefined ? {} : { statusColor }),
+      }),
     };
   }
   if (block.state === "failed" || block.state === "cancelled") {
     return { glyph: "×", text: `${stripSubagentPrefix(withoutGlyph(block.text), isSubagent)}${duration}`, color: "#e06c50",
       ...(isSubagent ? { badge: "subagent:", badgeColor: "#81c8f2" as Color } : {}),
-      ...(label === undefined ? {} : { statusLabel: label, statusColor }),
+      ...(label === undefined ? {} : {
+        statusLabel: label,
+        ...(statusColor === undefined ? {} : { statusColor }),
+      }),
     };
   }
   return { glyph: "·", text: stripSubagentPrefix(withoutGlyph(block.text), isSubagent),
     ...(isSubagent ? { badge: "subagent:", badgeColor: "#81c8f2" as Color } : {}),
-    ...(label === undefined ? {} : { statusLabel: label, statusColor }),
+    ...(label === undefined ? {} : {
+      statusLabel: label,
+      ...(statusColor === undefined ? {} : { statusColor }),
+    }),
   };
 }
 

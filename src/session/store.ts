@@ -419,6 +419,8 @@ function isTranscriptTurn(value: unknown): value is TranscriptTurn {
   if (!isRecord(value)) return false;
   if (!Number.isSafeInteger(value.id) || (value.id as number) < 1) return false;
   if (value.kind !== undefined && value.kind !== "compaction") return false;
+  if (value.submittedAt !== undefined && typeof value.submittedAt !== "string") return false;
+  if (value.completedAt !== undefined && typeof value.completedAt !== "string") return false;
   if (typeof value.prompt !== "string" || typeof value.assistantText !== "string") return false;
   if (!Array.isArray(value.statusLines) || !value.statusLines.every((line) => typeof line === "string")) return false;
   if (!Array.isArray(value.blocks) || !value.blocks.every(isTranscriptBlock)) return false;

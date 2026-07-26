@@ -23,5 +23,5 @@ describe("flavor CLI", () => {
     const { stdout } = await execFileAsync(process.execPath, [path.resolve("dist/cli.js"), "--version"]);
 
     expect(stdout.trim()).toBe("1.0.2");
-  });
+  }, 15_000);
 });

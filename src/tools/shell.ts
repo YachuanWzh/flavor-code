@@ -88,15 +88,26 @@ async function executeShell(
     let termination: Promise<void> | undefined;
     let terminalTimer: NodeJS.Timeout | undefined;
     const terminate = (reason: Exclude<ShellResult["terminationReason"], null>) => {
-      if (termination !== undefined || exitObserved) return;
+      if (
+        termination !== undefined ||
+        exitObserved ||
+        child.exitCode !== null ||
+        child.signalCode !== null
+      ) {
+        return;
+      }
       terminationReason = reason;
       termination = terminateTree(child.pid);
       terminalTimer = setTimeout(() => finishReject(new Error(`Process did not close after ${reason} termination`)), TERMINATION_FAILURE_MS);
       terminalTimer.unref();
     };
     const timeoutMs = input.timeoutMs ?? undefined;
-    const timer = timeoutMs === undefined ? undefined : setTimeout(() => terminate("timeout"), timeoutMs);
-    timer?.unref();
+    let timer: NodeJS.Timeout | undefined;
+    child.once("spawn", () => {
+      if (timeoutMs === undefined || exitObserved || settled) return;
+      timer = setTimeout(() => terminate("timeout"), timeoutMs);
+      timer.unref();
+    });
     const onCancel = () => terminate("cancelled");
     cancellation.addEventListener("abort", onCancel, { once: true });
     child.stdout.on("data", (chunk: Buffer) => stdout.add(chunk));

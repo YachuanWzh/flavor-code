@@ -435,7 +435,7 @@ describe("production runtime", () => {
     await runtime.session.submit("The requirement changed; replan it");
 
     expect(runtime.services.tasks()).toEqual({
-      plan: { tasks: [expect.objectContaining({ id: "implement" })] },
+      plan: undefined,
       graph: undefined,
       states: {},
       results: {},

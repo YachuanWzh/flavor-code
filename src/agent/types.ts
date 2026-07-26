@@ -38,6 +38,7 @@ export type AgentEvent =
   | { type: "tool-start"; id: string; name: string; input: unknown; label?: string; hint?: string }
   | { type: "tool-end"; id: string; name: string; result: ToolResult; label?: string; hint?: string }
   | { type: "tasks"; snapshot: TaskSnapshot }
+  | { type: "tasks-cleared" }
   | { type: "usage"; inputTokens: number; outputTokens: number; totalInputTokens: number; totalOutputTokens: number }
   | { type: "model-retry"; attempt: number; maxAttempts: number; delayMs: number }
   | {
@@ -58,6 +59,7 @@ export type AgentEvent =
   }
   | { type: "compact-progress"; progress: number }
   | { type: "compacted" }
+  | { type: "notice"; message: string }
   | { type: "warning"; message: string }
   | { type: "limit_reached"; iteration: number; maxIterations: number; extended: boolean }
   | { type: "done"; usage: { inputTokens: number; outputTokens: number } }

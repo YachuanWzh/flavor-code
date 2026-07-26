@@ -1,5 +1,5 @@
 import type { PermissionMode } from "../../config/schema.js";
-import type { DesktopSessionSummary } from "../contracts.js";
+import type { DesktopEvent, DesktopSessionSummary } from "../contracts.js";
 import { transcriptReducer, type TranscriptState } from "../../ui/transcript.js";
 import type { SessionOutput } from "../../ui/session.js";
 
@@ -51,4 +51,14 @@ export function workspaceName(path: string | undefined): string {
 
 export function applyDesktopOutput(state: TranscriptState, event: SessionOutput): TranscriptState {
   return transcriptReducer(state, { type: "session", event });
+}
+
+export function applyDesktopSessionOutput(
+  state: TranscriptState,
+  activeSessionId: string | undefined,
+  output: Extract<DesktopEvent, { type: "session-output" }>,
+): TranscriptState {
+  return output.sessionId === activeSessionId
+    ? applyDesktopOutput(state, output.event)
+    : state;
 }
