@@ -104,6 +104,12 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
 
   const event = action.event;
   if (event.type === "clear") return createTranscriptState();
+  if (event.type === "queued-prompt") {
+    return transcriptReducer(state.active === undefined ? state : finishActive(state), {
+      type: "submit",
+      prompt: event.prompt,
+    });
+  }
   if (event.type === "tasks-cleared") {
     const { taskSnapshot: _taskSnapshot, ...rest } = state;
     return rest;

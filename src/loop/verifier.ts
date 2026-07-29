@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { createShellTool } from "../tools/shell.js";
+import type { ExecutionEnvironment } from "../execution/types.js";
 import type { LoopVerificationEvidence } from "./types.js";
 
 export interface VerificationCommand {
@@ -45,12 +46,15 @@ export async function runVerificationPlan(
   plan: VerificationPlan,
   workspace: string,
   signal: AbortSignal,
+  executionEnvironment?: ExecutionEnvironment,
 ): Promise<LoopVerificationEvidence> {
   signal.throwIfAborted();
   if (plan.commands.length === 0) {
     return { passed: false, commands: [], summary: plan.needsHumanReason ?? "No verification commands were configured." };
   }
-  const shell = createShellTool(workspace);
+  const shell = createShellTool(workspace, {
+    ...(executionEnvironment === undefined ? {} : { executionEnvironment }),
+  });
   const commands: LoopVerificationEvidence["commands"] = [];
   for (const item of plan.commands) {
     signal.throwIfAborted();

@@ -68,6 +68,75 @@ describe("FlavorSession", () => {
     expect(events.slice(-2)).toEqual(["Stop", "SessionEnd"]);
   });
 
+  it("queues steering for an active run and follow-up work for after it", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const calls: Array<{ prompt: string; steering?: () => readonly string[] }> = [];
+    base.run = async function* (prompt, _signal, options) {
+      calls.push({
+        prompt,
+        ...(options?.getSteeringMessages === undefined ? {} : { steering: options.getSteeringMessages }),
+      });
+      if (prompt === "first") await gate;
+      yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
+    };
+    const session = new FlavorSession(base);
+
+    const active = session.submit("first");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    session.steer("change direction");
+    session.followUp("then add tests");
+    expect(outputs).toContain("Steering queued (1 pending).");
+    expect(outputs).toContain("Follow-up queued (1 pending).");
+    expect(session.queueSnapshot()).toEqual({
+      steering: ["change direction"],
+      followUp: ["then add tests"],
+    });
+    expect(calls[0]?.steering?.()).toEqual(["change direction"]);
+    release();
+    await active;
+    await session.whenIdle();
+
+    expect(calls.map((call) => call.prompt)).toEqual(["first", "then add tests"]);
+    expect(outputs).toContain("queued-prompt");
+    expect(session.queueSnapshot()).toEqual({ steering: [], followUp: [] });
+  });
+
+  it("starts an idle steering message as a normal submission", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const prompts: string[] = [];
+    base.run = async function* (prompt) {
+      prompts.push(prompt);
+      yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
+    };
+    const session = new FlavorSession(base);
+
+    session.steer("start now");
+    await session.whenIdle();
+
+    expect(prompts).toEqual(["start now"]);
+  });
+
+  it("keeps steering intent when it arrives before the queued run becomes active", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const steering: string[][] = [];
+    base.run = async function* (_prompt, _signal, options) {
+      steering.push([...(options?.getSteeringMessages() ?? [])]);
+      yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
+    };
+    const session = new FlavorSession(base);
+
+    const pending = session.submit("first");
+    session.steer("early adjustment");
+    await pending;
+
+    expect(steering).toEqual([["early adjustment"]]);
+  });
+
   it("close waits for an active cancellation and Stop before SessionEnd", async () => {
     const events: string[] = []; const outputs: string[] = [];
     const base = services(events, outputs);
@@ -239,5 +308,31 @@ describe("FlavorSession", () => {
 
     expect(finishTask).toHaveBeenCalledOnce();
     expect(outputs).toContain("Task completed; review 2 memory candidates.");
+  });
+
+  it("dispatches checkpoint and session tree commands without invoking the model", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const checkpoint = vi.fn(async () => ({ id: "turn-1", checkpointId: "checkpoint-1" }));
+    const tree = vi.fn(() => [{ id: "turn-1", parentId: null }]);
+    const rewind = vi.fn(async () => undefined);
+    const unrevert = vi.fn(async () => undefined);
+    const fork = vi.fn(async () => undefined);
+    Object.assign(base, { checkpoint, tree, rewind, unrevert, fork });
+    base.run = async function* () { throw new Error("ordinary run must not be called"); };
+    const session = new FlavorSession(base);
+
+    await session.submit("/checkpoint before refactor");
+    await session.submit("/tree");
+    await session.submit("/rewind turn-1");
+    await session.submit("/unrevert");
+    await session.submit("/fork turn-1");
+
+    expect(checkpoint).toHaveBeenCalledWith("before refactor");
+    expect(tree).toHaveBeenCalledOnce();
+    expect(rewind).toHaveBeenCalledWith("turn-1");
+    expect(unrevert).toHaveBeenCalledOnce();
+    expect(fork).toHaveBeenCalledWith("turn-1");
+    expect(outputs.join("\n")).toContain("checkpoint-1");
   });
 });

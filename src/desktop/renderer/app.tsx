@@ -223,9 +223,9 @@ export function DesktopApp(): React.JSX.Element {
     } catch (cause) { setError(errorMessage(cause)); }
   };
 
-  const send = async (override?: string) => {
+  const send = async (override?: string, delivery?: "prompt" | "steer" | "followUp") => {
     const prompt = (override ?? input).trim();
-    if (!prompt || busy) return;
+    if (!prompt) return;
     setError(undefined);
     try {
       let current = snapshot;
@@ -235,9 +235,12 @@ export function DesktopApp(): React.JSX.Element {
         setSnapshot(current);
         setTranscript(transcriptReducer(createTranscriptState(), { type: "restore", state: started.restoredTranscript }));
       }
-      setTranscript((state) => transcriptReducer(state, { type: "submit", prompt }));
+      const effectiveDelivery = delivery ?? (busy ? "steer" : "prompt");
+      if (effectiveDelivery === "prompt") {
+        setTranscript((state) => transcriptReducer(state, { type: "submit", prompt }));
+      }
       if (override === undefined) setInput("");
-      await window.flavorDesktop.submit(prompt);
+      await window.flavorDesktop.submit(prompt, effectiveDelivery);
     } catch (cause) {
       const value = errorMessage(cause);
       setError(value);
@@ -364,7 +367,7 @@ export function DesktopApp(): React.JSX.Element {
       </div>
 
       {snapshot.diagnostics.length > 0 && <details className="diagnostics"><summary>{snapshot.diagnostics.length} 条启动提示</summary><pre>{snapshot.diagnostics.join("\n")}</pre></details>}
-      <Composer input={input} setInput={updateInput} onSend={() => void send()} busy={busy}
+      <Composer input={input} setInput={updateInput} onSend={(delivery) => void send(undefined, delivery)} busy={busy}
         onInterrupt={() => void window.flavorDesktop.interrupt()} inputRef={inputRef} snapshot={snapshot}
         setModel={setModel} addModel={addModel} setPermission={setPermission}
         slashCompletion={slashCompletion} onSlashSelect={handleSlashSelect}
@@ -516,7 +519,7 @@ function DiffRow({ line, lineWidth }: { line: FileDiffLine; lineWidth: number })
 }
 
 interface ComposerProps {
-  input: string; setInput(value: string): void; onSend(): void; busy: boolean; onInterrupt(): void;
+  input: string; setInput(value: string): void; onSend(delivery?: "steer" | "followUp"): void; busy: boolean; onInterrupt(): void;
   inputRef: React.RefObject<HTMLTextAreaElement | null>; snapshot: DesktopSnapshot;
   setModel(modelId: string): void | Promise<void>; addModel(input: AddDesktopModelInput): Promise<void>; setPermission(mode: PermissionMode): void;
   slashCompletion: SlashCompletion | null;
@@ -623,7 +626,10 @@ function Composer(props: ComposerProps): React.JSX.Element {
         return;
       }
     }
-    if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); props.onSend(); }
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      props.onSend(event.altKey ? "followUp" : props.busy ? "steer" : undefined);
+    }
   };
 
   const handleTextareaChange = (val: string, selStart: number) => {
@@ -710,11 +716,15 @@ function Composer(props: ComposerProps): React.JSX.Element {
           onSelect={props.setModel} onAdd={props.addModel} />
         <select aria-label="权限模式" value={props.snapshot.activeSession?.permissionMode ?? "default"} disabled={props.busy || props.snapshot.activeSession === undefined}
           onChange={(event) => props.setPermission(event.target.value as PermissionMode)}>{PERMISSIONS.map((mode) => <option value={mode} key={mode}>{permissionLabel(mode)}</option>)}</select>
-        {props.busy ? <button className="send-button stop-button" onClick={props.onInterrupt} title="停止任务"><span /></button>
-          : <button className="send-button" onClick={props.onSend} disabled={disabled || !props.input.trim()} title="发送"><span>↑</span></button>}
+        {props.busy && <span className="queue-count" title="引导 + 后续消息">
+          {props.snapshot.activeSession?.queue.steering.length ?? 0}+{props.snapshot.activeSession?.queue.followUp.length ?? 0}
+        </span>}
+        <button className="send-button" onClick={() => props.onSend(props.busy ? "steer" : undefined)}
+          disabled={disabled || !props.input.trim()} title={props.busy ? "发送引导消息" : "发送"}><span>↑</span></button>
+        {props.busy && <button className="send-button stop-button" onClick={props.onInterrupt} title="停止任务"><span /></button>}
       </div>
     </div>
-  </div><p className="composer-hint">Enter 发送 · Shift Enter 换行 · @ 引用文件 · / 调用命令</p></div>;
+  </div><p className="composer-hint">Enter 发送 · Shift Enter 换行 · 运行中 Alt Enter 排队后续 · @ 引用文件 · / 调用命令</p></div>;
 }
 
 function DeleteSessionSheet({ session, deleting, onCancel, onDelete }: {

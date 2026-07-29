@@ -127,8 +127,8 @@ function installIpcHandlers(): void {
     appMenu?.items[index]?.submenu?.popup({ window, x, y });
   });
   ipcMain.handle(DESKTOP_CHANNELS.submit, async (_event, value) => {
-    const { prompt } = SubmitInputSchema.parse(value);
-    void controller.submit(prompt).catch(() => undefined);
+    const { prompt, delivery } = SubmitInputSchema.parse(value);
+    void controller.submit(prompt, delivery ?? "prompt").catch(() => undefined);
   });
   ipcMain.handle(DESKTOP_CHANNELS.finishTask, async () => controller.finishTask());
   ipcMain.handle(DESKTOP_CHANNELS.interrupt, async () => controller.interrupt());

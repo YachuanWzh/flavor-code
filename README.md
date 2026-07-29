@@ -9,7 +9,7 @@
 
 `flavor-code` 是一个同时提供终端界面与 Electron 桌面应用的 AI 编程助手。它接入大语言模型（OpenAI GPT、Anthropic Claude 或任何兼容服务），能理解你的项目结构，在工作区范围内安全操作文件，甚至能把复杂任务拆成多块，分给多个"小助手"并行处理。
 
-当前稳定版本：**1.0.2**
+当前稳定版本：**1.1.0**
 
 ## 它能做什么
 
@@ -28,6 +28,10 @@
 - **审计日志** — 所有工具执行失败都会被记录到 `.flavor/audit.jsonl`
 - **事故上报与 RCA** — 工具执行失败自动上报到 langgraph-claw 告警管道，P0 级错误触发自动根因分析（Auto-RCA）
 - **对抗性审查（/goal）** — 分离"规划 - 执行 - 审查"三角色，3 个独立 AI 质疑者多数投票验证目标是否达成，不通过则打回重做
+- **运行中追加任务** — CLI 工作时 Enter 保存一条待发送任务，SSE 结束后自动提交；`/steer` 可立即调整仍在执行的任务
+- **可逆会话树** — 为上下文和工作区创建内容寻址 checkpoint，可 rewind、unrevert，并从历史节点继续分支
+- **SDK、JSONL RPC 与 Eval** — Node 调用方、IDE 和自动化评测共用同一套生产运行时
+- **Docker 沙箱** — 可选择让 Shell、自治 loop 及其验证命令在无网络、只读根文件系统的容器中运行
 
 ### 子 Agent 字节级提示词缓存（0.8.0）
 
@@ -434,7 +438,7 @@ flavor-code 默认在过期前 60 秒自动丢弃缓存，下次启动时自动�
 
 ## 基本用法
 
-### Electron 桌面端（1.0.2）
+### Electron 桌面端（1.1.0）
 
 1.0.0 正式提供参考 Codex 交互方式设计的 Electron 桌面端。它不是简单套壳网页：Agent 运行时在 Electron 主进程中工作，桌面界面通过受控 IPC 与运行时通信，因此与 CLI 共享同一套工具、会话和配置能力。
 
@@ -461,7 +465,7 @@ npm run desktop:dist     # 生成 Windows NSIS 安装包
 Windows 打包产物位于：
 
 - 免安装目录：`release/win-unpacked/Flavor Code.exe`
-- NSIS 安装包：`release/Flavor-Code-1.0.2-x64.exe`
+- NSIS 安装包：`release/Flavor-Code-1.1.0-x64.exe`
 
 模型配置仍读取全局 `~/.flavor-code/flavor.json`、项目 `.flavor/flavor.json`、`.env` 和环境变量，因此 CLI 与桌面端可以共享配置与会话。生产版桌面窗口启用了 `contextIsolation` 和 Chromium 沙箱，关闭了渲染进程的 Node.js 集成；文件、命令和 Agent 操作只通过显式 IPC 接口进入主进程。Windows 的 `desktop:dev` 为兼容工作区内 Chromium 子进程启动，仅在本地开发启动器中使用 `--no-sandbox`，打包产物不携带该参数。
 
@@ -513,7 +517,7 @@ Flavor 的压缩是分层执行的：
 
 ## 长期记忆
 
-Flavor 1.0.2 使用“任务级长期记忆”：普通的隐式信息和应用退出都不会触发提取，用户明确完成当前任务时才评价整项任务。CLI 输入 `/finish`，Electron 点击顶部“完成任务”。这避免了同一任务的每轮对话都调用模型，也不会把半成品结论当成稳定事实。
+Flavor 1.1.0 使用“任务级长期记忆”：普通的隐式信息和应用退出都不会触发提取，用户明确完成当前任务时才评价整项任务。CLI 输入 `/finish`，Electron 点击顶部“完成任务”。这避免了同一任务的每轮对话都调用模型，也不会把半成品结论当成稳定事实。
 
 另有一个用户主动保存的快捷入口：当提示中出现“记住”“帮我记住”“加入长期记忆”“please remember that”等明确表达时，当前回复结束后立即调用 cheap 模型，只分析用户明确要求保存的内容，不必等到 `/finish`，也不受 200 字符下限影响。“不要记住”“不用帮我记住”“别记”“无需保存到长期记忆”等否定表达不会触发。因为保存意图已经由用户明确给出，合格候选通过敏感信息检查和相似度查重后直接写入，不再重复弹出确认栏；`/remember` 仍走不调用模型的精确手工写入。
 
@@ -741,6 +745,89 @@ flavor skills enable code-review
 
 ---
 
+## 控制面、会话树与自动化
+
+CLI 运行期间按 Enter 会保存一条待发送任务，显示在输入框上方，并在当前 SSE 完整结束后自动提交；待发送槽最多一条。按 Esc 会取消待发送并把内容回填输入框。运行中输入 `/steer <指令>` 可显式发送 steering。桌面端和 VS Code 继续使用普通发送进行 steering、`Alt+Enter` 排队 follow-up。Steering 不会打断正在传输的单次模型响应；它会在完整工具批次之后、下一次模型请求之前注入。CLI 内可用以下历史命令：
+
+```text
+/checkpoint [标签]     保存当前上下文和工作区
+/tree                  查看追加式会话节点
+/rewind <节点 ID>      恢复节点的文件、上下文和活动分支
+/unrevert              撤销最近一次 rewind
+/fork <节点 ID>        只移动上下文和分支，不修改文件
+```
+
+非交互调用可通过公开 SDK：
+
+```ts
+import { createFlavorRuntime } from "flavor-code/sdk";
+
+const runtime = await createFlavorRuntime({
+  workspace: process.cwd(),
+  approvalPolicy: "deny",
+  output: console.log,
+});
+await runtime.session.start();
+await runtime.session.submit("修复测试");
+await runtime.dispose();
+```
+
+其他语言和 IDE 可启动严格 JSONL 协议：
+
+```bash
+flavor --mode rpc --workspace . --trace .flavor/traces/run.jsonl
+```
+
+RPC 支持 `prompt`、`steer`、`follow_up`、`abort`、队列查询、checkpoint/tree/rewind/fork 和 `shutdown`。每行必须是单个 JSON 对象；输出也是逐行 response/event。
+
+评测文件示例：
+
+```json
+{
+  "name": "fix-parser",
+  "workspace": "./fixture",
+  "prompt": "Fix the parser",
+  "verification": [{ "command": "npm", "args": ["test"], "timeoutMs": 120000 }],
+  "maxTokens": 200000
+}
+```
+
+```bash
+flavor eval eval.json --output report.json
+```
+
+## Docker 沙箱
+
+本地执行仍是默认行为。在项目 `.flavor/flavor.json` 中显式启用 Docker：
+
+```json
+{
+  "execution": {
+    "mode": "docker",
+    "image": "node:24-bookworm-slim",
+    "network": false,
+    "memory": "2g",
+    "cpus": 2
+  }
+}
+```
+
+需要预先安装并启动 Docker。默认容器禁止网络、使用只读根文件系统、移除 capabilities，并限制进程数、内存和 CPU；工作区以 `/workspace` 绑定挂载。Docker 不可用时命令会失败并保持在沙箱模式，不会静默回退到本机。
+
+## VS Code
+
+扩展源码位于 `extensions/vscode`：
+
+```bash
+npm run build:cli
+npm run vscode:build
+npm link
+```
+
+在 VS Code 的 Extension Development Host 中加载该目录，然后执行 `Flavor: Start Agent`。扩展支持对选区执行任务、修复 Problems 诊断、steering、follow-up、停止、checkpoint、查看树和 rewind。若 `flavor` 不在 `PATH`，请配置 `flavorCode.executable` 为 CLI 的绝对路径。
+
+---
+
 ## 审计日志
 
 每次工具执行失败都会被记录到 `.flavor/audit.jsonl`，包含时间戳、会话 ID、工具名、Agent 角色和错误信息：
@@ -762,6 +849,8 @@ Flavor 相关的文件都放在 `.flavor/` 目录下：
 ├── goal-plan.md       # /goal 生成的验收契约
 ├── sessions/          # 会话存档（v2 JSONL 格式）
 │   └── session-xxx.jsonl
+├── session-trees/     # 追加式会话分支和上下文节点
+├── checkpoints/       # 内容寻址的工作区对象与 manifest
 ├── memory/            # 跨会话长期记忆
 │   └── MEMORY.md
 ├── sleep/             # 睡眠整理每日报告
@@ -777,7 +866,7 @@ Flavor 相关的文件都放在 `.flavor/` 目录下：
 
 - AI 模型的输出不一定总是正确或安全的，请审查它生成的代码
 - Skill 和插件中的内容应视为潜在不可信输入
-- 被批准执行的 shell 命令以你的用户身份运行
+- 本地模式中，被批准执行的 shell 命令以你的用户身份运行；不可信任务建议启用 Docker 模式
 - 不要将 `.flavor/sessions/` 中的会话文件当作秘密仓库
 - 建议在版本控制下使用、配置最小权限的 API Key
 
@@ -803,12 +892,12 @@ npm run smoke:install  # 验证打包和安装
 
 ## 路线图
 
-后续方向包括（这些是未来规划，非 1.0.2 已交付能力）：
+后续方向包括（这些是未来规划，非 1.1.0 已交付能力）：
 
 - `/loop` 的后台恢复、调度与并发 loop 管理
 - 长期记忆的全文/语义检索和质量整合
 - 更细粒度的任务恢复与重放
-- IDE 集成（VS Code / JetBrains 扩展）
+- JetBrains 扩展
 - 系统凭据存储（keychain 集成）
 - 插件隔离/签名验证
 - 跨设备会话

@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
 const cwd = resolve(import.meta.dirname, "..");
+const expectedVersion = JSON.parse(await readFile(join(cwd, "package.json"), "utf8")).version;
 const npmCli = process.env.npm_execpath
   ?? (process.platform === "win32" ? join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js") : undefined);
 const npm = npmCli === undefined ? "npm" : process.execPath;
@@ -28,7 +29,7 @@ try {
   await access(binary);
   const binaryOptions = { cwd: prefix, windowsHide: true };
   const version = await exec(process.execPath, [installedCli, "--version"], binaryOptions);
-  if (version.stdout.trim() !== "1.0.0") throw new Error(`Unexpected installed version: ${version.stdout.trim()}`);
+  if (version.stdout.trim() !== expectedVersion) throw new Error(`Unexpected installed version: ${version.stdout.trim()}`);
   const help = await exec(process.execPath, [installedCli, "--help"], {
     ...binaryOptions,
     env: { ...process.env, OPENAI_API_KEY: "", ANTHROPIC_API_KEY: "", NO_PROXY: "*" },

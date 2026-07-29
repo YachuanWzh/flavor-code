@@ -7,9 +7,12 @@ import { parseSlashCommand, type McpSlashCommand, type ModelRole, type SlashComm
 import type { QuestionBridge } from "../tools/ask-user-question.js";
 import { message } from "../utils/error.js";
 import type { MemoryType } from "../memory/types.js";
+import { AgentMessageQueue, type AgentQueueSnapshot } from "../agent/message-queue.js";
+import type { SessionTreeNode } from "../session/tree.js";
 
 export type SessionOutput = AgentEvent
   | { type: "notice"; message: string }
+  | { type: "queued-prompt"; prompt: string }
   | { type: "clear" }
   | { type: "exit" };
 
@@ -19,7 +22,11 @@ export interface SessionServices {
   mainModel(): string;
   subagentModel(): string;
   permissionMode(): PermissionMode;
-  run(prompt: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
+  run(
+    prompt: string,
+    signal: AbortSignal,
+    options?: { getSteeringMessages(): readonly string[] },
+  ): AsyncIterable<AgentEvent>;
   runSkill(skill: string, prompt: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
   runLoop(goal: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
   runGoal(goal: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
@@ -37,6 +44,11 @@ export interface SessionServices {
   audit(toolFilter?: string): string | Promise<string>;
   cancelActiveTask(): void | Promise<void>;
   clearContext(): void | Promise<void>;
+  checkpoint?(label?: string): Promise<SessionTreeNode>;
+  tree?(): readonly SessionTreeNode[];
+  rewind?(nodeId: string): Promise<void>;
+  unrevert?(): Promise<void>;
+  fork?(nodeId: string): Promise<void>;
   memory(): Promise<string>;
   refreshMemory?(): Promise<void>;
   remember(type: MemoryType, text: string): Promise<string>;
@@ -55,6 +67,7 @@ const HELP = [
   "/login                                  authenticate via OAuth PKCE",
   "/init  /config  /skills  /plugins  /hooks  /tasks",
   "/memory  /remember [type] <text>  /forget <text-or-id>  /finish",
+  "/checkpoint [label]  /tree  /rewind <node>  /unrevert  /fork <node>",
   "/compact  /clear  /help  /exit",
   "/loop <goal>                            run a verified autonomous loop",
   "/goal <objective>                       run a goal pipeline with adversarial verification",
@@ -69,11 +82,32 @@ export class FlavorSession {
   #interrupted = false;
   #startPromise: Promise<void> | undefined;
   #submissionTail: Promise<void> = Promise.resolve();
+  #pendingSubmissions = 0;
   #closePromise: Promise<void> | undefined;
+  readonly #queue = new AgentMessageQueue();
 
   constructor(services: SessionServices) { this.#services = services; }
 
   get active(): boolean { return this.#active !== undefined; }
+  queueSnapshot(): AgentQueueSnapshot { return this.#queue.snapshot(); }
+  clearQueue(): AgentQueueSnapshot { return this.#queue.clear(); }
+  whenIdle(): Promise<void> { return this.#submissionTail; }
+
+  steer(input: string): void {
+    if (this.#closed) throw new Error("Session is closed");
+    if (this.active || this.#pendingSubmissions > 0) {
+      this.#queue.enqueue("steer", input);
+      this.#notice(`Steering queued (${this.#queue.snapshot().steering.length} pending).`);
+    } else void this.submit(input);
+  }
+
+  followUp(input: string): void {
+    if (this.#closed) throw new Error("Session is closed");
+    if (this.active || this.#pendingSubmissions > 0) {
+      this.#queue.enqueue("followUp", input);
+      this.#notice(`Follow-up queued (${this.#queue.snapshot().followUp.length} pending).`);
+    } else void this.submit(input);
+  }
 
   async start(): Promise<void> {
     if (this.#started) return;
@@ -88,9 +122,23 @@ export class FlavorSession {
     if (this.#closed) throw new Error("Session is closed");
     const prompt = input.trim();
     if (!prompt) return;
-    const operation = this.#submissionTail.catch(() => {}).then(() => this.#runSubmission(prompt));
+    this.#pendingSubmissions += 1;
+    const operation = this.#submissionTail.catch(() => {}).then(() => this.#runSubmissionChain(prompt))
+      .finally(() => { this.#pendingSubmissions -= 1; });
     this.#submissionTail = operation;
     return operation;
+  }
+
+  async #runSubmissionChain(initialPrompt: string): Promise<void> {
+    const pending = [initialPrompt];
+    let initial = true;
+    while (pending.length > 0) {
+      const prompt = pending.shift()!;
+      if (!initial) this.#services.output({ type: "queued-prompt", prompt });
+      initial = false;
+      await this.#runSubmission(prompt);
+      pending.push(...this.#queue.drain("steer"), ...this.#queue.drain("followUp"));
+    }
   }
 
   async #runSubmission(prompt: string): Promise<void> {
@@ -116,7 +164,9 @@ export class FlavorSession {
       }
       const command = parseSlashCommand(prompt, this.#services.pluginCommands(), skillNames);
       if (command !== null) await this.#dispatch(command, controller.signal);
-      else for await (const event of this.#services.run(prompt, controller.signal)) this.#services.output(event);
+      else for await (const event of this.#services.run(prompt, controller.signal, {
+        getSteeringMessages: () => this.#queue.drain("steer"),
+      })) this.#services.output(event);
       if (controller.signal.aborted) outcome = "cancelled";
     } catch (error) {
       outcome = controller.signal.aborted ? "cancelled" : "failed";
@@ -193,6 +243,19 @@ export class FlavorSession {
       this.#notice(await this.#services.forget(command.query));
     } else if (command.name === "finish") {
       this.#notice(await this.#services.finishTask());
+    } else if (command.name === "checkpoint") {
+      this.#notice(format(await required(this.#services.checkpoint, "checkpoint")(command.label)));
+    } else if (command.name === "tree") {
+      this.#notice(format(required(this.#services.tree, "tree")()));
+    } else if (command.name === "rewind") {
+      await required(this.#services.rewind, "rewind")(command.nodeId);
+      this.#notice(`Rewound to ${command.nodeId}.`);
+    } else if (command.name === "unrevert") {
+      await required(this.#services.unrevert, "unrevert")();
+      this.#notice("Rewind undone.");
+    } else if (command.name === "fork") {
+      await required(this.#services.fork, "fork")(command.nodeId);
+      this.#notice(`Forked context from ${command.nodeId}.`);
     } else if (command.name === "compact") {
       this.#notice(await this.#services.compact(signal) ? "Context compacted." : "Context does not need compaction.");
     } else if (command.name === "init") {
@@ -222,5 +285,10 @@ export class FlavorSession {
 function format(value: unknown): string {
   if (Array.isArray(value) && value.length === 0) return "None registered.";
   return JSON.stringify(value, null, 2) ?? String(value);
+}
+
+function required<T extends (...args: never[]) => unknown>(service: T | undefined, name: string): T {
+  if (service === undefined) throw new Error(`Session history command /${name} is unavailable`);
+  return service;
 }
 

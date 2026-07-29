@@ -1,0 +1,43 @@
+{
+  "name": "flavor-code",
+  "displayName": "Flavor Code",
+  "description": "Control the Flavor coding agent from VS Code.",
+  "version": "1.1.0",
+  "publisher": "flavor-code",
+  "engines": { "vscode": "^1.95.0" },
+  "categories": ["Machine Learning", "Other"],
+  "activationEvents": ["onCommand:flavor.start", "onCommand:flavor.selection", "onCommand:flavor.diagnostics"],
+  "main": "./dist/extension.js",
+  "scripts": { "build": "npm --prefix ../.. run vscode:build" },
+  "contributes": {
+    "configuration": {
+      "title": "Flavor Code",
+      "properties": {
+        "flavorCode.executable": {
+          "type": "string",
+          "default": "flavor",
+          "description": "Path to the Flavor CLI executable."
+        }
+      }
+    },
+    "commands": [
+      { "command": "flavor.start", "title": "Flavor: Start Agent" },
+      { "command": "flavor.selection", "title": "Flavor: Work on Selection" },
+      { "command": "flavor.diagnostics", "title": "Flavor: Fix Workspace Diagnostics" },
+      { "command": "flavor.steer", "title": "Flavor: Steer Active Task" },
+      { "command": "flavor.followUp", "title": "Flavor: Queue Follow-up" },
+      { "command": "flavor.stop", "title": "Flavor: Stop Active Task" },
+      { "command": "flavor.checkpoint", "title": "Flavor: Create Checkpoint" },
+      { "command": "flavor.tree", "title": "Flavor: Show Session Tree" },
+      { "command": "flavor.rewind", "title": "Flavor: Rewind Session" }
+    ],
+    "menus": {
+      "editor/context": [
+        { "command": "flavor.selection", "when": "editorHasSelection", "group": "navigation@20" }
+      ],
+      "problems/context": [
+        { "command": "flavor.diagnostics", "group": "navigation@20" }
+      ]
+    }
+  }
+}

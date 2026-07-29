@@ -9,6 +9,8 @@ export interface AgentRunRequest {
   signal?: AbortSignal;
   /** Prompt-scoped system context, such as a matched skill body. It is never stored. */
   additionalContext?: string;
+  /** Messages supplied while a tool batch is running, injected before the next model call. */
+  getSteeringMessages?(): readonly string[];
 }
 
 export type AgentErrorCode = ProviderErrorCode | "iteration_limit" | "incomplete_stream";

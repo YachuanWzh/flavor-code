@@ -45,6 +45,7 @@ import type { PluginCommandHandler } from "./plugins/types.js";
 import { SkillRegistry } from "./skills/registry.js";
 import { createSkillResourceTool } from "./skills/tool.js";
 import { SESSION_VERSION, SessionStore, type SessionDocument } from "./session/store.js";
+import { SessionHistory } from "./session/tree.js";
 import { ProjectSleepOrganizer, ProjectSleepScheduler, localDateKey } from "./sleep/organizer.js";
 import { createApplyPatchTool, createEditTool, createReadTool, createWriteTool } from "./tools/files.js";
 import { createGlobTool, createGrepTool } from "./tools/search.js";
@@ -68,6 +69,7 @@ import { MemoryCoordinator } from "./memory/coordinator.js";
 import { isExplicitMemoryIntent } from "./memory/intent.js";
 import { MemoryStore, renderMemoryDocument } from "./memory/store.js";
 import { MemoryReviewBridge } from "./memory/review.js";
+import { createExecutionEnvironment } from "./execution/factory.js";
 
 export interface ProductionRuntimeOptions {
   workspace?: string;
@@ -233,9 +235,12 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     if (options.approvalPolicy === "deny") throw new Error("AskUserQuestion is not available in non-interactive mode");
     return questions.ask(qs, signal);
   };
+  const executionEnvironment = createExecutionEnvironment(workspace, config.execution);
   const tools: ToolDefinition<unknown>[] = [
     createReadTool(workspace), createWriteTool(workspace), createEditTool(workspace), createApplyPatchTool(workspace),
-    createGlobTool(workspace), createGrepTool(workspace), createShellTool(workspace),
+    createGlobTool(workspace), createGrepTool(workspace), createShellTool(workspace, {
+      ...(executionEnvironment === undefined ? {} : { executionEnvironment }),
+    }),
     ...createLspTools(workspace, {
       onStatus: (message) => emitOutput({ type: "notice", message }),
     }),
@@ -689,10 +694,13 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       yield { type: "error", error: { code: "unknown", message: selectedModels.mainError } };
       return;
     }
+    const loopExecutionEnvironment = createExecutionEnvironment(input.workspace, config.execution);
     const loopTools: ToolDefinition<unknown>[] = [
       createReadTool(input.workspace), createWriteTool(input.workspace), createEditTool(input.workspace),
       createApplyPatchTool(input.workspace), createGlobTool(input.workspace), createGrepTool(input.workspace),
-      createShellTool(input.workspace),
+      createShellTool(input.workspace, {
+        ...(loopExecutionEnvironment === undefined ? {} : { executionEnvironment: loopExecutionEnvironment }),
+      }),
       ...createLspTools(input.workspace, {
         onStatus: (status) => emitOutput({ type: "notice", message: status }),
       }),
@@ -767,6 +775,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       }
     } finally {
       loopHarness.dispose();
+      await loopExecutionEnvironment?.dispose();
     }
   };
 
@@ -780,7 +789,14 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     inferVerification: inferVerificationPlan,
     runWorker: ({ workspace: executionWorkspace, prompt, signal }) =>
       runLoopWorker({ workspace: executionWorkspace, prompt, signal }),
-    runVerifier: runVerificationPlan,
+    runVerifier: async (plan, executionWorkspace, signal) => {
+      const verifierEnvironment = createExecutionEnvironment(executionWorkspace, config.execution);
+      try {
+        return await runVerificationPlan(plan, executionWorkspace, signal, verifierEnvironment);
+      } finally {
+        await verifierEnvironment?.dispose();
+      }
+    },
     confirmBudget: async (state, dimensions, signal) => {
       if (options.approvalPolicy === "deny") return "unavailable";
       const reached = dimensions.map((dimension) => dimension === "cycles"
@@ -819,19 +835,29 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       runLoopWorker({ workspace: goalWorkspace, prompt, signal }),
   });
 
+  let sessionHistory = await SessionHistory.open({
+    workspace,
+    sessionId,
+    restoreContext: (snapshot) => harness.main.context.restore(snapshot),
+  });
 
   const services: SessionServices = {
     hooks, workspace,
     mainModel: () => harness.mainModelId,
     subagentModel: () => harness.subagentModelId,
     permissionMode: () => harness.permissionMode,
-    run: (prompt, signal) => persistAfter(runMain(
+    run: (prompt, signal, runOptions) => persistAndCheckpointAfter(runMain(
       harness, skills, prompt, signal, selectedModels.mainError,
       memoryStore === undefined || !memoryHasRoutableEntries ? undefined : {
         store: memoryStore, taskId: memoryLifecycle.taskId ?? sessionId,
         topK: config.memory.retrievalTopK, maxChars: config.memory.maxPromptChars,
       },
-    ), persist),
+      runOptions?.getSteeringMessages,
+    ), persist, () => sessionHistory.append({
+      prompt,
+      context: harness.main.context.snapshot(),
+      label: `turn: ${prompt.slice(0, 80)}`,
+    })),
     runSkill: (skill, prompt, signal) => persistAfter(
       runExplicitSkill(harness, skills, skill, prompt, signal, selectedModels.mainError), persist,
     ),
@@ -953,10 +979,29 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       for (const key of Object.keys(subagentElapsedMs)) delete subagentElapsedMs[key];
       sessionId = `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
       createdAt = new Date().toISOString();
+      sessionHistory = await SessionHistory.open({
+        workspace,
+        sessionId,
+        restoreContext: (snapshot) => harness.main.context.restore(snapshot),
+      });
       memoryLifecycle = { status: "active", taskId: createMemoryTaskId(), messageStart: 0 };
       timelineState = createTranscriptState();
       await persist();
       emitOutput({ type: "tasks", snapshot: { subagents: { states: {} } } });
+    },
+    checkpoint: (label) => sessionHistory.checkpoint(label, harness.main.context.snapshot()),
+    tree: () => sessionHistory.tree(),
+    rewind: async (nodeId) => {
+      await sessionHistory.rewind(nodeId, harness.main.context.snapshot());
+      await persist();
+    },
+    unrevert: async () => {
+      await sessionHistory.unrevert();
+      await persist();
+    },
+    fork: async (nodeId) => {
+      await sessionHistory.fork(nodeId);
+      await persist();
     },
     memory: async () => {
       if (memoryStore === undefined) return "Long-term memory is disabled.";
@@ -1096,6 +1141,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       await memoryCoordinator?.flush();
       await persist();
       await persistTail;
+      await executionEnvironment?.dispose();
       auditLogger.close();
       memoryReviews.dispose();
       await cleanupProduction(approvals, questions, pluginHost, mcpManager, harness);
@@ -1105,6 +1151,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     memoryReviews.dispose();
     try {
       await sleepScheduler?.dispose();
+      await executionEnvironment?.dispose();
       await cleanupProduction(approvals, questions, pluginHost, mcpManager, harnessCreated ? harness : undefined);
     }
     catch (cleanupError) { attachCleanupError(primaryError, cleanupError); }
@@ -1248,6 +1295,7 @@ async function workspaceFingerprint(workspace: string): Promise<string> {
 async function* runMain(
   harness: LocalHarness, skills: SkillRegistry, prompt: string, signal: AbortSignal, setupError?: string,
   memory?: { store: MemoryStore; taskId: string; topK: number; maxChars: number },
+  getSteeringMessages?: () => readonly string[],
 ): AsyncIterable<AgentEvent> {
   const contexts: string[] = [];
   try {
@@ -1269,7 +1317,12 @@ async function* runMain(
     const skill = await skills.match(prompt);
     if (skill !== undefined) contexts.push(`Matched skill: ${skill.name}\n${await skills.loadBody(skill)}`);
     const additionalContext = contexts.length === 0 ? undefined : contexts.join("\n\n");
-    for await (const event of harness.main.loop.run({ prompt, signal, ...(additionalContext === undefined ? {} : { additionalContext }) })) {
+    for await (const event of harness.main.loop.run({
+      prompt,
+      signal,
+      ...(additionalContext === undefined ? {} : { additionalContext }),
+      ...(getSteeringMessages === undefined ? {} : { getSteeringMessages }),
+    })) {
       if (event.type === "error" && /adapter|provider|api.?key|model/i.test(event.error.message)) {
         yield { ...event, error: { ...event.error,
           message: `${event.error.message}. Configure providers and agents in .flavor/flavor.json or set OPENAI_API_KEY/ANTHROPIC_API_KEY.`,
@@ -1314,6 +1367,19 @@ async function* runExplicitSkill(
 async function* persistAfter<T>(source: AsyncIterable<T>, persist: () => Promise<void>): AsyncIterable<T> {
   try { for await (const item of source) yield item; }
   finally { await persist(); }
+}
+
+async function* persistAndCheckpointAfter<T>(
+  source: AsyncIterable<T>,
+  persist: () => Promise<void>,
+  checkpoint: () => Promise<unknown>,
+): AsyncIterable<T> {
+  try {
+    for await (const item of source) yield item;
+    await checkpoint();
+  } finally {
+    await persist();
+  }
 }
 
 async function* persistEach<T>(source: AsyncIterable<T>, persist: () => Promise<void>): AsyncIterable<T> {

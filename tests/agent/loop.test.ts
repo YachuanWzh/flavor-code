@@ -76,6 +76,34 @@ describe("AgentLoop", () => {
     expect(fixture.context.lastRecordedInputTokens).toBe(12);
   });
 
+  it("injects queued steering after tool results and before the next model call", async () => {
+    const requests: ModelRequest[] = [];
+    const steering = [["use the safer parser"], []];
+    const fixture = createLoop({
+      adapter: fakeAdapter([
+        [
+          { type: "tool-call", id: "call-1", name: "echo", input: { value: "inspect" } },
+          { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+        ],
+        [
+          { type: "text", text: "adjusted" },
+          { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+        ],
+      ], requests),
+    });
+
+    await collect(fixture.loop.run({
+      prompt: "change the parser",
+      getSteeringMessages: () => steering.shift() ?? [],
+    }));
+
+    const messages = requests[1]!.messages;
+    const toolIndex = messages.findIndex((message) => message.role === "tool");
+    const steerIndex = messages.findIndex((message) => message.role === "user" && message.content === "use the safer parser");
+    expect(toolIndex).toBeGreaterThan(-1);
+    expect(steerIndex).toBeGreaterThan(toolIndex);
+  });
+
   it("emits balanced lifecycle events for every physical model call", async () => {
     const fixture = createLoop({
       adapter: fakeAdapter([

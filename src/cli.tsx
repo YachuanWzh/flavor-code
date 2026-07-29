@@ -13,14 +13,20 @@ import { staticTaskLines } from "./ui/task-progress-model.js";
 import { SkillManager } from "./skills/manager.js";
 import { registerMemoryCommands } from "./memory/cli.js";
 import { registerMcpCommands } from "./mcp/cli.js";
+import { FlavorRpcServer } from "./rpc/server.js";
+import { TraceRecorder } from "./trace/recorder.js";
+import { runEvaluationFile } from "./eval/cli.js";
 
 export function createProgram(): Command {
   const program = new Command()
     .name("flavor")
     .description("Interactive coding agent")
-    .version("1.0.2")
+    .version("1.1.0")
     .option("-p, --print <prompt>", "run one prompt without the interactive UI")
-    .option("--resume [session-id]", "resume a saved session (latest when id is omitted)");
+    .option("--resume [session-id]", "resume a saved session (latest when id is omitted)")
+    .option("--mode <mode>", "runtime mode: interactive or rpc")
+    .option("--workspace <path>", "workspace path (RPC mode)")
+    .option("--trace <path>", "write a redacted JSONL execution trace");
 
   program
     .command("init [directory]")
@@ -66,9 +72,30 @@ export function createProgram(): Command {
 
   registerMemoryCommands(program);
   registerMcpCommands(program);
+  program.command("eval <spec>")
+    .option("--output <path>", "write the JSON report to a file")
+    .description("run a repeatable coding-agent evaluation")
+    .action(async (spec: string, command: { output?: string }) => {
+      process.exitCode = await runEvaluationFile(spec, command.output);
+    });
 
-  program.action(async (options: { print?: string; resume?: string | boolean }) => {
+  program.action(async (options: {
+    print?: string; resume?: string | boolean; mode?: string; workspace?: string; trace?: string;
+  }) => {
     const resumeSession = options.resume === true ? true : typeof options.resume === "string" ? options.resume : undefined;
+    if (options.mode === "rpc") {
+      process.exitCode = await runRpcMode({
+        workspace: resolve(options.workspace ?? process.cwd()),
+        ...(resumeSession === undefined ? {} : { resumeSession }),
+        ...(options.trace === undefined ? {} : { trace: resolve(options.trace) }),
+      });
+      return;
+    }
+    if (options.mode !== undefined && options.mode !== "interactive") {
+      process.stderr.write(`Unsupported mode: ${options.mode}\n`);
+      process.exitCode = 2;
+      return;
+    }
     if (options.print !== undefined) {
       process.exitCode = await runPrint(options.print, {}, resumeSession);
       return;
@@ -90,6 +117,42 @@ export function createProgram(): Command {
   });
 
   return program;
+}
+
+export async function runRpcMode(options: {
+  workspace: string;
+  resumeSession?: string | true;
+  trace?: string;
+}): Promise<number> {
+  let recorder: TraceRecorder | undefined;
+  try {
+    const server = new FlavorRpcServer({
+      input: process.stdin,
+      output: process.stdout,
+      workspace: options.workspace,
+      createRuntime: async ({ workspace, output }) => {
+        const runtime = await createProductionRuntime({
+          workspace,
+          home: homedir(),
+          approvalPolicy: "deny",
+          ...(options.resumeSession === undefined ? {} : { resumeSession: options.resumeSession }),
+          output,
+        });
+        if (options.trace !== undefined) recorder = new TraceRecorder({
+          path: options.trace, sessionId: runtime.sessionId,
+        });
+        return runtime;
+      },
+      onRecord: (kind, payload) => recorder?.record(kind, payload),
+    });
+    await server.start();
+    await recorder?.close();
+    return 0;
+  } catch (error) {
+    await recorder?.close().catch(() => undefined);
+    process.stderr.write(`rpc: ${safeError(error)}\n`);
+    return 1;
+  }
 }
 
 export function setInteractiveProcessTitle(target: { title: string } = process): void {

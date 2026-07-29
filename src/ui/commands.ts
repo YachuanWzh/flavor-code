@@ -3,6 +3,7 @@ export const MVP_COMMANDS = [
   "tasks", "finish", "compact", "clear", "help", "exit", "audit",
   "loop", "goal", "mcp",
   "memory", "remember", "forget",
+  "checkpoint", "tree", "rewind", "unrevert", "fork",
 ] as const;
 
 export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string> = {
@@ -27,6 +28,11 @@ export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string>
   memory: "Show long-term project memory",
   remember: "Add a long-term memory",
   forget: "Remove matching long-term memories",
+  checkpoint: "Create a workspace and context checkpoint",
+  tree: "Show the session history tree",
+  rewind: "Restore a prior session node",
+  unrevert: "Undo the most recent rewind",
+  fork: "Continue context from a prior session node",
 };
 
 export type PermissionCommandMode = PermissionMode;
@@ -45,8 +51,10 @@ export type SlashCommand =
   | { name: "goal"; goal: string }
   | { name: "remember"; type: MemoryType; text: string }
   | { name: "forget"; query: string }
+  | { name: "checkpoint"; label?: string }
+  | { name: "rewind" | "fork"; nodeId: string }
   | McpSlashCommand
-  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop" | "goal" | "mcp" | "remember" | "forget"> }
+  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop" | "goal" | "mcp" | "remember" | "forget" | "checkpoint" | "rewind" | "fork"> }
   | { name: "audit"; toolFilter?: string | undefined }
   | { name: "unknown"; input: string; suggestions: string[] }
   | { name: "invalid"; command: string; message: string };
@@ -111,6 +119,16 @@ export function parseSlashCommand(
     return query.length === 0
       ? { name: "invalid", command: name, message: "Use /forget <text-or-id>." }
       : { name, query };
+  }
+  if (name === "checkpoint") {
+    const label = args.join(" ").trim();
+    return label.length === 0 ? { name } : { name, label };
+  }
+  if (name === "rewind" || name === "fork") {
+    const [nodeId, ...extra] = args;
+    return nodeId === undefined || extra.length > 0
+      ? { name: "invalid", command: name, message: `Use /${name} <node-id>.` }
+      : { name, nodeId };
   }
   if (name === "mcp") {
     const usage = "Use /mcp [status|tools <server>|reconnect <server>|enable [server|all]|disable [server|all]].";

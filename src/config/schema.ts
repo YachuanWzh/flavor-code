@@ -99,6 +99,13 @@ export const FlavorConfigSchema = z.object({
     })
     .prefault({}),
   permissionMode: PermissionModeSchema,
+  execution: z.object({
+    mode: z.enum(["local", "docker"]).default("local"),
+    image: z.string().trim().min(1).default("node:24-bookworm-slim"),
+    network: z.boolean().default(false),
+    memory: z.string().regex(/^[1-9][0-9]*(?:[kKmMgG])?$/).default("2g"),
+    cpus: z.number().positive().max(64).default(2),
+  }).prefault({}),
   language: z
     .string()
     .regex(/^[a-z]{2}(-[A-Z]{2})?$/, "language must be a BCP47 tag like zh-CN or en-US")

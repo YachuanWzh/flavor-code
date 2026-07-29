@@ -1,6 +1,65 @@
 import { expect, it, vi } from "vitest";
 import type { ProductionRuntime } from "../../src/production.js";
-import { shutdownRuntime, submitSafely } from "../../src/ui/app.js";
+import {
+  promptDelivery,
+  resolvePromptDelivery,
+  runTerminalSubmissionChain,
+  shutdownRuntime,
+  SinglePendingPrompt,
+  submitSafely,
+} from "../../src/ui/app.js";
+
+it("maps active CLI submissions to steering and Alt+Enter to follow-up", () => {
+  expect(promptDelivery(false, { meta: false })).toBe("prompt");
+  expect(promptDelivery(true, { meta: false })).toBe("followUp");
+  expect(promptDelivery(true, { meta: true })).toBe("followUp");
+});
+
+it("supports a terminal-portable follow-up prefix while active", () => {
+  expect(resolvePromptDelivery(true, { meta: false }, "/followup then add docs")).toEqual({
+    delivery: "followUp",
+    prompt: "then add docs",
+  });
+  expect(resolvePromptDelivery(true, { meta: false }, "/steer focus tests")).toEqual({
+    delivery: "steer",
+    prompt: "focus tests",
+  });
+});
+
+it("keeps at most one pending CLI prompt and returns it for editing on cancel", () => {
+  const pending = new SinglePendingPrompt();
+  expect(pending.queue("then add tests")).toBe(true);
+  expect(pending.queue("a second pending query")).toBe(false);
+  expect(pending.value).toBe("then add tests");
+  expect(pending.cancel()).toBe("then add tests");
+  expect(pending.value).toBeUndefined();
+});
+
+it("automatically submits the single pending prompt after the active run ends", async () => {
+  const pending = new SinglePendingPrompt();
+  const submitted: string[] = [];
+  const visible: string[] = [];
+  await runTerminalSubmissionChain({
+    session: {
+      submit: async (prompt) => {
+        submitted.push(prompt);
+        if (prompt === "first") pending.queue("then add tests");
+      },
+    },
+    initialPrompt: "first",
+    pending,
+    onStart: (prompt) => visible.push(`start:${prompt}`),
+    onFinish: () => visible.push("finish"),
+    onPendingConsumed: () => visible.push("consumed"),
+    report: (error) => visible.push(`error:${error}`),
+  });
+
+  expect(submitted).toEqual(["first", "then add tests"]);
+  expect(visible).toEqual([
+    "start:first", "finish", "consumed",
+    "start:then add tests", "finish",
+  ]);
+});
 
 it("disposes and exits exactly once when SessionEnd fails without leaking secrets", async () => {
   const dispose = vi.fn(async () => { throw new Error("dispose failed"); }); const exit = vi.fn(); const errors: string[] = [];

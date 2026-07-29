@@ -1,8 +1,12 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: ["src/cli.tsx"],
+  entry: {
+    cli: "src/cli.tsx",
+    "sdk/index": "src/sdk/index.ts",
+  },
   format: ["esm"],
+  dts: false,
   clean: true,
   sourcemap: true,
   banner: {

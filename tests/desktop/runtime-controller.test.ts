@@ -19,6 +19,9 @@ function fakeRuntime(output: (event: SessionOutput) => void, sessionId = "sessio
         output({ type: "text", text: `answer:${prompt}` });
         output({ type: "done", usage: { inputTokens: 2, outputTokens: 3 } });
       }),
+      steer: vi.fn(),
+      followUp: vi.fn(),
+      queueSnapshot: vi.fn(() => ({ steering: [], followUp: [] })),
       interrupt: vi.fn(() => "cancelled" as const),
       close: vi.fn(async () => undefined),
     },
@@ -167,6 +170,35 @@ describe("DesktopRuntimeController", () => {
 
     releases[1]!();
     await newSubmission;
+  });
+
+  it("delivers steering and follow-up messages while a task is running", async () => {
+    let release!: () => void;
+    const runtime = fakeRuntime(() => undefined);
+    runtime.session.submit = vi.fn(async () => new Promise<void>((resolve) => { release = resolve; }));
+    runtime.session.queueSnapshot = vi.fn(() => ({
+      steering: ["change direction"],
+      followUp: ["then write docs"],
+    }));
+    const controller = new DesktopRuntimeController({
+      home: "C:\\Users\\demo", createRuntime: async () => runtime, listSessions: async () => [], emit: () => undefined,
+    });
+    await controller.openWorkspace("C:\\work");
+    await controller.startSession();
+
+    const running = controller.submit("start");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await controller.submit("change direction", "steer");
+    await controller.submit("then write docs", "followUp");
+
+    expect(runtime.session.steer).toHaveBeenCalledWith("change direction");
+    expect(runtime.session.followUp).toHaveBeenCalledWith("then write docs");
+    expect(controller.snapshot().activeSession?.queue).toEqual({
+      steering: ["change direction"],
+      followUp: ["then write docs"],
+    });
+    release();
+    await running;
   });
 
   it("forwards permission, question, and memory-review answers only to an active runtime", async () => {

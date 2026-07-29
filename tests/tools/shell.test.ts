@@ -1,7 +1,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createShellTool } from "../../src/tools/shell.js";
 
@@ -66,6 +66,25 @@ describe("Shell", () => {
     expect(result).toMatchObject({ stdout: "abcdefgh", truncated: false });
   });
 
+  it("applies the same output bound to execution-environment results", async () => {
+    const executionEnvironment = {
+      kind: "docker" as const,
+      exec: vi.fn(async () => ({
+        exitCode: 0, signal: null, stdout: "abcdefghijklmno", stderr: "",
+        terminationReason: null,
+      })),
+      dispose: vi.fn(async () => undefined),
+    };
+    const result = await createShellTool(process.cwd(), {
+      maxOutputBytes: 10,
+      executionEnvironment,
+    }).execute({ command: "node", args: [], cwd: null }, signal);
+
+    expect(result.stdout).toBe("abcde…klmno");
+    expect(result.truncated).toBe(true);
+    expect(result.truncation.stdout).toMatchObject({ truncated: true, originalBytes: 15, limitBytes: 10 });
+  });
+
   it("reports per-stream truncation without splitting UTF-8 code points", async () => {
     const result = await createShellTool(process.cwd(), { maxOutputBytes: 5 }).execute({
       command: node, args: ["-e", "process.stdout.write('A😀BC😀D');process.stderr.write('small')"],
@@ -94,10 +113,10 @@ describe("Shell", () => {
   it("does not mark a timeout after the direct child has already exited", async () => {
     const script = [
       "const {spawn}=require('node:child_process')",
-      "spawn(process.execPath,['-e','setTimeout(()=>{},800)'],{stdio:['ignore',1,2]}).unref()",
+      "spawn(process.execPath,['-e','setTimeout(()=>{},2000)'],{stdio:['ignore',1,2]}).unref()",
     ].join(";");
     const result = await createShellTool(process.cwd()).execute({
-      command: node, args: ["-e", script], timeoutMs: 300,
+      command: node, args: ["-e", script], timeoutMs: 750,
     }, signal);
     expect(result).toMatchObject({ exitCode: 0, signal: null, terminationReason: null });
   });

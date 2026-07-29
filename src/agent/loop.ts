@@ -528,6 +528,11 @@ export class AgentLoop {
         yield { type: "error", error: turnError };
         return;
       }
+      const steering = request.getSteeringMessages?.() ?? [];
+      for (const prompt of steering) {
+        const content = prompt.trim();
+        if (content.length > 0) this.#options.context.append({ role: "user", content });
+      }
 
       iteration += 1;
     }

@@ -24,7 +24,12 @@ export const AppMenuInputSchema = z.object({
   x: z.number().int().min(0).max(32_768),
   y: z.number().int().min(0).max(32_768),
 }).strict();
-export const SubmitInputSchema = z.object({ prompt: z.string().trim().min(1).max(1_000_000) }).strict();
+const DesktopMessageDeliverySchema = z.enum(["prompt", "steer", "followUp"]);
+export const SubmitInputSchema = z.object({
+  prompt: z.string().trim().min(1).max(1_000_000),
+  delivery: DesktopMessageDeliverySchema.optional(),
+}).strict();
+export type DesktopMessageDelivery = z.infer<typeof DesktopMessageDeliverySchema>;
 export const ResolveApprovalInputSchema = z.object({ decision: z.enum(["allow", "deny", "always"]) }).strict();
 export const AnswerQuestionsInputSchema = z.object({
   answers: z.record(z.coerce.number().int().min(0).max(3), z.string().min(1).max(10_000)),
@@ -126,6 +131,7 @@ export interface DesktopSnapshot {
     subagentModel: string;
     permissionMode: PermissionMode;
     busy: boolean;
+    queue: { steering: readonly string[]; followUp: readonly string[] };
   };
   approval?: DesktopApproval;
   questions?: readonly Question[];
@@ -158,7 +164,7 @@ export interface FlavorDesktopApi {
   startSession(resumeSession?: string): Promise<SessionStartedPayload>;
   deleteSession(sessionId: string): Promise<DesktopSnapshot>;
   showAppMenu(menu: "file" | "edit" | "view" | "help", x: number, y: number): Promise<void>;
-  submit(prompt: string): Promise<void>;
+  submit(prompt: string, delivery?: DesktopMessageDelivery): Promise<void>;
   finishTask(): Promise<string>;
   interrupt(): Promise<void>;
   resolveApproval(decision: "allow" | "deny" | "always"): Promise<void>;

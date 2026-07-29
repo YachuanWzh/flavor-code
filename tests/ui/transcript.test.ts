@@ -70,6 +70,21 @@ describe("transcriptReducer", () => {
     expect(state.active?.assistantText).toBe("第一段");
   });
 
+  it("opens a new visible turn when a queued prompt starts", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "first" });
+    state = transcriptReducer(state, {
+      type: "session",
+      event: { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+    });
+    state = transcriptReducer(state, {
+      type: "session",
+      event: { type: "queued-prompt", prompt: "then add tests" },
+    });
+
+    expect(state.completed[0]?.prompt).toBe("first");
+    expect(state.active).toMatchObject({ prompt: "then add tests", assistantText: "" });
+  });
+
   it("creates a transient activity block when a model call starts", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-19T00:00:00.000Z"));

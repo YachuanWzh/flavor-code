@@ -11,6 +11,18 @@ afterEach(() => {
   delete process.env.CUSTOM_API_KEY;
 });
 
+it("defaults to local execution and validates docker sandbox options", () => {
+  expect(FlavorConfigSchema.parse({}).execution).toEqual({
+    mode: "local",
+    image: "node:24-bookworm-slim",
+    network: false,
+    memory: "2g",
+    cpus: 2,
+  });
+  expect(FlavorConfigSchema.parse({ execution: { mode: "docker", image: "node:24" } }).execution.mode).toBe("docker");
+  expect(() => FlavorConfigSchema.parse({ execution: { mode: "docker", image: "" } })).toThrow();
+});
+
 it("keeps project sleep review opt-in", () => {
   expect(FlavorConfigSchema.parse({}).sleep).toBe(false);
   expect(FlavorConfigSchema.parse({ sleep: true }).sleep).toBe(true);

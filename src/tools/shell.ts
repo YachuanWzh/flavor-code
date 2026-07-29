@@ -3,6 +3,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 
 import type { ToolDefinition } from "./types.js";
+import type { ExecutionEnvironment } from "../execution/types.js";
 
 export const DEFAULT_MAX_OUTPUT_BYTES = 1_048_576;
 const ELLIPSIS = Buffer.from("\u2026");
@@ -16,7 +17,7 @@ const ShellInput = z.object({
   timeoutMs: z.number().int().positive().max(86_400_000).nullable().optional(),
 });
 
-export interface ShellToolOptions { maxOutputBytes?: number }
+export interface ShellToolOptions { maxOutputBytes?: number; executionEnvironment?: ExecutionEnvironment }
 export interface TruncationMetadata { truncated: boolean; originalBytes: number; limitBytes: number }
 export interface ShellResult {
   exitCode: number | null;
@@ -51,11 +52,33 @@ export function createShellTool(
       args: input.args,
       cwd: workingDirectory(root, input.cwd ?? undefined),
     }),
-    execute: (input, signal) => executeShell(root, input, signal, maxBytes),
+    execute: async (input, signal) => {
+      if (options.executionEnvironment === undefined) return executeShell(root, input, signal, maxBytes);
+      const result = await options.executionEnvironment.exec({
+        command: input.command,
+        args: input.args,
+        cwd: workingDirectory(root, input.cwd ?? undefined),
+        ...(input.timeoutMs == null ? {} : { timeoutMs: input.timeoutMs }),
+      }, signal);
+      const stdout = new BoundedOutput(maxBytes);
+      const stderr = new BoundedOutput(maxBytes);
+      stdout.add(Buffer.from(result.stdout));
+      stderr.add(Buffer.from(result.stderr));
+      return {
+        ...result,
+        stdout: stdout.text(),
+        stderr: stderr.text(),
+        truncated: stdout.truncated || stderr.truncated,
+        truncation: {
+          stdout: stdout.metadata(),
+          stderr: stderr.metadata(),
+        },
+      };
+    },
   };
 }
 
-async function executeShell(
+export async function executeShell(
   root: string,
   input: z.infer<typeof ShellInput>,
   cancellation: AbortSignal,

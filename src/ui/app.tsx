@@ -74,6 +74,72 @@ export type TerminalInputAction =
   | { type: "page"; fraction: number }
   | { type: "history"; direction: "up" | "down" };
 
+export type PromptDelivery = "prompt" | "steer" | "followUp";
+
+export function promptDelivery(
+  activeSession: boolean,
+  key: Pick<Key, "meta">,
+): PromptDelivery {
+  if (!activeSession) return "prompt";
+  return "followUp";
+}
+
+export function resolvePromptDelivery(
+  activeSession: boolean,
+  key: Pick<Key, "meta">,
+  input: string,
+): { delivery: PromptDelivery; prompt: string } {
+  if (activeSession) {
+    const followUp = input.match(/^\/follow-?up\s+([\s\S]+)$/iu);
+    if (followUp !== null) return { delivery: "followUp", prompt: followUp[1]!.trim() };
+    const steer = input.match(/^\/steer\s+([\s\S]+)$/iu);
+    if (steer !== null) return { delivery: "steer", prompt: steer[1]!.trim() };
+  }
+  return { delivery: promptDelivery(activeSession, key), prompt: input };
+}
+
+export class SinglePendingPrompt {
+  #value: string | undefined;
+
+  get value(): string | undefined { return this.#value; }
+
+  queue(prompt: string): boolean {
+    const value = prompt.trim();
+    if (value.length === 0 || this.#value !== undefined) return false;
+    this.#value = value;
+    return true;
+  }
+
+  cancel(): string | undefined {
+    const value = this.#value;
+    this.#value = undefined;
+    return value;
+  }
+
+  take(): string | undefined { return this.cancel(); }
+}
+
+export async function runTerminalSubmissionChain(options: {
+  session: Pick<ProductionRuntime["session"], "submit">;
+  initialPrompt: string;
+  pending: SinglePendingPrompt;
+  onStart(prompt: string): void;
+  onFinish(): void;
+  onPendingConsumed(): void;
+  report(message: string): void;
+  shouldContinue?(): boolean;
+}): Promise<void> {
+  let prompt: string | undefined = options.initialPrompt;
+  while (prompt !== undefined) {
+    options.onStart(prompt);
+    await submitSafely(options.session, prompt, options.report);
+    options.onFinish();
+    if (options.shouldContinue?.() === false) return;
+    prompt = options.pending.take();
+    if (prompt !== undefined) options.onPendingConsumed();
+  }
+}
+
 export function classifyTerminalInput(key: Pick<Key, "wheelUp" | "wheelDown" | "pageUp" | "pageDown" | "upArrow" | "downArrow">): TerminalInputAction | null {
   if (key.wheelUp) return { type: "scroll", rows: -3 };
   if (key.wheelDown) return { type: "scroll", rows: 3 };
@@ -129,6 +195,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   const [mentionCandidates, setMentionCandidates] = useState<string[]>([]);
   const [mentionSelection, setMentionSelection] = useState(0);
   const [dismissedMentionInput, setDismissedMentionInput] = useState<string>();
+  const [pendingPrompt, setPendingPrompt] = useState<string>();
   const [revision, setRevision] = useState(0);
   const [questionIndex, setQuestionIndex] = useState(0);
   const [questionAnswers, setQuestionAnswers] = useState<Record<number, string>>({});
@@ -140,6 +207,8 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   const taskScrollRef = useRef<ScrollBoxHandle>(null);
   const taskPanelHovered = useRef(false);
   const runtimeRef = useRef<ProductionRuntime | undefined>(undefined);
+  const pendingPromptRef = useRef<SinglePendingPrompt | undefined>(undefined);
+  pendingPromptRef.current ??= new SinglePendingPrompt();
   const closing = useRef(false);
   const textBuf = useRef<{ pending: string; timer: ReturnType<typeof setTimeout> | null }>({ pending: "", timer: null });
 
@@ -371,6 +440,20 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
         else return;
       }
     }
+    if (key.escape && transcript.active !== undefined) {
+      const restored = pendingPromptRef.current!.cancel();
+      if (restored !== undefined) {
+        setPendingPrompt(undefined);
+        setInput(restored);
+        setPastedBlocks([]);
+        setPromptCursor([...restored].length);
+        setSlashSelection(0);
+        setDismissedSlashInput(undefined);
+        setMentionSelection(0);
+        setDismissedMentionInput(undefined);
+        return;
+      }
+    }
     const menuAction = slashKeyAction(key, slashCompletion);
     if (menuAction?.type === "select" && slashCompletion !== null) {
       setSlashSelection((value) => moveSlashSelection(value, menuAction.delta, slashCompletion.items.length));
@@ -405,11 +488,16 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
       return;
     }
     if (key.return) {
-      const prompt = input.trim();
-      if (!prompt || active === undefined || transcript.active !== undefined) return;
+      const entered = input.trim();
+      if (!entered || active === undefined) return;
+      const { delivery, prompt } = resolvePromptDelivery(transcript.active !== undefined, key, entered);
+      if (!prompt) return;
+      if (delivery === "followUp" && transcript.active !== undefined) {
+        if (!pendingPromptRef.current!.queue(prompt)) return;
+        setPendingPrompt(prompt);
+      }
       scrollRef.current?.scrollToBottom();
-      dispatch({ type: "submit", prompt });
-      setHistory((current) => [...current, prompt].slice(-HISTORY_CAP));
+      setHistory((current) => [...current, entered].slice(-HISTORY_CAP));
       setHistoryCursor(history.length + 1);
       setInput("");
       setPastedBlocks([]);
@@ -418,9 +506,24 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
       setDismissedSlashInput(undefined);
       setMentionSelection(0);
       setDismissedMentionInput(undefined);
-      void submitSafely(active.session, prompt, (error) => {
-        dispatch({ type: "submit-error", message: error });
-      }).finally(() => dispatch({ type: "finish" }));
+      if (delivery === "prompt") {
+        void runTerminalSubmissionChain({
+          session: active.session,
+          initialPrompt: prompt,
+          pending: pendingPromptRef.current!,
+          onStart: (next) => dispatch({ type: "submit", prompt: next }),
+          onFinish: () => dispatch({ type: "finish" }),
+          onPendingConsumed: () => setPendingPrompt(undefined),
+          report: (error) => dispatch({ type: "submit-error", message: error }),
+          shouldContinue: () => !closing.current,
+        });
+      } else if (delivery === "steer") {
+        try {
+          active.session.steer(prompt);
+        } catch (error) {
+          dispatch({ type: "submit-error", message: safeUiError(error) });
+        }
+      }
       return;
     }
     if (key.backspace) {
@@ -490,6 +593,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     {...(approval === undefined ? {} : { approval })}
     {...(questions === undefined ? {} : { questions })}
     memoryReviews={memoryReviews}
+    {...(pendingPrompt === undefined ? {} : { pendingPrompt })}
     questionIndex={questionIndex}
     questionAnswers={questionAnswers}
     customQuestionActive={customQuestionActive}
@@ -524,6 +628,7 @@ export interface TerminalLayoutProps {
   columns: number;
   rows?: number;
   activeSession: boolean;
+  pendingPrompt?: string;
   completedSlashTokenLength?: number;
   completion?: SlashCompletion;
   mentionCompletion?: MentionCompletion;
@@ -540,7 +645,7 @@ export interface TerminalLayoutProps {
 }
 
 export function TerminalLayout({
-  model, workspaceName, completed, active, input, pastedBlocks = [], promptCursor, columns, rows = 24, activeSession, approval,
+  model, workspaceName, completed, active, input, pastedBlocks = [], promptCursor, columns, rows = 24, activeSession, pendingPrompt, approval,
   questions, memoryReviews = [], questionIndex = 0, questionAnswers = {}, customQuestionActive = false,
   completion, mentionCompletion, onMentionSelect, completedSlashTokenLength: tokenLength = 0, scrollRef,
   taskScrollRef, onTaskPanelHoverChange, onPromptCursorChange,
@@ -565,7 +670,8 @@ export function TerminalLayout({
     : 4 + (questions[questionIndex]?.options.length ?? 0) + questions.length * 2;
   const memoryReviewRows = memoryReviews.length === 0 ? 0 : 5;
 
-  const fixedBottomRows = (approval === undefined ? 0 : 3) + questionRows + memoryReviewRows + menuRows + 2;
+  const fixedBottomRows = (approval === undefined ? 0 : 3) + questionRows + memoryReviewRows + menuRows
+    + (pendingPrompt === undefined ? 0 : 1) + 2;
   const taskPanelRows = taskPanelViewportRows(rows, fixedBottomRows, activeTaskBlocks.length > 0);
   const availableBottomRows = Math.max(1, rows - taskPanelRows - 1);
   const bottomMaxRows = Math.min(availableBottomRows, Math.max(Math.floor(rows / 2), fixedBottomRows + 1));
@@ -613,6 +719,9 @@ export function TerminalLayout({
       {mentionCompletion === undefined ? null : (
         <MentionMenu completion={mentionCompletion} {...(onMentionSelect === undefined ? {} : { onSelect: onMentionSelect })} />
       )}
+      {pendingPrompt === undefined ? null : (
+        <Text color="yellow" wrap="truncate-end">Pending · {pendingPrompt} · Esc edit</Text>
+      )}
       <Text dimColor>{"─".repeat(dividerWidth)}</Text>
       <PromptLine
         input={input}
@@ -624,7 +733,7 @@ export function TerminalLayout({
         {...(onPromptCursorChange === undefined ? {} : { onCursorChange: onPromptCursorChange })}
       />
       <Text dimColor wrap="truncate-end">{activeSession
-        ? "Ctrl+C cancel · Ctrl+C again exit"
+        ? "Ctrl+C cancel · Enter queue · Esc edit pending · /steer sends now"
         : completion !== undefined
           ? "↑/↓ select · Tab complete · Esc close"
           : mentionCompletion !== undefined

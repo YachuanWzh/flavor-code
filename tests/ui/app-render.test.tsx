@@ -47,6 +47,24 @@ describe("TerminalLayout", () => {
     expect(output).toContain("3. Custom input");
   });
 
+  it("renders the single pending CLI query directly above the prompt", () => {
+    const output = stripAnsi(renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[]}
+      input=""
+      promptCursor={0}
+      columns={90}
+      rows={24}
+      activeSession
+      pendingPrompt="then add tests"
+    />, { columns: 90 }));
+
+    expect(output).toContain("Pending · then add tests");
+    expect(output.indexOf("Pending · then add tests")).toBeLessThan(output.lastIndexOf("❯"));
+    expect(output).toContain("Esc edit");
+  });
+
   it("renders model-generated memory as pending confirmation instead of stored state", () => {
     const output = stripAnsi(renderToString(<TerminalLayout
       model="model"
@@ -553,6 +571,8 @@ describe("TerminalLayout", () => {
     expect(output).toContain("subagent: Worker A");
     expect(output).toContain("Worker B");
     expect(output.match(/⠋/gu)).toHaveLength(1);
+    expect(output).toContain("Enter queue");
+    expect(output).toContain("Esc edit pending");
   });
 
   it("keeps every task available instead of slicing the list to six rows", () => {

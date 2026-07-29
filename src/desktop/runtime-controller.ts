@@ -16,7 +16,7 @@ import type { MemoryCandidate, MemoryEntry } from "../memory/types.js";
 import type { MemoryReviewItem } from "../memory/review.js";
 import { ProjectMcpConfigManager, type ManagedMcpServer, type ProjectMcpConfigManagerLike } from "../mcp/config-manager.js";
 import { DEFAULT_DESKTOP_MODELS, loadDesktopModels, saveDesktopModel } from "./model-config.js";
-import type { AddDesktopModelInput, DesktopEvent, DesktopModelOption, DesktopModelMutationResult, DesktopSessionSummary, DesktopSnapshot, McpServerDraft, SessionStartedPayload } from "./contracts.js";
+import type { AddDesktopModelInput, DesktopEvent, DesktopMessageDelivery, DesktopModelOption, DesktopModelMutationResult, DesktopSessionSummary, DesktopSnapshot, McpServerDraft, SessionStartedPayload } from "./contracts.js";
 
 export interface RuntimeLike {
   readonly sessionId: string;
@@ -26,6 +26,9 @@ export interface RuntimeLike {
     readonly active: boolean;
     start(): Promise<void>;
     submit(prompt: string): Promise<void>;
+    steer(prompt: string): void;
+    followUp(prompt: string): void;
+    queueSnapshot(): { steering: readonly string[]; followUp: readonly string[] };
     interrupt(): "cancelled" | "exit";
     close(): Promise<void>;
   };
@@ -124,6 +127,7 @@ export class DesktopRuntimeController {
           subagentModel: runtime.services.subagentModel(),
           permissionMode: runtime.services.permissionMode(),
           busy: this.#busy,
+          queue: runtime.session.queueSnapshot(),
         },
         ...(runtime.approvals.pending === undefined ? {} : { approval: runtime.approvals.pending }),
         ...(runtime.services.questions.pending === undefined ? {} : { questions: runtime.services.questions.pending }),
@@ -199,10 +203,19 @@ export class DesktopRuntimeController {
     return this.#publishSnapshot();
   }
 
-  async submit(prompt: string): Promise<void> {
+  async submit(prompt: string, delivery: DesktopMessageDelivery = "prompt"): Promise<void> {
     const runtime = this.#runtime;
     if (runtime === undefined) throw new Error("Start a session before sending a message");
-    if (this.#busy) throw new Error("A task is already running");
+    if (delivery === "followUp") {
+      runtime.session.followUp(prompt);
+      this.#publishSnapshot();
+      return;
+    }
+    if (delivery === "steer" || this.#busy) {
+      runtime.session.steer(prompt);
+      this.#publishSnapshot();
+      return;
+    }
     this.#busy = true;
     this.#publishSnapshot();
     try {

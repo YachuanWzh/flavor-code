@@ -28,6 +28,12 @@ describe("parseSlashCommand", () => {
     ["/remember Prefer Chinese responses", { name: "remember", type: "project", text: "Prefer Chinese responses" }],
     ["/forget obsolete convention", { name: "forget", query: "obsolete convention" }],
     ["/loop fix all tests", { name: "loop", goal: "fix all tests" }],
+    ["/checkpoint before refactor", { name: "checkpoint", label: "before refactor" }],
+    ["/checkpoint", { name: "checkpoint" }],
+    ["/tree", { name: "tree" }],
+    ["/rewind turn-123", { name: "rewind", nodeId: "turn-123" }],
+    ["/fork turn-456", { name: "fork", nodeId: "turn-456" }],
+    ["/unrevert", { name: "unrevert" }],
     ["/help", { name: "help" }], ["/exit", { name: "exit" }],
   ])("parses %s", (input, expected) => expect(parseSlashCommand(input)).toEqual(expected));
 
@@ -71,6 +77,8 @@ describe("parseSlashCommand", () => {
       name: "invalid", command: "mcp", message: "Use /mcp [status|tools <server>|reconnect <server>|enable [server|all]|disable [server|all]].",
     });
     expect(parseSlashCommand("/mcp remove docs")).toMatchObject({ name: "invalid", command: "mcp" });
+    expect(parseSlashCommand("/rewind")).toMatchObject({ name: "invalid", command: "rewind" });
+    expect(parseSlashCommand("/fork one two")).toMatchObject({ name: "invalid", command: "fork" });
   });
 
   it("parses explicit task completion without arguments", () => {
