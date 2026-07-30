@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { GoalOrchestrator } from "../../src/goal/orchestrator.js";
 import type { GoalState } from "../../src/goal/types.js";
 import { ModelRegistry } from "../../src/models/registry.js";
-import type { ModelAdapter } from "../../src/models/types.js";
+import { modelContentText, type ModelAdapter } from "../../src/models/types.js";
 
 const roots: string[] = [];
 
@@ -23,7 +23,7 @@ async function workspace(): Promise<string> {
 function registry(): ModelRegistry {
   const adapter: ModelAdapter = {
     async *stream(request) {
-      const prompt = request.messages.at(-1)?.content ?? "";
+      const prompt = modelContentText(request.messages.at(-1)?.content ?? "");
       if (prompt.includes("goal planner")) {
         yield { type: "text", text: JSON.stringify({
           kind: "code-change",

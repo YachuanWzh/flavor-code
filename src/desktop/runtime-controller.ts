@@ -4,10 +4,15 @@ import { resolve } from "node:path";
 import type { PermissionMode } from "../config/schema.js";
 import { createProductionRuntime, type ProductionRuntimeOptions } from "../production.js";
 import { SessionStore } from "../session/store.js";
+import {
+  SessionAssetStore,
+  type ImageAttachmentInput,
+} from "../session/assets.js";
 import type { Question } from "../tools/ask-user-question.js";
-import type { SessionOutput } from "../ui/session.js";
+import type { MultimodalSessionInput, SessionOutput } from "../ui/session.js";
 import type { TranscriptState } from "../ui/transcript.js";
 import { message } from "../utils/error.js";
+import { modelContentText } from "../models/types.js";
 import type { ApprovalDecision } from "../tools/runtime.js";
 import { createGlobTool, type SearchResult } from "../tools/search.js";
 import { SkillManager, type ManagedSkill, type ManagedSkillSummary, type SkillDraft } from "../skills/manager.js";
@@ -66,6 +71,11 @@ export interface DesktopRuntimeControllerOptions {
   saveModel?(workspace: string, home: string, input: AddDesktopModelInput): Promise<DesktopModelOption>;
   loadMemoryManager?(workspace: string, home: string): Promise<MemoryManagerLike>;
   loadMcpManager?(workspace: string): ProjectMcpConfigManagerLike;
+  storeAttachments?(
+    workspace: string,
+    sessionId: string,
+    attachments: readonly ImageAttachmentInput[],
+  ): Promise<MultimodalSessionInput["content"]>;
   emit(event: DesktopEvent): void;
 }
 
@@ -78,6 +88,7 @@ export class DesktopRuntimeController {
   readonly #saveModel: NonNullable<DesktopRuntimeControllerOptions["saveModel"]>;
   readonly #loadMemoryManager: NonNullable<DesktopRuntimeControllerOptions["loadMemoryManager"]>;
   readonly #loadMcpManager: NonNullable<DesktopRuntimeControllerOptions["loadMcpManager"]>;
+  readonly #storeAttachments: NonNullable<DesktopRuntimeControllerOptions["storeAttachments"]>;
   readonly #emit: (event: DesktopEvent) => void;
   #workspace: string | undefined;
   #sessions: readonly DesktopSessionSummary[] = [];
@@ -97,7 +108,8 @@ export class DesktopRuntimeController {
       return Promise.all(entries.map(async (entry) => {
         try {
           const document = await store.load(entry.sessionId);
-          const preview = document.conversation.messages.find((item) => item.role === "user")?.content.trim()
+          const firstUser = document.conversation.messages.find((item) => item.role === "user");
+          const preview = (firstUser === undefined ? undefined : modelContentText(firstUser.content).trim())
             ?? document.timeline.state.completed.find((turn) => turn.kind !== "compaction")?.prompt.trim()
             ?? document.timeline.state.active?.prompt.trim();
           return { ...entry, ...(preview ? { preview } : {}) };
@@ -112,6 +124,9 @@ export class DesktopRuntimeController {
     this.#loadMemoryManager = options.loadMemoryManager
       ?? ((workspace, home) => createProjectMemoryManager({ workspace, home }));
     this.#loadMcpManager = options.loadMcpManager ?? ((workspace) => new ProjectMcpConfigManager(workspace));
+    this.#storeAttachments = options.storeAttachments
+      ?? ((workspace, sessionId, attachments) =>
+        new SessionAssetStore({ workspace }).store(sessionId, attachments));
     this.#emit = options.emit;
   }
 
@@ -203,9 +218,16 @@ export class DesktopRuntimeController {
     return this.#publishSnapshot();
   }
 
-  async submit(prompt: string, delivery: DesktopMessageDelivery = "prompt"): Promise<void> {
+  async submit(
+    prompt: string,
+    delivery: DesktopMessageDelivery = "prompt",
+    attachments: readonly ImageAttachmentInput[] = [],
+  ): Promise<void> {
     const runtime = this.#runtime;
     if (runtime === undefined) throw new Error("Start a session before sending a message");
+    if (attachments.length > 0 && delivery !== "prompt") {
+      throw new Error("Images are only supported on new prompts");
+    }
     if (delivery === "followUp") {
       runtime.session.followUp(prompt);
       this.#publishSnapshot();
@@ -219,7 +241,16 @@ export class DesktopRuntimeController {
     this.#busy = true;
     this.#publishSnapshot();
     try {
-      await runtime.session.submit(prompt);
+      if (attachments.length === 0) {
+        await runtime.session.submit(prompt);
+      } else {
+        const workspace = this.#workspace;
+        if (workspace === undefined) throw new Error("Open a project before sending images");
+        const content = await this.#storeAttachments(workspace, runtime.sessionId, attachments);
+        const submitMultimodal = runtime.session.submit as unknown as
+          (input: MultimodalSessionInput) => Promise<void>;
+        await submitMultimodal.call(runtime.session, { text: prompt, content });
+      }
     } catch (error) {
       if (this.#runtime === runtime) {
         this.#emit({ type: "runtime-error", sessionId: runtime.sessionId, message: message(error) });

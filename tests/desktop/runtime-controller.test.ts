@@ -41,6 +41,41 @@ function fakeRuntime(output: (event: SessionOutput) => void, sessionId = "sessio
 }
 
 describe("DesktopRuntimeController", () => {
+  it("stores desktop attachments and submits a multimodal prompt to the active session", async () => {
+    const runtime = fakeRuntime(() => undefined);
+    const storeAttachments = vi.fn(async () => [{
+      type: "image" as const,
+      source: { type: "file" as const, path: "C:\\work\\.flavor\\session-assets\\session-live\\a.png" },
+      mediaType: "image/png" as const,
+      sha256: "a".repeat(64),
+      bytes: 8,
+      name: "screen.png",
+    }]);
+    const controller = new DesktopRuntimeController({
+      home: "C:\\Users\\demo",
+      createRuntime: async () => runtime,
+      listSessions: async () => [],
+      storeAttachments,
+      emit: () => undefined,
+    });
+    await controller.openWorkspace("C:\\work");
+    await controller.startSession();
+
+    await controller.submit("", "prompt", [{
+      name: "screen.png",
+      mediaType: "image/png",
+      dataBase64: "iVBORw0KGgo=",
+    }]);
+
+    expect(storeAttachments).toHaveBeenCalledWith("C:\\work", "session-live", [
+      expect.objectContaining({ name: "screen.png" }),
+    ]);
+    expect(runtime.session.submit).toHaveBeenCalledWith({
+      text: "",
+      content: [expect.objectContaining({ type: "image", mediaType: "image/png" })],
+    });
+  });
+
   it("delegates MCP configuration CRUD to the opened project manager", async () => {
     const local = {
       name: "local", transport: "stdio" as const, enabled: true,

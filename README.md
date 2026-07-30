@@ -9,7 +9,7 @@
 
 `flavor-code` 是一个同时提供终端界面与 Electron 桌面应用的 AI 编程助手。它接入大语言模型（OpenAI GPT、Anthropic Claude 或任何兼容服务），能理解你的项目结构，在工作区范围内安全操作文件，甚至能把复杂任务拆成多块，分给多个"小助手"并行处理。
 
-当前稳定版本：**1.1.0**
+当前稳定版本：**1.1.1**
 
 ## 它能做什么
 
@@ -31,6 +31,7 @@
 - **运行中追加任务** — CLI 工作时 Enter 保存一条待发送任务，SSE 结束后自动提交；`/steer` 可立即调整仍在执行的任务
 - **可逆会话树** — 为上下文和工作区创建内容寻址 checkpoint，可 rewind、unrevert，并从历史节点继续分支
 - **SDK、JSONL RPC 与 Eval** — Node 调用方、IDE 和自动化评测共用同一套生产运行时
+- **图片上传与多模态** — CLI 中 Ctrl+V 粘贴剪贴板图片、桌面端文件选择器上传，支持 PNG/JPEG/WebP，每张 ≤5MB，去重存储，作为 user 消息的一部分发送给视觉模型分析 UI 截图、设计稿或错误日志
 - **Docker 沙箱** — 可选择让 Shell、自治 loop 及其验证命令在无网络、只读根文件系统的容器中运行
 
 ### 子 Agent 字节级提示词缓存（0.8.0）
@@ -465,7 +466,7 @@ npm run desktop:dist     # 生成 Windows NSIS 安装包
 Windows 打包产物位于：
 
 - 免安装目录：`release/win-unpacked/Flavor Code.exe`
-- NSIS 安装包：`release/Flavor-Code-1.1.0-x64.exe`
+- NSIS 安装包：`release/Flavor-Code-1.1.1-x64.exe`
 
 模型配置仍读取全局 `~/.flavor-code/flavor.json`、项目 `.flavor/flavor.json`、`.env` 和环境变量，因此 CLI 与桌面端可以共享配置与会话。生产版桌面窗口启用了 `contextIsolation` 和 Chromium 沙箱，关闭了渲染进程的 Node.js 集成；文件、命令和 Agent 操作只通过显式 IPC 接口进入主进程。Windows 的 `desktop:dev` 为兼容工作区内 Chromium 子进程启动，仅在本地开发启动器中使用 `--no-sandbox`，打包产物不携带该参数。
 
@@ -492,6 +493,30 @@ flavor -p "分析这个项目的依赖关系"
 ```
 
 `--print` 模式下所有需要审批的操作默认拒绝，不会悬挂等待。
+
+### 图片上传（多模态）
+
+Flavor 1.1.1 支持将图片作为提示词的一部分发送给视觉模型，让你可以请 AI 帮忙分析 UI 截图、设计稿、错误日志截图等。
+
+**CLI 终端：**
+
+直接在输入框中 Ctrl+V（macOS 用 Cmd+V）粘贴剪贴板中的图片即可。Flavor 会自动检测剪贴板中的图像数据并作为附件包含在下一轮消息中。
+
+- 支持 PNG、JPEG、WebP 格式
+- 每张图片最大 5MB
+- 每次最多附带 5 张
+- 图片存储在 `.flavor/session-assets/` 下，SHA-256 去重
+- 当前支持 Windows 和 macOS；Linux 暂不支持
+
+**桌面端：**
+
+在输入框上方通过文件选择器选择图片文件，或直接拖拽图片到输入区域。图片会随同 prompt 一起发送。
+
+**限制：**
+
+- 图片只能随新提示词发送，不能通过 steering/follow-up 追加
+- 不能在使用斜杠命令（以 `/` 开头）时附带图片
+- 不在子 Agent 的上下文中自动携带图片
 
 ### 恢复上次会话
 
@@ -916,6 +941,7 @@ npm run smoke:install  # 验证打包和安装
 - **PKCE 到 SSE 全链路（OAuth 授权 → API 网关 → 流式代理）**
 - **事故上报与 RCA（PostToolUseFailure → langgraph-claw → 自动根因分析）**
 - **对抗性审查流水线（Plan → Execute → Skeptic Panel 多数投票 → 停滞检测熔断）**
+- **多模态图片支持（剪贴板/文件选择器 → 验证存储 → Provider-Native 翻译 → 混合内容上下文管理）**
 - 权限引擎决策树与 Shell 安全分析
 - Hook 事件总线（19 个事件）
 - Skill 渐进加载与资源安全

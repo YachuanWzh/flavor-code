@@ -16,6 +16,7 @@ import {
   type TranscriptTurn,
 } from "../ui/transcript.js";
 import { message } from "../utils/error.js";
+import type { ModelContent } from "../models/types.js";
 
 export const SESSION_VERSION = 3 as const;
 export const DEFAULT_MAX_SESSION_BYTES = 5 * 1024 * 1024;
@@ -25,12 +26,31 @@ const IsoDateSchema = z.string().datetime({ offset: true });
 const ToolCallSchema = z.object({
   id: z.string().min(1).max(256), name: z.string().min(1).max(256), input: z.unknown(),
 }).strict();
-const MessageSchema = z.object({
-  role: z.enum(["user", "assistant", "tool"]),
-  content: z.string().max(DEFAULT_MAX_SESSION_BYTES),
+const TextContentBlockSchema = z.object({
+  type: z.literal("text"),
+  text: z.string().max(DEFAULT_MAX_SESSION_BYTES),
+}).strict();
+const ImageContentBlockSchema = z.object({
+  type: z.literal("image"),
+  source: z.object({ type: z.literal("file"), path: z.string().min(1).max(32_768) }).strict(),
+  mediaType: z.enum(["image/png", "image/jpeg", "image/webp"]),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  bytes: z.number().int().positive().max(20 * 1024 * 1024),
+  name: z.string().min(1).max(255).optional(),
+}).strict();
+const UserContentSchema: z.ZodType<ModelContent> = z.union([
+  z.string().max(DEFAULT_MAX_SESSION_BYTES),
+  z.array(z.discriminatedUnion("type", [TextContentBlockSchema, ImageContentBlockSchema])).min(1).max(100),
+]);
+const MessageMetadataShape = {
   toolCallId: z.string().min(1).max(256).optional(),
   toolCalls: z.array(ToolCallSchema).max(1_000).optional(),
-}).strict();
+};
+const MessageSchema = z.discriminatedUnion("role", [
+  z.object({ role: z.literal("user"), content: UserContentSchema, ...MessageMetadataShape }).strict(),
+  z.object({ role: z.literal("assistant"), content: z.string().max(DEFAULT_MAX_SESSION_BYTES), ...MessageMetadataShape }).strict(),
+  z.object({ role: z.literal("tool"), content: z.string().max(DEFAULT_MAX_SESSION_BYTES), ...MessageMetadataShape }).strict(),
+]);
 const LegacySummarySchema = z.object({ role: z.literal("system"), content: z.string().max(DEFAULT_MAX_SESSION_BYTES) }).strict();
 const CompactBoundarySchema = z.object({
   summary: z.string().min(1).max(DEFAULT_MAX_SESSION_BYTES),

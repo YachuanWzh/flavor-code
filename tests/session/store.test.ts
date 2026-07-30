@@ -165,6 +165,34 @@ describe("SessionStore", () => {
     expect(loaded.timeline.state.completed).toEqual([expect.objectContaining({ prompt: "hello", assistantText: "world" })]);
   });
 
+  it("persists image references without embedding attachment base64 in JSONL", async () => {
+    const root = await workspace();
+    const saved = document(root);
+    saved.conversation.messages[0] = {
+      role: "user",
+      content: [
+        { type: "text", text: "Inspect this screenshot" },
+        {
+          type: "image",
+          source: { type: "file", path: join(root, ".flavor", "session-assets", saved.sessionId, "a.png") },
+          mediaType: "image/png",
+          sha256: "a".repeat(64),
+          bytes: 128,
+          name: "screen.png",
+        },
+      ],
+    };
+
+    await new SessionStore({ workspace: root }).save(saved);
+
+    const raw = await readFile(join(root, ".flavor", "sessions", `${saved.sessionId}.jsonl`), "utf8");
+    expect(raw).toContain('"type":"image"');
+    expect(raw).toContain('"sha256"');
+    expect(raw).not.toContain("dataBase64");
+    await expect(new SessionStore({ workspace: root }).load(saved.sessionId))
+      .resolves.toMatchObject({ conversation: { messages: expect.arrayContaining([saved.conversation.messages[0]]) } });
+  });
+
   it("migrates a version-2 JSONL session into a reconstructed tool timeline", async () => {
     const root = await workspace();
     await mkdir(join(root, ".flavor", "sessions"), { recursive: true });

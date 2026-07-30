@@ -2,10 +2,39 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { DesktopTurnView } from "../../src/desktop/renderer/app.js";
+import {
+  attachmentTranscriptPrompt,
+  DesktopImageAttachmentStrip,
+  DesktopTurnView,
+} from "../../src/desktop/renderer/app.js";
 import type { TranscriptTurn } from "../../src/ui/transcript.js";
 
 describe("desktop restored timeline rendering", () => {
+  it("renders Claude-style numbered image chips and transcript references", () => {
+    const attachments = [
+      {
+        id: "one", name: "screen.png", mediaType: "image/png" as const,
+        dataBase64: "abc", previewUrl: "blob:one",
+      },
+      {
+        id: "two", name: "layout.webp", mediaType: "image/webp" as const,
+        dataBase64: "def", previewUrl: "blob:two",
+      },
+    ];
+
+    const html = renderToStaticMarkup(
+      <DesktopImageAttachmentStrip attachments={attachments} onRemove={() => undefined} />,
+    );
+
+    expect(html).toContain("[Image #1]");
+    expect(html).toContain("[Image #2]");
+    expect(html).toContain("screen.png");
+    expect(html).toContain("layout.webp");
+    expect(attachmentTranscriptPrompt("Inspect", attachments)).toBe(
+      "Inspect\n[Image #1]\n[Image #2]",
+    );
+  });
+
   it("shows task-plan cards only while their owning turn is active", () => {
     const turn: TranscriptTurn = {
       id: 1,

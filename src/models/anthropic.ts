@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { readFile } from "node:fs/promises";
 import type {
   MessageDeltaUsage,
   MessageCreateParamsStreaming,
@@ -12,6 +13,7 @@ import {
   type ModelAdapter,
   type ModelEvent,
   type ModelRequest,
+  modelContentText,
 } from "./types.js";
 import { normalizeToolCallInput } from "../utils/json.js";
 
@@ -103,10 +105,10 @@ export class AnthropicModelAdapter implements ModelAdapter {
       const system = systemMessages.some((message) => message.cacheBreakpoint)
         ? systemMessages.map((message) => ({
           type: "text" as const,
-          text: message.content,
+          text: modelContentText(message.content),
           ...(message.cacheBreakpoint ? { cache_control: { type: "ephemeral" as const } } : {}),
         }))
-        : systemMessages.map((message) => message.content).join("\n\n");
+        : systemMessages.map((message) => modelContentText(message.content)).join("\n\n");
       const messages: MessageParam[] = [];
       const nonSystem = request.messages.filter((m) => m.role !== "system");
       for (let i = 0; i < nonSystem.length; i += 1) {
@@ -122,7 +124,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
             {
               type: "tool_result",
               tool_use_id: message.toolCallId,
-              content: message.content,
+              content: modelContentText(message.content),
               ...(message.cacheBreakpoint ? { cache_control: { type: "ephemeral" as const } } : {}),
             },
           ];
@@ -133,14 +135,16 @@ export class AnthropicModelAdapter implements ModelAdapter {
             results.push({
               type: "tool_result",
               tool_use_id: next.toolCallId,
-              content: next.content,
+              content: modelContentText(next.content),
               ...(next.cacheBreakpoint ? { cache_control: { type: "ephemeral" as const } } : {}),
             });
           }
           messages.push({ role: "user" as const, content: results });
         } else if (message.role === "assistant" && message.toolCalls?.length) {
           const content: AnthropicAssistantBlock[] = [
-            ...(message.content ? [{ type: "text" as const, text: message.content }] : []),
+            ...(modelContentText(message.content)
+              ? [{ type: "text" as const, text: modelContentText(message.content) }]
+              : []),
             ...message.toolCalls.map((call) => ({
               type: "tool_use" as const,
               id: call.id,
@@ -159,12 +163,33 @@ export class AnthropicModelAdapter implements ModelAdapter {
             content,
           } as MessageParam);
         } else {
+          const content: string | Array<Record<string, unknown>> = typeof message.content === "string"
+            ? message.content
+            : await Promise.all(message.content.map(async (block): Promise<Record<string, unknown>> => block.type === "text"
+              ? { type: "text" as const, text: block.text }
+              : {
+                  type: "image" as const,
+                  source: {
+                    type: "base64" as const,
+                    media_type: block.mediaType,
+                    data: (await readFile(block.source.path)).toString("base64"),
+                  },
+                }));
+          if (message.cacheBreakpoint && Array.isArray(content) && content.length > 0) {
+            const last = content[content.length - 1]!;
+            if (last.type === "text") {
+              content[content.length - 1] = {
+                ...last,
+                cache_control: { type: "ephemeral" as const },
+              };
+            }
+          }
           messages.push({
             role: message.role,
-            content: message.cacheBreakpoint
-              ? [{ type: "text", text: message.content, cache_control: { type: "ephemeral" } }]
-              : message.content,
-          } as MessageParam);
+            content: message.cacheBreakpoint && typeof content === "string"
+              ? [{ type: "text", text: content, cache_control: { type: "ephemeral" } }]
+              : content,
+          } as unknown as MessageParam);
         }
       }
 

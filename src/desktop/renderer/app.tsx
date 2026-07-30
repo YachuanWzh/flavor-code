@@ -2,7 +2,14 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import type { PermissionMode } from "../../config/schema.js";
 import { createTranscriptState, transcriptReducer, type TranscriptBlock, type TranscriptState, type TranscriptTurn } from "../../ui/transcript.js";
-import type { AddDesktopModelInput, DesktopEvent, DesktopModelOption, DesktopSnapshot, DesktopSessionSummary } from "../contracts.js";
+import type {
+  AddDesktopModelInput,
+  DesktopEvent,
+  DesktopImageAttachmentInput,
+  DesktopModelOption,
+  DesktopSnapshot,
+  DesktopSessionSummary,
+} from "../contracts.js";
 import { applyDesktopSessionOutput, groupSessions, permissionLabel, sessionTitle, STARTER_PROMPTS, workspaceName } from "./view-model.js";
 import { MarkdownContent } from "./markdown.js";
 import { SlashCompletionDropdown } from "./slash-completion-dropdown.js";
@@ -33,11 +40,44 @@ import type { ManagedSkillSummary } from "../../skills/manager.js";
 const EMPTY_SNAPSHOT: DesktopSnapshot = { sessions: [], diagnostics: [], models: [] };
 const PERMISSIONS: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions", "auto", "bubble"];
 const BUILTIN_SLASH_CANDIDATES = MVP_COMMANDS.map((name) => ({ name, description: COMMAND_DESCRIPTIONS[name] }));
+const MAX_DESKTOP_IMAGES = 5;
+const MAX_DESKTOP_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_DESKTOP_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024;
+const IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+
+export interface PendingDesktopImage extends DesktopImageAttachmentInput {
+  id: string;
+  previewUrl: string;
+}
+
+export function attachmentTranscriptPrompt(
+  prompt: string,
+  attachments: readonly Pick<PendingDesktopImage, "id">[],
+): string {
+  const text = prompt.trim();
+  const references = attachments.map((_attachment, index) => `[Image #${index + 1}]`);
+  return [text, ...references].filter(Boolean).join("\n");
+}
+
+export function DesktopImageAttachmentStrip({ attachments, onRemove }: {
+  attachments: readonly PendingDesktopImage[];
+  onRemove(id: string): void;
+}): React.JSX.Element {
+  return <div className="image-attachment-strip" aria-label="待发送图片">
+    {attachments.map((attachment, index) => <figure className="image-attachment-chip" key={attachment.id}>
+      <img src={attachment.previewUrl} alt={attachment.name} />
+      <figcaption><strong>[Image #{index + 1}]</strong><span>{attachment.name}</span></figcaption>
+      <button type="button" onClick={() => onRemove(attachment.id)}
+        aria-label={`移除 ${attachment.name}`} title="移除图片">×</button>
+    </figure>)}
+  </div>;
+}
 
 export function DesktopApp(): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<DesktopSnapshot>(EMPTY_SNAPSHOT);
   const [transcript, setTranscript] = useState<TranscriptState>(createTranscriptState);
   const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState<PendingDesktopImage[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [railOpen, setRailOpen] = useState(false);
@@ -57,12 +97,64 @@ export function DesktopApp(): React.JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const activeSessionIdRef = useRef<string | undefined>(undefined);
+  const previewUrlsRef = useRef(new Set<string>());
   const userScrolledUp = useRef(false);
   const updateInput = useCallback((value: string) => {
     setInput(value);
     setDismissedSlashInput(undefined);
     setDismissedMentionInput(undefined);
   }, []);
+
+  useEffect(() => () => {
+    for (const url of previewUrlsRef.current) URL.revokeObjectURL(url);
+    previewUrlsRef.current.clear();
+  }, []);
+
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((current) => {
+      const removed = current.find((attachment) => attachment.id === id);
+      if (removed !== undefined) {
+        URL.revokeObjectURL(removed.previewUrl);
+        previewUrlsRef.current.delete(removed.previewUrl);
+      }
+      return current.filter((attachment) => attachment.id !== id);
+    });
+  }, []);
+
+  const clearAttachments = useCallback(() => {
+    setAttachments((current) => {
+      for (const attachment of current) {
+        URL.revokeObjectURL(attachment.previewUrl);
+        previewUrlsRef.current.delete(attachment.previewUrl);
+      }
+      return [];
+    });
+  }, []);
+
+  const addImageFiles = useCallback(async (files: readonly File[]) => {
+    if (files.length === 0) return;
+    const remaining = MAX_DESKTOP_IMAGES - attachments.length;
+    if (remaining <= 0 || files.length > remaining) {
+      setError(`每条消息最多添加 ${MAX_DESKTOP_IMAGES} 张图片。`);
+      return;
+    }
+    const existingBytes = attachments.reduce(
+      (sum, attachment) => sum + Math.floor(attachment.dataBase64.length * 3 / 4),
+      0,
+    );
+    if (existingBytes + files.reduce((sum, file) => sum + file.size, 0) > MAX_DESKTOP_TOTAL_IMAGE_BYTES) {
+      setError("单条消息的图片总大小不能超过 20 MiB。");
+      return;
+    }
+    try {
+      const added = await Promise.all(files.map(readPendingDesktopImage));
+      for (const attachment of added) previewUrlsRef.current.add(attachment.previewUrl);
+      setAttachments((current) => [...current, ...added].slice(0, MAX_DESKTOP_IMAGES));
+      setError(undefined);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    }
+  }, [attachments]);
 
   // Track wheel scrolling: pause auto-scroll when user scrolls up, resume when they scroll back to bottom
   useEffect(() => {
@@ -206,6 +298,7 @@ export function DesktopApp(): React.JSX.Element {
     try {
       const next = await window.flavorDesktop.chooseWorkspace();
       if (next !== undefined) {
+        clearAttachments();
         setSnapshot(next); setTranscript(createTranscriptState()); setRailOpen(false); setView("conversation");
       }
     } catch (cause) { setError(errorMessage(cause)); }
@@ -215,6 +308,7 @@ export function DesktopApp(): React.JSX.Element {
     setError(undefined);
     try {
       const result = await window.flavorDesktop.startSession(session?.sessionId);
+      clearAttachments();
       setSnapshot(result.snapshot);
       setTranscript(transcriptReducer(createTranscriptState(), { type: "restore", state: result.restoredTranscript }));
       setRailOpen(false);
@@ -225,7 +319,8 @@ export function DesktopApp(): React.JSX.Element {
 
   const send = async (override?: string, delivery?: "prompt" | "steer" | "followUp") => {
     const prompt = (override ?? input).trim();
-    if (!prompt) return;
+    const selectedAttachments = override === undefined ? attachments : [];
+    if (!prompt && selectedAttachments.length === 0) return;
     setError(undefined);
     try {
       let current = snapshot;
@@ -236,11 +331,22 @@ export function DesktopApp(): React.JSX.Element {
         setTranscript(transcriptReducer(createTranscriptState(), { type: "restore", state: started.restoredTranscript }));
       }
       const effectiveDelivery = delivery ?? (busy ? "steer" : "prompt");
+      if (selectedAttachments.length > 0 && effectiveDelivery !== "prompt") {
+        throw new Error("图片只能随新消息发送，不能作为运行中的引导或后续消息。");
+      }
       if (effectiveDelivery === "prompt") {
-        setTranscript((state) => transcriptReducer(state, { type: "submit", prompt }));
+        setTranscript((state) => transcriptReducer(state, {
+          type: "submit",
+          prompt: attachmentTranscriptPrompt(prompt, selectedAttachments),
+        }));
       }
       if (override === undefined) setInput("");
-      await window.flavorDesktop.submit(prompt, effectiveDelivery);
+      await window.flavorDesktop.submit(
+        prompt,
+        effectiveDelivery,
+        selectedAttachments.map(({ name, mediaType, dataBase64 }) => ({ name, mediaType, dataBase64 })),
+      );
+      if (selectedAttachments.length > 0) clearAttachments();
     } catch (cause) {
       const value = errorMessage(cause);
       setError(value);
@@ -369,6 +475,8 @@ export function DesktopApp(): React.JSX.Element {
       {snapshot.diagnostics.length > 0 && <details className="diagnostics"><summary>{snapshot.diagnostics.length} 条启动提示</summary><pre>{snapshot.diagnostics.join("\n")}</pre></details>}
       <Composer input={input} setInput={updateInput} onSend={(delivery) => void send(undefined, delivery)} busy={busy}
         onInterrupt={() => void window.flavorDesktop.interrupt()} inputRef={inputRef} snapshot={snapshot}
+        attachments={attachments} onAddImages={(files) => void addImageFiles(files)}
+        onRemoveImage={removeAttachment}
         setModel={setModel} addModel={addModel} setPermission={setPermission}
         slashCompletion={slashCompletion} onSlashSelect={handleSlashSelect}
         onSlashDismiss={handleSlashDismiss}
@@ -521,6 +629,9 @@ function DiffRow({ line, lineWidth }: { line: FileDiffLine; lineWidth: number })
 interface ComposerProps {
   input: string; setInput(value: string): void; onSend(delivery?: "steer" | "followUp"): void; busy: boolean; onInterrupt(): void;
   inputRef: React.RefObject<HTMLTextAreaElement | null>; snapshot: DesktopSnapshot;
+  attachments: readonly PendingDesktopImage[];
+  onAddImages(files: readonly File[]): void;
+  onRemoveImage(id: string): void;
   setModel(modelId: string): void | Promise<void>; addModel(input: AddDesktopModelInput): Promise<void>; setPermission(mode: PermissionMode): void;
   slashCompletion: SlashCompletion | null;
   onSlashSelect(name: string): void;
@@ -539,6 +650,8 @@ interface ComposerProps {
 
 function Composer(props: ComposerProps): React.JSX.Element {
   const disabled = props.snapshot.workspace === undefined;
+  const [draggingImages, setDraggingImages] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const slashMenuOpen = props.slashCompletion !== null;
   const mentionMenuOpen = props.mentionCompletion !== null;
   const menuOpen = slashMenuOpen || mentionMenuOpen;
@@ -664,6 +777,12 @@ function Composer(props: ComposerProps): React.JSX.Element {
       onChange={(event) => handleTextareaChange(event.target.value, event.target.selectionStart)}
       onSelect={(event) => handleTextareaSelect((event.target as HTMLTextAreaElement).selectionStart)}
       onKeyDown={onKeyDown}
+      onPaste={(event) => {
+        const images = imageFiles(event.clipboardData.files);
+        if (images.length === 0) return;
+        event.preventDefault();
+        props.onAddImages(images);
+      }}
       onClick={(event) => handleTextareaSelect((event.target as HTMLTextAreaElement).selectionStart)}
       placeholder={disabled ? "先打开一个项目" : (hasSlashTag || hasMentionTag) ? "" : "给 Flavor 一个任务，或输入 / 查看命令"}
       disabled={disabled}
@@ -688,7 +807,26 @@ function Composer(props: ComposerProps): React.JSX.Element {
       )
       : textarea;
 
-  return <div className="composer-wrap">
+  return <div className="composer-wrap"
+    onDragEnter={(event) => {
+      if (hasImageFiles(event.dataTransfer)) {
+        event.preventDefault();
+        setDraggingImages(true);
+      }
+    }}
+    onDragOver={(event) => {
+      if (hasImageFiles(event.dataTransfer)) event.preventDefault();
+    }}
+    onDragLeave={(event) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDraggingImages(false);
+    }}
+    onDrop={(event) => {
+      const images = imageFiles(event.dataTransfer.files);
+      if (images.length === 0) return;
+      event.preventDefault();
+      setDraggingImages(false);
+      props.onAddImages(images);
+    }}>
     {slashMenuOpen && <SlashCompletionDropdown
       completion={props.slashCompletion!}
       onSelect={props.onSlashSelect}
@@ -699,9 +837,22 @@ function Composer(props: ComposerProps): React.JSX.Element {
       onSelect={props.onMentionSelect}
       onDismiss={props.onMentionDismiss}
     />}
-    <div className={`composer${hasSlashTag || hasMentionTag ? " has-tag" : ""}`} data-busy={props.busy}>
+    <div className={`composer${hasSlashTag || hasMentionTag ? " has-tag" : ""}`}
+      data-busy={props.busy} data-image-drag={draggingImages}>
+      {props.attachments.length > 0
+        && <DesktopImageAttachmentStrip attachments={props.attachments} onRemove={props.onRemoveImage} />}
       {inputRow}
     <div className="composer-tools">
+      <input ref={fileInputRef} className="image-file-input" type="file"
+        accept="image/png,image/jpeg,image/webp" multiple
+        onChange={(event) => {
+          props.onAddImages(imageFiles(event.target.files));
+          event.target.value = "";
+        }} />
+      <button type="button" className="attach-button image-attach-button"
+        title="添加图片（也可粘贴或拖入）" aria-label="添加图片"
+        onClick={() => fileInputRef.current?.click()}
+        disabled={disabled || props.busy || props.attachments.length >= MAX_DESKTOP_IMAGES}>▧</button>
       <button className="attach-button" title="在提示中输入 @ 引用项目文件"
         onClick={() => {
           props.setInput(`${props.input}${props.input ? " " : ""}@`);
@@ -720,11 +871,50 @@ function Composer(props: ComposerProps): React.JSX.Element {
           {props.snapshot.activeSession?.queue.steering.length ?? 0}+{props.snapshot.activeSession?.queue.followUp.length ?? 0}
         </span>}
         <button className="send-button" onClick={() => props.onSend(props.busy ? "steer" : undefined)}
-          disabled={disabled || !props.input.trim()} title={props.busy ? "发送引导消息" : "发送"}><span>↑</span></button>
+          disabled={disabled || (!props.input.trim() && props.attachments.length === 0)}
+          title={props.busy ? "发送引导消息" : "发送"}><span>↑</span></button>
         {props.busy && <button className="send-button stop-button" onClick={props.onInterrupt} title="停止任务"><span /></button>}
       </div>
     </div>
-  </div><p className="composer-hint">Enter 发送 · Shift Enter 换行 · 运行中 Alt Enter 排队后续 · @ 引用文件 · / 调用命令</p></div>;
+  </div><p className="composer-hint">Enter 发送 · Shift Enter 换行 · 粘贴/拖入图片 · @ 引用文件 · / 调用命令</p></div>;
+}
+
+function imageFiles(files: FileList | null): File[] {
+  if (files === null) return [];
+  return Array.from(files).filter((file) => file.type.startsWith("image/"));
+}
+
+function hasImageFiles(dataTransfer: DataTransfer): boolean {
+  return Array.from(dataTransfer.items).some((item) =>
+    item.kind === "file" && item.type.startsWith("image/"));
+}
+
+async function readPendingDesktopImage(file: File): Promise<PendingDesktopImage> {
+  if (!IMAGE_MEDIA_TYPES.has(file.type)) {
+    throw new Error(`不支持 ${file.type || "未知格式"}；请选择 PNG、JPEG 或 WebP 图片。`);
+  }
+  if (file.size <= 0) throw new Error(`${file.name} 是空文件。`);
+  if (file.size > MAX_DESKTOP_IMAGE_BYTES) {
+    throw new Error(`${file.name} 超过单图 5 MiB 限制。`);
+  }
+  const dataBase64 = bytesToBase64(new Uint8Array(await file.arrayBuffer()));
+  const previewUrl = URL.createObjectURL(file);
+  return {
+    id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+    name: file.name,
+    mediaType: file.type as DesktopImageAttachmentInput["mediaType"],
+    dataBase64,
+    previewUrl,
+  };
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 32_768;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
 }
 
 function DeleteSessionSheet({ session, deleting, onCancel, onDelete }: {

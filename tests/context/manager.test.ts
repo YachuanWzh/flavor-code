@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { HookBus } from "../../src/hooks/bus.js";
 import { ContextManager, estimateTokens } from "../../src/context/manager.js";
+import { modelContentText } from "../../src/models/types.js";
 
 describe("ContextManager", () => {
   it("forks an isolated byte-identical visible prefix and freezes dynamic system sections", () => {
@@ -130,7 +131,7 @@ describe("ContextManager", () => {
       compactAtChars: 1,
       recentTurns: 1,
       summarize: async (messages) => {
-        summarized.push(messages.map((message) => message.content));
+        summarized.push(messages.map((message) => modelContentText(message.content)));
         return "structured summary";
       },
     });

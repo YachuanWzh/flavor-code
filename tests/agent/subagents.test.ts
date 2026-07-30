@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ContextManager } from "../../src/context/manager.js";
 import { HookBus } from "../../src/hooks/bus.js";
 import { ModelRegistry } from "../../src/models/registry.js";
-import type { ModelAdapter } from "../../src/models/types.js";
+import { modelContentText, type ModelAdapter } from "../../src/models/types.js";
 import { LocalHarness } from "../../src/harness/local.js";
 import {
   parseFinalSubagentMessage,
@@ -528,7 +528,7 @@ describe("LocalHarness", () => {
     let cheapCalls = 0;
     const adapter: ModelAdapter = {
       async *stream(request) {
-        requests.push({ model: request.model, tools: request.tools.map((tool) => tool.name), messages: request.messages.map((message) => message.content) });
+        requests.push({ model: request.model, tools: request.tools.map((tool) => tool.name), messages: request.messages.map((message) => modelContentText(message.content)) });
         if (request.model === "cheap" && cheapCalls++ === 0) {
           yield { type: "tool-call", id: "network", name: "Network", input: {} };
         }

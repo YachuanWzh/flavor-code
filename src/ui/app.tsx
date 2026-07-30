@@ -59,6 +59,20 @@ import {
   type MentionCompletion,
 } from "./mention-completion.js";
 import { WelcomeCard } from "./welcome.js";
+import {
+  DEFAULT_MAX_IMAGES,
+  DEFAULT_MAX_TOTAL_IMAGE_BYTES,
+  SessionAssetStore,
+} from "../session/assets.js";
+import {
+  modelContentTranscriptText,
+  type ModelContentBlock,
+  type ModelImageContentBlock,
+} from "../models/types.js";
+import {
+  readClipboardImage,
+  shouldReadClipboardImage,
+} from "./clipboard-image.js";
 
 export const HISTORY_CAP = 200;
 const BUILTIN_SLASH_CANDIDATES = MVP_COMMANDS.map((name) => ({ name, description: COMMAND_DESCRIPTIONS[name] }));
@@ -67,6 +81,52 @@ const PROMPT_HORIZONTAL_PADDING = 1;
 export interface PastedBlock {
   id: number;
   text: string;
+}
+
+export function removeLastCliImageOnBackspace(
+  input: string,
+  cursor: number,
+  images: readonly ModelImageContentBlock[],
+): { handled: boolean; images: ModelImageContentBlock[] } {
+  if (input.length === 0 && cursor === 0 && images.length > 0) {
+    return { handled: true, images: images.slice(0, -1) };
+  }
+  return { handled: false, images: [...images] };
+}
+
+export type CliSubmissionPreparation =
+  | { kind: "empty" }
+  | { kind: "error"; message: string }
+  | {
+      kind: "ready";
+      text: string;
+      displayText: string;
+      content?: ModelContentBlock[];
+    };
+
+export function prepareCliSubmission(
+  input: string,
+  images: readonly ModelImageContentBlock[],
+  activeSession: boolean,
+): CliSubmissionPreparation {
+  const entered = input.trim();
+  if (entered.length === 0 && images.length === 0) return { kind: "empty" };
+  if (images.length > 0 && entered.startsWith("/")) {
+    return { kind: "error", message: "Image attachments cannot be used with slash commands." };
+  }
+  if (images.length > 0 && activeSession) {
+    return { kind: "error", message: "Images can only be attached to a new prompt." };
+  }
+
+  const text = entered || "Analyze the attached image(s).";
+  if (images.length === 0) return { kind: "ready", text, displayText: text };
+  const content: ModelContentBlock[] = [{ type: "text", text }, ...images];
+  return {
+    kind: "ready",
+    text,
+    displayText: modelContentTranscriptText(content),
+    content,
+  };
 }
 
 export type TerminalInputAction =
@@ -120,8 +180,10 @@ export class SinglePendingPrompt {
 }
 
 export async function runTerminalSubmissionChain(options: {
-  session: Pick<ProductionRuntime["session"], "submit">;
+  session: { submit(prompt: string): Promise<void> };
   initialPrompt: string;
+  initialDisplayPrompt?: string;
+  initialSubmit?(prompt: string): Promise<void>;
   pending: SinglePendingPrompt;
   onStart(prompt: string): void;
   onFinish(): void;
@@ -130,13 +192,20 @@ export async function runTerminalSubmissionChain(options: {
   shouldContinue?(): boolean;
 }): Promise<void> {
   let prompt: string | undefined = options.initialPrompt;
+  let initial = true;
   while (prompt !== undefined) {
-    options.onStart(prompt);
-    await submitSafely(options.session, prompt, options.report);
+    options.onStart(initial ? options.initialDisplayPrompt ?? prompt : prompt);
+    if (initial && options.initialSubmit !== undefined) {
+      try { await options.initialSubmit(prompt); }
+      catch (error) { safeReport(options.report, safeUiError(error)); }
+    } else {
+      await submitSafely(options.session, prompt, options.report);
+    }
     options.onFinish();
     if (options.shouldContinue?.() === false) return;
     prompt = options.pending.take();
     if (prompt !== undefined) options.onPendingConsumed();
+    initial = false;
   }
 }
 
@@ -184,6 +253,8 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   const [runtime, setRuntime] = useState<ProductionRuntime>();
   const [input, setInput] = useState("");
   const [pastedBlocks, setPastedBlocks] = useState<PastedBlock[]>([]);
+  const [imageAttachments, setImageAttachments] = useState<ModelImageContentBlock[]>([]);
+  const [clipboardNotice, setClipboardNotice] = useState<string>();
   const [history, setHistory] = useState<string[]>([]);
   const [historyCursor, setHistoryCursor] = useState(0);
   const [promptCursor, setPromptCursor] = useState(0);
@@ -210,6 +281,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   const pendingPromptRef = useRef<SinglePendingPrompt | undefined>(undefined);
   pendingPromptRef.current ??= new SinglePendingPrompt();
   const closing = useRef(false);
+  const clipboardBusy = useRef(false);
   const textBuf = useRef<{ pending: string; timer: ReturnType<typeof setTimeout> | null }>({ pending: "", timer: null });
 
   useTerminalTitle("Flavor Code");
@@ -355,7 +427,47 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     setDismissedMentionInput(next.text);
   };
 
-  useInput((character, key) => {
+  const pasteClipboardImage = async (): Promise<void> => {
+    const active = runtimeRef.current;
+    if (active === undefined) {
+      setClipboardNotice("Flavor is still starting; try pasting the image again.");
+      return;
+    }
+    if (transcript.active !== undefined) {
+      setClipboardNotice("Images can only be attached to a new prompt.");
+      return;
+    }
+    if (imageAttachments.length >= DEFAULT_MAX_IMAGES) {
+      setClipboardNotice(`A prompt can contain at most ${DEFAULT_MAX_IMAGES} images.`);
+      return;
+    }
+    if (clipboardBusy.current) return;
+
+    clipboardBusy.current = true;
+    setClipboardNotice("Reading image from clipboard...");
+    try {
+      const attachment = await readClipboardImage();
+      if (attachment === undefined) {
+        setClipboardNotice("Clipboard does not contain an image.");
+        return;
+      }
+      const incomingBytes = Buffer.byteLength(attachment.dataBase64, "base64");
+      const currentBytes = imageAttachments.reduce((sum, image) => sum + image.bytes, 0);
+      if (currentBytes + incomingBytes > DEFAULT_MAX_TOTAL_IMAGE_BYTES) {
+        throw new Error(`Image attachments exceed the maximum total size of ${DEFAULT_MAX_TOTAL_IMAGE_BYTES} bytes`);
+      }
+      const [stored] = await new SessionAssetStore({ workspace }).store(active.sessionId, [attachment]);
+      if (stored === undefined) throw new Error("Clipboard image could not be stored");
+      setImageAttachments((current) => [...current, stored]);
+      setClipboardNotice(`Added [Image #${imageAttachments.length + 1}] ${stored.name ?? basename(stored.source.path)}`);
+    } catch (error) {
+      setClipboardNotice(safeUiError(error));
+    } finally {
+      clipboardBusy.current = false;
+    }
+  };
+
+  useInput((character, key, event) => {
     const terminalAction = classifyTerminalInput(key);
     if (terminalAction?.type === "scroll") {
       const scroll = selectWheelScrollTarget(scrollRef.current, taskScrollRef.current, taskPanelHovered.current);
@@ -375,6 +487,10 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     if (key.ctrl && character === "c") {
       if (selection.hasSelection()) { selection.copySelection(); }
       else { interrupt(); }
+      return;
+    }
+    if (shouldReadClipboardImage(character, key, event.keypress.isPasted)) {
+      void pasteClipboardImage();
       return;
     }
     if (active?.approvals.pending !== undefined) {
@@ -488,19 +604,27 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
       return;
     }
     if (key.return) {
-      const entered = input.trim();
-      if (!entered || active === undefined) return;
-      const { delivery, prompt } = resolvePromptDelivery(transcript.active !== undefined, key, entered);
+      const images = [...imageAttachments];
+      const prepared = prepareCliSubmission(input, images, transcript.active !== undefined);
+      if (prepared.kind === "empty" || active === undefined) return;
+      if (prepared.kind === "error") {
+        setClipboardNotice(prepared.message);
+        return;
+      }
+      const submittedText = prepared.text;
+      const { delivery, prompt } = resolvePromptDelivery(transcript.active !== undefined, key, submittedText);
       if (!prompt) return;
       if (delivery === "followUp" && transcript.active !== undefined) {
         if (!pendingPromptRef.current!.queue(prompt)) return;
         setPendingPrompt(prompt);
       }
       scrollRef.current?.scrollToBottom();
-      setHistory((current) => [...current, entered].slice(-HISTORY_CAP));
+      setHistory((current) => [...current, submittedText].slice(-HISTORY_CAP));
       setHistoryCursor(history.length + 1);
       setInput("");
       setPastedBlocks([]);
+      setImageAttachments([]);
+      setClipboardNotice(undefined);
       setPromptCursor(0);
       setSlashSelection(0);
       setDismissedSlashInput(undefined);
@@ -510,6 +634,13 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
         void runTerminalSubmissionChain({
           session: active.session,
           initialPrompt: prompt,
+          ...(prepared.content === undefined ? {} : {
+            initialDisplayPrompt: prepared.displayText,
+            initialSubmit: (text: string) => active.session.submit({
+              text,
+              content: prepared.content!,
+            }),
+          }),
           pending: pendingPromptRef.current!,
           onStart: (next) => dispatch({ type: "submit", prompt: next }),
           onFinish: () => dispatch({ type: "finish" }),
@@ -527,6 +658,14 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
       return;
     }
     if (key.backspace) {
+      const imageEdit = removeLastCliImageOnBackspace(input, promptCursor, imageAttachments);
+      if (imageEdit.handled) {
+        setImageAttachments(imageEdit.images);
+        setClipboardNotice(imageEdit.images.length === 0
+          ? "Removed image attachment."
+          : `Removed image attachment; ${imageEdit.images.length} remaining.`);
+        return;
+      }
       const next = editPromptWithPastedBlocks(
         { text: input, cursor: promptCursor },
         { type: "backspace" },
@@ -579,6 +718,8 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     {...(transcript.active === undefined ? {} : { active: transcript.active })}
     input={input}
     pastedBlocks={pastedBlocks}
+    imageAttachments={imageAttachments}
+    {...(clipboardNotice === undefined ? {} : { clipboardNotice })}
     promptCursor={promptCursor}
     onPromptCursorChange={setPromptCursor}
     columns={columns}
@@ -623,6 +764,8 @@ export interface TerminalLayoutProps {
   active?: TranscriptTurn;
   input: string;
   pastedBlocks?: readonly PastedBlock[];
+  imageAttachments?: readonly ModelImageContentBlock[];
+  clipboardNotice?: string;
   promptCursor: number;
   onPromptCursorChange?: (cursor: number) => void;
   columns: number;
@@ -645,7 +788,8 @@ export interface TerminalLayoutProps {
 }
 
 export function TerminalLayout({
-  model, workspaceName, completed, active, input, pastedBlocks = [], promptCursor, columns, rows = 24, activeSession, pendingPrompt, approval,
+  model, workspaceName, completed, active, input, pastedBlocks = [], imageAttachments = [], clipboardNotice,
+  promptCursor, columns, rows = 24, activeSession, pendingPrompt, approval,
   questions, memoryReviews = [], questionIndex = 0, questionAnswers = {}, customQuestionActive = false,
   completion, mentionCompletion, onMentionSelect, completedSlashTokenLength: tokenLength = 0, scrollRef,
   taskScrollRef, onTaskPanelHoverChange, onPromptCursorChange,
@@ -671,7 +815,8 @@ export function TerminalLayout({
   const memoryReviewRows = memoryReviews.length === 0 ? 0 : 5;
 
   const fixedBottomRows = (approval === undefined ? 0 : 3) + questionRows + memoryReviewRows + menuRows
-    + (pendingPrompt === undefined ? 0 : 1) + 2;
+    + (pendingPrompt === undefined ? 0 : 1) + imageAttachments.length
+    + (clipboardNotice === undefined ? 0 : 1) + 2;
   const taskPanelRows = taskPanelViewportRows(rows, fixedBottomRows, activeTaskBlocks.length > 0);
   const availableBottomRows = Math.max(1, rows - taskPanelRows - 1);
   const bottomMaxRows = Math.min(availableBottomRows, Math.max(Math.floor(rows / 2), fixedBottomRows + 1));
@@ -723,6 +868,14 @@ export function TerminalLayout({
         <Text color="yellow" wrap="truncate-end">Pending · {pendingPrompt} · Esc edit</Text>
       )}
       <Text dimColor>{"─".repeat(dividerWidth)}</Text>
+      {imageAttachments.map((image, index) => (
+        <Text key={`${image.sha256}:${index}`} color="cyan" wrap="truncate-end">
+          [Image #{index + 1}] {image.name ?? basename(image.source.path)}
+        </Text>
+      ))}
+      {clipboardNotice === undefined ? null : (
+        <Text color="yellow" wrap="truncate-end">{clipboardNotice}</Text>
+      )}
       <PromptLine
         input={input}
         pastedBlocks={pastedBlocks}
@@ -738,7 +891,7 @@ export function TerminalLayout({
           ? "↑/↓ select · Tab complete · Esc close"
           : mentionCompletion !== undefined
             ? "↑/↓ select · Tab complete · click choose · Esc close"
-            : "Enter send · ↑↓ history · Ctrl+C exit"}</Text>
+            : "Enter send · Ctrl/Cmd+V image · ↑↓ history · Ctrl+C exit"}</Text>
     </Box>
   </Box>;
 }
@@ -1376,7 +1529,7 @@ function updatePrompt(
 
 
 export async function submitSafely(
-  session: Pick<ProductionRuntime["session"], "submit">, prompt: string, report: (message: string) => void,
+  session: { submit(prompt: string): Promise<void> }, prompt: string, report: (message: string) => void,
 ): Promise<void> {
   try { await session.submit(prompt); }
   catch (error) { safeReport(report, safeUiError(error)); }

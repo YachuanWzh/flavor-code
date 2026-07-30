@@ -1,4 +1,4 @@
-import type { ModelMessage } from "../models/types.js";
+import { cloneModelContent, modelContentText, type ModelMessage } from "../models/types.js";
 
 export interface CompactionPolicy {
   windowTokens: number;
@@ -174,12 +174,12 @@ export function estimateMessageTokens(messages: readonly ModelMessage[]): number
 function messageMetrics(messages: readonly ModelMessage[]): { tokens: number; textMessages: number } {
   return {
     tokens: estimateMessageTokens(messages),
-    textMessages: messages.filter((message) => message.role !== "tool" && message.content.trim().length > 0).length,
+    textMessages: messages.filter((message) => message.role !== "tool" && modelContentText(message.content).trim().length > 0).length,
   };
 }
 
 function messageVisibleText(message: ModelMessage): string {
-  return `${message.content}${message.toolCalls === undefined ? "" : `\n${safeJson(message.toolCalls)}`}`;
+  return `${modelContentText(message.content)}${message.toolCalls === undefined ? "" : `\n${safeJson(message.toolCalls)}`}`;
 }
 
 function safeJson(value: unknown): string {
@@ -196,6 +196,7 @@ function safeJson(value: unknown): string {
 function cloneMessage(message: ModelMessage): ModelMessage {
   return {
     ...message,
+    content: cloneModelContent(message.content),
     ...(message.toolCalls === undefined ? {} : { toolCalls: message.toolCalls.map((call) => ({ ...call })) }),
-  };
+  } as ModelMessage;
 }

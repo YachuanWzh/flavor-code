@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   AnthropicModelAdapter,
@@ -9,6 +12,16 @@ import { normalizeProviderError } from "../../src/models/types.js";
 import type { ModelEvent, ModelRequest } from "../../src/models/types.js";
 
 const signal = new AbortController().signal;
+const imageRoots: string[] = [];
+afterEach(async () => Promise.all(imageRoots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
+
+async function imageFile(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "flavor-adapter-image-"));
+  imageRoots.push(root);
+  const path = join(root, "screen.png");
+  await writeFile(path, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  return path;
+}
 const request: ModelRequest = {
   model: "example-model",
   messages: [{ role: "user", content: "hello" }],
@@ -41,6 +54,40 @@ function asAnthropicClient(client: unknown): AnthropicClient {
 }
 
 describe("OpenAIModelAdapter", () => {
+  it("maps local image blocks to OpenAI Responses input images", async () => {
+    const path = await imageFile();
+    const stream = vi.fn(() => events());
+    const client = { responses: { stream } };
+
+    await collect(new OpenAIModelAdapter({ client: asOpenAIClient(client) }).stream({
+      ...request,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "Inspect this screenshot" },
+          {
+            type: "image", source: { type: "file", path }, mediaType: "image/png",
+            sha256: "unused-in-adapter-test", bytes: 8, name: "screen.png",
+          },
+        ],
+      }],
+    }));
+
+    expect(stream).toHaveBeenCalledWith(expect.objectContaining({
+      input: [{
+        role: "user",
+        content: [
+          { type: "input_text", text: "Inspect this screenshot" },
+          {
+            type: "input_image",
+            image_url: "data:image/png;base64,iVBORw0KGgo=",
+            detail: "auto",
+          },
+        ],
+      }],
+    }), { signal });
+  });
+
   it("normalizes Responses API text, tool calls, usage, and completion", async () => {
     const stream = vi.fn(() =>
       events(
@@ -257,6 +304,39 @@ describe("OpenAIModelAdapter", () => {
 });
 
 describe("AnthropicModelAdapter", () => {
+  it("maps local image blocks to Anthropic base64 image sources", async () => {
+    const path = await imageFile();
+    const stream = vi.fn(() => events());
+    const client = { messages: { create: stream } };
+
+    await collect(new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream({
+      ...request,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "Inspect this screenshot" },
+          {
+            type: "image", source: { type: "file", path }, mediaType: "image/png",
+            sha256: "unused-in-adapter-test", bytes: 8, name: "screen.png",
+          },
+        ],
+      }],
+    }));
+
+    expect(stream).toHaveBeenCalledWith(expect.objectContaining({
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "Inspect this screenshot" },
+          {
+            type: "image",
+            source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" },
+          },
+        ],
+      }],
+    }), { signal });
+  });
+
   it("accumulates content block JSON and normalizes text, usage, and completion", async () => {
     const stream = vi.fn(() =>
       events(

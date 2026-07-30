@@ -9,6 +9,11 @@ import { message } from "../utils/error.js";
 import type { MemoryType } from "../memory/types.js";
 import { AgentMessageQueue, type AgentQueueSnapshot } from "../agent/message-queue.js";
 import type { SessionTreeNode } from "../session/tree.js";
+import {
+  modelContentTranscriptText,
+  type ModelContentBlock,
+  type ModelMessage,
+} from "../models/types.js";
 
 export type SessionOutput = AgentEvent
   | { type: "notice"; message: string }
@@ -25,7 +30,10 @@ export interface SessionServices {
   run(
     prompt: string,
     signal: AbortSignal,
-    options?: { getSteeringMessages(): readonly string[] },
+    options?: {
+      getSteeringMessages(): readonly string[];
+      initialUserMessage?: Extract<ModelMessage, { role: "user" }>;
+    },
   ): AsyncIterable<AgentEvent>;
   runSkill(skill: string, prompt: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
   runLoop(goal: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
@@ -60,6 +68,17 @@ export interface SessionServices {
   questions: QuestionBridge;
   login(): Promise<string>;
 }
+
+export interface MultimodalSessionInput {
+  text: string;
+  content: ModelContentBlock[];
+}
+
+type NormalizedSubmission = {
+  text: string;
+  displayText: string;
+  initialUserMessage?: Extract<ModelMessage, { role: "user" }>;
+};
 
 const HELP = [
   "/model <main|subagent> <provider:model>  switch any configured model",
@@ -118,30 +137,35 @@ export class FlavorSession {
     return this.#startPromise;
   }
 
-  async submit(input: string): Promise<void> {
+  async submit(input: string): Promise<void>;
+  async submit(input: MultimodalSessionInput): Promise<void>;
+  async submit(input: string | MultimodalSessionInput): Promise<void> {
     if (this.#closed) throw new Error("Session is closed");
-    const prompt = input.trim();
-    if (!prompt) return;
+    const submission = normalizeSubmission(input);
+    if (submission === undefined) return;
     this.#pendingSubmissions += 1;
-    const operation = this.#submissionTail.catch(() => {}).then(() => this.#runSubmissionChain(prompt))
+    const operation = this.#submissionTail.catch(() => {}).then(() => this.#runSubmissionChain(submission))
       .finally(() => { this.#pendingSubmissions -= 1; });
     this.#submissionTail = operation;
     return operation;
   }
 
-  async #runSubmissionChain(initialPrompt: string): Promise<void> {
-    const pending = [initialPrompt];
+  async #runSubmissionChain(initialSubmission: NormalizedSubmission): Promise<void> {
+    const pending = [initialSubmission];
     let initial = true;
     while (pending.length > 0) {
-      const prompt = pending.shift()!;
-      if (!initial) this.#services.output({ type: "queued-prompt", prompt });
+      const submission = pending.shift()!;
+      if (!initial) this.#services.output({ type: "queued-prompt", prompt: submission.displayText });
       initial = false;
-      await this.#runSubmission(prompt);
-      pending.push(...this.#queue.drain("steer"), ...this.#queue.drain("followUp"));
+      await this.#runSubmission(submission);
+      pending.push(...[...this.#queue.drain("steer"), ...this.#queue.drain("followUp")]
+        .map((prompt) => normalizeSubmission(prompt))
+        .filter((item): item is NormalizedSubmission => item !== undefined));
     }
   }
 
-  async #runSubmission(prompt: string): Promise<void> {
+  async #runSubmission(submission: NormalizedSubmission): Promise<void> {
+    const prompt = submission.text;
     await this.start();
     if (this.#closed) throw new Error("Session is closed");
     const controller = new AbortController();
@@ -150,7 +174,7 @@ export class FlavorSession {
     let outcome = "completed";
     try {
       const decision = await this.#services.hooks.emit({
-        version: 1, type: "UserPromptSubmit", payload: { prompt },
+        version: 1, type: "UserPromptSubmit", payload: { prompt: submission.displayText },
       }, controller.signal);
       if (decision.decision === "deny") {
         outcome = "denied";
@@ -166,6 +190,9 @@ export class FlavorSession {
       if (command !== null) await this.#dispatch(command, controller.signal);
       else for await (const event of this.#services.run(prompt, controller.signal, {
         getSteeringMessages: () => this.#queue.drain("steer"),
+        ...(submission.initialUserMessage === undefined
+          ? {}
+          : { initialUserMessage: submission.initialUserMessage }),
       })) this.#services.output(event);
       if (controller.signal.aborted) outcome = "cancelled";
     } catch (error) {
@@ -280,6 +307,23 @@ export class FlavorSession {
   }
 
   #notice(message: string): void { this.#services.output({ type: "notice", message }); }
+}
+
+function normalizeSubmission(input: string | MultimodalSessionInput): NormalizedSubmission | undefined {
+  if (typeof input === "string") {
+    const text = input.trim();
+    return text ? { text, displayText: text } : undefined;
+  }
+  const text = input.text.trim() || "Analyze the attached image(s).";
+  if (input.content.length === 0) return { text, displayText: text };
+  const content = input.content.some((block) => block.type === "text")
+    ? input.content
+    : [{ type: "text" as const, text }, ...input.content];
+  return {
+    text,
+    displayText: modelContentTranscriptText(content),
+    initialUserMessage: { role: "user", content },
+  };
 }
 
 function format(value: unknown): string {

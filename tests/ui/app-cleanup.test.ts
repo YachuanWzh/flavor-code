@@ -61,6 +61,29 @@ it("automatically submits the single pending prompt after the active run ends", 
   ]);
 });
 
+it("uses the multimodal submitter only for the first prompt in a CLI submission chain", async () => {
+  const pending = new SinglePendingPrompt();
+  const submitted: string[] = [];
+  const visible: string[] = [];
+  await runTerminalSubmissionChain({
+    session: { submit: async (prompt) => { submitted.push(`text:${prompt}`); } },
+    initialPrompt: "inspect",
+    initialDisplayPrompt: "inspect\n[Image #1]",
+    initialSubmit: async (prompt) => {
+      submitted.push(`rich:${prompt}`);
+      pending.queue("then add tests");
+    },
+    pending,
+    onStart: (prompt) => visible.push(prompt),
+    onFinish: () => undefined,
+    onPendingConsumed: () => undefined,
+    report: () => undefined,
+  });
+
+  expect(submitted).toEqual(["rich:inspect", "text:then add tests"]);
+  expect(visible).toEqual(["inspect\n[Image #1]", "then add tests"]);
+});
+
 it("disposes and exits exactly once when SessionEnd fails without leaking secrets", async () => {
   const dispose = vi.fn(async () => { throw new Error("dispose failed"); }); const exit = vi.fn(); const errors: string[] = [];
   const runtime = { session: { close: async () => { throw new Error("token=sk-secret-value"); } }, dispose } as unknown as ProductionRuntime;

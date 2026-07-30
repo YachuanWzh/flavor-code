@@ -32,7 +32,7 @@ import { inferVerificationPlan, runVerificationPlan } from "./loop/verifier.js";
 import { AnthropicModelAdapter } from "./models/anthropic.js";
 import { OpenAIModelAdapter } from "./models/openai.js";
 import { ModelRegistry, parseModelId } from "./models/registry.js";
-import type { ModelAdapter, ModelMessage } from "./models/types.js";
+import { modelContentText, type ModelAdapter, type ModelMessage } from "./models/types.js";
 import { connectMcpServers, McpManager, type McpClientFactory, type McpServerSummary } from "./mcp/client.js";
 import { connectSdkMcpClient } from "./mcp/sdk.js";
 import { OAuthCallbackAuthProvider } from "./auth/oauth.js";
@@ -549,11 +549,14 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   harnessCreated = true;
   if (recovered !== undefined) harness.main.context.restore({
     ...(recovered.conversation.compact === undefined ? {} : { compact: recovered.conversation.compact }),
-    messages: recovered.conversation.messages.map((message) => ({
-      role: message.role, content: message.content,
-      ...(message.toolCallId === undefined ? {} : { toolCallId: message.toolCallId }),
-      ...(message.toolCalls === undefined ? {} : { toolCalls: message.toolCalls }),
-    })),
+    messages: recovered.conversation.messages.map((message): ModelMessage => {
+      const metadata = {
+        ...(message.toolCallId === undefined ? {} : { toolCallId: message.toolCallId }),
+        ...(message.toolCalls === undefined ? {} : { toolCalls: message.toolCalls }),
+      };
+      if (message.role === "user") return { role: "user", content: message.content, ...metadata };
+      return { role: message.role, content: message.content, ...metadata };
+    }),
   });
 
   hooks.on("SubagentStart", async (event) => {
@@ -853,6 +856,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         topK: config.memory.retrievalTopK, maxChars: config.memory.maxPromptChars,
       },
       runOptions?.getSteeringMessages,
+      runOptions?.initialUserMessage,
     ), persist, () => sessionHistory.append({
       prompt,
       context: harness.main.context.snapshot(),
@@ -1296,6 +1300,7 @@ async function* runMain(
   harness: LocalHarness, skills: SkillRegistry, prompt: string, signal: AbortSignal, setupError?: string,
   memory?: { store: MemoryStore; taskId: string; topK: number; maxChars: number },
   getSteeringMessages?: () => readonly string[],
+  initialUserMessage?: Extract<ModelMessage, { role: "user" }>,
 ): AsyncIterable<AgentEvent> {
   const contexts: string[] = [];
   try {
@@ -1320,6 +1325,7 @@ async function* runMain(
     for await (const event of harness.main.loop.run({
       prompt,
       signal,
+      ...(initialUserMessage === undefined ? {} : { initialUserMessage }),
       ...(additionalContext === undefined ? {} : { additionalContext }),
       ...(getSteeringMessages === undefined ? {} : { getSteeringMessages }),
     })) {
@@ -1700,11 +1706,16 @@ function remove<T>(items: T[], item: T): void { const index = items.indexOf(item
 function storedConversation(snapshot: ContextSnapshot): SessionDocument["conversation"] {
   return {
     ...(snapshot.compact === undefined ? {} : { compact: snapshot.compact }),
-    messages: snapshot.messages.filter((message) => message.role !== "system").map((message) => ({
-      role: message.role as "user" | "assistant" | "tool", content: message.content,
-      ...(message.toolCallId === undefined ? {} : { toolCallId: message.toolCallId }),
-      ...(message.toolCalls === undefined ? {} : { toolCalls: message.toolCalls }),
-    })),
+    messages: snapshot.messages.flatMap((message) => {
+      if (message.role === "system") return [];
+      const metadata = {
+        ...(message.toolCallId === undefined ? {} : { toolCallId: message.toolCallId }),
+        ...(message.toolCalls === undefined ? {} : { toolCalls: message.toolCalls }),
+      };
+      if (message.role === "user") return { role: "user" as const, content: message.content, ...metadata };
+      if (message.role === "assistant") return { role: "assistant" as const, content: message.content, ...metadata };
+      return { role: "tool" as const, content: message.content, ...metadata };
+    }),
   };
 }
 
@@ -1819,7 +1830,7 @@ export async function* runGoalSession(
 
 function memoryTranscriptHash(messages: readonly ModelMessage[]): string {
   const visible = messages.filter((item) => item.role === "user" || item.role === "assistant")
-    .map((item) => `${item.role}\0${item.content.trim()}`).join("\n");
+    .map((item) => `${item.role}\0${modelContentText(item.content).trim()}`).join("\n");
   return createHash("sha256").update(visible, "utf8").digest("hex");
 }
 

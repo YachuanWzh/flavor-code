@@ -24,6 +24,13 @@ describe("desktop IPC contracts", () => {
     expect(OpenWorkspaceInputSchema.parse({ path: "C:\\work\\demo" })).toEqual({ path: "C:\\work\\demo" });
     expect(StartSessionInputSchema.parse({ resumeSession: "session-1" })).toEqual({ resumeSession: "session-1" });
     expect(SubmitInputSchema.parse({ prompt: "fix the tests" })).toEqual({ prompt: "fix the tests" });
+    expect(SubmitInputSchema.parse({
+      prompt: "",
+      attachments: [{ name: "screen.png", mediaType: "image/png", dataBase64: "iVBORw0KGgo=" }],
+    })).toEqual({
+      prompt: "",
+      attachments: [{ name: "screen.png", mediaType: "image/png", dataBase64: "iVBORw0KGgo=" }],
+    });
     expect(ResolveApprovalInputSchema.parse({ decision: "allow" })).toEqual({ decision: "allow" });
     expect(ResolveApprovalInputSchema.parse({ decision: "always" })).toEqual({ decision: "always" });
     expect(AnswerQuestionsInputSchema.parse({ answers: { 0: "Electron" } })).toEqual({ answers: { 0: "Electron" } });
@@ -53,6 +60,17 @@ describe("desktop IPC contracts", () => {
 
   it("rejects blank prompts, unknown approval decisions and oversized question indexes", () => {
     expect(() => SubmitInputSchema.parse({ prompt: "   " })).toThrow();
+    expect(() => SubmitInputSchema.parse({
+      prompt: "look",
+      delivery: "steer",
+      attachments: [{ name: "x.png", mediaType: "image/png", dataBase64: "iVBORw0KGgo=" }],
+    })).toThrow();
+    expect(() => SubmitInputSchema.parse({
+      prompt: "look",
+      attachments: Array.from({ length: 6 }, (_, index) => ({
+        name: `${index}.png`, mediaType: "image/png", dataBase64: "iVBORw0KGgo=",
+      })),
+    })).toThrow();
     expect(() => ResolveApprovalInputSchema.parse({ decision: "never" })).toThrow();
     expect(() => AnswerQuestionsInputSchema.parse({ answers: { 10: "x" } })).toThrow();
     expect(() => ResolveMemoryReviewInputSchema.parse({ id: "../outside", decision: "accept" })).toThrow();

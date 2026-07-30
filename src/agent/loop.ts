@@ -81,7 +81,7 @@ export class AgentLoop {
   }
 
   async *run(request: AgentRunRequest): AsyncIterable<AgentEvent> {
-    this.#options.context.append({ role: "user", content: request.prompt });
+    this.#options.context.append(request.initialUserMessage ?? { role: "user", content: request.prompt });
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
     let accumulatedText = "";

@@ -10,6 +10,11 @@ import { MEMORY_TYPES, type MemoryCandidate, type MemoryEntry } from "../memory/
 import type { MemorySnapshot } from "../memory/manager.js";
 import type { MemoryReviewItem } from "../memory/review.js";
 import type { ManagedMcpServer } from "../mcp/config-manager.js";
+import {
+  DEFAULT_MAX_IMAGE_BYTES,
+  DEFAULT_MAX_IMAGES,
+  type ImageAttachmentInput,
+} from "../session/assets.js";
 export { DESKTOP_CHANNELS } from "./channels.js";
 
 export const OpenWorkspaceInputSchema = z.object({ path: z.string().trim().min(1).max(32_768) }).strict();
@@ -25,10 +30,28 @@ export const AppMenuInputSchema = z.object({
   y: z.number().int().min(0).max(32_768),
 }).strict();
 const DesktopMessageDeliverySchema = z.enum(["prompt", "steer", "followUp"]);
-export const SubmitInputSchema = z.object({
-  prompt: z.string().trim().min(1).max(1_000_000),
-  delivery: DesktopMessageDeliverySchema.optional(),
+const ImageAttachmentInputSchema = z.object({
+  name: z.string().min(1).max(255),
+  mediaType: z.enum(["image/png", "image/jpeg", "image/webp"]),
+  dataBase64: z.string().min(4).max(Math.ceil(DEFAULT_MAX_IMAGE_BYTES / 3) * 4 + 4),
 }).strict();
+export const SubmitInputSchema = z.object({
+  prompt: z.string().max(1_000_000),
+  delivery: DesktopMessageDeliverySchema.optional(),
+  attachments: z.array(ImageAttachmentInputSchema).max(DEFAULT_MAX_IMAGES).optional(),
+}).strict().superRefine((value, context) => {
+  const attachments = value.attachments ?? [];
+  if (value.prompt.trim().length === 0 && attachments.length === 0) {
+    context.addIssue({ code: "custom", path: ["prompt"], message: "Prompt or image attachment is required" });
+  }
+  if (value.delivery !== undefined && value.delivery !== "prompt" && attachments.length > 0) {
+    context.addIssue({ code: "custom", path: ["attachments"], message: "Images are only supported on new prompts" });
+  }
+  if (attachments.length > 0 && value.prompt.trim().startsWith("/")) {
+    context.addIssue({ code: "custom", path: ["attachments"], message: "Images cannot be attached to slash commands" });
+  }
+});
+export type DesktopImageAttachmentInput = ImageAttachmentInput;
 export type DesktopMessageDelivery = z.infer<typeof DesktopMessageDeliverySchema>;
 export const ResolveApprovalInputSchema = z.object({ decision: z.enum(["allow", "deny", "always"]) }).strict();
 export const AnswerQuestionsInputSchema = z.object({
@@ -164,7 +187,11 @@ export interface FlavorDesktopApi {
   startSession(resumeSession?: string): Promise<SessionStartedPayload>;
   deleteSession(sessionId: string): Promise<DesktopSnapshot>;
   showAppMenu(menu: "file" | "edit" | "view" | "help", x: number, y: number): Promise<void>;
-  submit(prompt: string, delivery?: DesktopMessageDelivery): Promise<void>;
+  submit(
+    prompt: string,
+    delivery?: DesktopMessageDelivery,
+    attachments?: readonly DesktopImageAttachmentInput[],
+  ): Promise<void>;
   finishTask(): Promise<string>;
   interrupt(): Promise<void>;
   resolveApproval(decision: "allow" | "deny" | "always"): Promise<void>;

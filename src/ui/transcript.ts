@@ -1,6 +1,11 @@
 import type { SessionOutput } from "./session.js";
 import type { TaskSnapshot } from "../agent/types.js";
 import type { ToolPresentation } from "../tools/types.js";
+import {
+  modelContentText,
+  modelContentTranscriptText,
+  type ModelContent,
+} from "../models/types.js";
 
 export interface TranscriptTurn {
   id: number;
@@ -17,7 +22,7 @@ export interface TranscriptTurn {
 
 export interface TranscriptHistoryMessage {
   readonly role: "user" | "assistant" | "tool";
-  readonly content: string;
+  readonly content: ModelContent;
   readonly toolCallId?: string | undefined;
   readonly toolCalls?: readonly { id: string; name: string; input: unknown }[] | undefined;
 }
@@ -238,13 +243,14 @@ function hydrateHistory(
       if (turn !== undefined) completed.push(turn);
       turn = {
         id: completed.length + 1,
-        prompt: message.content,
+        prompt: modelContentTranscriptText(message.content),
         assistantText: "",
         statusLines: [],
         blocks: [],
       };
     } else if (message.role === "assistant" && turn !== undefined) {
-      if (message.content.length > 0) turn = addText(turn, message.content);
+      const content = modelContentText(message.content);
+      if (content.length > 0) turn = addText(turn, content);
       for (const call of message.toolCalls ?? []) {
         turn = upsertTurnStatus(turn, {
           kind: "status",
@@ -444,12 +450,12 @@ function applyLegacyToolResult(turn: TranscriptTurn, message: TranscriptHistoryM
       state: "info",
       tone: "warning",
       text: "Orphaned historical tool result",
-      details: message.content,
+      details: modelContentText(message.content),
     });
   }
   const previous = turn.blocks[index]!;
   if (previous.kind !== "status" || previous.tool === undefined) return turn;
-  const result = parseLegacyToolResult(message.content);
+  const result = parseLegacyToolResult(modelContentText(message.content));
   const block: Extract<TranscriptBlock, { kind: "status" }> = {
     ...previous,
     state: result.ok ? "completed" : "failed",

@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { readFile } from "node:fs/promises";
 import type {
   ResponseInputItem,
   ResponseStreamEvent,
@@ -10,6 +11,7 @@ import {
   type ModelEvent,
   type ModelMessage,
   type ModelRequest,
+  modelContentText,
 } from "./types.js";
 import { normalizeToolCallInput } from "../utils/json.js";
 
@@ -30,17 +32,28 @@ export interface OpenAIModelAdapterOptions {
   client?: OpenAIClient;
 }
 
-function toInput(message: ModelMessage): ResponseInputItem[] {
+async function toInput(message: ModelMessage): Promise<ResponseInputItem[]> {
   if (message.role === "tool") {
     if (!message.toolCallId) throw new Error("Tool messages require toolCallId");
     return [{
       type: "function_call_output",
       call_id: message.toolCallId,
-      output: message.content,
+      output: modelContentText(message.content),
     }];
   }
+  const content = typeof message.content === "string"
+    ? message.content
+    : await Promise.all(message.content.map(async (block) => block.type === "text"
+      ? { type: "input_text" as const, text: block.text }
+      : {
+          type: "input_image" as const,
+          image_url: `data:${block.mediaType};base64,${(await readFile(block.source.path)).toString("base64")}`,
+          detail: "auto" as const,
+        }));
   return [
-    ...(message.content ? [{ role: message.role, content: message.content } as ResponseInputItem] : []),
+    ...(typeof content === "string"
+      ? (content ? [{ role: message.role, content } as ResponseInputItem] : [])
+      : (content.length > 0 ? [{ role: message.role, content } as unknown as ResponseInputItem] : [])),
     ...(message.toolCalls ?? []).map((call): ResponseInputItem => ({
       type: "function_call",
       call_id: call.id,
@@ -85,7 +98,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
     try {
       const body: OpenAIStreamRequest = {
         model: request.model,
-        input: request.messages.flatMap(toInput),
+        input: (await Promise.all(request.messages.map(toInput))).flat(),
         tools: request.tools.map((tool) => ({
           type: "function",
           name: tool.name,

@@ -1,4 +1,4 @@
-import type { ProviderErrorCode } from "../models/types.js";
+import type { ModelMessage, ProviderErrorCode } from "../models/types.js";
 import type { ToolResult } from "../tools/types.js";
 import type { TaskGraph } from "./planner.js";
 import type { SubagentState } from "./subagents.js";
@@ -6,6 +6,8 @@ import type { TaskPlan } from "./task-plan.js";
 
 export interface AgentRunRequest {
   prompt: string;
+  /** Optional rich initial user message. Text-only routing continues to use prompt. */
+  initialUserMessage?: Extract<ModelMessage, { role: "user" }>;
   signal?: AbortSignal;
   /** Prompt-scoped system context, such as a matched skill body. It is never stored. */
   additionalContext?: string;

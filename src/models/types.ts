@@ -1,10 +1,54 @@
-export interface ModelMessage {
-  role: "system" | "user" | "assistant" | "tool";
-  content: string;
+export type ModelImageMediaType = "image/png" | "image/jpeg" | "image/webp";
+
+export interface ModelTextContentBlock {
+  type: "text";
+  text: string;
+}
+
+export interface ModelImageContentBlock {
+  type: "image";
+  source: { type: "file"; path: string };
+  mediaType: ModelImageMediaType;
+  sha256: string;
+  bytes: number;
+  name?: string | undefined;
+}
+
+export type ModelContentBlock = ModelTextContentBlock | ModelImageContentBlock;
+export type ModelContent = string | ModelContentBlock[];
+
+interface ModelMessageMetadata {
   toolCallId?: string;
   toolCalls?: ModelToolCall[];
   /** Provider-neutral marker for the end of a byte-stable reusable prompt prefix. */
   cacheBreakpoint?: boolean;
+}
+
+export type ModelMessage =
+  | (ModelMessageMetadata & { role: "user"; content: ModelContent })
+  | (ModelMessageMetadata & { role: "system" | "assistant" | "tool"; content: string });
+
+export function modelContentText(content: ModelContent): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((block): block is ModelTextContentBlock => block.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+}
+
+export function modelContentTranscriptText(content: ModelContent): string {
+  if (typeof content === "string") return content;
+  let image = 0;
+  return content.map((block) => block.type === "text"
+    ? block.text
+    : `[Image #${++image}]`).filter(Boolean).join("\n");
+}
+
+export function cloneModelContent(content: ModelContent): ModelContent {
+  if (typeof content === "string") return content;
+  return content.map((block) => block.type === "text"
+    ? { ...block }
+    : { ...block, source: { ...block.source } });
 }
 
 export interface ModelToolCall {

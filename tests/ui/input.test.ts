@@ -5,9 +5,11 @@ import {
   editPrompt,
   editPromptWithPastedBlocks,
   navigateHistory,
+  prepareCliSubmission,
   selectWheelScrollTarget,
   slashKeyAction,
   taskPanelViewportRows,
+  removeLastCliImageOnBackspace,
 } from "../../src/ui/app.js";
 import type { ScrollBoxHandle } from "../../src/claude-ink/index.js";
 import type { SlashCompletion } from "../../src/ui/slash-completion.js";
@@ -54,6 +56,41 @@ it("backspace removes the latest pasted block when the cursor is directly after 
     text: prefix,
     cursor: [...prefix].length,
     pastedBlocks: [{ id: 1, text: olderPaste }],
+  });
+});
+
+it("backspace on an empty CLI prompt removes the most recent image", () => {
+  const images = [
+    { type: "image" as const, source: { type: "file" as const, path: "one.png" }, mediaType: "image/png" as const, sha256: "a".repeat(64), bytes: 8 },
+    { type: "image" as const, source: { type: "file" as const, path: "two.png" }, mediaType: "image/png" as const, sha256: "b".repeat(64), bytes: 8 },
+  ];
+  expect(removeLastCliImageOnBackspace("", 0, images)).toEqual({
+    handled: true,
+    images: [images[0]],
+  });
+  expect(removeLastCliImageOnBackspace("text", 4, images)).toEqual({
+    handled: false,
+    images,
+  });
+});
+
+it("prepares image-only CLI prompts and rejects unsupported image deliveries", () => {
+  const images = [
+    { type: "image" as const, source: { type: "file" as const, path: "one.png" }, mediaType: "image/png" as const, sha256: "a".repeat(64), bytes: 8 },
+  ];
+  expect(prepareCliSubmission("", images, false)).toEqual({
+    kind: "ready",
+    text: "Analyze the attached image(s).",
+    displayText: "Analyze the attached image(s).\n[Image #1]",
+    content: [{ type: "text", text: "Analyze the attached image(s)." }, images[0]],
+  });
+  expect(prepareCliSubmission("/help", images, false)).toEqual({
+    kind: "error",
+    message: "Image attachments cannot be used with slash commands.",
+  });
+  expect(prepareCliSubmission("inspect", images, true)).toEqual({
+    kind: "error",
+    message: "Images can only be attached to a new prompt.",
   });
 });
 

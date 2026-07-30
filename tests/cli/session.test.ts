@@ -43,6 +43,38 @@ function services(events: string[], outputs: string[]): SessionServices {
 }
 
 describe("FlavorSession", () => {
+  it("forwards image content only to a normal main-model prompt", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const calls: unknown[] = [];
+    base.run = async function* (prompt, _signal, options) {
+      calls.push({ prompt, initialUserMessage: options?.initialUserMessage });
+      yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
+    };
+    const session = new FlavorSession(base);
+    await session.submit({
+      text: "Inspect this screenshot",
+      content: [
+        { type: "text", text: "Inspect this screenshot" },
+        {
+          type: "image",
+          source: { type: "file", path: "C:\\assets\\screen.png" },
+          mediaType: "image/png",
+          sha256: "a".repeat(64),
+          bytes: 8,
+        },
+      ],
+    });
+
+    expect(calls).toEqual([{
+      prompt: "Inspect this screenshot",
+      initialUserMessage: expect.objectContaining({
+        role: "user",
+        content: expect.arrayContaining([expect.objectContaining({ type: "image" })]),
+      }),
+    }]);
+  });
+
   it("shares startup, serializes submissions, and ends only after Stop", async () => {
     const events: string[] = []; const outputs: string[] = [];
     const base = services(events, outputs);

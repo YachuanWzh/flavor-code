@@ -6,11 +6,40 @@ import type { AgentEvent } from "../../src/agent/types.js";
 import { ContextManager } from "../../src/context/manager.js";
 import { HookBus } from "../../src/hooks/bus.js";
 import { ModelRegistry } from "../../src/models/registry.js";
-import type { ModelAdapter, ModelEvent, ModelRequest } from "../../src/models/types.js";
+import { modelContentText, type ModelAdapter, type ModelEvent, type ModelRequest } from "../../src/models/types.js";
 import { PermissionEngine } from "../../src/permissions/engine.js";
 import { ToolRuntime } from "../../src/tools/runtime.js";
 
 describe("AgentLoop", () => {
+  it("uses a supplied multimodal user message while keeping the routing prompt textual", async () => {
+    const requests: ModelRequest[] = [];
+    const fixture = createLoop({
+      adapter: fakeAdapter([
+        [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
+      ], requests),
+    });
+    const userMessage = {
+      role: "user" as const,
+      content: [
+        { type: "text" as const, text: "Inspect this screenshot" },
+        {
+          type: "image" as const,
+          source: { type: "file" as const, path: "C:\\assets\\screen.png" },
+          mediaType: "image/png" as const,
+          sha256: "a".repeat(64),
+          bytes: 8,
+        },
+      ],
+    };
+
+    await collect(fixture.loop.run({
+      prompt: "Inspect this screenshot",
+      initialUserMessage: userMessage,
+    }));
+
+    expect(requests[0]?.messages).toContainEqual(userMessage);
+  });
+
   it("switches models without replacing its context", async () => {
     const requests: ModelRequest[] = [];
     const fixture = createLoop({ adapter: fakeAdapter([
@@ -639,7 +668,7 @@ describe("AgentLoop", () => {
     const assistant = requests[1]?.messages.find((message) => message.toolCalls?.length === 2);
     expect(assistant?.toolCalls?.map((call) => call.id)).toEqual(["one", "two"]);
     expect(requests[1]?.messages.filter((message) => message.role === "tool").map((message) => message.toolCallId)).toEqual(["one", "two"]);
-    expect(requests[1]?.messages.filter((message) => message.role === "tool").every((message) => message.content.includes("cancel"))).toBe(true);
+    expect(requests[1]?.messages.filter((message) => message.role === "tool").every((message) => modelContentText(message.content).includes("cancel"))).toBe(true);
   });
 
   it.each([
@@ -666,7 +695,7 @@ describe("AgentLoop", () => {
     expect(executions).toBe(1);
     const tools = requests[1]?.messages.filter((message) => message.role === "tool") ?? [];
     expect(tools.map((message) => message.toolCallId)).toEqual(["bad", "skipped"]);
-    expect(tools.every((message) => message.content.includes("error"))).toBe(true);
+    expect(tools.every((message) => modelContentText(message.content).includes("error"))).toBe(true);
   });
 
   it("surfaces the tool's hint on tool-start and tool-end", async () => {

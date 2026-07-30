@@ -1,5 +1,5 @@
 import type { HookBus } from "../hooks/bus.js";
-import type { ModelMessage } from "../models/types.js";
+import { cloneModelContent, modelContentText, type ModelMessage } from "../models/types.js";
 import { awaitWithSignal } from "../utils/async.js";
 import {
   DEFAULT_COMPACTION_POLICY,
@@ -159,9 +159,9 @@ export class ContextManager {
   }
 
   appendMany(messages: readonly ModelMessage[]): void {
-    const prepared = messages.map((message) => message.role === "tool"
+    const prepared: ModelMessage[] = messages.map((message): ModelMessage => message.role === "tool"
       ? { ...message, content: truncateToolOutput(message.content, this.#toolOutputChars) }
-      : { ...message });
+      : { ...message, content: cloneModelContent(message.content) } as ModelMessage);
     this.#messages.push(...prepared);
   }
 
@@ -395,7 +395,7 @@ function modelVisibleText(messages: readonly ModelMessage[]): string {
 }
 
 function messageVisiblePart(message: ModelMessage): string {
-  return `${message.content}${message.toolCalls === undefined ? "" : `\n${serializeForEstimate(message.toolCalls)}`}`;
+  return `${modelContentText(message.content)}${message.toolCalls === undefined ? "" : `\n${serializeForEstimate(message.toolCalls)}`}`;
 }
 
 function serializeForEstimate(value: unknown): string {
@@ -412,20 +412,22 @@ function serializeForEstimate(value: unknown): string {
 function cloneMessage(message: ModelMessage): ModelMessage {
   return {
     ...message,
+    content: cloneModelContent(message.content),
     ...(message.toolCalls === undefined ? {} : { toolCalls: message.toolCalls.map((call) => ({ ...call })) }),
-  };
+  } as ModelMessage;
 }
 
 function cloneForkMessage(message: ModelMessage): ModelMessage {
   return {
     ...message,
+    content: cloneModelContent(message.content),
     ...(message.toolCalls === undefined ? {} : {
       toolCalls: message.toolCalls.map((call) => ({
         ...call,
         input: structuredClone(call.input),
       })),
     }),
-  };
+  } as ModelMessage;
 }
 
 function providerValidMessages(input: readonly ModelMessage[]): ModelMessage[] {

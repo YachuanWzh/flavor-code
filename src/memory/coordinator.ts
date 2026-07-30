@@ -1,4 +1,4 @@
-import type { ModelMessage } from "../models/types.js";
+import { modelContentText, type ModelMessage } from "../models/types.js";
 import { buildMemoryExtractionPrompt, parseScoredMemoryCandidates } from "./extractor.js";
 import type { ScoredMemoryCandidate } from "./types.js";
 
@@ -47,7 +47,7 @@ export class MemoryCoordinator {
 
   async #evaluate(taskId: string, messages: readonly ModelMessage[], explicit: boolean): Promise<ExplicitMemoryResult> {
     const visible = visibleMessages(messages);
-    const visibleChars = visible.reduce((total, message) => total + [...message.content.trim()].length, 0);
+    const visibleChars = visible.reduce((total, message) => total + [...modelContentText(message.content).trim()].length, 0);
     if (visibleChars === 0 || (!explicit && visibleChars < this.#options.minChars)) {
       return { evaluated: true, candidates: false, stored: 0 };
     }
@@ -90,11 +90,12 @@ export class MemoryCoordinator {
 
 function visibleMessages(messages: readonly ModelMessage[]): ModelMessage[] {
   return messages.filter((message) => message.role === "user" || message.role === "assistant")
-    .map((message) => ({ ...message, content: message.content.trim() })).filter((message) => message.content.length > 0);
+    .map((message): ModelMessage => ({ ...message, content: modelContentText(message.content).trim() }))
+    .filter((message) => modelContentText(message.content).length > 0);
 }
 
 function boundTaskMessages(messages: readonly ModelMessage[]): readonly ModelMessage[] {
-  const text = messages.map((message) => `${message.role.toUpperCase()}: ${message.content}`).join("\n\n");
+  const text = messages.map((message) => `${message.role.toUpperCase()}: ${modelContentText(message.content)}`).join("\n\n");
   if ([...text].length <= MAX_TASK_PROMPT_CHARS) return messages;
   const chars = [...text];
   const bounded = `${chars.slice(0, 6_000).join("")}\n\n[...middle of long task omitted...]\n\n${chars.slice(-14_000).join("")}`;

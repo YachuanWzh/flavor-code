@@ -192,6 +192,25 @@ describe("TerminalLayout", () => {
       .toBe("ansi:yellowBright");
   });
 
+  it("renders numbered CLI image attachments above the prompt", () => {
+    const output = stripAnsi(renderToString(<TerminalLayout
+      model="openai:gpt-5"
+      workspaceName="demo"
+      completed={[]}
+      input="inspect"
+      imageAttachments={[
+        { type: "image", source: { type: "file", path: "one.png" }, mediaType: "image/png", sha256: "a".repeat(64), bytes: 8, name: "wechat.png" },
+        { type: "image", source: { type: "file", path: "two.png" }, mediaType: "image/png", sha256: "b".repeat(64), bytes: 8, name: "layout.png" },
+      ]}
+      promptCursor={7}
+      columns={80}
+      activeSession={false}
+    />, { columns: 80 }));
+
+    expect(output).toContain("[Image #1] wechat.png");
+    expect(output).toContain("[Image #2] layout.png");
+  });
+
   it("renders active model thinking beneath the submitted prompt", () => {
     const thinking: TranscriptTurn = {
       id: 1,

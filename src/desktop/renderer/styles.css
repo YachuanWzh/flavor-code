@@ -202,6 +202,17 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .composer { overflow: visible; border: 1px solid #dfe4e9; border-radius: 18px; background: rgba(255,255,255,.97); box-shadow: var(--shadow); }
 .composer:focus-within { border-color: #b9d4eb; box-shadow: var(--shadow), 0 0 0 3px rgba(74, 159, 232, 0.12); }
 .composer[data-busy="true"] { border-color: #c9dfef; }
+.composer[data-image-drag="true"] { border-color: var(--accent); box-shadow: var(--shadow), 0 0 0 4px rgba(74,159,232,.16); }
+.image-file-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.image-attachment-strip { display: flex; gap: 8px; overflow-x: auto; padding: 10px 12px 0; }
+.image-attachment-chip { position: relative; display: grid; grid-template-columns: 48px minmax(0, 1fr); align-items: center; min-width: 155px; max-width: 230px; height: 58px; margin: 0; padding: 5px 28px 5px 5px; border: 1px solid #dce6ee; border-radius: 11px; background: #f8fbfd; }
+.image-attachment-chip img { width: 48px; height: 48px; border-radius: 7px; object-fit: cover; background: #e9eef2; }
+.image-attachment-chip figcaption { min-width: 0; padding-left: 8px; }
+.image-attachment-chip figcaption strong, .image-attachment-chip figcaption span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.image-attachment-chip figcaption strong { color: #3d7fae; font-size: 10px; }
+.image-attachment-chip figcaption span { margin-top: 3px; color: #65727e; font-size: 10px; }
+.image-attachment-chip > button { position: absolute; top: 5px; right: 5px; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #87929c; cursor: pointer; line-height: 20px; }
+.image-attachment-chip > button:hover { background: #e7edf2; color: #34424e; }
 .queue-count { color: #6b7d8d; font-size: 11px; font-variant-numeric: tabular-nums; }
 .composer-textarea { display: block; width: 100%; min-height: 62px; max-height: 180px; resize: none; overflow-y: auto; padding: 16px 17px 8px; border: 0; outline: none; background: transparent; font-size: 14px; line-height: 1.5; }
 .composer-textarea:focus-visible { outline: none; }
