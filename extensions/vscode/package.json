@@ -2,11 +2,17 @@
   "name": "flavor-code",
   "displayName": "Flavor Code",
   "description": "Control the Flavor coding agent from VS Code.",
-  "version": "1.1.0",
+  "version": "1.1.4",
   "publisher": "flavor-code",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YachuanWzh/flavor-code.git"
+  },
+  "icon": "media/flavor.png",
   "engines": { "vscode": "^1.95.0" },
   "categories": ["Machine Learning", "Other"],
-  "activationEvents": ["onStartupFinished", "onCommand:flavor.start", "onCommand:flavor.selection", "onCommand:flavor.diagnostics"],
+  "activationEvents": ["onStartupFinished"],
   "main": "./dist/extension.js",
   "scripts": { "build": "npm --prefix ../.. run vscode:build" },
   "contributes": {
@@ -17,27 +23,103 @@
           "type": "string",
           "default": "flavor",
           "description": "Path to the Flavor CLI executable."
+        },
+        "flavorCode.autoCheckpoint": {
+          "type": "boolean",
+          "default": true,
+          "description": "Create a recoverable checkpoint before tasks started from VS Code."
+        },
+        "flavorCode.codeLens": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Flavor actions above functions and classes."
         }
       }
     },
+    "chatParticipants": [
+      {
+        "id": "flavor-code.agent",
+        "name": "flavor",
+        "fullName": "Flavor Code",
+        "description": "Work on this codebase with Flavor",
+        "isSticky": true
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "flavor",
+          "title": "Flavor Code",
+          "icon": "media/flavor-activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "flavor": [
+        { "id": "flavor.mission", "name": "Mission Control" },
+        { "id": "flavor.health", "name": "Changes & Health" },
+        { "id": "flavor.timeline", "name": "Time Machine" }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "flavor.mission",
+        "contents": "Start Flavor to inspect this workspace and run agent tasks.\n[Start Flavor](command:flavor.start)\n[Ask Flavor](command:flavor.ask)"
+      }
+    ],
     "commands": [
       { "command": "flavor.start", "title": "Flavor: Start Agent" },
+      { "command": "flavor.ask", "title": "Flavor: Ask…", "icon": "$(comment-discussion)" },
+      { "command": "flavor.focusTerminal", "title": "Flavor: Focus Terminal Session", "icon": "$(terminal)" },
       { "command": "flavor.selection", "title": "Flavor: Work on Selection" },
       { "command": "flavor.diagnostics", "title": "Flavor: Fix Workspace Diagnostics" },
+      { "command": "flavor.fixDiagnostic", "title": "Flavor: Fix This Diagnostic" },
+      { "command": "flavor.explainDiagnostic", "title": "Flavor: Explain This Diagnostic" },
+      { "command": "flavor.fixTests", "title": "Flavor: Fix Failing Tests" },
+      { "command": "flavor.review", "title": "Flavor: Review Workspace Changes" },
+      { "command": "flavor.reviewSymbol", "title": "Flavor: Review This Symbol" },
+      { "command": "flavor.generateTests", "title": "Flavor: Add Tests for This Symbol" },
+      { "command": "flavor.codeTour", "title": "Flavor: Create Code Tour" },
+      { "command": "flavor.bossFight", "title": "Flavor: Start Adversarial Review" },
       { "command": "flavor.steer", "title": "Flavor: Steer Active Task" },
       { "command": "flavor.followUp", "title": "Flavor: Queue Follow-up" },
       { "command": "flavor.stop", "title": "Flavor: Stop Active Task" },
-      { "command": "flavor.checkpoint", "title": "Flavor: Create Checkpoint" },
+      { "command": "flavor.checkpoint", "title": "Flavor: Create Checkpoint", "icon": "$(save)" },
       { "command": "flavor.tree", "title": "Flavor: Show Session Tree" },
-      { "command": "flavor.rewind", "title": "Flavor: Rewind Session" }
+      { "command": "flavor.rewind", "title": "Flavor: Rewind Session", "icon": "$(discard)" },
+      { "command": "flavor.fork", "title": "Flavor: Fork from Checkpoint", "icon": "$(git-branch)" },
+      { "command": "flavor.unrevert", "title": "Flavor: Undo Last Rewind" },
+      { "command": "flavor.refresh", "title": "Flavor: Refresh Views", "icon": "$(refresh)" },
+      { "command": "flavor.openFile", "title": "Flavor: Open File", "icon": "$(go-to-file)" },
+      { "command": "flavor.openChange", "title": "Flavor: Open Change", "icon": "$(diff)" }
     ],
     "menus": {
       "editor/context": [
-        { "command": "flavor.selection", "when": "editorHasSelection", "group": "navigation@20" }
+        { "command": "flavor.selection", "when": "editorHasSelection", "group": "navigation@20" },
+        { "command": "flavor.codeTour", "group": "navigation@21" }
       ],
       "problems/context": [
         { "command": "flavor.diagnostics", "group": "navigation@20" }
+      ],
+      "testing/item/context": [
+        { "command": "flavor.fixTests", "group": "inline@20" }
+      ],
+      "view/title": [
+        { "command": "flavor.ask", "when": "view == flavor.mission && flavor.connectionMode != terminal", "group": "navigation@1" },
+        { "command": "flavor.focusTerminal", "when": "view == flavor.mission && flavor.connectionMode == terminal", "group": "navigation@1" },
+        { "command": "flavor.checkpoint", "when": "view == flavor.timeline", "group": "navigation@1" },
+        { "command": "flavor.refresh", "when": "view =~ /flavor\\..*/", "group": "navigation@9" }
+      ],
+      "view/item/context": [
+        { "command": "flavor.openFile", "when": "viewItem == flavorFile || viewItem == flavorFootprint", "group": "inline@1" },
+        { "command": "flavor.openChange", "when": "viewItem == flavorChange", "group": "inline@1" },
+        { "command": "flavor.rewind", "when": "viewItem == flavorCheckpoint", "group": "inline@1" },
+        { "command": "flavor.fork", "when": "viewItem == flavorCheckpoint", "group": "inline@2" }
       ]
-    }
+    },
+    "keybindings": [
+      { "command": "flavor.ask", "key": "ctrl+shift+;", "mac": "cmd+shift+;" },
+      { "command": "flavor.selection", "key": "ctrl+k ctrl+f", "mac": "cmd+k cmd+f", "when": "editorHasSelection" }
+    ]
   }
 }

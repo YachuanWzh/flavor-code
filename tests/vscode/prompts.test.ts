@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { diagnosticsPrompt, selectionPrompt } from "../../extensions/vscode/src/prompts.js";
+import {
+  diagnosticPrompt,
+  diagnosticsPrompt,
+  selectionPrompt,
+  symbolPrompt,
+} from "../../extensions/vscode/src/prompts.js";
 
 describe("VS Code prompt builders", () => {
   it("builds a bounded selection prompt with file coordinates", () => {
@@ -18,5 +23,20 @@ describe("VS Code prompt builders", () => {
     ]);
     expect(prompt).toContain("src/app.ts:9");
     expect(prompt).toContain("Cannot find name x");
+  });
+
+  it("keeps explain actions read-only", () => {
+    expect(diagnosticPrompt({
+      action: "explain",
+      relativePath: "src/app.ts",
+      line: 9,
+      severity: "Error",
+      message: "Cannot find name x",
+    })).toContain("Do not edit files");
+  });
+
+  it("builds focused symbol prompts", () => {
+    expect(symbolPrompt({ action: "tests", relativePath: "src/app.ts", line: 4 }))
+      .toContain("src/app.ts:4");
   });
 });

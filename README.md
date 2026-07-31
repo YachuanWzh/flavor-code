@@ -9,7 +9,7 @@
 
 `flavor-code` 是一个同时提供终端界面与 Electron 桌面应用的 AI 编程助手。它接入大语言模型（OpenAI GPT、Anthropic Claude 或任何兼容服务），能理解你的项目结构，在工作区范围内安全操作文件，甚至能把复杂任务拆成多块，分给多个"小助手"并行处理。
 
-当前稳定版本：**1.1.2**
+当前稳定版本：**1.1.4**
 
 ## 它能做什么
 
@@ -466,7 +466,7 @@ npm run desktop:dist     # 生成 Windows NSIS 安装包
 Windows 打包产物位于：
 
 - 免安装目录：`release/win-unpacked/Flavor Code.exe`
-- NSIS 安装包：`release/Flavor-Code-1.1.2-x64.exe`
+- NSIS 安装包：`release/Flavor-Code-1.1.4-x64.exe`
 
 模型配置仍读取全局 `~/.flavor-code/flavor.json`、项目 `.flavor/flavor.json`、`.env` 和环境变量，因此 CLI 与桌面端可以共享配置与会话。生产版桌面窗口启用了 `contextIsolation` 和 Chromium 沙箱，关闭了渲染进程的 Node.js 集成；文件、命令和 Agent 操作只通过显式 IPC 接口进入主进程。Windows 的 `desktop:dev` 为兼容工作区内 Chromium 子进程启动，仅在本地开发启动器中使用 `--no-sandbox`，打包产物不携带该参数。
 
@@ -852,7 +852,9 @@ npm link
 
 在 VS Code 的 Extension Development Host 中加载该目录。扩展会在启动完成后注册一个仅监听 loopback、带随机令牌认证的 IDE bridge；从同一工作区启动的 `flavor` 会自动发现它。CLI 中运行 `/ide` 可查看活动文件、光标和选区，普通提示提交时也会自动附带这份最新编辑器上下文。终端底部右侧会实时显示 `In <文件名>`、`1 line selected` 或 `N lines selected`。
 
-执行 `Flavor: Start Agent` 仍可由扩展直接启动 RPC Agent；扩展同时支持对选区执行任务、修复 Problems 诊断、steering、follow-up、停止、checkpoint、查看树和 rewind。若 `flavor` 不在 `PATH`，请配置 `flavorCode.executable` 为 CLI 的绝对路径。IDE bridge 不包含内联代码补全；补全需要单独的低延迟 completion 服务和 VS Code `InlineCompletionItemProvider`。
+点击 Activity Bar 中的 Flavor 气泡可打开原生工作台：**Mission Control** 展示任务计划、子 Agent、工具、loop 与 token 状态，**Changes & Health** 聚合 Problems、Git 变更和 Agent 文件足迹，**Time Machine** 提供 checkpoint、rewind、fork 与 undo-rewind。扩展还注册 `@flavor` Chat Participant、诊断 Quick Fix、函数/类 CodeLens、Test Explorer 修复入口、代码导览和对抗性审查命令。从同一工作区终端手动启动的 `flavor` 会通过 IDE bridge v2 注册并把实时任务事件转发到 Mission Control；提示输入和取消操作仍由原终端负责。
+
+执行 `Flavor: Start Agent` 仍可由扩展直接启动 RPC Agent；扩展同时支持对选区执行任务、修复 Problems 诊断、steering、follow-up、停止、checkpoint、查看树和 rewind。VS Code 发起的编辑任务默认先创建可恢复 checkpoint，可用 `flavorCode.autoCheckpoint` 关闭。若 `flavor` 不在 `PATH`，请配置 `flavorCode.executable` 为 CLI 的绝对路径。IDE bridge 不包含内联代码补全；补全需要单独的低延迟 completion 服务和 VS Code `InlineCompletionItemProvider`。
 
 ---
 

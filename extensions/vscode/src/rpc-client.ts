@@ -21,6 +21,10 @@ export class FlavorRpcClient {
     this.#input.once("error", this.#onError);
   }
 
+  get closed(): boolean {
+    return this.#closed;
+  }
+
   onEvent(listener: (event: unknown) => void): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);

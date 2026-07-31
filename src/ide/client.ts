@@ -44,6 +44,8 @@ export class FlavorIdeClient {
   readonly #fetch: typeof fetch;
   #connection: IdeLockfile | undefined;
   #lastDiscoveryAt = 0;
+  #sessionId: string | undefined;
+  #eventTail: Promise<void> = Promise.resolve();
 
   constructor(options: FlavorIdeClientOptions) {
     this.#workspace = resolve(options.workspace);
@@ -96,6 +98,31 @@ export class FlavorIdeClient {
       selectedText,
       "</ide_selection>",
     ].join("\n");
+  }
+
+  async startSession(sessionId: string): Promise<void> {
+    this.#sessionId = sessionId;
+    if (!this.#eventForwardingEnabled()) return;
+    await this.#post("/session/start", {
+      sessionId,
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+    });
+  }
+
+  publishEvent(sessionId: string, event: unknown): void {
+    if (!this.#eventForwardingEnabled()) return;
+    this.#sessionId = sessionId;
+    this.#eventTail = this.#eventTail
+      .catch(() => undefined)
+      .then(() => this.#post("/events", { sessionId, pid: process.pid, event }));
+  }
+
+  async endSession(sessionId = this.#sessionId): Promise<void> {
+    if (sessionId === undefined || !this.#eventForwardingEnabled()) return;
+    await this.#eventTail.catch(() => undefined);
+    await this.#post("/session/end", { sessionId, pid: process.pid });
+    if (this.#sessionId === sessionId) this.#sessionId = undefined;
   }
 
   async #getConnection(): Promise<IdeLockfile | undefined> {
@@ -177,6 +204,28 @@ export class FlavorIdeClient {
     } catch {
       return undefined;
     }
+  }
+
+  async #post(path: string, body: unknown): Promise<void> {
+    const connection = await this.#getConnection();
+    if (connection === undefined) return;
+    try {
+      await this.#fetch(`http://127.0.0.1:${connection.port}${path}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${connection.authToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(1_500),
+      });
+    } catch {
+      // IDE event forwarding is best-effort and must never interrupt the agent.
+    }
+  }
+
+  #eventForwardingEnabled(): boolean {
+    return this.#environment.FLAVOR_CODE_IDE_EVENT_FORWARDING !== "0";
   }
 }
 

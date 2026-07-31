@@ -82,4 +82,59 @@ describe("FlavorIdeClient", () => {
     await expect(client.status()).resolves.toMatch(/No matching/);
     expect(request).not.toHaveBeenCalled();
   });
+
+  it("registers terminal sessions and forwards events to the IDE bridge", async () => {
+    const root = await mkdtemp(join(tmpdir(), "flavor-ide-"));
+    roots.push(root);
+    const workspace = join(root, "workspace");
+    const ideDirectory = join(root, ".flavor-code", "ide");
+    await Promise.all([mkdir(workspace), mkdir(ideDirectory, { recursive: true })]);
+    await writeFile(join(ideDirectory, "43125.lock"), JSON.stringify({
+      protocolVersion: 1,
+      transport: "http",
+      port: 43125,
+      pid: 123,
+      ideName: "Qoder",
+      workspaceFolders: [workspace],
+      authToken: "test-token",
+    }));
+    const posts: Array<{ url: string; body: unknown }> = [];
+    const request = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/health")) return new Response('{"ok":true}', { status: 200 });
+      posts.push({ url, body: JSON.parse(String(init?.body)) });
+      return new Response('{"ok":true}', { status: 200 });
+    });
+    const client = new FlavorIdeClient({ workspace, home: root, environment: {}, fetch: request });
+
+    await client.startSession("session-terminal");
+    client.publishEvent("session-terminal", { type: "tool-start", name: "Read" });
+    await client.endSession("session-terminal");
+
+    expect(posts.map((item) => item.url)).toEqual([
+      "http://127.0.0.1:43125/session/start",
+      "http://127.0.0.1:43125/events",
+      "http://127.0.0.1:43125/session/end",
+    ]);
+    expect(posts[1]?.body).toMatchObject({
+      sessionId: "session-terminal",
+      event: { type: "tool-start", name: "Read" },
+    });
+  });
+
+  it("can disable event forwarding for the extension-owned RPC runtime", async () => {
+    const request = vi.fn<typeof fetch>();
+    const client = new FlavorIdeClient({
+      workspace: process.cwd(),
+      home: process.cwd(),
+      environment: { FLAVOR_CODE_IDE_EVENT_FORWARDING: "0" },
+      fetch: request,
+    });
+
+    await client.startSession("session-rpc");
+    client.publishEvent("session-rpc", { type: "text", text: "hello" });
+    await client.endSession("session-rpc");
+
+    expect(request).not.toHaveBeenCalled();
+  });
 });

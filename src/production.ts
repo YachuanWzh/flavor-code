@@ -201,9 +201,11 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     ? createTranscriptState()
     : restoreTranscriptState(recovered.timeline.state);
   const restoredTranscript = restoreTranscriptState(timelineState);
+  let ideSessionId: string | undefined;
   const emitOutput = (event: SessionOutput): void => {
     timelineState = transcriptReducer(timelineState, { type: "session", event });
     options.output(event);
+    if (ideSessionId !== undefined) ide.publishEvent(ideSessionId, event);
   };
   const secrets = [
     ...Object.values(config.providers).map((provider) => provider.apiKey),
@@ -351,6 +353,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const subagentStartedAt: Record<string, number> = {};
   const subagentElapsedMs: Record<string, number> = {};
   let sessionId = recovered?.sessionId ?? `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
+  ideSessionId = sessionId;
+  await ide.startSession(sessionId);
   let createdAt = recovered?.createdAt ?? new Date().toISOString();
   let memoryLifecycle: NonNullable<SessionDocument["memory"]> = recovered?.memory
     ?? { status: "active", taskId: createMemoryTaskId(), messageStart: 0 };
@@ -985,7 +989,11 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       taskResults = {};
       for (const key of Object.keys(subagentStartedAt)) delete subagentStartedAt[key];
       for (const key of Object.keys(subagentElapsedMs)) delete subagentElapsedMs[key];
+      const previousIdeSessionId = ideSessionId;
       sessionId = `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
+      ideSessionId = sessionId;
+      if (previousIdeSessionId !== undefined) await ide.endSession(previousIdeSessionId);
+      await ide.startSession(sessionId);
       createdAt = new Date().toISOString();
       sessionHistory = await SessionHistory.open({
         workspace,
@@ -1151,6 +1159,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       await memoryCoordinator?.flush();
       await persist();
       await persistTail;
+      if (ideSessionId !== undefined) await ide.endSession(ideSessionId);
       await executionEnvironment?.dispose();
       auditLogger.close();
       memoryReviews.dispose();
@@ -1160,6 +1169,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   } catch (primaryError) {
     memoryReviews.dispose();
     try {
+      if (ideSessionId !== undefined) await ide.endSession(ideSessionId);
       await sleepScheduler?.dispose();
       await executionEnvironment?.dispose();
       await cleanupProduction(approvals, questions, pluginHost, mcpManager, harnessCreated ? harness : undefined);
