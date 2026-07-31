@@ -26,6 +26,7 @@ function services(events: string[], outputs: string[]): SessionServices {
     runLoop: async function* () {},
     runGoal: async function* () {},
     mcp: async () => "No MCP servers configured.",
+    ide: async () => "Connected to Visual Studio Code: src/main.ts:6:9.",
     setModel: () => {}, setPermissionMode: () => {}, compact: async () => false,
     initialize: async () => ({ path: "/work/FLAVOR.md", created: true }),
     config: () => ({ providers: { openai: { apiKey: "top-secret", token: "also-secret" } } }),
@@ -305,6 +306,20 @@ describe("FlavorSession", () => {
 
     expect(mcp).toHaveBeenCalledWith({ name: "mcp", action: "reconnect", target: "filesystem" }, expect.any(AbortSignal));
     expect(outputs).toContain("filesystem  connected  stdio  14 tools");
+  });
+
+  it("reports IDE connection state without invoking the model", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const ide = vi.fn(async () => "Connected to Visual Studio Code: src/main.ts:6:9.");
+    Object.assign(base, { ide });
+    base.run = async function* () { throw new Error("ordinary run must not be called"); };
+    const session = new FlavorSession(base);
+
+    await session.submit("/ide");
+
+    expect(ide).toHaveBeenCalledOnce();
+    expect(outputs).toContain("Connected to Visual Studio Code: src/main.ts:6:9.");
   });
 
   it("dispatches long-term-memory commands without invoking the model", async () => {

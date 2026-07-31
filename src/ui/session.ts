@@ -14,6 +14,7 @@ import {
   type ModelContentBlock,
   type ModelMessage,
 } from "../models/types.js";
+import type { IdeEditorContext } from "../ide/client.js";
 
 export type SessionOutput = AgentEvent
   | { type: "notice"; message: string }
@@ -39,6 +40,8 @@ export interface SessionServices {
   runLoop(goal: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
   runGoal(goal: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
   mcp(command: McpSlashCommand, signal: AbortSignal): Promise<string>;
+  ide?(): Promise<string>;
+  ideContext?(): Promise<IdeEditorContext | undefined>;
   setModel(role: ModelRole, modelId: string): void | Promise<void>;
   setPermissionMode(mode: PermissionMode): void | Promise<void>;
   compact(signal?: AbortSignal): Promise<boolean>;
@@ -91,6 +94,7 @@ const HELP = [
   "/loop <goal>                            run a verified autonomous loop",
   "/goal <objective>                       run a goal pipeline with adversarial verification",
   "/mcp [status|tools|reconnect|enable|disable]  manage MCP servers",
+  "/ide                                     show VS Code connection and cursor/selection",
 ].join("\n");
 
 export class FlavorSession {
@@ -262,6 +266,8 @@ export class FlavorSession {
       for await (const event of this.#services.runGoal(command.goal, signal)) this.#services.output(event);
     } else if (command.name === "mcp") {
       this.#notice(await this.#services.mcp(command, signal));
+    } else if (command.name === "ide") {
+      this.#notice(await required(this.#services.ide, "ide")());
     } else if (command.name === "memory") {
       this.#notice(await this.#services.memory());
     } else if (command.name === "remember") {

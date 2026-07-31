@@ -3,15 +3,21 @@ import { relative } from "node:path";
 import * as vscode from "vscode";
 
 import { diagnosticsPrompt, selectionPrompt } from "./prompts.js";
+import { FlavorIdeBridge } from "./ide-bridge.js";
 import { FlavorRpcClient } from "./rpc-client.js";
 
 let child: ChildProcessWithoutNullStreams | undefined;
 let client: FlavorRpcClient | undefined;
 let output: vscode.OutputChannel;
 let status: vscode.StatusBarItem;
+let ideBridge: FlavorIdeBridge | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("Flavor Code");
+  ideBridge = new FlavorIdeBridge(context, output);
+  void ideBridge.start().catch((error: unknown) => {
+    output.appendLine(`IDE bridge failed to start: ${error instanceof Error ? error.message : String(error)}`);
+  });
   status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
   status.command = "flavor.start";
   status.text = "$(sparkle) Flavor";
@@ -145,4 +151,6 @@ async function stopClient(): Promise<void> {
   await active?.dispose().catch(() => undefined);
   child?.kill();
   child = undefined;
+  await ideBridge?.dispose();
+  ideBridge = undefined;
 }

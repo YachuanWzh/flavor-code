@@ -73,6 +73,7 @@ import {
   readClipboardImage,
   shouldReadClipboardImage,
 } from "./clipboard-image.js";
+import type { IdeEditorContext } from "../ide/client.js";
 
 export const HISTORY_CAP = 200;
 const BUILTIN_SLASH_CANDIDATES = MVP_COMMANDS.map((name) => ({ name, description: COMMAND_DESCRIPTIONS[name] }));
@@ -268,6 +269,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   const [dismissedMentionInput, setDismissedMentionInput] = useState<string>();
   const [pendingPrompt, setPendingPrompt] = useState<string>();
   const [revision, setRevision] = useState(0);
+  const [ideContext, setIdeContext] = useState<IdeEditorContext>();
   const [questionIndex, setQuestionIndex] = useState(0);
   const [questionAnswers, setQuestionAnswers] = useState<Record<number, string>>({});
   const [customQuestionActive, setCustomQuestionActive] = useState(false);
@@ -367,6 +369,37 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   }, [workspace, home, resumeSession]);
 
   useEffect(() => installSigintHandler(process, interrupt), [interrupt]);
+
+  useEffect(() => {
+    if (runtime?.services.ideContext === undefined) {
+      setIdeContext(undefined);
+      return;
+    }
+    let disposed = false;
+    let refreshing = false;
+    let previous = "";
+    const refresh = async (): Promise<void> => {
+      if (refreshing) return;
+      refreshing = true;
+      try {
+        const next = await runtime.services.ideContext!().catch(() => undefined);
+        if (disposed) return;
+        const serialized = JSON.stringify(next);
+        if (serialized !== previous) {
+          previous = serialized;
+          setIdeContext(next);
+        }
+      } finally {
+        refreshing = false;
+      }
+    };
+    void refresh();
+    const timer = setInterval(() => void refresh(), 400);
+    return () => {
+      disposed = true;
+      clearInterval(timer);
+    };
+  }, [runtime]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -725,6 +758,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     columns={columns}
     rows={rows}
     activeSession={transcript.active !== undefined}
+    {...(ideContext === undefined ? {} : { ideContext })}
     completedSlashTokenLength={completedTokenLength}
     scrollRef={scrollRef}
     taskScrollRef={taskScrollRef}
@@ -771,6 +805,7 @@ export interface TerminalLayoutProps {
   columns: number;
   rows?: number;
   activeSession: boolean;
+  ideContext?: IdeEditorContext;
   pendingPrompt?: string;
   completedSlashTokenLength?: number;
   completion?: SlashCompletion;
@@ -792,7 +827,7 @@ export function TerminalLayout({
   promptCursor, columns, rows = 24, activeSession, pendingPrompt, approval,
   questions, memoryReviews = [], questionIndex = 0, questionAnswers = {}, customQuestionActive = false,
   completion, mentionCompletion, onMentionSelect, completedSlashTokenLength: tokenLength = 0, scrollRef,
-  taskScrollRef, onTaskPanelHoverChange, onPromptCursorChange,
+  taskScrollRef, onTaskPanelHoverChange, onPromptCursorChange, ideContext,
 }: TerminalLayoutProps): React.JSX.Element {
   const dividerWidth = Math.max(1, columns - 1);
   const showWelcome = completed.length === 0 && active === undefined;
@@ -885,15 +920,49 @@ export function TerminalLayout({
         completedSlashTokenLength={tokenLength}
         {...(onPromptCursorChange === undefined ? {} : { onCursorChange: onPromptCursorChange })}
       />
-      <Text dimColor wrap="truncate-end">{activeSession
-        ? "Ctrl+C cancel · Enter queue · Esc edit pending · /steer sends now"
-        : completion !== undefined
-          ? "↑/↓ select · Tab complete · Esc close"
-          : mentionCompletion !== undefined
-            ? "↑/↓ select · Tab complete · click choose · Esc close"
-            : "Enter send · Ctrl/Cmd+V image · ↑↓ history · Ctrl+C exit"}</Text>
+      <FooterStatus
+        hint={activeSession
+          ? "Ctrl+C cancel · Enter queue · Esc edit pending · /steer sends now"
+          : completion !== undefined
+            ? "↑/↓ select · Tab complete · Esc close"
+            : mentionCompletion !== undefined
+              ? "↑/↓ select · Tab complete · click choose · Esc close"
+              : "Enter send · Ctrl/Cmd+V image · ↑↓ history · Ctrl+C exit"}
+        {...(ideContext === undefined ? {} : { ideContext })}
+      />
     </Box>
   </Box>;
+}
+
+export function FooterStatus({
+  hint,
+  ideContext,
+}: {
+  hint: string;
+  ideContext?: IdeEditorContext;
+}): React.JSX.Element {
+  const ide = ideFooterPresentation(ideContext);
+  return <Box flexDirection="row" width="100%" justifyContent="space-between">
+    <Box flexGrow={1} flexShrink={1}>
+      <Text dimColor wrap="truncate-end">{hint}</Text>
+    </Box>
+    {ide === undefined ? null : (
+      <Box flexShrink={0} marginLeft={1}>
+        <Text color="cyan" wrap="truncate-end">⧉ {ide}</Text>
+      </Box>
+    )}
+  </Box>;
+}
+
+export function ideFooterPresentation(context: IdeEditorContext | undefined): string | undefined {
+  if (context?.filePath === undefined) return undefined;
+  if (context.selection.isEmpty || !context.selectedText) return `In ${basename(context.filePath)}`;
+  const endLine = context.selection.end.character === 0
+    && context.selection.end.line > context.selection.start.line
+    ? context.selection.end.line - 1
+    : context.selection.end.line;
+  const count = Math.max(1, endLine - context.selection.start.line + 1);
+  return `${count} ${count === 1 ? "line" : "lines"} selected`;
 }
 
 function QuestionCards({ questions, activeIndex, answers, customActive }: {

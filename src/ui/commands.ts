@@ -2,6 +2,7 @@ export const MVP_COMMANDS = [
   "model", "init", "config", "login", "permissions", "skills", "plugins", "hooks",
   "tasks", "finish", "compact", "clear", "help", "exit", "audit",
   "loop", "goal", "mcp",
+  "ide",
   "memory", "remember", "forget",
   "checkpoint", "tree", "rewind", "unrevert", "fork",
 ] as const;
@@ -25,6 +26,7 @@ export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string>
   loop: "Run a verified autonomous loop toward a goal",
   goal: "Run a goal pipeline with adversarial verification",
   mcp: "Manage MCP servers",
+  ide: "Show the connected IDE and editor context",
   memory: "Show long-term project memory",
   remember: "Add a long-term memory",
   forget: "Remove matching long-term memories",
@@ -68,10 +70,10 @@ export function parseSlashCommand(
   if (!trimmed.startsWith("/")) return null;
   const [rawName = "", ...args] = trimmed.slice(1).split(/\s+/);
   const name = rawName.toLowerCase();
-  if (name !== "ide" && !(MVP_COMMANDS as readonly string[]).includes(name) && dynamicCommands.includes(name)) {
+  if (!(MVP_COMMANDS as readonly string[]).includes(name) && dynamicCommands.includes(name)) {
     return { name: "plugin", command: name, args };
   }
-  if (name !== "ide" && !(MVP_COMMANDS as readonly string[]).includes(name) && skillCommands.includes(name)) {
+  if (!(MVP_COMMANDS as readonly string[]).includes(name) && skillCommands.includes(name)) {
     return { name: "skill", skill: name, prompt: args.join(" ") };
   }
   if (!(MVP_COMMANDS as readonly string[]).includes(name)) {

@@ -22,6 +22,7 @@ describe("parseSlashCommand", () => {
     ["/mcp reconnect filesystem", { name: "mcp", action: "reconnect", target: "filesystem" }],
     ["/mcp enable", { name: "mcp", action: "enable", target: "all" }],
     ["/mcp disable docs", { name: "mcp", action: "disable", target: "docs" }],
+    ["/ide", { name: "ide" }],
     ["/config", { name: "config" }], ["/clear", { name: "clear" }],
     ["/memory", { name: "memory" }],
     ["/remember project Use pnpm for scripts", { name: "remember", type: "project", text: "Use pnpm for scripts" }],
@@ -43,16 +44,12 @@ describe("parseSlashCommand", () => {
     expect(parseSlashCommand("/permisions")).toEqual({ name: "unknown", input: "permisions", suggestions: ["permissions"] });
   });
 
-  it("does not include the removed ide command", () => {
-    expect(parseSlashCommand("/ide")).toMatchObject({ name: "unknown" });
-  });
-
   it("parses only explicitly registered dynamic plugin commands", () => {
     expect(parseSlashCommand("/taste saffron plum", ["taste"])).toEqual({
       name: "plugin", command: "taste", args: ["saffron", "plum"],
     });
     expect(parseSlashCommand("/taste saffron")).toMatchObject({ name: "unknown" });
-    expect(parseSlashCommand("/ide", ["ide"])).toMatchObject({ name: "unknown" });
+    expect(parseSlashCommand("/ide", ["ide"])).toEqual({ name: "ide" });
   });
 
   it("parses explicitly discovered skills after built-in and plugin commands", () => {

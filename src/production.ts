@@ -70,6 +70,7 @@ import { isExplicitMemoryIntent } from "./memory/intent.js";
 import { MemoryStore, renderMemoryDocument } from "./memory/store.js";
 import { MemoryReviewBridge } from "./memory/review.js";
 import { createExecutionEnvironment } from "./execution/factory.js";
+import { FlavorIdeClient } from "./ide/client.js";
 
 export interface ProductionRuntimeOptions {
   workspace?: string;
@@ -153,7 +154,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const workspace = resolve(options.workspace ?? process.cwd());
   const home = resolve(options.home ?? homedir());
   const environment = options.environment ?? process.env;
+  const ide = new FlavorIdeClient({ workspace, home, environment });
   const loaded = await loadConfig({ cwd: workspace, home, environment });
+  await ide.initialize();
   const config = loaded.config;
   const sessionStore = new SessionStore({ workspace, maxSessions: config.maxSessions });
   const memoryStore = config.memory.enabled ? new MemoryStore({
@@ -857,6 +860,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       },
       runOptions?.getSteeringMessages,
       runOptions?.initialUserMessage,
+      ide,
     ), persist, () => sessionHistory.append({
       prompt,
       context: harness.main.context.snapshot(),
@@ -993,6 +997,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       await persist();
       emitOutput({ type: "tasks", snapshot: { subagents: { states: {} } } });
     },
+    ide: () => ide.status(),
+    ideContext: () => ide.editorContext(),
     checkpoint: (label) => sessionHistory.checkpoint(label, harness.main.context.snapshot()),
     tree: () => sessionHistory.tree(),
     rewind: async (nodeId) => {
@@ -1301,6 +1307,7 @@ async function* runMain(
   memory?: { store: MemoryStore; taskId: string; topK: number; maxChars: number },
   getSteeringMessages?: () => readonly string[],
   initialUserMessage?: Extract<ModelMessage, { role: "user" }>,
+  ide?: FlavorIdeClient,
 ): AsyncIterable<AgentEvent> {
   const contexts: string[] = [];
   try {
@@ -1319,6 +1326,8 @@ async function* runMain(
         // Memory routing is best effort and must never block the current task.
       }
     }
+    const ideContext = await ide?.promptContext();
+    if (ideContext !== undefined) contexts.push(ideContext);
     const skill = await skills.match(prompt);
     if (skill !== undefined) contexts.push(`Matched skill: ${skill.name}\n${await skills.loadBody(skill)}`);
     const additionalContext = contexts.length === 0 ? undefined : contexts.join("\n\n");

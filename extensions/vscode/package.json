@@ -6,7 +6,7 @@
   "publisher": "flavor-code",
   "engines": { "vscode": "^1.95.0" },
   "categories": ["Machine Learning", "Other"],
-  "activationEvents": ["onCommand:flavor.start", "onCommand:flavor.selection", "onCommand:flavor.diagnostics"],
+  "activationEvents": ["onStartupFinished", "onCommand:flavor.start", "onCommand:flavor.selection", "onCommand:flavor.diagnostics"],
   "main": "./dist/extension.js",
   "scripts": { "build": "npm --prefix ../.. run vscode:build" },
   "contributes": {

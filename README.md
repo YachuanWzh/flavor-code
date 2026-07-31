@@ -9,7 +9,7 @@
 
 `flavor-code` 是一个同时提供终端界面与 Electron 桌面应用的 AI 编程助手。它接入大语言模型（OpenAI GPT、Anthropic Claude 或任何兼容服务），能理解你的项目结构，在工作区范围内安全操作文件，甚至能把复杂任务拆成多块，分给多个"小助手"并行处理。
 
-当前稳定版本：**1.1.1**
+当前稳定版本：**1.1.2**
 
 ## 它能做什么
 
@@ -466,7 +466,7 @@ npm run desktop:dist     # 生成 Windows NSIS 安装包
 Windows 打包产物位于：
 
 - 免安装目录：`release/win-unpacked/Flavor Code.exe`
-- NSIS 安装包：`release/Flavor-Code-1.1.1-x64.exe`
+- NSIS 安装包：`release/Flavor-Code-1.1.2-x64.exe`
 
 模型配置仍读取全局 `~/.flavor-code/flavor.json`、项目 `.flavor/flavor.json`、`.env` 和环境变量，因此 CLI 与桌面端可以共享配置与会话。生产版桌面窗口启用了 `contextIsolation` 和 Chromium 沙箱，关闭了渲染进程的 Node.js 集成；文件、命令和 Agent 操作只通过显式 IPC 接口进入主进程。Windows 的 `desktop:dev` 为兼容工作区内 Chromium 子进程启动，仅在本地开发启动器中使用 `--no-sandbox`，打包产物不携带该参数。
 
@@ -675,6 +675,7 @@ flavor memory path
 | `/compact` | 强制压缩上下文 |
 | `/clear` | 清空终端显示 |
 | `/mcp [status\|tools\|reconnect\|enable\|disable]` | 管理 MCP 服务器 |
+| `/ide` | 查看 VS Code 连接、活动文件、光标和选区 |
 | `/loop <goal>` | 启动经验证的前台自治循环 |
 | `/goal <objective>` | 启动对抗性审查流水线（Plan → Execute → Verify） |
 | `/help` | 显示帮助 |
@@ -849,7 +850,9 @@ npm run vscode:build
 npm link
 ```
 
-在 VS Code 的 Extension Development Host 中加载该目录，然后执行 `Flavor: Start Agent`。扩展支持对选区执行任务、修复 Problems 诊断、steering、follow-up、停止、checkpoint、查看树和 rewind。若 `flavor` 不在 `PATH`，请配置 `flavorCode.executable` 为 CLI 的绝对路径。
+在 VS Code 的 Extension Development Host 中加载该目录。扩展会在启动完成后注册一个仅监听 loopback、带随机令牌认证的 IDE bridge；从同一工作区启动的 `flavor` 会自动发现它。CLI 中运行 `/ide` 可查看活动文件、光标和选区，普通提示提交时也会自动附带这份最新编辑器上下文。终端底部右侧会实时显示 `In <文件名>`、`1 line selected` 或 `N lines selected`。
+
+执行 `Flavor: Start Agent` 仍可由扩展直接启动 RPC Agent；扩展同时支持对选区执行任务、修复 Problems 诊断、steering、follow-up、停止、checkpoint、查看树和 rewind。若 `flavor` 不在 `PATH`，请配置 `flavorCode.executable` 为 CLI 的绝对路径。IDE bridge 不包含内联代码补全；补全需要单独的低延迟 completion 服务和 VS Code `InlineCompletionItemProvider`。
 
 ---
 

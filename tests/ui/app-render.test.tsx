@@ -2,7 +2,7 @@ import React from "react";
 import { renderToString } from "ink";
 import { describe, expect, it } from "vitest";
 
-import { MentionMenu, TerminalLayout, statusLineColor } from "../../src/ui/app.js";
+import { ideFooterPresentation, MentionMenu, TerminalLayout, statusLineColor } from "../../src/ui/app.js";
 import {
   COMPACT_PROGRESS_COMPLETE,
   COMPACT_PROGRESS_REMAINING,
@@ -25,6 +25,60 @@ const turn = (id: number, prompt: string, assistantText: string): TranscriptTurn
 const stripAnsi = (value: string): string => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/gu, "");
 
 describe("TerminalLayout", () => {
+  it("shows the active IDE file at the bottom right when there is no selection", () => {
+    const output = stripAnsi(renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[]}
+      input=""
+      promptCursor={0}
+      columns={90}
+      rows={24}
+      activeSession={false}
+      ideContext={{
+        ideName: "Visual Studio Code",
+        workspaceFolders: ["/work"],
+        filePath: "/work/flavor.json",
+        selection: {
+          start: { line: 3, character: 7 },
+          end: { line: 3, character: 7 },
+          active: { line: 3, character: 7 },
+          isEmpty: true,
+        },
+      }}
+    />, { columns: 90 }));
+
+    expect(output).toContain("⧉ In flavor.json");
+  });
+
+  it("formats single-line and multi-line IDE selections like Claude Code", () => {
+    const base = {
+      ideName: "Visual Studio Code",
+      workspaceFolders: ["/work"],
+      filePath: "/work/src/main.ts",
+    };
+    expect(ideFooterPresentation({
+      ...base,
+      selectedText: "const one = 1;",
+      selection: {
+        start: { line: 4, character: 2 },
+        end: { line: 4, character: 16 },
+        active: { line: 4, character: 16 },
+        isEmpty: false,
+      },
+    })).toBe("1 line selected");
+    expect(ideFooterPresentation({
+      ...base,
+      selectedText: "five lines",
+      selection: {
+        start: { line: 4, character: 0 },
+        end: { line: 9, character: 0 },
+        active: { line: 9, character: 0 },
+        isEmpty: false,
+      },
+    })).toBe("5 lines selected");
+  });
+
   it("renders an implicit custom answer after agent-provided AskUser choices", () => {
     const output = stripAnsi(renderToString(<TerminalLayout
       model="model"
