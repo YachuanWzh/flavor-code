@@ -39,7 +39,7 @@ const FILE_TYPE_EXTENSIONS: Record<FileType, readonly string[]> = {
 const GlobInput = z.object({
   pattern: z.string().min(1),
   path: z.string().min(1).nullable().optional(),
-  limit: z.number().int().positive().max(100_000).nullable().optional(),
+  limit: z.coerce.number().int().positive().max(100_000).nullable().optional(),
 });
 
 const GrepInput = z.object({
@@ -47,8 +47,8 @@ const GrepInput = z.object({
   path: z.string().min(1).nullable().optional(),
   glob: z.string().min(1).nullable().optional(),
   fileType: z.enum(FILE_TYPES).nullable().optional(),
-  context: z.number().int().nonnegative().max(100).nullable().optional(),
-  limit: z.number().int().positive().max(100_000).nullable().optional(),
+  context: z.coerce.number().int().nonnegative().max(100).nullable().optional(),
+  limit: z.coerce.number().int().positive().max(100_000).nullable().optional(),
 });
 
 export interface SearchToolOptions {

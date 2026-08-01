@@ -470,14 +470,14 @@ export class RealLspManager implements LspManager {
 
 const LspFindRefsInput = z.object({
   file: z.string().min(1),
-  line: z.number().int().nonnegative(),
-  character: z.number().int().nonnegative(),
+  line: z.coerce.number().int().nonnegative(),
+  character: z.coerce.number().int().nonnegative(),
 });
 
 const LspHoverInput = z.object({
   file: z.string().min(1),
-  line: z.number().int().nonnegative(),
-  character: z.number().int().nonnegative(),
+  line: z.coerce.number().int().nonnegative(),
+  character: z.coerce.number().int().nonnegative(),
 });
 
 const LspDiagnosticsInput = z.object({

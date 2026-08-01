@@ -11,7 +11,7 @@ export const MAX_READ_BYTES = 1_048_576;
 
 const ReadInput = z.object({
   path: z.string().min(1),
-  maxBytes: z.number().int().positive().max(MAX_READ_BYTES).nullable().optional(),
+  maxBytes: z.coerce.number().int().positive().max(MAX_READ_BYTES).nullable().optional(),
 });
 const WriteInput = z.object({ path: z.string().min(1), content: z.string() });
 const EditInput = z.object({ path: z.string().min(1), oldText: z.string().min(1), newText: z.string() });

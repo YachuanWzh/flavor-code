@@ -14,7 +14,7 @@ const ShellInput = z.object({
   command: z.string().min(1),
   args: z.array(z.string()),
   cwd: z.string().min(1).nullable().optional(),
-  timeoutMs: z.number().int().positive().max(86_400_000).nullable().optional(),
+  timeoutMs: z.coerce.number().int().positive().max(86_400_000).nullable().optional(),
 });
 
 export interface ShellToolOptions { maxOutputBytes?: number; executionEnvironment?: ExecutionEnvironment }

@@ -3,7 +3,7 @@ import type { ToolDefinition } from "./types.js";
 
 const CommandRunSchema = z.object({
   command: z.string().trim().min(1),
-  exitCode: z.number().int().nullable(),
+  exitCode: z.coerce.number().int().nullable(),
   summary: z.string().trim().min(1),
 });
 
