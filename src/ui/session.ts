@@ -16,9 +16,22 @@ import {
 } from "../models/types.js";
 import type { IdeEditorContext } from "../ide/client.js";
 
+export interface SessionApprovalRequest {
+  id: string;
+  agent: "main" | "subagent";
+  tool: string;
+  reason?: string;
+  paths?: readonly string[];
+  command?: string;
+  args?: readonly string[];
+  cwd?: string;
+}
+
 export type SessionOutput = AgentEvent
   | { type: "notice"; message: string }
   | { type: "queued-prompt"; prompt: string }
+  | { type: "approval-request"; request: SessionApprovalRequest }
+  | { type: "approval-cleared"; id?: string }
   | { type: "clear" }
   | { type: "exit" };
 

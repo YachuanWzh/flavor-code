@@ -80,6 +80,8 @@ export interface ProductionRuntimeOptions {
   onApprovalChange?(): void;
   /** Non-interactive callers must deny requests instead of waiting for input. */
   approvalPolicy?: "prompt" | "deny";
+  /** Allow a protocol host to resolve tool approvals without enabling other interactive UI bridges. */
+  rpcToolApprovals?: boolean;
   /** Resume a named session, or the latest session when true. Never resumed implicitly. */
   resumeSession?: string | true;
   /** Test and embedding seam for creating configured MCP clients. */
@@ -117,18 +119,18 @@ export function createPromptEnvironment(input: PromptEnvironmentInput = {}): Pro
 }
 
 export class ApprovalBridge {
-  #pending: (PermissionRequest & { reason?: string }) | undefined;
+  #pending: (PermissionRequest & { id: string; reason?: string }) | undefined;
   #settle: ((decision: ApprovalDecision) => void) | undefined;
   #removeAbort: (() => void) | undefined;
   readonly #onChange: (() => void) | undefined;
 
   constructor(onChange?: () => void) { this.#onChange = onChange; }
-  get pending(): (PermissionRequest & { reason?: string }) | undefined { return this.#pending; }
+  get pending(): (PermissionRequest & { id: string; reason?: string }) | undefined { return this.#pending; }
 
   request(request: PermissionRequest & { reason?: string }, signal: AbortSignal = new AbortController().signal): Promise<ApprovalDecision> {
     if (this.#settle !== undefined) return Promise.resolve("deny");
     if (signal.aborted) return Promise.resolve("deny");
-    this.#pending = request;
+    this.#pending = { id: randomUUID(), ...request };
     this.#onChange?.();
     return new Promise<ApprovalDecision>((resolvePromise) => {
       this.#settle = resolvePromise;
@@ -235,6 +237,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const registry = new ModelRegistry();
   const diagnostics: string[] = [];
   const approvals = new ApprovalBridge(options.onApprovalChange);
+  const resolveToolApproval = options.approvalPolicy === "deny" && options.rpcToolApprovals !== true
+    ? () => "deny" as ApprovalDecision
+    : (request: PermissionRequest & { reason?: string }, signal: AbortSignal) => approvals.request(request, signal);
   const questions = new QuestionBridge(options.onApprovalChange);
   const askUserQuestionHandler: AskUserQuestionHandler = async (qs, signal) => {
     if (options.approvalPolicy === "deny") throw new Error("AskUserQuestion is not available in non-interactive mode");
@@ -551,7 +556,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     maxIterationsMain: config.maxIterations.main,
     maxIterationsSubagent: config.maxIterations.subagent,
     hasActiveProgress,
-    approve: options.approvalPolicy === "deny" ? () => "deny" as ApprovalDecision : (request, signal) => approvals.request(request, signal),
+    approve: resolveToolApproval,
   });
   harnessCreated = true;
   if (recovered !== undefined) harness.main.context.restore({
@@ -768,9 +773,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       maxIterationsMain: config.maxIterations.main,
       maxIterationsSubagent: config.maxIterations.subagent,
       loopMode: true,
-      approve: options.approvalPolicy === "deny"
-        ? () => "deny" as ApprovalDecision
-        : (request, approvalSignal) => approvals.request(request, approvalSignal),
+      approve: resolveToolApproval,
     });
     try {
       yield* loopHarness.main.loop.run({ prompt: input.prompt, signal: input.signal });

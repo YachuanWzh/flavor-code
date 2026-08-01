@@ -4,6 +4,8 @@ import type { Readable, Writable } from "node:stream";
 
 import type { AgentQueueSnapshot } from "../agent/message-queue.js";
 import type { SessionOutput } from "../ui/session.js";
+import type { SessionApprovalRequest } from "../ui/session.js";
+import type { ApprovalDecision } from "../tools/runtime.js";
 import { message } from "../utils/error.js";
 import { RpcCommandSchema, type RpcCommand } from "./schema.js";
 
@@ -30,6 +32,11 @@ export interface RpcRuntimeLike {
     unrevert?(): Promise<void>;
     fork?(nodeId: string): Promise<void>;
   };
+  readonly approvals?: {
+    readonly pending: SessionApprovalRequest | undefined;
+    resolve(decision: ApprovalDecision): void;
+  };
+  readonly rpcApprovals?: boolean;
   dispose(): Promise<void>;
 }
 
@@ -124,11 +131,20 @@ export class FlavorRpcServer {
       await respond(runtime.session.queueSnapshot());
     } else if (command.type === "clear_queue") {
       await respond(runtime.session.clearQueue());
+    } else if (command.type === "approval_decision") {
+      const approvals = runtime.approvals;
+      const approval = approvals?.pending;
+      if (!runtime.rpcApprovals || approvals === undefined || approval === undefined) throw new Error("No approval request is pending");
+      if (approval.id !== command.approvalId) throw new Error("Approval request is no longer active");
+      approvals.resolve(command.decision);
+      await respond();
     } else if (command.type === "get_state") {
       await respond({
         sessionId: runtime.sessionId,
         active: runtime.session.active,
         queue: runtime.session.queueSnapshot(),
+        capabilities: { approvals: runtime.rpcApprovals === true },
+        ...(runtime.rpcApprovals && runtime.approvals?.pending !== undefined ? { approval: runtime.approvals.pending } : {}),
       });
     } else if (command.type === "checkpoint") {
       await respond(await required(runtime.services?.checkpoint, "checkpoint")(command.label));

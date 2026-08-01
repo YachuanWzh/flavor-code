@@ -32,6 +32,11 @@ describe("FlavorRpcServer", () => {
         unrevert: vi.fn(async () => undefined),
         fork: vi.fn(async () => undefined),
       },
+      rpcApprovals: true,
+      approvals: {
+        pending: { id: "approval-1", agent: "main" as const, tool: "Write", paths: ["/work/index.js"], reason: "Write requires approval" },
+        resolve: vi.fn(),
+      },
       dispose: vi.fn(async () => undefined),
     };
     const server = new FlavorRpcServer({
@@ -48,6 +53,7 @@ describe("FlavorRpcServer", () => {
     input.write('{"id":"1","type":"prompt","message":"work"}\n');
     input.write('{"id":"2","type":"steer","message":"adjust"}\n');
     input.write('{"id":"3","type":"get_state"}\n');
+    input.write('{"id":"approval","type":"approval_decision","approvalId":"approval-1","decision":"once"}\n');
     input.write('{"id":"tree","type":"get_tree"}\n');
     input.write('{"id":"rewind","type":"rewind","nodeId":"turn-1"}\n');
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -58,6 +64,7 @@ describe("FlavorRpcServer", () => {
 
     expect(runtime.session.steer).toHaveBeenCalledWith("adjust");
     expect(runtime.services.rewind).toHaveBeenCalledWith("turn-1");
+    expect(runtime.approvals.resolve).toHaveBeenCalledWith("once");
     expect(records).toContainEqual(expect.objectContaining({ type: "error", code: "invalid_json" }));
     expect(records).toContainEqual(expect.objectContaining({ id: "1", type: "response", success: true }));
     expect(records).toContainEqual(expect.objectContaining({ type: "event", event: { type: "text", text: "stream" } }));

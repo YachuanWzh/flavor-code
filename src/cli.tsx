@@ -21,11 +21,12 @@ export function createProgram(): Command {
   const program = new Command()
     .name("flavor")
     .description("Interactive coding agent")
-    .version("1.1.4")
+    .version("1.1.5")
     .option("-p, --print <prompt>", "run one prompt without the interactive UI")
     .option("--resume [session-id]", "resume a saved session (latest when id is omitted)")
     .option("--mode <mode>", "runtime mode: interactive or rpc")
     .option("--workspace <path>", "workspace path (RPC mode)")
+    .option("--rpc-approvals", "allow an RPC client to resolve interactive tool approvals")
     .option("--trace <path>", "write a redacted JSONL execution trace");
 
   program
@@ -80,7 +81,7 @@ export function createProgram(): Command {
     });
 
   program.action(async (options: {
-    print?: string; resume?: string | boolean; mode?: string; workspace?: string; trace?: string;
+    print?: string; resume?: string | boolean; mode?: string; workspace?: string; trace?: string; rpcApprovals?: boolean;
   }) => {
     const resumeSession = options.resume === true ? true : typeof options.resume === "string" ? options.resume : undefined;
     if (options.mode === "rpc") {
@@ -88,6 +89,7 @@ export function createProgram(): Command {
         workspace: resolve(options.workspace ?? process.cwd()),
         ...(resumeSession === undefined ? {} : { resumeSession }),
         ...(options.trace === undefined ? {} : { trace: resolve(options.trace) }),
+        interactiveApprovals: options.rpcApprovals === true,
       });
       return;
     }
@@ -123,6 +125,7 @@ export async function runRpcMode(options: {
   workspace: string;
   resumeSession?: string | true;
   trace?: string;
+  interactiveApprovals?: boolean;
 }): Promise<number> {
   let recorder: TraceRecorder | undefined;
   try {
@@ -131,13 +134,25 @@ export async function runRpcMode(options: {
       output: process.stdout,
       workspace: options.workspace,
       createRuntime: async ({ workspace, output }) => {
+        let activeRuntime: ProductionRuntime | undefined;
+        const onApprovalChange = (): void => {
+          if (!options.interactiveApprovals) return;
+          const approval = activeRuntime?.approvals.pending;
+          output(approval === undefined
+            ? { type: "approval-cleared" }
+            : { type: "approval-request", request: approval });
+        };
         const runtime = await createProductionRuntime({
           workspace,
           home: homedir(),
           approvalPolicy: "deny",
+          rpcToolApprovals: options.interactiveApprovals === true,
+          ...(options.interactiveApprovals ? { onApprovalChange } : {}),
           ...(options.resumeSession === undefined ? {} : { resumeSession: options.resumeSession }),
           output,
         });
+        activeRuntime = runtime;
+        Object.defineProperty(runtime, "rpcApprovals", { value: options.interactiveApprovals === true, enumerable: true });
         if (options.trace !== undefined) recorder = new TraceRecorder({
           path: options.trace, sessionId: runtime.sessionId,
         });
