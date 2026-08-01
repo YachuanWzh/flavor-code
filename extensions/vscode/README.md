@@ -9,6 +9,10 @@ Install the `flavor` CLI (or run `npm link` from the repository), open a
 workspace, then select the Flavor speech-bubble icon in the Activity Bar.
 Choose **Start Flavor** or run **Flavor: Start Agent**.
 
+To build, package, install, and verify the extension from the repository in one
+step, run `npm run qoder:install` for Qoder or `npm run vscode:install` for VS
+Code. Reload the IDE window once after installing into an open IDE.
+
 Set `flavorCode.executable` when the CLI is not on `PATH`.
 
 ## Native workspace experience

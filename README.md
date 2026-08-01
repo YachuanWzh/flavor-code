@@ -842,7 +842,17 @@ flavor eval eval.json --output report.json
 
 ## VS Code
 
-扩展源码位于 `extensions/vscode`：
+从源码安装或更新扩展时，在仓库根目录运行一条命令即可。脚本会构建 CLI 和扩展、生成 VSIX、覆盖安装并核对版本：
+
+```bash
+npm run qoder:install   # 安装到 Qoder
+npm run vscode:install  # 安装到 VS Code
+npm run ide:install     # 自动优先选择 Qoder，其次 VS Code
+```
+
+IDE 已打开时，安装完成后执行一次 **Developer: Reload Window**。生成的 VSIX 会保留在 `release/flavor-code-vscode-<version>.vsix`。
+
+扩展源码位于 `extensions/vscode`。仅做开发调试时可手动构建：
 
 ```bash
 npm run build:cli

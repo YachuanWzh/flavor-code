@@ -19,6 +19,7 @@ export class FlavorRpcClient {
     this.#input.once("end", this.#onClose);
     this.#input.once("close", this.#onClose);
     this.#input.once("error", this.#onError);
+    this.#output.once("error", this.#onError);
   }
 
   get closed(): boolean {
@@ -54,6 +55,7 @@ export class FlavorRpcClient {
     this.#input.off("end", this.#onClose);
     this.#input.off("close", this.#onClose);
     this.#input.off("error", this.#onError);
+    this.#output.off("error", this.#onError);
   }
 
   readonly #onData = (chunk: string | Buffer): void => {

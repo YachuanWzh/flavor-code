@@ -31,4 +31,16 @@ describe("FlavorRpcClient", () => {
     input.end();
     await expect(pending).rejects.toThrow(/closed/i);
   });
+
+  it("rejects pending requests when the child stdin pipe errors", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const client = new FlavorRpcClient({ input, output });
+    const pending = client.request({ type: "get_state" });
+
+    output.destroy(new Error("write EPIPE"));
+
+    await expect(pending).rejects.toThrow(/EPIPE/);
+    expect(client.closed).toBe(true);
+  });
 });

@@ -32,6 +32,9 @@
     "build:desktop:renderer": "vite build --config vite.desktop.config.ts",
     "vscode:build": "tsup --config tsup.vscode.config.ts",
     "vscode:typecheck": "tsc --noEmit -p tsconfig.vscode.json",
+    "ide:install": "node scripts/install-vscode-extension.mjs --ide auto",
+    "qoder:install": "node scripts/install-vscode-extension.mjs --ide qoder",
+    "vscode:install": "node scripts/install-vscode-extension.mjs --ide code",
     "desktop:dev": "npm run build:desktop:main && node scripts/desktop-dev.mjs",
     "desktop:start": "npm run build && electron .",
     "desktop:pack": "npm run build && electron-builder --win --dir",
@@ -99,6 +102,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@vscode/vsce": "3.9.2",
     "@types/vscode": "1.95.0",
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",

@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { relative } from "node:path";
 import * as vscode from "vscode";
 
+import { resolveAgentLaunch } from "./agent-launch.js";
 import { DashboardModel } from "./dashboard-model.js";
 import {
   FlavorCodeActionProvider,
@@ -25,6 +26,7 @@ import { FlavorRpcClient } from "./rpc-client.js";
 
 let child: ChildProcessWithoutNullStreams | undefined;
 let client: FlavorRpcClient | undefined;
+let clientStart: Promise<FlavorRpcClient> | undefined;
 let output: vscode.OutputChannel;
 let status: vscode.StatusBarItem;
 let ideBridge: FlavorIdeBridge | undefined;
@@ -123,11 +125,26 @@ async function startAgent(): Promise<void> {
 
 async function ensureClient(): Promise<FlavorRpcClient> {
   if (client !== undefined && !client.closed) return client;
+  if (clientStart !== undefined) return clientStart;
   client = undefined;
+  const starting = startClient();
+  clientStart = starting;
+  try {
+    return await starting;
+  } finally {
+    if (clientStart === starting) clientStart = undefined;
+  }
+}
+
+async function startClient(): Promise<FlavorRpcClient> {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (folder === undefined) throw new Error("Open a workspace before starting Flavor");
   const executable = vscode.workspace.getConfiguration("flavorCode").get<string>("executable", "flavor");
-  const spawned = spawn(executable, ["--mode", "rpc", "--workspace", folder.uri.fsPath], {
+  const launch = await resolveAgentLaunch(executable, ["--mode", "rpc", "--workspace", folder.uri.fsPath], {
+    cwd: folder.uri.fsPath,
+  });
+  output.appendLine(`Starting Flavor: ${launch.command} ${launch.args.map(displayArgument).join(" ")}`);
+  const spawned = spawn(launch.command, launch.args, {
     cwd: folder.uri.fsPath,
     env: { ...process.env, FLAVOR_CODE_IDE_EVENT_FORWARDING: "0" },
     windowsHide: true,
@@ -140,6 +157,15 @@ async function ensureClient(): Promise<FlavorRpcClient> {
     stderrTail = `${stderrTail}${text}`.slice(-4_000);
     output.append(text);
   });
+  try {
+    await waitForSpawn(spawned);
+  } catch (error) {
+    if (child === spawned) child = undefined;
+    dashboard.setConnection(false);
+    missionControl?.refresh();
+    syncConnectionUi();
+    throw new Error(`Flavor RPC agent failed to start: ${errorMessage(error)}`);
+  }
   const rpc = new FlavorRpcClient({ input: spawned.stdout, output: spawned.stdin });
   client = rpc;
   rpc.onEvent(dispatchEvent);
@@ -181,6 +207,25 @@ async function ensureClient(): Promise<FlavorRpcClient> {
   output.appendLine(`Flavor session ${String(state.sessionId ?? "started")}.`);
   missionControl?.refresh();
   return rpc;
+}
+
+function waitForSpawn(spawned: ChildProcessWithoutNullStreams): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    const onSpawn = (): void => {
+      spawned.off("error", onError);
+      resolvePromise();
+    };
+    const onError = (error: Error): void => {
+      spawned.off("spawn", onSpawn);
+      reject(error);
+    };
+    spawned.once("spawn", onSpawn);
+    spawned.once("error", onError);
+  });
+}
+
+function displayArgument(value: string): string {
+  return /\s/.test(value) ? JSON.stringify(value) : value;
 }
 
 async function askFlavor(): Promise<void> {
