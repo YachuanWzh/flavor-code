@@ -3,14 +3,14 @@
     "anthropic": {
       "type": "anthropic",
       "baseURL": "${ANTHROPIC_BASE_URL}",
-      "defaultModel": "deepseek-v4-pro",
+      "defaultModel": "deepseek-v4-flash",
       "cheapModel": "deepseek-v4-flash",
       "maxOutputTokens": 65536
     }
   },
   "agents": {
     "main": {
-      "model": "anthropic:deepseek-v4-pro"
+      "model": "anthropic:deepseek-v4-flash"
     },
     "subagent": {
       "model": "anthropic:deepseek-v4-flash"
