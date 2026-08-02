@@ -63,6 +63,9 @@ describe("buildSystemPrompt", () => {
       "TaskOutput", "SkillResource",
     ]) expect(allTools).toContain(`\`${name}\``);
     expect(allTools).toContain("exact context has one unique nearby match");
+    expect(allTools).toContain("never construct paths from memory");
+    expect(allTools).toContain("copy `oldText` verbatim");
+    expect(allTools).toContain("never pass absolute paths outside");
     expect(readOnly).toContain("`Read`");
     for (const name of ["Shell", "Task", "TodoWrite", "AskUserQuestion"]) {
       expect(readOnly).not.toContain(`\`${name}\``);

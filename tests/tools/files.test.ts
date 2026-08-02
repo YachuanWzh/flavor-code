@@ -25,6 +25,39 @@ describe("file tools", () => {
       .rejects.toThrow(/binary/i);
   });
 
+  it("Read treats a maxBytes cut inside a multi-byte character as text, not binary", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "utf8.txt");
+    writeFileSync(path, "abc中文def");
+
+    const result = await createReadTool(workspace).execute({ path, maxBytes: 5 }, new AbortController().signal);
+
+    expect(result).toContain("[Truncated to 5 bytes");
+    expect(result).toContain("abc");
+    expect(result).not.toMatch(/binary/i);
+  });
+
+  it("Read returns complete characters when maxBytes lands exactly on a boundary", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "utf8.txt");
+    writeFileSync(path, "abc中文def");
+
+    const result = await createReadTool(workspace).execute({ path, maxBytes: 6 }, new AbortController().signal);
+
+    expect(result).toContain("[Truncated to 6 bytes");
+    expect(result).toContain("abc中");
+  });
+
+  it("Read returns the whole file when maxBytes covers it", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "utf8.txt");
+    writeFileSync(path, "abc中文def");
+
+    const result = await createReadTool(workspace).execute({ path, maxBytes: 20 }, new AbortController().signal);
+
+    expect(result).toBe("abc中文def");
+  });
+
   it("Read validates the entire accepted buffer for late binary bytes", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
     for (const suffix of [Buffer.from([0]), Buffer.from([0xff])]) {

@@ -55,10 +55,12 @@ export function createReadTool(workspace: string, options: ReadToolOptions = {})
       }
       const contents = await readBounded(path, maxBytes, signal, openFile);
       if (isBinary(contents)) throw new Error("Cannot read binary file as text");
-      const text = contents.toString("utf8");
-      if (text.length > maxBytes) {
-        const truncated = text.slice(0, maxBytes);
-        return `[Truncated to ${maxBytes} bytes. File is ${info.size} bytes total. Request a higher maxBytes or read a specific range.]\n\n${truncated}`;
+      // Trim to a UTF-8 character boundary so the returned text never ends
+      // mid-character; the byte count may sit up to 3 bytes below maxBytes.
+      const textEnd = utf8SafeEnd(contents, maxBytes);
+      const text = contents.subarray(0, textEnd).toString("utf8");
+      if (contents.length > maxBytes) {
+        return `[Truncated to ${maxBytes} bytes. File is ${info.size} bytes total. Request a higher maxBytes or read a specific range.]\n\n${text}`;
       }
       return text;
     },
@@ -248,12 +250,71 @@ async function readOptionalPresentationText(path: string): Promise<{ exists: boo
 
 function isBinary(contents: Buffer): boolean {
   if (contents.includes(0)) return true;
+  // Strict UTF-8 check that tolerates only an incomplete trailing sequence: a
+  // bounded Read can cut a multi-byte character exactly at maxBytes, which is
+  // still a text file. Invalid bytes anywhere else remain binary.
   try {
     new TextDecoder("utf-8", { fatal: true }).decode(contents);
     return false;
   } catch {
+    for (let trim = 1; trim <= 3; trim += 1) {
+      if (trim > contents.length) break;
+      try {
+        new TextDecoder("utf-8", { fatal: true }).decode(contents.subarray(0, contents.length - trim));
+        return !isIncompleteUtf8Prefix(contents.subarray(contents.length - trim));
+      } catch { /* keep trimming */ }
+    }
     return true;
   }
+}
+
+function isIncompleteUtf8Prefix(tail: Buffer): boolean {
+  // True when tail is a valid prefix of a multi-byte UTF-8 character that is
+  // missing continuation bytes (i.e. the bounded read cut the character).
+  if (tail.length === 0 || tail.length > 3) return false;
+  const b0 = tail[0]!;
+  if (b0 >= 0xc2 && b0 <= 0xdf) return tail.length === 1;
+  if (b0 >= 0xe0 && b0 <= 0xef) {
+    if (tail.length === 1) return true;
+    if (tail.length === 2) {
+      const b1 = tail[1]!;
+      if (b0 === 0xe0) return b1 >= 0xa0 && b1 <= 0xbf;
+      if (b0 === 0xed) return b1 >= 0x80 && b1 <= 0x9f;
+      return b1 >= 0x80 && b1 <= 0xbf;
+    }
+    return false;
+  }
+  if (b0 >= 0xf0 && b0 <= 0xf4) {
+    if (tail.length === 1) return true;
+    if (tail.length === 2) {
+      const b1 = tail[1]!;
+      if (b0 === 0xf0) return b1 >= 0x90 && b1 <= 0xbf;
+      if (b0 === 0xf4) return b1 >= 0x80 && b1 <= 0x8f;
+      return b1 >= 0x80 && b1 <= 0xbf;
+    }
+    if (tail.length === 3) {
+      const b1 = tail[1]!;
+      const b2 = tail[2]!;
+      if (b0 === 0xf0) return b1 >= 0x90 && b1 <= 0xbf && b2 >= 0x80 && b2 <= 0xbf;
+      if (b0 === 0xf4) return b1 >= 0x80 && b1 <= 0x8f && b2 >= 0x80 && b2 <= 0xbf;
+      return b1 >= 0x80 && b1 <= 0xbf && b2 >= 0x80 && b2 <= 0xbf;
+    }
+    return false;
+  }
+  return false;
+}
+
+function utf8SafeEnd(contents: Buffer, maxBytes: number): number {
+  // Largest UTF-8 character boundary not exceeding maxBytes. Only reached with
+  // valid text, so a boundary always exists within the trailing 3 bytes.
+  const upper = Math.min(maxBytes, contents.length);
+  for (let end = upper; end >= Math.max(0, upper - 3); end -= 1) {
+    try {
+      new TextDecoder("utf-8", { fatal: true }).decode(contents.subarray(0, end));
+      return end;
+    } catch { /* try an earlier boundary */ }
+  }
+  return upper;
 }
 
 async function readBounded(
