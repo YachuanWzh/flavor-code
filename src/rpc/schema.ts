@@ -10,6 +10,7 @@ export const RpcCommandSchema = z.discriminatedUnion("type", [
   z.object({ ...base, type: z.literal("get_queue") }).strict(),
   z.object({ ...base, type: z.literal("clear_queue") }).strict(),
   z.object({ ...base, type: z.literal("approval_decision"), approvalId: z.string().min(1).max(128), decision: z.enum(["once", "always", "deny"]) }).strict(),
+  z.object({ ...base, type: z.literal("write_commit"), writeId: z.string().uuid() }).strict(),
   z.object({ ...base, type: z.literal("checkpoint"), label: z.string().trim().min(1).max(256).optional() }).strict(),
   z.object({ ...base, type: z.literal("get_tree") }).strict(),
   z.object({ ...base, type: z.literal("rewind"), nodeId: z.string().min(1).max(256) }).strict(),

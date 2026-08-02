@@ -26,6 +26,17 @@ export interface ReadToolOptions {
   openFile?: (path: string) => Promise<ReadFileHandle>;
 }
 
+export interface FileWriteProposal {
+  path: string;
+  before: string;
+  after: string;
+  kind: "create" | "update";
+}
+
+export interface FileMutationOptions {
+  beforeCommit?(proposal: FileWriteProposal, signal: AbortSignal): Promise<void>;
+}
+
 export function createReadTool(workspace: string, options: ReadToolOptions = {}): ToolDefinition<z.infer<typeof ReadInput>> {
   const guard = createPathGuard(workspace);
   const openFile = options.openFile ?? ((path: string) => open(path, constants.O_RDONLY));
@@ -54,7 +65,7 @@ export function createReadTool(workspace: string, options: ReadToolOptions = {})
   };
 }
 
-export function createWriteTool(workspace: string): ToolDefinition<z.infer<typeof WriteInput>> {
+export function createWriteTool(workspace: string, options: FileMutationOptions = {}): ToolDefinition<z.infer<typeof WriteInput>> {
   const guard = createPathGuard(workspace);
   return {
     name: "Write",
@@ -65,6 +76,14 @@ export function createWriteTool(workspace: string): ToolDefinition<z.infer<typeo
       abortIfNeeded(signal);
       const path = await guard.destination(input.path);
       const previous = await readOptionalPresentationText(path);
+      if (!previous.exists || previous.text !== undefined) {
+        await options.beforeCommit?.({
+          path,
+          before: previous.text ?? "",
+          after: input.content,
+          kind: previous.exists ? "update" : "create",
+        }, signal);
+      }
       await atomicWrite(path, input.content, signal);
       const output = { path, bytes: Buffer.byteLength(input.content) };
       if (previous.exists && previous.text === undefined) return output;
@@ -78,7 +97,7 @@ export function createWriteTool(workspace: string): ToolDefinition<z.infer<typeo
   };
 }
 
-export function createEditTool(workspace: string): ToolDefinition<z.infer<typeof EditInput>> {
+export function createEditTool(workspace: string, options: FileMutationOptions = {}): ToolDefinition<z.infer<typeof EditInput>> {
   const guard = createPathGuard(workspace);
   return {
     name: "Edit",
@@ -102,6 +121,7 @@ export function createEditTool(workspace: string): ToolDefinition<z.infer<typeof
       }
       const updatedLF = contentsLF.slice(0, first) + newTextLF + contentsLF.slice(first + oldTextLF.length);
       const updated = hasCRLF ? updatedLF.replace(/\n/g, "\r\n") : updatedLF;
+      await options.beforeCommit?.({ path, before: contents, after: updated, kind: "update" }, signal);
       await atomicWrite(path, updated, signal);
       return withToolPresentation(
         { path, replacements: 1 },
@@ -111,7 +131,7 @@ export function createEditTool(workspace: string): ToolDefinition<z.infer<typeof
   };
 }
 
-export function createApplyPatchTool(workspace: string): ToolDefinition<z.infer<typeof ApplyPatchInput>> {
+export function createApplyPatchTool(workspace: string, options: FileMutationOptions = {}): ToolDefinition<z.infer<typeof ApplyPatchInput>> {
   const guard = createPathGuard(workspace);
   return {
     name: "ApplyPatch",
@@ -130,7 +150,16 @@ export function createApplyPatchTool(workspace: string): ToolDefinition<z.infer<
         const applied = applyHunks(original, change.hunks);
         prepared.push({ path, content: applied.content, change, hunks: applied.hunks });
       }
-      for (const change of prepared) await atomicWrite(change.path, change.content, signal);
+      for (const change of prepared) {
+        const before = change.change.created ? "" : await readText(change.path);
+        await options.beforeCommit?.({
+          path: change.path,
+          before,
+          after: change.content,
+          kind: change.change.created ? "create" : "update",
+        }, signal);
+        await atomicWrite(change.path, change.content, signal);
+      }
       const first = prepared[0]!;
       return withToolPresentation(
         { files: prepared.map((change) => change.path) },

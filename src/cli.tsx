@@ -14,6 +14,7 @@ import { SkillManager } from "./skills/manager.js";
 import { registerMemoryCommands } from "./memory/cli.js";
 import { registerMcpCommands } from "./mcp/cli.js";
 import { FlavorRpcServer } from "./rpc/server.js";
+import { RpcWriteStreamBridge } from "./rpc/write-stream.js";
 import { TraceRecorder } from "./trace/recorder.js";
 import { runEvaluationFile } from "./eval/cli.js";
 
@@ -27,6 +28,7 @@ export function createProgram(): Command {
     .option("--mode <mode>", "runtime mode: interactive or rpc")
     .option("--workspace <path>", "workspace path (RPC mode)")
     .option("--rpc-approvals", "allow an RPC client to resolve interactive tool approvals")
+    .option("--rpc-streamed-writes", "stream proposed file writes to an RPC client before committing them")
     .option("--trace <path>", "write a redacted JSONL execution trace");
 
   program
@@ -81,7 +83,7 @@ export function createProgram(): Command {
     });
 
   program.action(async (options: {
-    print?: string; resume?: string | boolean; mode?: string; workspace?: string; trace?: string; rpcApprovals?: boolean;
+    print?: string; resume?: string | boolean; mode?: string; workspace?: string; trace?: string; rpcApprovals?: boolean; rpcStreamedWrites?: boolean;
   }) => {
     const resumeSession = options.resume === true ? true : typeof options.resume === "string" ? options.resume : undefined;
     if (options.mode === "rpc") {
@@ -90,6 +92,7 @@ export function createProgram(): Command {
         ...(resumeSession === undefined ? {} : { resumeSession }),
         ...(options.trace === undefined ? {} : { trace: resolve(options.trace) }),
         interactiveApprovals: options.rpcApprovals === true,
+        streamedWrites: options.rpcStreamedWrites === true,
       });
       return;
     }
@@ -126,6 +129,7 @@ export async function runRpcMode(options: {
   resumeSession?: string | true;
   trace?: string;
   interactiveApprovals?: boolean;
+  streamedWrites?: boolean;
 }): Promise<number> {
   let recorder: TraceRecorder | undefined;
   try {
@@ -135,6 +139,7 @@ export async function runRpcMode(options: {
       workspace: options.workspace,
       createRuntime: async ({ workspace, output }) => {
         let activeRuntime: ProductionRuntime | undefined;
+        const streamedWrites = options.streamedWrites ? new RpcWriteStreamBridge(output) : undefined;
         const onApprovalChange = (): void => {
           if (!options.interactiveApprovals) return;
           const approval = activeRuntime?.approvals.pending;
@@ -147,12 +152,14 @@ export async function runRpcMode(options: {
           home: homedir(),
           approvalPolicy: "deny",
           rpcToolApprovals: options.interactiveApprovals === true,
+          ...(streamedWrites === undefined ? {} : { beforeFileCommit: streamedWrites.preview.bind(streamedWrites) }),
           ...(options.interactiveApprovals ? { onApprovalChange } : {}),
           ...(options.resumeSession === undefined ? {} : { resumeSession: options.resumeSession }),
           output,
         });
         activeRuntime = runtime;
         Object.defineProperty(runtime, "rpcApprovals", { value: options.interactiveApprovals === true, enumerable: true });
+        if (streamedWrites !== undefined) Object.defineProperty(runtime, "rpcWrites", { value: streamedWrites, enumerable: true });
         if (options.trace !== undefined) recorder = new TraceRecorder({
           path: options.trace, sessionId: runtime.sessionId,
         });

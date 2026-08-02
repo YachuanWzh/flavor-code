@@ -121,6 +121,30 @@ describe("file tools", () => {
     });
   });
 
+  it("does not change the real file until the optional pre-commit stream is released", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "old");
+    let release!: () => void;
+    let previewed!: () => void;
+    const preview = new Promise<void>((resolve) => { previewed = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tool = createWriteTool(workspace, {
+      beforeCommit: async (proposal) => {
+        expect(proposal).toMatchObject({ path, before: "old", after: "new", kind: "update" });
+        previewed();
+        await gate;
+      },
+    });
+
+    const executing = tool.execute({ path, content: "new" }, new AbortController().signal);
+    await preview;
+    expect(readFileSync(path, "utf8")).toBe("old");
+    release();
+    await executing;
+    expect(readFileSync(path, "utf8")).toBe("new");
+  });
+
   it("Write presents a missing destination as a new all-added file", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
     const path = join(workspace, "new.txt");

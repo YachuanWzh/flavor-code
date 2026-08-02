@@ -47,7 +47,13 @@ import { createSkillResourceTool } from "./skills/tool.js";
 import { SESSION_VERSION, SessionStore, type SessionDocument } from "./session/store.js";
 import { SessionHistory } from "./session/tree.js";
 import { ProjectSleepOrganizer, ProjectSleepScheduler, localDateKey } from "./sleep/organizer.js";
-import { createApplyPatchTool, createEditTool, createReadTool, createWriteTool } from "./tools/files.js";
+import {
+  createApplyPatchTool,
+  createEditTool,
+  createReadTool,
+  createWriteTool,
+  type FileWriteProposal,
+} from "./tools/files.js";
 import { createGlobTool, createGrepTool } from "./tools/search.js";
 import { createShellTool } from "./tools/shell.js";
 import { createLspTools } from "./tools/lsp.js";
@@ -82,6 +88,8 @@ export interface ProductionRuntimeOptions {
   approvalPolicy?: "prompt" | "deny";
   /** Allow a protocol host to resolve tool approvals without enabling other interactive UI bridges. */
   rpcToolApprovals?: boolean;
+  /** Optional pre-commit gate used by protocol hosts to stream a proposed text write before it reaches disk. */
+  beforeFileCommit?(proposal: FileWriteProposal, signal: AbortSignal): Promise<void>;
   /** Resume a named session, or the latest session when true. Never resumed implicitly. */
   resumeSession?: string | true;
   /** Test and embedding seam for creating configured MCP clients. */
@@ -246,8 +254,14 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     return questions.ask(qs, signal);
   };
   const executionEnvironment = createExecutionEnvironment(workspace, config.execution);
+  const fileMutationOptions = options.beforeFileCommit === undefined
+    ? {}
+    : { beforeCommit: options.beforeFileCommit };
   const tools: ToolDefinition<unknown>[] = [
-    createReadTool(workspace), createWriteTool(workspace), createEditTool(workspace), createApplyPatchTool(workspace),
+    createReadTool(workspace),
+    createWriteTool(workspace, fileMutationOptions),
+    createEditTool(workspace, fileMutationOptions),
+    createApplyPatchTool(workspace, fileMutationOptions),
     createGlobTool(workspace), createGrepTool(workspace), createShellTool(workspace, {
       ...(executionEnvironment === undefined ? {} : { executionEnvironment }),
     }),

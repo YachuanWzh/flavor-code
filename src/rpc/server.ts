@@ -37,6 +37,11 @@ export interface RpcRuntimeLike {
     resolve(decision: ApprovalDecision): void;
   };
   readonly rpcApprovals?: boolean;
+  readonly rpcWrites?: {
+    readonly pendingId: string | undefined;
+    commit(id: string): void;
+    dispose(): void;
+  };
   dispose(): Promise<void>;
 }
 
@@ -72,6 +77,7 @@ export class FlavorRpcServer {
       }
     } finally {
       this.#lines = undefined;
+      this.#runtime.rpcWrites?.dispose();
       await this.#runtime.session.close();
       await this.#runtime.dispose();
       await this.#writeTail;
@@ -138,12 +144,18 @@ export class FlavorRpcServer {
       if (approval.id !== command.approvalId) throw new Error("Approval request is no longer active");
       approvals.resolve(command.decision);
       await respond();
+    } else if (command.type === "write_commit") {
+      const writes = runtime.rpcWrites;
+      if (writes === undefined) throw new Error("Streamed writes are unavailable");
+      if (writes.pendingId !== command.writeId) throw new Error("Streamed write is no longer awaiting commit");
+      writes.commit(command.writeId);
+      await respond();
     } else if (command.type === "get_state") {
       await respond({
         sessionId: runtime.sessionId,
         active: runtime.session.active,
         queue: runtime.session.queueSnapshot(),
-        capabilities: { approvals: runtime.rpcApprovals === true },
+        capabilities: { approvals: runtime.rpcApprovals === true, streamedWrites: runtime.rpcWrites !== undefined },
         ...(runtime.rpcApprovals && runtime.approvals?.pending !== undefined ? { approval: runtime.approvals.pending } : {}),
       });
     } else if (command.type === "checkpoint") {

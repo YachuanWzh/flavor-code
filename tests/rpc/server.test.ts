@@ -37,6 +37,11 @@ describe("FlavorRpcServer", () => {
         pending: { id: "approval-1", agent: "main" as const, tool: "Write", paths: ["/work/index.js"], reason: "Write requires approval" },
         resolve: vi.fn(),
       },
+      rpcWrites: {
+        pendingId: "62b77184-8a91-4ba3-873d-c804c93891ef",
+        commit: vi.fn(),
+        dispose: vi.fn(),
+      },
       dispose: vi.fn(async () => undefined),
     };
     const server = new FlavorRpcServer({
@@ -54,6 +59,7 @@ describe("FlavorRpcServer", () => {
     input.write('{"id":"2","type":"steer","message":"adjust"}\n');
     input.write('{"id":"3","type":"get_state"}\n');
     input.write('{"id":"approval","type":"approval_decision","approvalId":"approval-1","decision":"once"}\n');
+    input.write('{"id":"write","type":"write_commit","writeId":"62b77184-8a91-4ba3-873d-c804c93891ef"}\n');
     input.write('{"id":"tree","type":"get_tree"}\n');
     input.write('{"id":"rewind","type":"rewind","nodeId":"turn-1"}\n');
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -65,11 +71,16 @@ describe("FlavorRpcServer", () => {
     expect(runtime.session.steer).toHaveBeenCalledWith("adjust");
     expect(runtime.services.rewind).toHaveBeenCalledWith("turn-1");
     expect(runtime.approvals.resolve).toHaveBeenCalledWith("once");
+    expect(runtime.rpcWrites.commit).toHaveBeenCalledWith("62b77184-8a91-4ba3-873d-c804c93891ef");
+    expect(runtime.rpcWrites.dispose).toHaveBeenCalledOnce();
     expect(records).toContainEqual(expect.objectContaining({ type: "error", code: "invalid_json" }));
     expect(records).toContainEqual(expect.objectContaining({ id: "1", type: "response", success: true }));
     expect(records).toContainEqual(expect.objectContaining({ type: "event", event: { type: "text", text: "stream" } }));
     expect(records).toContainEqual(expect.objectContaining({
-      id: "3", type: "response", data: expect.objectContaining({ sessionId: "session-rpc", active: true }),
+      id: "3", type: "response", data: expect.objectContaining({
+        sessionId: "session-rpc", active: true,
+        capabilities: { approvals: true, streamedWrites: true },
+      }),
     }));
     expect(runtime.dispose).toHaveBeenCalledOnce();
   });

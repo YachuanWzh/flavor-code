@@ -30,6 +30,10 @@ export interface SessionApprovalRequest {
 export type SessionOutput = AgentEvent
   | { type: "notice"; message: string }
   | { type: "queued-prompt"; prompt: string }
+  | { type: "write-start"; id: string; path: string; before: string; totalBytes: number }
+  | { type: "write-delta"; id: string; delta: string }
+  | { type: "write-ready"; id: string }
+  | { type: "write-cancelled"; id: string }
   | { type: "approval-request"; request: SessionApprovalRequest }
   | { type: "approval-cleared"; id?: string }
   | { type: "clear" }
