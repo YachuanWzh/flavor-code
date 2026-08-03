@@ -74,7 +74,7 @@ describe("MemoryStore", () => {
     expect((await memory.references())[0]).toMatchObject({ recallTotal: 1, recalls: { "consumer-task": "2026-07-22T00:00:00.000Z" } });
   });
 
-  it("returns every full user preference separately from relevance-based recall", async () => {
+  it("returns every full user preference separately and counts its injection once per task", async () => {
     const memory = await store();
     await memory.rememberForTask("user-profile", {
       type: "user", summary: "Address preference", content: "Always address the user as 亚川.",
@@ -86,9 +86,27 @@ describe("MemoryStore", () => {
     expect(await memory.userContext()).toContain("Always address the user as 亚川.");
     expect(await memory.userContext()).toContain("Use Chinese for every answer.");
     const recalled = await memory.recall("Always address the user as 亚川", {
-      taskId: "consumer-task", topK: 5, maxChars: 1_000,
+      taskId: "consumer-task", topK: 5, maxChars: 1_000, now: new Date("2026-07-22T00:00:00.000Z"),
     });
     expect(recalled).toEqual({ references: [] });
+    await memory.recall("An unrelated follow-up", {
+      taskId: "consumer-task", topK: 5, maxChars: 1_000, now: new Date("2026-07-22T01:00:00.000Z"),
+    });
+    await memory.recall("A new task", {
+      taskId: "another-task", topK: 5, maxChars: 1_000, now: new Date("2026-07-23T00:00:00.000Z"),
+    });
+
+    const references = await memory.references();
+    expect(references.filter((reference) => reference.type === "user"))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ recallTotal: 2, recalls: {
+          "consumer-task": "2026-07-22T00:00:00.000Z",
+          "another-task": "2026-07-23T00:00:00.000Z",
+        } }),
+      ]));
+    const index = await readFile(memory.path, "utf8");
+    expect(index).toContain("  - updated:");
+    expect(index).toContain("  - last-recalled: 2026-07-23T00:00:00.000Z");
   });
 
   it("normalizes, de-duplicates, bounds, and forgets entries by text or id", async () => {

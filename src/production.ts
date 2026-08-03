@@ -904,7 +904,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     permissionMode: () => harness.permissionMode,
     run: (prompt, signal, runOptions) => persistAndCheckpointAfter(runMain(
       harness, skills, prompt, signal, selectedModels.mainError,
-      memoryStore === undefined || !memoryHasRoutableEntries ? undefined : {
+      memoryStore === undefined || (!memoryHasRoutableEntries && userMemoryContext === undefined) ? undefined : {
         store: memoryStore, taskId: memoryLifecycle.taskId ?? sessionId,
         topK: config.memory.retrievalTopK, maxChars: config.memory.maxPromptChars,
       },

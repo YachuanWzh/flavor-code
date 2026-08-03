@@ -180,8 +180,9 @@ export class MemoryStore {
   }> {
     assertTaskId(options.taskId);
     const now = options.now ?? new Date();
-    const references = (await this.references()).filter((reference) => reference.type !== "user");
-    const ranked = rankMemoryReferences(references, query, {
+    const references = await this.references();
+    const userReferences = references.filter((reference) => reference.type === "user");
+    const ranked = rankMemoryReferences(references.filter((reference) => reference.type !== "user"), query, {
       now, topK: options.topK, maxChars: options.maxChars,
     });
     const lines = [
@@ -196,8 +197,10 @@ export class MemoryStore {
       if ([...lines, line].join("\n").length > options.maxChars) continue;
       lines.push(line); recalled.push(item.reference);
     }
-    if (recalled.length > 0) {
-      const ids = new Set(recalled.map((reference) => reference.id));
+    if (userReferences.length > 0 || recalled.length > 0) {
+      // User memories are injected into every model request separately from
+      // relevance-based routing, so their use must be recorded here as well.
+      const ids = new Set([...userReferences, ...recalled].map((reference) => reference.id));
       const timestamp = now.toISOString();
       await this.#updateIndex((index) => ({ ...index, references: index.references.map((reference) => {
         if (!ids.has(reference.id) || reference.recalls[options.taskId] !== undefined) return reference;
@@ -323,7 +326,8 @@ function encodeIndex(index: MemoryIndexDocument): string {
   const rows = index.references.map((reference) => {
     const heat = classifyMemoryHeat(reference, now);
     const tag = heat === "normal" ? "" : `[${heat}] `;
-    return `- ${tag}[${reference.type}] ${reference.summary}\n  - id: ${reference.id}\n  - task: ${reference.taskId}\n  - path: ${reference.contentPath}#${reference.id}\n  - created: ${reference.createdAt}\n  - recalls: ${reference.recallTotal}`;
+    const lastRecalledAt = latestRecallAt(reference.recalls);
+    return `- ${tag}[${reference.type}] ${reference.summary}\n  - id: ${reference.id}\n  - task: ${reference.taskId}\n  - path: ${reference.contentPath}#${reference.id}\n  - created: ${reference.createdAt}\n  - updated: ${reference.updatedAt}\n  - last-recalled: ${lastRecalledAt ?? "never"}\n  - recalls: ${reference.recallTotal}`;
   });
   return `${V2_TITLE}\n\n> Routing index for task-level long-term memory. Full content lives under tasks/.\n\n<!-- ${INDEX_MARKER}:${data} -->\n\n## References\n\n${rows.join("\n\n")}\n`;
 }
@@ -399,4 +403,9 @@ function assertTaskId(taskId: string): void {
 function pruneRecalls(recalls: Record<string, string>, now: Date): Record<string, string> {
   const cutoff = now.getTime() - 30 * 24 * 60 * 60 * 1_000;
   return Object.fromEntries(Object.entries(recalls).filter(([, value]) => Date.parse(value) >= cutoff).slice(-128));
+}
+
+function latestRecallAt(recalls: Record<string, string>): string | undefined {
+  return Object.values(recalls).filter((value) => Number.isFinite(Date.parse(value)))
+    .sort((left, right) => Date.parse(right) - Date.parse(left))[0];
 }

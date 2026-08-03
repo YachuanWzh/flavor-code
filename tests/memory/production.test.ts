@@ -99,6 +99,7 @@ describe("production long-term memory", () => {
       content: expect.stringContaining("Always address the user as 亚川 in every response."),
       cacheBreakpoint: true,
     });
+    expect((await store.references()).find((reference) => reference.type === "user")?.recallTotal).toBe(1);
 
     await runtime.services.remember("user", "Prefer concise answers.");
     await runtime.session.submit("Tell me something unrelated.");
@@ -106,6 +107,13 @@ describe("production long-term memory", () => {
       messages.some((message) => message.content === "Tell me something unrelated."));
     expect(latest?.filter((message) => message.role === "system").at(-1)?.content)
       .toContain("Prefer concise answers.");
+    expect((await store.references()).filter((reference) => reference.type === "user")
+      .map((reference) => reference.recallTotal)).toEqual([1, 1]);
+
+    await runtime.services.finishTask();
+    await runtime.session.submit("Start a new task.");
+    expect((await store.references()).filter((reference) => reference.type === "user")
+      .map((reference) => reference.recallTotal)).toEqual([2, 2]);
     await runtime.dispose();
   });
 
