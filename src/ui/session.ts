@@ -215,7 +215,10 @@ export class FlavorSession {
         ...(submission.initialUserMessage === undefined
           ? {}
           : { initialUserMessage: submission.initialUserMessage }),
-      })) this.#services.output(event);
+      })) {
+        this.#services.output(event);
+        if (event.type === "error") outcome = "failed";
+      }
       if (controller.signal.aborted) outcome = "cancelled";
     } catch (error) {
       outcome = controller.signal.aborted ? "cancelled" : "failed";

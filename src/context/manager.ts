@@ -5,6 +5,7 @@ import {
   DEFAULT_COMPACTION_POLICY,
   calculateContextPressure,
   compactContinuationMessage,
+  estimateTokens,
   estimateMessageTokens,
   formatCompactSummary,
   microcompactMessages,
@@ -14,6 +15,8 @@ import {
 
 export interface ContextManagerOptions {
   system: SystemPromptSource;
+  /** Dynamic system suffix excluded from the stable prompt-cache prefix. */
+  volatileSystem?: SystemPromptSource;
   flavor?: string;
   memory?: string;
   taskState?: string;
@@ -54,12 +57,11 @@ export type ContextForkOptions = Partial<Pick<
   "summarize" | "onCompactProgress" | "hooks"
 >>;
 
-export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
+export { estimateTokens } from "./compaction.js";
 
 export class ContextManager {
   readonly #system: SystemPromptSource;
+  readonly #volatileSystem: SystemPromptSource | undefined;
   readonly #flavor: string | undefined;
   readonly #memory: string | undefined;
   readonly #userMemory: SystemPromptSource | undefined;
@@ -93,6 +95,7 @@ export class ContextManager {
     if (compaction.reservedOutputTokens >= compaction.windowTokens) throw new Error("compaction.reservedOutputTokens must be below windowTokens");
     if (compaction.maxRecentTokens < compaction.recentTokens) throw new Error("compaction.maxRecentTokens must be at least recentTokens");
     this.#system = options.system;
+    this.#volatileSystem = options.volatileSystem;
     this.#flavor = options.flavor;
     this.#memory = options.memory;
     this.#userMemory = options.userMemory;
@@ -127,6 +130,7 @@ export class ContextManager {
     const userMemory = this.#resolvedUserMemory();
     const child = new ContextManager({
       system: resolveSystemSections(this.#system),
+      ...(this.#volatileSystem === undefined ? {} : { volatileSystem: resolveSystemSections(this.#volatileSystem) }),
       ...(this.#flavor === undefined ? {} : { flavor: this.#flavor }),
       ...(this.#memory === undefined ? {} : { memory: this.#memory }),
       ...(this.#taskState === undefined ? {} : { taskState: this.#taskState }),
@@ -353,7 +357,7 @@ export class ContextManager {
 
   #pinnedMessages(): ModelMessage[] {
     const userMemory = this.#resolvedUserMemory();
-    return [
+    const stable: ModelMessage[] = [
       ...resolveSystemSections(this.#system).map((content) => ({ role: "system" as const, content })),
       ...(this.#flavor === undefined ? [] : [{ role: "system" as const, content: `FLAVOR.md\n${this.#flavor}` }]),
       ...(this.#memory === undefined ? [] : [{ role: "system" as const, content: `Long-term memory\n${this.#memory}` }]),
@@ -363,6 +367,12 @@ export class ContextManager {
         content: `User memory\n${userMemory}`,
         cacheBreakpoint: true,
       }]),
+    ];
+    const volatile = this.#volatileSystem === undefined ? [] : resolveSystemSections(this.#volatileSystem);
+    if (volatile.length > 0 && stable.length > 0) stable[stable.length - 1]!.cacheBreakpoint = true;
+    return [
+      ...stable,
+      ...volatile.map((content) => ({ role: "system" as const, content })),
     ];
   }
 

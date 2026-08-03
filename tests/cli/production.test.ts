@@ -105,7 +105,7 @@ describe("production runtime", () => {
   }, 15_000);
   it("creates deterministic prompt environment data with explicit fallbacks", () => {
     expect(createPromptEnvironment({
-      now: new Date("2026-07-13T23:59:00.000Z"),
+      now: new Date(2026, 6, 13, 23, 59),
       platform: "win32",
       osVersion: "Windows 11 10.0.26100",
       shell: "powershell.exe",
@@ -122,6 +122,12 @@ describe("production runtime", () => {
     })).toEqual({
       date: "unknown", platform: "unknown", osVersion: "unknown", shell: "unknown", isGitRepository: "unknown",
     });
+  });
+
+  it("uses the local calendar date instead of the UTC date", () => {
+    const localEarlyMorning = new Date(2026, 7, 3, 0, 30);
+
+    expect(createPromptEnvironment({ now: localEarlyMorning }).date).toBe("2026-08-03");
   });
 
   it("does not advertise AskUserQuestion in non-interactive mode", async () => {

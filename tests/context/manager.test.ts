@@ -188,6 +188,25 @@ describe("ContextManager", () => {
     expect(estimateTokens("12345")).toBe(2);
   });
 
+  it("weights CJK and supplementary Unicode characters conservatively", () => {
+    expect(estimateTokens("你好世界")).toBe(6);
+    expect(estimateTokens("🙂")).toBe(2);
+    expect(estimateTokens("hello你好")).toBe(5);
+  });
+
+  it("places volatile system content after the stable cache breakpoint", () => {
+    const context = createContext({
+      system: ["stable one", "stable two"],
+      volatileSystem: "# Current date\n\n2026-08-03",
+    });
+
+    const messages = context.messagesForModel();
+    const dateIndex = messages.findIndex((message) => message.content === "# Current date\n\n2026-08-03");
+    expect(dateIndex).toBeGreaterThan(0);
+    expect(messages[dateIndex - 1]?.cacheBreakpoint).toBe(true);
+    expect(messages[dateIndex]?.cacheBreakpoint).toBeUndefined();
+  });
+
   it("includes model-visible tool-call arguments in compaction sizing", () => {
     const context = createContext({ compactAtChars: 100, recentTurns: 0 });
     context.append({

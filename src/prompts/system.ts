@@ -37,6 +37,10 @@ export function buildSystemPrompt(options: SystemPromptOptions): string[] {
     .filter((section) => section.length > 0);
 }
 
+export function buildCurrentDateSection(date: string): string {
+  return `# Current date\n\n${data(date)}`;
+}
+
 export function buildSubagentDirective(): string {
   return `${roleSection("subagent")}
 
@@ -134,7 +138,6 @@ function environmentSection(options: SystemPromptOptions): string {
     : options.environment.isGitRepository ? "yes" : "no";
   return `# Environment
 
-- Date: ${data(options.environment.date)}
 - Working directory: ${data(options.workspace)}
 - Git repository: ${git}
 - Platform: ${data(options.environment.platform)}

@@ -40,7 +40,7 @@ import { createFileTokenStore } from "./auth/store.js";
 import { oauthCredentialId } from "./auth/oauth-config.js";
 import type { AuthResult, OAuthLlmConfig } from "./auth/types.js";
 import type { PermissionRequest } from "./permissions/engine.js";
-import { buildSubagentDirective, buildSystemPrompt, type PromptEnvironment } from "./prompts/system.js";
+import { buildCurrentDateSection, buildSubagentDirective, buildSystemPrompt, type PromptEnvironment } from "./prompts/system.js";
 import type { ApprovalDecision } from "./tools/runtime.js";
 import { PluginHost } from "./plugins/host.js";
 import type { PluginCommandHandler } from "./plugins/types.js";
@@ -121,7 +121,7 @@ export interface PromptEnvironmentInput {
 export function createPromptEnvironment(input: PromptEnvironmentInput = {}): PromptEnvironment {
   const now = input.now ?? new Date();
   return {
-    date: Number.isNaN(now.getTime()) ? "unknown" : now.toISOString().slice(0, 10),
+    date: Number.isNaN(now.getTime()) ? "unknown" : localDateKey(now),
     platform: promptEnvironmentValue(input.platform ?? process.platform),
     osVersion: promptEnvironmentValue(input.osVersion ?? `${osVersion()} ${osRelease()}`),
     shell: promptEnvironmentValue(input.shell ?? process.env.ComSpec ?? process.env.SHELL),
@@ -571,6 +571,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         toolNames: new Set(agentTools.map((tool) => tool.name)),
         environment: promptEnvironment,
       }),
+      volatileSystem: () => buildCurrentDateSection(promptEnvironment.date),
       ...(flavor === undefined ? {} : { flavor }),
       ...(memoryContext === undefined ? {} : { memory: memoryContext }),
       ...(taskState === undefined ? {} : { taskState }),
@@ -658,10 +659,34 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   if (memoryCoordinator !== undefined) {
     memoryCoordinator.onError = (error) => diagnostics.push(`Long-term memory extraction failed: ${message(error)}`);
   }
+  const finalizeMemoryTask = async (): Promise<string> => {
+    const allMessages = harness.main.context.snapshot().messages;
+    const messages = allMessages.slice(memoryLifecycle.messageStart ?? 0);
+    const transcriptHash = memoryTranscriptHash(messages);
+    if (memoryLifecycle.status === "completed" && memoryLifecycle.transcriptHash === transcriptHash) {
+      return "Task was already completed and evaluated for long-term memory.";
+    }
+    const finalization = memoryCoordinator === undefined || !config.memory.autoExtract || options.approvalPolicy === "deny"
+      ? { evaluated: true, candidates: false }
+      : await memoryCoordinator.finalize(memoryLifecycle.taskId ?? sessionId, messages);
+    if (!finalization.evaluated) {
+      return "Task memory evaluation failed and was not marked complete; retry /finish after checking diagnostics.";
+    }
+    memoryLifecycle = {
+      status: "completed", taskId: memoryLifecycle.taskId ?? sessionId,
+      messageStart: memoryLifecycle.messageStart ?? 0, finalizedAt: new Date().toISOString(), transcriptHash,
+    };
+    await persist();
+    return finalization.candidates
+      ? "Task completed. Review the generated long-term-memory candidates before anything is stored."
+      : "Task completed; no durable long-term-memory candidates passed the threshold.";
+  };
   let explicitMemoryRequest: { taskId: string; messageStart: number } | undefined;
+  let automaticMemoryTask = false;
   hooks.on("UserPromptSubmit", (event) => {
     const prompt = String(event.payload.prompt);
     timelineState = transcriptReducer(timelineState, { type: "submit", prompt });
+    automaticMemoryTask = !prompt.startsWith("/");
     if (!prompt.startsWith("/") && memoryLifecycle.status === "completed") {
       memoryLifecycle = {
         status: "active", taskId: createMemoryTaskId(),
@@ -676,10 +701,12 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     }
     return { decision: "allow" };
   });
-  hooks.on("Stop", async (_event) => {
+  hooks.on("Stop", async (event) => {
     timelineState = transcriptReducer(timelineState, { type: "finish" });
     const explicit = explicitMemoryRequest;
+    const automatic = automaticMemoryTask;
     explicitMemoryRequest = undefined;
+    automaticMemoryTask = false;
     if (explicit !== undefined && memoryCoordinator !== undefined) {
       const result = await memoryCoordinator.rememberExplicit(
         explicit.taskId, harness.main.context.snapshot().messages.slice(explicit.messageStart),
@@ -692,6 +719,15 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         emitOutput({ type: "notice", message: "The explicit memory already exists or the memory limit was reached." });
       } else {
         emitOutput({ type: "notice", message: "The explicit request did not contain durable information that passed the memory safety threshold." });
+      }
+    }
+    if (explicit === undefined && automatic && event.payload.outcome === "completed"
+      && memoryCoordinator !== undefined && config.memory.autoExtract && options.approvalPolicy !== "deny") {
+      const result = await finalizeMemoryTask();
+      if (result.startsWith("Task memory evaluation failed")) {
+        emitOutput({ type: "notice", message: "Automatic long-term-memory evaluation failed; use /finish to retry after checking diagnostics." });
+      } else if (result.startsWith("Task completed. Review")) {
+        emitOutput({ type: "notice", message: result });
       }
     }
     taskPlan = undefined;
@@ -795,6 +831,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
           toolNames: new Set(agentTools.map((tool) => tool.name)),
           environment: loopEnvironment,
         }),
+        volatileSystem: () => buildCurrentDateSection(loopEnvironment.date),
         ...(loopFlavor === undefined ? {} : { flavor: loopFlavor }),
         ...(memoryContext === undefined ? {} : { memory: memoryContext }),
         userMemory: () => userMemoryContext ?? "",
@@ -1103,28 +1140,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       if (removed > 0) await refreshMemoryState();
       return removed === 0 ? "No matching memory found." : `Forgot ${removed} memory ${removed === 1 ? "entry" : "entries"}.`;
     },
-    finishTask: async () => {
-      const allMessages = harness.main.context.snapshot().messages;
-      const messages = allMessages.slice(memoryLifecycle.messageStart ?? 0);
-      const transcriptHash = memoryTranscriptHash(messages);
-      if (memoryLifecycle.status === "completed" && memoryLifecycle.transcriptHash === transcriptHash) {
-        return "Task was already completed and evaluated for long-term memory.";
-      }
-      const finalization = memoryCoordinator === undefined || !config.memory.autoExtract || options.approvalPolicy === "deny"
-        ? { evaluated: true, candidates: false }
-        : await memoryCoordinator.finalize(memoryLifecycle.taskId ?? sessionId, messages);
-      if (!finalization.evaluated) {
-        return "Task memory evaluation failed and was not marked complete; retry /finish after checking diagnostics.";
-      }
-      memoryLifecycle = {
-        status: "completed", taskId: memoryLifecycle.taskId ?? sessionId,
-        messageStart: memoryLifecycle.messageStart ?? 0, finalizedAt: new Date().toISOString(), transcriptHash,
-      };
-      await persist();
-      return finalization.candidates
-        ? "Task completed. Review the generated long-term-memory candidates before anything is stored."
-        : "Task completed; no durable long-term-memory candidates passed the threshold.";
-    },
+    finishTask: finalizeMemoryTask,
     pluginCommands: () => [...pluginCommands.keys()].sort(),
     runPluginCommand: async (name, args, signal) => {
       const handler = pluginCommands.get(name);

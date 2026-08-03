@@ -105,6 +105,79 @@ describe("AgentLoop", () => {
     expect(fixture.context.lastRecordedInputTokens).toBe(12);
   });
 
+  it("executes consecutive read-only tool calls concurrently", async () => {
+    const requests: ModelRequest[] = [];
+    let started = 0;
+    let release!: () => void;
+    const bothStarted = new Promise<void>((resolve) => { release = resolve; });
+    const fixture = createLoop({
+      adapter: fakeAdapter([[
+        { type: "tool-call", id: "read", name: "Read", input: { value: "read" } },
+        { type: "tool-call", id: "grep", name: "Grep", input: { value: "grep" } },
+        { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      ], [
+        { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      ]], requests),
+      toolNames: ["Read", "Grep"],
+      execute: async (input) => {
+        started += 1;
+        if (started === 2) release();
+        await bothStarted;
+        return input;
+      },
+    });
+
+    await collect(fixture.loop.run({ prompt: "inspect" }));
+
+    expect(started).toBe(2);
+    expect(requests[1]?.messages.filter((message) => message.role === "tool").map((message) => message.toolCallId))
+      .toEqual(["read", "grep"]);
+  });
+
+  it("uses writes as ordering barriers between read-only batches", async () => {
+    const log: string[] = [];
+    let firstStarted = 0;
+    let secondStarted = 0;
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstBatch = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const secondBatch = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const fixture = createLoop({
+      adapter: fakeAdapter([[
+        { type: "tool-call", id: "read", name: "Read", input: { value: "read" } },
+        { type: "tool-call", id: "glob", name: "Glob", input: { value: "glob" } },
+        { type: "tool-call", id: "write", name: "Write", input: { value: "write" } },
+        { type: "tool-call", id: "grep", name: "Grep", input: { value: "grep" } },
+        { type: "tool-call", id: "hover", name: "LspHover", input: { value: "hover" } },
+        { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      ], [
+        { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      ]]),
+      toolNames: ["Read", "Glob", "Write", "Grep", "LspHover"],
+      execute: async (input) => {
+        log.push(`start:${input.value}`);
+        if (input.value === "read" || input.value === "glob") {
+          firstStarted += 1;
+          if (firstStarted === 2) releaseFirst();
+          await firstBatch;
+        }
+        if (input.value === "grep" || input.value === "hover") {
+          secondStarted += 1;
+          if (secondStarted === 2) releaseSecond();
+          await secondBatch;
+        }
+        log.push(`end:${input.value}`);
+        return input;
+      },
+    });
+
+    await collect(fixture.loop.run({ prompt: "inspect then write then inspect" }));
+
+    expect(Math.max(log.indexOf("end:read"), log.indexOf("end:glob"))).toBeLessThan(log.indexOf("start:write"));
+    expect(log.indexOf("end:write")).toBeLessThan(log.indexOf("start:grep"));
+    expect(log.indexOf("end:write")).toBeLessThan(log.indexOf("start:hover"));
+  });
+
   it("injects queued steering after tool results and before the next model call", async () => {
     const requests: ModelRequest[] = [];
     const steering = [["use the safer parser"], []];
@@ -748,18 +821,19 @@ function createLoop(options: {
   recentTurns?: number;
   summarize?: () => Promise<string>;
   toolSummarize?: (input: { value: string }) => string | undefined;
+  toolNames?: readonly string[];
 }) {
   const hooks = new HookBus();
-  const tool = {
-    name: "echo",
+  const tools = (options.toolNames ?? ["echo"]).map((name) => ({
+    name,
     description: "echo input",
     inputSchema: z.object({ value: z.string() }),
-    paths: () => [],
+    paths: () => ["Read", "Glob", "Grep", "Write"].includes(name) ? [process.cwd()] : [],
     ...(options.toolSummarize === undefined ? {} : { summarize: options.toolSummarize }),
     execute: options.execute ?? (async (input: { value: string }) => input),
-  };
+  }));
   const runtime = new ToolRuntime({
-    tools: [tool],
+    tools,
     hooks,
     permissions: new PermissionEngine({ workspace: process.cwd() }),
     approve: () => "once",
@@ -781,7 +855,7 @@ function createLoop(options: {
     context,
     runtime,
     hooks,
-    tools: [{ name: tool.name, description: tool.description, inputSchema: { type: "object" } }],
+    tools: tools.map((tool) => ({ name: tool.name, description: tool.description, inputSchema: { type: "object" } })),
     maxIterations: options.maxIterations ?? 4,
   };
   return { loop: new AgentLoop(loopOptions), runtime, context, hooks };

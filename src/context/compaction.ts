@@ -168,7 +168,38 @@ export function compactContinuationMessage(summary: string, transcriptPath?: str
 }
 
 export function estimateMessageTokens(messages: readonly ModelMessage[]): number {
-  return Math.ceil(messages.map(messageVisibleText).join("\n").length / 4);
+  return estimateTokens(messages.map(messageVisibleText).join("\n"));
+}
+
+/**
+ * Cheap tokenizer-independent estimate that keeps the historical 4 ASCII
+ * characters/token rule while accounting for scripts whose characters are
+ * commonly one or more tokens each.
+ */
+export function estimateTokens(text: string): number {
+  let units = 0;
+  for (const character of text) {
+    const codePoint = character.codePointAt(0)!;
+    if (codePoint <= 0x7f) {
+      units += 0.25;
+    } else if (isCjkCodePoint(codePoint)) {
+      units += 1.5;
+    } else if (codePoint > 0xffff) {
+      units += 2;
+    } else {
+      units += 1;
+    }
+  }
+  return Math.ceil(units);
+}
+
+function isCjkCodePoint(codePoint: number): boolean {
+  return (codePoint >= 0x3400 && codePoint <= 0x4dbf)
+    || (codePoint >= 0x4e00 && codePoint <= 0x9fff)
+    || (codePoint >= 0xf900 && codePoint <= 0xfaff)
+    || (codePoint >= 0x20000 && codePoint <= 0x323af)
+    || (codePoint >= 0x3040 && codePoint <= 0x30ff)
+    || (codePoint >= 0xac00 && codePoint <= 0xd7af);
 }
 
 function messageMetrics(messages: readonly ModelMessage[]): { tokens: number; textMessages: number } {

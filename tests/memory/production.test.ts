@@ -32,6 +32,9 @@ async function workspace(memory: Record<string, unknown>): Promise<string> {
       const text = request.messages.map((message) => message.content).join("\\n");
       if (text.includes("Evaluate this completed coding task")) {
         yield { type: "text", text: '{"memories":[{"type":"project","summary":"Use pnpm for repository scripts","content":"Use pnpm for all repository scripts.","topicKey":"project.package-manager","keywords":["pnpm","scripts","package manager"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":2}}]}' };
+      } else if (text.includes("FAIL_MAIN")) {
+        yield { type: "error", error: { code: "authentication", message: "simulated main-model failure" } };
+        return;
       } else {
         yield { type: "text", text: "Acknowledged. This response is deliberately long enough to qualify for automatic durable memory extraction." };
       }
@@ -43,10 +46,10 @@ async function workspace(memory: Record<string, unknown>): Promise<string> {
 
 describe("production long-term memory", () => {
   it("directly analyzes and stores an explicit remember request without waiting for task finish", async () => {
-    const root = await workspace({ autoExtract: false });
+    const root = await workspace({ autoExtract: true });
     const notices: string[] = [];
     const runtime = await createProductionRuntime({
-      workspace: root, home: root, environment: {}, approvalPolicy: "deny",
+      workspace: root, home: root, environment: {},
       output: (event) => { if (event.type === "notice") notices.push(event.message); },
     });
 
@@ -94,18 +97,20 @@ describe("production long-term memory", () => {
       .__flavorMemoryRequests ?? [];
     const main = requests.find((messages) => messages.some((message) => message.content === "What is the weather like?"));
     const system = main?.filter((message) => message.role === "system") ?? [];
-    expect(system.at(-1)).toEqual({
+    expect(system.find((message) => message.cacheBreakpoint)).toEqual({
       role: "system",
       content: expect.stringContaining("Always address the user as 亚川 in every response."),
       cacheBreakpoint: true,
     });
+    expect(system.at(-1)?.content).toMatch(/^# Current date/);
     expect((await store.references()).find((reference) => reference.type === "user")?.recallTotal).toBe(1);
 
     await runtime.services.remember("user", "Prefer concise answers.");
     await runtime.session.submit("Tell me something unrelated.");
     const latest = [...requests].reverse().find((messages) =>
       messages.some((message) => message.content === "Tell me something unrelated."));
-    expect(latest?.filter((message) => message.role === "system").at(-1)?.content)
+    expect(latest?.filter((message) => message.role === "system")
+      .find((message) => message.cacheBreakpoint)?.content)
       .toContain("Prefer concise answers.");
     expect((await store.references()).filter((reference) => reference.type === "user")
       .map((reference) => reference.recallTotal)).toEqual([1, 1]);
@@ -117,7 +122,7 @@ describe("production long-term memory", () => {
     await runtime.dispose();
   });
 
-  it("stages extracted memory, writes only after confirmation, and exposes it to the next runtime", async () => {
+  it("automatically stages memory after a successful task, remains idempotent with /finish, and writes only after confirmation", async () => {
     const root = await workspace({ autoExtract: true, autoExtractMinChars: 200 });
     const first = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
 
@@ -125,14 +130,13 @@ describe("production long-term memory", () => {
 
     const store = new MemoryStore({ workspace: root, maxEntries: 200, maxEntryChars: 1000 });
     expect(await store.list()).toEqual([]);
-    expect(first.memoryReviews.pending).toEqual([]);
-    await first.services.finishTask();
+    expect(first.memoryReviews.pending).toMatchObject([{ type: "project", content: "Use pnpm for all repository scripts." }]);
     const extractionCount = ((globalThis as { __flavorMemoryRequests?: Array<Array<{ content: string }>> })
       .__flavorMemoryRequests ?? []).filter((messages) => messages.some((message) => message.content.includes("Evaluate this completed coding task"))).length;
-    await first.services.finishTask();
+    expect(extractionCount).toBe(1);
+    await expect(first.services.finishTask()).resolves.toBe("Task was already completed and evaluated for long-term memory.");
     expect(((globalThis as { __flavorMemoryRequests?: Array<Array<{ content: string }>> })
       .__flavorMemoryRequests ?? []).filter((messages) => messages.some((message) => message.content.includes("Evaluate this completed coding task")))).toHaveLength(extractionCount);
-    expect(first.memoryReviews.pending).toMatchObject([{ type: "project", content: "Use pnpm for all repository scripts." }]);
     await first.memoryReviews.accept(first.memoryReviews.pending[0]!.id);
     await first.dispose();
 
@@ -147,6 +151,19 @@ describe("production long-term memory", () => {
     expect(latestMain?.some((message) => message.role === "system"
       && message.content.includes("Use pnpm for all repository scripts."))).toBe(true);
     await second.dispose();
+  });
+
+  it("does not auto-extract when the normal task fails", async () => {
+    const root = await workspace({ autoExtract: true, autoExtractMinChars: 200 });
+    const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
+
+    await runtime.session.submit(`FAIL_MAIN ${"durable-looking context ".repeat(20)}`);
+
+    const requests = (globalThis as { __flavorMemoryRequests?: Array<Array<{ content: string }>> })
+      .__flavorMemoryRequests ?? [];
+    expect(requests.some((messages) => messages.some((message) => message.content.includes("Evaluate this completed coding task")))).toBe(false);
+    expect(runtime.memoryReviews.pending).toEqual([]);
+    await runtime.dispose();
   });
 
   it("evaluates only the current task when multiple tasks share one session", async () => {

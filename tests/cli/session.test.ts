@@ -101,6 +101,23 @@ describe("FlavorSession", () => {
     expect(events.slice(-2)).toEqual(["Stop", "SessionEnd"]);
   });
 
+  it("reports a failed Stop outcome when the agent stream returns an error event", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const outcomes: unknown[] = [];
+    base.hooks.on("Stop", (event) => {
+      outcomes.push(event.payload.outcome);
+      return { decision: "allow" };
+    });
+    base.run = async function* () {
+      yield { type: "error", error: { code: "authentication", message: "expired token" } };
+    };
+
+    await new FlavorSession(base).submit("run a task");
+
+    expect(outcomes).toEqual(["failed"]);
+  });
+
   it("queues steering for an active run and follow-up work for after it", async () => {
     const events: string[] = []; const outputs: string[] = [];
     const base = services(events, outputs);
@@ -343,7 +360,7 @@ describe("FlavorSession", () => {
     expect(outputs).toContain("Forgot 1 memory entry.");
   });
 
-  it("finalizes task memory only through the explicit finish command", async () => {
+  it("dispatches the explicit finish command to the task finalizer", async () => {
     const events: string[] = []; const outputs: string[] = [];
     const base = services(events, outputs);
     const finishTask = vi.fn(async () => "Task completed; review 2 memory candidates.");

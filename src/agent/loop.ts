@@ -482,35 +482,49 @@ export class AgentLoop {
       const stagedResults: Array<{ call: (typeof toolCalls)[number]; result: ToolResult }> = [];
       let turnError: ReturnType<typeof normalizeProviderError> | undefined;
       this.#options.runtime.beginTurn();
-      for (let index = 0; index < toolCalls.length; index += 1) {
-        const call = toolCalls[index]!;
+      for (let index = 0; index < toolCalls.length;) {
         if (request.signal?.aborted) {
           turnError = { code: "cancelled", message: abortMessage(request.signal) };
           stageSyntheticResults(toolCalls, index, turnError, stagedMessages);
           break;
         }
-        const label = this.#options.runtime.label(call);
-        const hint = this.#options.runtime.hint(call);
-        this.#options.hallucinationGuard?.recordToolCall(call.name, call.input, call.id);
-        yield { type: "tool-start", id: call.id, name: call.name, input: call.input, ...(label === undefined ? {} : { label }), ...(hint === undefined ? {} : { hint }) };
-        const result = await this.#options.runtime.execute(call, { agent: this.#options.agent, ...(request.signal === undefined ? {} : { signal: request.signal }) });
+        const batchEnd = parallelReadBatchEnd(toolCalls, index);
+        const batch = toolCalls.slice(index, batchEnd);
+        for (const call of batch) {
+          const label = this.#options.runtime.label(call);
+          const hint = this.#options.runtime.hint(call);
+          this.#options.hallucinationGuard?.recordToolCall(call.name, call.input, call.id);
+          yield { type: "tool-start", id: call.id, name: call.name, input: call.input, ...(label === undefined ? {} : { label }), ...(hint === undefined ? {} : { hint }) };
+        }
+        const results = await Promise.all(batch.map(async (call) => ({
+          call,
+          result: await this.#options.runtime.execute(call, {
+            agent: this.#options.agent,
+            ...(request.signal === undefined ? {} : { signal: request.signal }),
+          }),
+        })));
         if (request.signal?.aborted) {
           turnError = { code: "cancelled", message: abortMessage(request.signal) };
-          stagedResults.push({ call, result: { ok: false, error: turnError } });
+          stagedResults.push({ call: batch[0]!, result: { ok: false, error: turnError } });
           stageSyntheticResults(toolCalls, index, turnError, stagedMessages);
           break;
         }
-        try {
-          stagedMessages.push(toolResultMessage(call.id, result));
-          stagedResults.push({ call, result });
-        } catch (error) {
-          turnError = normalizeProviderError(error);
-          stageSyntheticResults(toolCalls, index, {
-            code: "serialization_error",
-            message: turnError.message,
-          }, stagedMessages);
-          break;
+        for (let resultIndex = 0; resultIndex < results.length; resultIndex += 1) {
+          const { call, result } = results[resultIndex]!;
+          try {
+            stagedMessages.push(toolResultMessage(call.id, result));
+            stagedResults.push({ call, result });
+          } catch (error) {
+            turnError = normalizeProviderError(error);
+            stageSyntheticResults(toolCalls, index + resultIndex, {
+              code: "serialization_error",
+              message: turnError.message,
+            }, stagedMessages);
+            break;
+          }
         }
+        if (turnError !== undefined) break;
+        index = batchEnd;
       }
       const assistantMessage: ModelMessage = {
         role: "assistant",
@@ -537,6 +551,25 @@ export class AgentLoop {
       iteration += 1;
     }
   }
+}
+
+const PARALLEL_READ_TOOLS = new Set([
+  "Read",
+  "Glob",
+  "Grep",
+  "LspFindRefs",
+  "LspHover",
+  "LspDiagnostics",
+]);
+
+function parallelReadBatchEnd(
+  calls: readonly { name: string }[],
+  start: number,
+): number {
+  if (!PARALLEL_READ_TOOLS.has(calls[start]!.name)) return start + 1;
+  let end = start + 1;
+  while (end < calls.length && PARALLEL_READ_TOOLS.has(calls[end]!.name)) end += 1;
+  return end;
 }
 
 function toolResultMessage(toolCallId: string, result: ToolResult): ModelMessage {

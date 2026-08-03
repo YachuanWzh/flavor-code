@@ -78,11 +78,6 @@ export class MemoryCoordinator {
     return { evaluated, candidates: accepted, stored };
   }
 
-  /** @deprecated Automatic per-turn extraction is intentionally disabled in V2. */
-  enqueue(_messages: readonly ModelMessage[]): boolean {
-    return false;
-  }
-
   async flush(): Promise<void> { await this.#tail; }
 
   abort(reason: unknown = new Error("Memory coordinator disposed")): void { this.#controller.abort(reason); }

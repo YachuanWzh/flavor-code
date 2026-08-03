@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildSystemPrompt, type SystemPromptOptions } from "../../src/prompts/system.js";
+import { buildCurrentDateSection, buildSystemPrompt, type SystemPromptOptions } from "../../src/prompts/system.js";
 
 const base: Omit<SystemPromptOptions, "agent" | "toolNames"> = {
   languageInstruction: "Always reply in Simplified Chinese.",
@@ -97,7 +97,7 @@ describe("buildSystemPrompt", () => {
       toolNames: new Set(),
     }).at(-1);
 
-    expect(prompt).toContain("- Date: 2026-07-13");
+    expect(prompt).not.toContain("2026-07-13");
     expect(prompt).toContain("- Working directory: C:\\repo ignored");
     expect(prompt).toContain("- Git repository: yes");
     expect(prompt).toContain("- Platform: win32");
@@ -105,6 +105,7 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("- Shell: powershell");
     expect(prompt).toContain("- Model: openai:gpt-5");
     expect(prompt).toContain("- Permission mode: default");
+    expect(buildCurrentDateSection(base.environment.date)).toBe("# Current date\n\n2026-07-13");
   });
 
   it("omits a blank language preference", () => {
