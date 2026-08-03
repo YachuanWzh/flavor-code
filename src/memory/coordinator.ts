@@ -10,6 +10,7 @@ export interface MemoryCoordinatorOptions {
   maxEntryChars: number;
   scoreThreshold: number;
   maxCandidates: number;
+  language?: string;
 }
 
 const MAX_TASK_PROMPT_CHARS = 20_000;
@@ -33,7 +34,7 @@ export class MemoryCoordinator {
     if (!Number.isSafeInteger(options.minChars) || options.minChars < 0) throw new Error("minChars must be a non-negative integer");
     if (!Number.isSafeInteger(options.scoreThreshold) || options.scoreThreshold < 0 || options.scoreThreshold > 12) throw new Error("scoreThreshold must be between 0 and 12");
     if (!Number.isSafeInteger(options.maxCandidates) || options.maxCandidates < 1) throw new Error("maxCandidates must be positive");
-    this.#options = { ...options, minChars: Math.max(200, options.minChars) };
+    this.#options = { ...options, minChars: Math.max(200, options.minChars), maxCandidates: 1 };
   }
 
   async finalize(taskId: string, messages: readonly ModelMessage[]): Promise<MemoryFinalizationResult> {
@@ -57,7 +58,11 @@ export class MemoryCoordinator {
     const operation = this.#tail.then(async () => {
       this.#controller.signal.throwIfAborted();
       const raw = await this.#options.generate(buildMemoryExtractionPrompt(
-        boundTaskMessages(visible), explicit ? { explicitIntent: true } : {},
+        boundTaskMessages(visible), {
+          ...(explicit ? { explicitIntent: true } : {}),
+          ...(this.#options.language === undefined ? {} : { outputLanguage: this.#options.language }),
+          maxCandidates: this.#options.maxCandidates,
+        },
       ), this.#controller.signal);
       const candidates = parseScoredMemoryCandidates(raw, {
         maxEntryChars: this.#options.maxEntryChars,

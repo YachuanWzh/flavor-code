@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { MemoryReviewBridge } from "../../src/memory/review.js";
 
 describe("MemoryReviewBridge", () => {
-  it("stages generated candidates and writes only an explicitly accepted item", async () => {
+  it("stages at most one generated candidate and writes only an explicitly accepted item", async () => {
     const remember = vi.fn(async () => undefined);
     const changed = vi.fn();
     const reviews = new MemoryReviewBridge({ remember, onChange: changed });
@@ -11,17 +11,28 @@ describe("MemoryReviewBridge", () => {
     expect(reviews.offer([
       { type: "project", content: "Use pnpm." },
       { type: "feedback", content: "Do not commit automatically." },
-    ])).toBe(2);
+    ])).toBe(1);
     expect(remember).not.toHaveBeenCalled();
-    expect(reviews.pending).toHaveLength(2);
+    expect(reviews.pending).toHaveLength(1);
 
     const accepted = reviews.pending[0]!;
     await reviews.accept(accepted.id);
 
     expect(remember).toHaveBeenCalledOnce();
     expect(remember).toHaveBeenCalledWith(expect.objectContaining({ type: "project", content: "Use pnpm." }));
-    expect(reviews.pending).toEqual([expect.objectContaining({ type: "feedback" })]);
+    expect(reviews.pending).toEqual([]);
     expect(changed).toHaveBeenCalled();
+  });
+
+  it("dismisses every pending candidate when a new query supersedes the review", () => {
+    const changed = vi.fn();
+    const reviews = new MemoryReviewBridge({ remember: async () => undefined, onChange: changed });
+    reviews.offer([{ type: "project", content: "Use pnpm." }]);
+
+    expect(reviews.dismissAll()).toBe(1);
+    expect(reviews.pending).toEqual([]);
+    expect(changed).toHaveBeenCalledTimes(2);
+    expect(reviews.dismissAll()).toBe(0);
   });
 
   it("dismisses candidates without writing and de-duplicates pending content", async () => {

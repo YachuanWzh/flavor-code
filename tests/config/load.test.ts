@@ -35,7 +35,7 @@ it("uses bounded long-term-memory defaults and validates overrides", () => {
     autoExtract: true,
     autoExtractMinChars: 200,
     scoreThreshold: 9,
-    maxCandidatesPerTask: 3,
+    maxCandidatesPerTask: 1,
     retrievalTopK: 5,
     maxEntries: 200,
     maxEntryChars: 1000,

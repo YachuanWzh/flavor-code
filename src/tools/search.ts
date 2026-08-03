@@ -38,13 +38,17 @@ const FILE_TYPE_EXTENSIONS: Record<FileType, readonly string[]> = {
 
 const GlobInput = z.object({
   pattern: z.string().min(1),
-  path: z.string().min(1).nullable().optional(),
+  path: z.string().min(1)
+    .describe('Workspace-relative search directory. Use JSON null, not the string "null", for the workspace root.')
+    .nullable().optional(),
   limit: z.coerce.number().int().positive().max(100_000).nullable().optional(),
 });
 
 const GrepInput = z.object({
   pattern: z.string().min(1),
-  path: z.string().min(1).nullable().optional(),
+  path: z.string().min(1)
+    .describe('Workspace-relative search path. Use JSON null, not the string "null", for the workspace root.')
+    .nullable().optional(),
   glob: z.string().min(1).nullable().optional(),
   fileType: z.enum(FILE_TYPES).nullable().optional(),
   context: z.coerce.number().int().nonnegative().max(100).nullable().optional(),
@@ -112,13 +116,14 @@ export function createGlobTool(
     name: "Glob",
     description: "Find workspace files matching a glob",
     inputSchema: GlobInput,
-    paths: (input) => [scope(root, input.path ?? undefined)],
-    summarize: (input) => input.path
-      ? `pattern: "${input.pattern}" in ${input.path}`
-      : `pattern: "${input.pattern}"`,
+    paths: (input) => [scope(root, searchPath(input.path))],
+    summarize: (input) => {
+      const path = searchPath(input.path);
+      return path ? `pattern: "${input.pattern}" in ${path}` : `pattern: "${input.pattern}"`;
+    },
     execute: async (input, signal) => {
       const limit = input.limit ?? options.defaultLimit ?? DEFAULT_RESULT_LIMIT;
-      const start = scope(root, input.path ?? undefined);
+      const start = scope(root, searchPath(input.path));
       const matcher = globRegex(input.pattern);
       const ignoreBudget = createIgnoreBudget(resources);
       let paths: string[];
@@ -149,9 +154,10 @@ export function createGrepTool(
     name: "Grep",
     description: `Search workspace text with a regular expression. fileType must be one of: ${FILE_TYPES.join(", ")}.`,
     inputSchema: GrepInput,
-    paths: (input) => [scope(root, input.path ?? undefined)],
+    paths: (input) => [scope(root, searchPath(input.path))],
     summarize: (input) => {
-      const where = input.path ? ` in ${input.path}` : "";
+      const path = searchPath(input.path);
+      const where = path ? ` in ${path}` : "";
       const kind = input.fileType ? ` [${input.fileType}]` : "";
       return `pattern: /${input.pattern}/${kind}${where}`;
     },
@@ -160,7 +166,7 @@ export function createGrepTool(
       const expression = new RegExp(input.pattern);
       const limit = input.limit ?? options.defaultLimit ?? DEFAULT_RESULT_LIMIT;
       const context = input.context ?? 0;
-      const start = await resolveGrepPath(root, input.path ?? undefined);
+      const start = await resolveGrepPath(root, searchPath(input.path));
       const ignoreBudget = createIgnoreBudget(resources);
       let matches: GrepMatch[];
       if (options.forceNode === true) {
@@ -551,6 +557,10 @@ function expandBraces(pattern: string): string[] {
 
 function typeExtension(type: string): readonly string[] | undefined {
   return FILE_TYPE_EXTENSIONS[type as FileType];
+}
+
+function searchPath(path: string | null | undefined): string | undefined {
+  return path?.trim().toLowerCase() === "null" ? undefined : path ?? undefined;
 }
 
 function scope(root: string, path = "."): string {

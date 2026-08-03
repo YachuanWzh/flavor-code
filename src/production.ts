@@ -652,7 +652,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       minChars: config.memory.autoExtractMinChars,
       maxEntryChars: config.memory.maxEntryChars,
       scoreThreshold: config.memory.scoreThreshold,
-      maxCandidates: config.memory.maxCandidatesPerTask,
+      maxCandidates: Math.min(config.memory.maxCandidatesPerTask, 1),
+      ...(config.language === undefined ? {} : { language: config.language }),
       generate: (prompt, signal) => generateMemoryExtraction(registry, childModel, prompt, signal),
     })
     : undefined;
@@ -687,6 +688,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     const prompt = String(event.payload.prompt);
     timelineState = transcriptReducer(timelineState, { type: "submit", prompt });
     automaticMemoryTask = !prompt.startsWith("/");
+    if (automaticMemoryTask) memoryReviews.dismissAll();
     if (!prompt.startsWith("/") && memoryLifecycle.status === "completed") {
       memoryLifecycle = {
         status: "active", taskId: createMemoryTaskId(),

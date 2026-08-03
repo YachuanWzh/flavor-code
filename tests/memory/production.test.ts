@@ -12,7 +12,7 @@ afterEach(async () => {
   delete (globalThis as { __flavorMemoryRequests?: unknown }).__flavorMemoryRequests;
 });
 
-async function workspace(memory: Record<string, unknown>): Promise<string> {
+async function workspace(memory: Record<string, unknown>, config: Record<string, unknown> = {}): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "flavor-memory-production-")); roots.push(root);
   const pluginRoot = join(root, ".flavor", "plugins", "memory-model");
   await mkdir(pluginRoot, { recursive: true });
@@ -20,6 +20,7 @@ async function workspace(memory: Record<string, unknown>): Promise<string> {
     providers: { capture: { type: "plugin", defaultModel: "main", cheapModel: "child" } },
     agents: { main: { model: "capture:main" }, subagent: { model: "capture:child" } },
     memory,
+    ...config,
   }));
   await writeFile(join(pluginRoot, "flavor-plugin.json"), JSON.stringify({
     name: "memory-model", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
@@ -31,7 +32,14 @@ async function workspace(memory: Record<string, unknown>): Promise<string> {
       globalThis.__flavorMemoryRequests.push(request.messages);
       const text = request.messages.map((message) => message.content).join("\\n");
       if (text.includes("Evaluate this completed coding task")) {
-        yield { type: "text", text: '{"memories":[{"type":"project","summary":"Use pnpm for repository scripts","content":"Use pnpm for all repository scripts.","topicKey":"project.package-manager","keywords":["pnpm","scripts","package manager"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":2}}]}' };
+        const memories = text.includes("NO_MEMORY") ? [] : text.includes("zh-CN") ? [
+          {"type":"project","summary":"仓库脚本使用 pnpm","content":"本项目的所有仓库脚本统一使用 pnpm。","topicKey":"project.package-manager","keywords":["pnpm","仓库脚本"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":2}},
+          {"type":"feedback","summary":"回答保持简洁","content":"回答用户时保持简洁。","topicKey":"user.response-style","keywords":["简洁"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":2}}
+        ] : [
+          {"type":"project","summary":"Use pnpm for repository scripts","content":"Use pnpm for all repository scripts.","topicKey":"project.package-manager","keywords":["pnpm","scripts","package manager"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":2}},
+          {"type":"feedback","summary":"Keep answers concise","content":"Keep answers concise for the user.","topicKey":"user.response-style","keywords":["concise"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":2}}
+        ];
+        yield { type: "text", text: JSON.stringify({ memories }) };
       } else if (text.includes("FAIL_MAIN")) {
         yield { type: "error", error: { code: "authentication", message: "simulated main-model failure" } };
         return;
@@ -130,6 +138,7 @@ describe("production long-term memory", () => {
 
     const store = new MemoryStore({ workspace: root, maxEntries: 200, maxEntryChars: 1000 });
     expect(await store.list()).toEqual([]);
+    expect(first.memoryReviews.pending).toHaveLength(1);
     expect(first.memoryReviews.pending).toMatchObject([{ type: "project", content: "Use pnpm for all repository scripts." }]);
     const extractionCount = ((globalThis as { __flavorMemoryRequests?: Array<Array<{ content: string }>> })
       .__flavorMemoryRequests ?? []).filter((messages) => messages.some((message) => message.content.includes("Evaluate this completed coding task"))).length;
@@ -151,6 +160,34 @@ describe("production long-term memory", () => {
     expect(latestMain?.some((message) => message.role === "system"
       && message.content.includes("Use pnpm for all repository scripts."))).toBe(true);
     await second.dispose();
+  });
+
+  it("uses the configured language for generated memory fields", async () => {
+    const root = await workspace({ autoExtract: true }, { language: "zh-CN" });
+    const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
+
+    await runtime.session.submit(`Record the durable package-manager convention. ${"Useful task context. ".repeat(12)}`);
+
+    expect(runtime.memoryReviews.pending).toEqual([
+      expect.objectContaining({ type: "project", content: "本项目的所有仓库脚本统一使用 pnpm。", summary: "仓库脚本使用 pnpm" }),
+    ]);
+    const requests = (globalThis as { __flavorMemoryRequests?: Array<Array<{ content: string }>> })
+      .__flavorMemoryRequests ?? [];
+    expect(requests.some((messages) => messages.some((message) => message.content.includes("zh-CN")))).toBe(true);
+    await runtime.dispose();
+  });
+
+  it("invalidates and hides pending reviews when the user sends a new query", async () => {
+    const root = await workspace({ autoExtract: true });
+    const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
+    await runtime.session.submit(`First durable task. ${"Useful durable context. ".repeat(12)}`);
+    const oldReview = runtime.memoryReviews.pending[0]!;
+
+    await runtime.session.submit(`NO_MEMORY New unrelated query. ${"Transient context. ".repeat(12)}`);
+
+    expect(runtime.memoryReviews.pending).toEqual([]);
+    await expect(runtime.memoryReviews.accept(oldReview.id)).resolves.toBe(false);
+    await runtime.dispose();
   });
 
   it("does not auto-extract when the normal task fails", async () => {

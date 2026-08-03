@@ -38,6 +38,7 @@ export class MemoryReviewBridge {
     const candidates = typeof taskIdOrCandidates === "string" ? scoredCandidates ?? [] : taskIdOrCandidates;
     let added = 0;
     for (const candidate of candidates) {
+      if (this.#pending.length >= 1) break;
       const content = normalizeMemoryContent(candidate.content);
       const duplicate = this.#pending.some((item) => item.type === candidate.type
         && normalizeMemoryContent(item.content).toLocaleLowerCase() === content.toLocaleLowerCase());
@@ -71,10 +72,16 @@ export class MemoryReviewBridge {
     return this.#remove(id);
   }
 
-  dispose(): void {
-    if (this.#pending.length === 0) return;
+  dismissAll(): number {
+    const count = this.#pending.length;
+    if (count === 0) return 0;
     this.#pending = [];
     this.#onChange?.();
+    return count;
+  }
+
+  dispose(): void {
+    this.dismissAll();
   }
 
   #remove(id: string): boolean {

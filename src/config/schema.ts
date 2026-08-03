@@ -91,7 +91,7 @@ export const FlavorConfigSchema = z.object({
       autoExtract: z.boolean().default(true),
       autoExtractMinChars: z.number().int().min(200).max(100_000).default(200),
       scoreThreshold: z.number().int().min(0).max(12).default(9),
-      maxCandidatesPerTask: z.number().int().min(1).max(10).default(3),
+      maxCandidatesPerTask: z.number().int().min(1).max(10).default(1),
       retrievalTopK: z.number().int().min(1).max(20).default(5),
       maxEntries: z.number().int().min(1).max(10_000).default(200),
       maxEntryChars: z.number().int().min(32).max(20_000).default(1_000),

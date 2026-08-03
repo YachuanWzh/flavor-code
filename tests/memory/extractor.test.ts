@@ -8,10 +8,13 @@ describe("memory extraction", () => {
       { role: "user", content: "Please remember that this repository uses pnpm." },
       { role: "assistant", content: "Understood." },
       { role: "tool", content: "secret tool output", toolCallId: "call" },
-    ]);
+    ], { outputLanguage: "zh-CN", maxCandidates: 1 });
 
     expect(prompt).toContain("user | feedback | project | reference");
     expect(prompt).toContain("Do not retain secrets");
+    expect(prompt).toContain("zh-CN");
+    expect(prompt).toContain("Return at most 1 candidate");
+    expect(prompt).toContain("Preserve code identifiers, commands, paths, URLs");
     expect(prompt).toContain("this repository uses pnpm");
     expect(prompt).not.toContain("secret tool output");
   });

@@ -78,6 +78,22 @@ describe("search tools", () => {
     expect(node).toEqual(ripgrep);
   });
 
+  it('treats the string "null" as an omitted search path without weakening workspace containment', async () => {
+    const root = fixture();
+    const signal = new AbortController().signal;
+    const globInput = { pattern: "**/*.ts", path: "null" };
+    const grepInput = { pattern: "needle", path: "null", glob: "**/*.ts" };
+
+    expect(await createGlobTool(root, { forceNode: true }).execute(globInput, signal))
+      .toEqual(await createGlobTool(root).execute(globInput, signal));
+    expect(await createGrepTool(root, { forceNode: true }).execute(grepInput, signal))
+      .toEqual(await createGrepTool(root).execute(grepInput, signal));
+    await expect(createGlobTool(root, { forceNode: true }).execute(
+      { pattern: "**/*.ts", path: "../outside" },
+      signal,
+    )).rejects.toThrow("Path is outside the workspace");
+  });
+
   it("supports brace globs and common file-type filters in Node mode", async () => {
     const root = mkdtempSync(join(tmpdir(), "flavor-search-types-"));
     writeFileSync(join(root, "a.rs"), "needle rust\n");
