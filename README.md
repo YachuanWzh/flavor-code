@@ -9,7 +9,7 @@
 
 `flavor-code` 是一个同时提供终端界面与 Electron 桌面应用的 AI 编程助手。它接入大语言模型（OpenAI GPT、Anthropic Claude 或任何兼容服务），能理解你的项目结构，在工作区范围内安全操作文件，甚至能把复杂任务拆成多块，分给多个"小助手"并行处理。
 
-当前稳定版本：**1.1.6**
+当前稳定版本：**1.1.7**
 
 ## 它能做什么
 
@@ -24,6 +24,7 @@
 - **长任务不中断** — 上下文快满时自动压缩旧消息并生成工作摘要，检测到活跃进度时自动扩展迭代上限
 - **跨会话长期记忆** — 自动保留少量用户偏好、项目约定和行为反馈，新会话不必重复说明
 - **插件和 Skill** — 通过插件扩展功能，通过 Skill（技能包）教它新的工作流
+- **Agent 自注册工具** — 任务中用自然语言描述一个可复用能力，Agent 创建 `RegisterTool` 持久工具，同一次任务立刻可用，无需重启
 - **MCP 服务管理** — CLI 与 Electron 共享项目级配置，可添加、编辑、启停和删除 stdio / HTTP 服务
 - **审计日志** — 所有工具执行失败都会被记录到 `.flavor/audit.jsonl`
 - **事故上报与 RCA** — 工具执行失败自动上报到 langgraph-claw 告警管道，P0 级错误触发自动根因分析（Auto-RCA）
@@ -466,7 +467,7 @@ npm run desktop:dist     # 生成 Windows NSIS 安装包
 Windows 打包产物位于：
 
 - 免安装目录：`release/win-unpacked/Flavor Code.exe`
-- NSIS 安装包：`release/Flavor-Code-1.1.6-x64.exe`
+- NSIS 安装包：`release/Flavor-Code-1.1.7-x64.exe`
 
 模型配置仍读取全局 `~/.flavor-code/flavor.json`、项目 `.flavor/flavor.json`、`.env` 和环境变量，因此 CLI 与桌面端可以共享配置与会话。生产版桌面窗口启用了 `contextIsolation` 和 Chromium 沙箱，关闭了渲染进程的 Node.js 集成；文件、命令和 Agent 操作只通过显式 IPC 接口进入主进程。Windows 的 `desktop:dev` 为兼容工作区内 Chromium 子进程启动，仅在本地开发启动器中使用 `--no-sandbox`，打包产物不携带该参数。
 
@@ -768,6 +769,45 @@ flavor skills enable code-review
 插件放在 `.flavor/plugins/` 下，可以注册自定义命令、工具、Hook、Skill 根目录等。插件命令可以直接通过 `/command-name` 调用。
 
 > ⚠️ 插件是进程内运行的 Node.js 代码，不是沙箱隔离。请只加载你信任的插件。
+
+### Agent 自注册工具与热加载
+
+CLI 和桌面端都向主 Agent 提供三个管理工具：`RegisterTool`、`RemoveTool` 和 `ListRegisteredTools`。它们是 Agent 可调用的结构化工具，不是 `/registerTool` 斜杠命令。直接用自然语言说明要创建的持久能力即可，例如：
+
+```text
+创建一个项目级工具 EchoUpper，参数是字符串 text，返回它的大写形式；创建后马上调用它处理 "flavor code"。
+```
+
+Agent 会生成 JSON Schema 和 async JavaScript 实现，申请写入权限，然后调用 `RegisterTool`。注册成功后，无需重启或输入 `/reload`，同一次任务的下一次模型调用就能看到并调用 `EchoUpper`。项目工具保存在 `.flavor/tools/`；要求 `scope: "global"` 时保存在 `~/.flavor-code/tools/`，以后启动仍会加载。
+
+工具实现接收三个变量：`input` 是已按 JSON Schema 校验的参数，`signal` 用于取消，`context` 包含 `workspace`、`scope` 和 `toolName`。`implementation` 既可以是必须显式 `return` 的函数体，也可以是完整的普通函数、async 函数或箭头函数表达式；这些形式都可以使用 `await import("node:...")`。等价的注册内容示例：
+
+```json
+{
+  "name": "EchoUpper",
+  "description": "Uppercase the provided text",
+  "inputSchema": {
+    "type": "object",
+    "properties": { "text": { "type": "string" } },
+    "required": ["text"],
+    "additionalProperties": false
+  },
+  "implementation": "return { value: input.text.toUpperCase() };",
+  "scope": "project",
+  "agents": ["main"]
+}
+```
+
+管理同样使用自然语言：
+
+```text
+列出你注册过的持久工具。
+删除项目级 EchoUpper 工具。
+```
+
+注册是仅新增语义，不会覆盖已有工具。需要修改时，先用 `RemoveTool` 删除，再重新注册。删除只允许作用于这套机制创建的记录，不会删除内置、插件或 MCP 工具。Agent 也可能在长任务中发现明确、可复用的重复操作后建议自动创建工具，但一次性操作不应持久化；写入和删除仍经过正常权限确认。
+
+> ⚠️ 自注册工具与普通插件一样，是进程内运行的可信 JavaScript，不是安全沙箱。确认注册前应审阅 Agent 展示的用途和权限请求；首次调用自定义工具也会按当前权限策略进行确认。
 
 ---
 

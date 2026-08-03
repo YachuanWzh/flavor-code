@@ -146,6 +146,29 @@ describe("PermissionEngine", () => {
       .decide({ agent: "subagent", tool }).decision).toBe("ask");
   });
 
+  it("classifies managed-tool registration, removal, and listing by their durable effects", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-managed-permissions-"));
+    const outside = mkdtempSync(join(tmpdir(), "flavor-managed-global-"));
+    const projectPath = join(workspace, ".flavor", "tools", "echo.json");
+    const globalPath = join(outside, ".flavor-code", "tools", "echo.json");
+
+    expect(getToolCategory("RegisterTool")).toBe("write");
+    expect(getToolCategory("RemoveTool")).toBe("destructive");
+    expect(getToolCategory("ListRegisteredTools")).toBe("read");
+    expect(new PermissionEngine({ workspace, mode: "default" })
+      .decide({ agent: "main", tool: "RegisterTool", paths: [projectPath] }).decision).toBe("ask");
+    expect(new PermissionEngine({ workspace, mode: "acceptEdits" })
+      .decide({ agent: "main", tool: "RegisterTool", paths: [projectPath] }).decision).toBe("allow");
+    expect(new PermissionEngine({ workspace, mode: "acceptEdits" })
+      .decide({ agent: "main", tool: "RegisterTool", paths: [globalPath] }).decision).toBe("ask");
+    expect(new PermissionEngine({ workspace, mode: "default" })
+      .decide({ agent: "main", tool: "RemoveTool", paths: [projectPath] }).decision).toBe("ask");
+    expect(new PermissionEngine({ workspace, mode: "bypassPermissions" })
+      .decide({ agent: "main", tool: "RemoveTool", paths: [projectPath] }).decision).toBe("allow");
+    expect(new PermissionEngine({ workspace, mode: "plan" })
+      .decide({ agent: "main", tool: "ListRegisteredTools" }).decision).toBe("allow");
+  });
+
   it("detects destructive and opaque commands behind wrappers", () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-workspace-"));
     const engine = new PermissionEngine({ workspace, mode: "full" });

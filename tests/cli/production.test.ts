@@ -654,4 +654,84 @@ describe("production runtime", () => {
     expect((globalThis as Record<string, unknown>).brokenToolDisposed).toBe(true);
     delete (globalThis as Record<string, unknown>).brokenToolDisposed;
   });
+
+  it("hot-loads a registered tool in the same run and restores it after restart", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-managed-tool-")); roots.push(workspace);
+    const pluginRoot = join(workspace, ".flavor", "plugins", "managed-tool-model");
+    await mkdir(pluginRoot, { recursive: true });
+    await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
+      permissionMode: "bypassPermissions",
+      providers: { capture: { type: "plugin", defaultModel: "main", cheapModel: "child" } },
+      agents: { main: { model: "capture:main" }, subagent: { model: "capture:child" } },
+    }));
+    await writeFile(join(pluginRoot, "flavor-plugin.json"), JSON.stringify({
+      name: "managed-tool-model", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
+      contributes: { commands: [], tools: [], hooks: [], skillRoots: [], modelAdapters: [{ name: "capture" }] },
+    }));
+    await writeFile(join(pluginRoot, "index.mjs"), `export function activate(ctx) {
+      ctx.registerModelAdapter("capture", { async *stream(request) {
+        globalThis.__flavorManagedSnapshots ??= [];
+        globalThis.__flavorManagedSnapshots.push(request.tools.map((tool) => tool.name));
+        if (globalThis.__flavorManagedRestart === true) {
+          yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
+          return;
+        }
+        const call = globalThis.__flavorManagedSnapshots.length;
+        if (call === 1) {
+          yield { type: "tool-call", id: "register-1", name: "RegisterTool", input: {
+            name: "EchoUpper",
+            description: "Uppercase text",
+            inputSchema: {
+              type: "object",
+              properties: { text: { type: "string" } },
+              required: ["text"],
+              additionalProperties: false,
+            },
+            implementation: "async (input) => ({ value: input.text.toUpperCase() })",
+            scope: "project",
+            agents: ["main"],
+          }};
+        } else if (call === 2) {
+          yield { type: "tool-call", id: "echo-1", name: "EchoUpper", input: { text: "flavor" } };
+        } else {
+          globalThis.__flavorManagedResult = request.messages.findLast((message) => message.role === "tool")?.content;
+          yield { type: "text", text: "done" };
+        }
+        yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
+      }});
+    }`);
+    const state = globalThis as typeof globalThis & {
+      __flavorManagedSnapshots?: string[][];
+      __flavorManagedResult?: string;
+      __flavorManagedRestart?: boolean;
+    };
+    delete state.__flavorManagedSnapshots;
+    delete state.__flavorManagedResult;
+    delete state.__flavorManagedRestart;
+
+    const first = await createProductionRuntime({ workspace, home: workspace, environment: {}, output: () => {} });
+    const firstSubmission = first.session.submit("create and use a reusable uppercase tool");
+    await vi.waitFor(() => expect(first.approvals.pending?.tool).toBe("EchoUpper"));
+    first.approvals.resolve("once");
+    await firstSubmission;
+    expect(state.__flavorManagedSnapshots).toHaveLength(3);
+    expect(state.__flavorManagedSnapshots?.[0]).toContain("RegisterTool");
+    expect(state.__flavorManagedSnapshots?.[0]).not.toContain("EchoUpper");
+    expect(state.__flavorManagedSnapshots?.[1]).toContain("EchoUpper");
+    expect(state.__flavorManagedResult).toContain("FLAVOR");
+    expect(JSON.parse(await readFile(
+      join(workspace, ".flavor", "tools", "echoupper.json"), "utf8",
+    ))).toMatchObject({ name: "EchoUpper" });
+    await first.dispose();
+
+    state.__flavorManagedRestart = true;
+    state.__flavorManagedSnapshots = [];
+    const restarted = await createProductionRuntime({ workspace, home: workspace, environment: {}, output: () => {} });
+    await restarted.session.submit("show available tools");
+    expect(state.__flavorManagedSnapshots?.[0]).toContain("EchoUpper");
+    await restarted.dispose();
+    delete state.__flavorManagedSnapshots;
+    delete state.__flavorManagedResult;
+    delete state.__flavorManagedRestart;
+  });
 });

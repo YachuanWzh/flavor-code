@@ -21,13 +21,14 @@ export interface PermissionEngineOptions {
 }
 
 const CONTROL_TOOLS = new Set(["TaskPlan", "TaskUpdate", "AskUserQuestion", "TodoWrite", "TaskOutput"]);
-const READ_TOOLS = new Set(["Read", "Glob", "Grep", "Search", "List", "SkillResource", "LspFindRefs", "LspHover", "LspDiagnostics"]);
-const WRITE_TOOLS = new Set(["Write", "Edit", "ApplyPatch", "Copy", "Mkdir"]);
-const DESTRUCTIVE_TOOLS = new Set(["Delete", "Move"]);
+const READ_TOOLS = new Set(["Read", "Glob", "Grep", "Search", "List", "SkillResource", "LspFindRefs", "LspHover", "LspDiagnostics", "ListRegisteredTools"]);
+const WRITE_TOOLS = new Set(["Write", "Edit", "ApplyPatch", "Copy", "Mkdir", "RegisterTool"]);
+const DESTRUCTIVE_TOOLS = new Set(["Delete", "Move", "RemoveTool"]);
 const SHELL_TOOLS = new Set(["Shell", "Bash", "Command", "Exec"]);
 const NETWORK_TOOLS = new Set(["WebFetch", "WebSearch", "Fetch", "Network"]);
 const PATH_REQUIRED_TOOLS = new Set([
   "Read", "Write", "Edit", "ApplyPatch", "Glob", "Grep", "Delete", "Move", "Copy", "Mkdir",
+  "RegisterTool", "RemoveTool",
 ]);
 
 export type ToolCategory = "control" | "read" | "write" | "destructive" | "shell" | "network" | "unknown";

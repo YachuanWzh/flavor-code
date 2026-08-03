@@ -48,7 +48,7 @@ describe("buildSystemPrompt", () => {
       toolNames: new Set([
         "Read", "Write", "Edit", "ApplyPatch", "Glob", "Grep", "Shell",
         "AskUserQuestion", "TodoWrite", "TaskPlan", "TaskUpdate", "Task",
-        "TaskOutput", "SkillResource",
+        "TaskOutput", "SkillResource", "RegisterTool", "RemoveTool", "ListRegisteredTools",
       ]),
     }).join("\n\n");
     const readOnly = buildSystemPrompt({
@@ -60,12 +60,15 @@ describe("buildSystemPrompt", () => {
     for (const name of [
       "Read", "Write", "Edit", "ApplyPatch", "Glob", "Grep", "Shell",
       "AskUserQuestion", "TodoWrite", "TaskPlan", "TaskUpdate", "Task",
-      "TaskOutput", "SkillResource",
+      "TaskOutput", "SkillResource", "RegisterTool", "RemoveTool", "ListRegisteredTools",
     ]) expect(allTools).toContain(`\`${name}\``);
     expect(allTools).toContain("exact context has one unique nearby match");
     expect(allTools).toContain("never construct paths from memory");
     expect(allTools).toContain("copy `oldText` verbatim");
     expect(allTools).toContain("never pass absolute paths outside");
+    expect(allTools).toContain("next model step");
+    expect(allTools).toContain("one-off");
+    expect(allTools).toContain("delete and register again");
     expect(readOnly).toContain("`Read`");
     for (const name of ["Shell", "Task", "TodoWrite", "AskUserQuestion"]) {
       expect(readOnly).not.toContain(`\`${name}\``);

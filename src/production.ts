@@ -60,6 +60,7 @@ import { createLspTools } from "./tools/lsp.js";
 import { createAskUserQuestionTool, QuestionBridge, type AskUserQuestionHandler } from "./tools/ask-user-question.js";
 import { createTaskOutputTool } from "./tools/task-output.js";
 import { createTodoWriteTool } from "./tools/todo-write.js";
+import { createManagedToolManagementTools, ManagedToolStore } from "./tools/managed.js";
 import type { ToolDefinition } from "./tools/types.js";
 import { FlavorSession, type SessionOutput, type SessionServices } from "./ui/session.js";
 import { createTranscriptState, restoreTranscriptState, transcriptReducer, type TranscriptState } from "./ui/transcript.js";
@@ -272,6 +273,36 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     createTaskOutputTool(),
     createTodoWriteTool(),
   ];
+  const managedToolStore = new ManagedToolStore({ workspace, home });
+  await managedToolStore.load();
+  diagnostics.push(...managedToolStore.diagnostics);
+  let managedTools: ToolDefinition<unknown>[] = [];
+  let harness!: LocalHarness;
+  let harnessCreated = false;
+  const syncManagedTools = (): void => {
+    for (const tool of managedTools) remove(tools, tool);
+    managedTools = [];
+    for (const tool of managedToolStore.definitions()) {
+      const conflict = tools.find((candidate) => sameToolName(candidate.name, tool.name));
+      if (conflict !== undefined) {
+        const diagnostic = `Managed tool "${tool.name}" conflicts with existing tool "${conflict.name}" and was skipped`;
+        if (!diagnostics.includes(diagnostic)) diagnostics.push(diagnostic);
+        continue;
+      }
+      tools.push(tool);
+      managedTools.push(tool);
+    }
+    if (harnessCreated) harness.replaceMainTools(tools);
+  };
+  tools.push(...createManagedToolManagementTools({
+    store: managedToolStore,
+    conflict: (name) => {
+      const existing = tools.find((candidate) => sameToolName(candidate.name, name));
+      return existing === undefined ? undefined : `existing tool "${existing.name}"`;
+    },
+    onChanged: syncManagedTools,
+  }));
+  syncManagedTools();
   const pluginSkillRoots: string[] = [];
   const pluginHooks: HookEventName[] = [];
   const pluginCommands = new Map<string, PluginCommandHandler>();
@@ -315,8 +346,6 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     emitLifecycle: async (type, plugin) => { await hooks.emit({ version: 1, type, payload: { name: plugin.name, version: plugin.version } }); },
   });
   await pluginHost.loadAll();
-  let harness!: LocalHarness;
-  let harnessCreated = false;
   let sleepScheduler: ProjectSleepScheduler | undefined;
   try {
   mcpManager = await connectMcpServers({
@@ -1739,6 +1768,7 @@ async function optionalText(path: string): Promise<string | undefined> {
 }
 
 function remove<T>(items: T[], item: T): void { const index = items.indexOf(item); if (index >= 0) items.splice(index, 1); }
+function sameToolName(left: string, right: string): boolean { return left.toLowerCase() === right.toLowerCase(); }
 function storedConversation(snapshot: ContextSnapshot): SessionDocument["conversation"] {
   return {
     ...(snapshot.compact === undefined ? {} : { compact: snapshot.compact }),
