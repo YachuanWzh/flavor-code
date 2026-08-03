@@ -252,13 +252,14 @@ describe("transcriptReducer", () => {
     let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "/compact" });
     state = transcriptReducer(state, { type: "session", event: { type: "compact-progress", progress: 10 } });
     state = transcriptReducer(state, { type: "session", event: { type: "compact-progress", progress: 40 } });
+    state = transcriptReducer(state, { type: "session", event: { type: "compact-progress", progress: 100 } });
 
     expect(state.active?.blocks).toEqual([{
       kind: "status",
       id: "compact:progress",
-      state: "running",
+      state: "completed",
       text: "Compacting context",
-      progress: 40,
+      progress: 100,
     }]);
   });
 

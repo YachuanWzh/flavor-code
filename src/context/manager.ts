@@ -243,7 +243,14 @@ export class ContextManager {
       this.#lastRecordedInputTokens = undefined;
       this.#estimatedTokensAtLastRecordedUsage = undefined;
     }
-    if (!this.needsCompaction()) return microcompact.changed;
+    if (!this.needsCompaction()) {
+      if (microcompact.changed) {
+        this.#lastCompactProgress = undefined;
+        this.#reportCompactProgress(0);
+        this.#reportCompactProgress(100);
+      }
+      return microcompact.changed;
+    }
     if (this.#consecutiveAutoCompactFailures >= 3) {
       rollbackMicrocompact();
       return false;

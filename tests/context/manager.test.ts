@@ -267,10 +267,12 @@ describe("ContextManager", () => {
 
   it("microcompacts old tool results before paying for a full summary", async () => {
     let summaries = 0;
+    const progress: number[] = [];
     const context = createContext({
       compactAtChars: 700,
       toolOutputChars: 1_000,
       summarize: async () => { summaries += 1; return "not needed"; },
+      onCompactProgress: (percentage) => { progress.push(percentage); },
       compaction: {
         microcompactKeepRecentToolResults: 1,
       },
@@ -283,6 +285,7 @@ describe("ContextManager", () => {
     expect(await context.prepareForModelCall()).toBe(true);
 
     expect(summaries).toBe(0);
+    expect(progress).toEqual([0, 100]);
     expect(context.messagesForModel().find((message) => message.toolCallId === "old")?.content).toContain("cleared");
     expect(context.messagesForModel().find((message) => message.toolCallId === "new")?.content).toBe("y".repeat(400));
   });
