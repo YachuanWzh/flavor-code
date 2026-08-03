@@ -1,12 +1,16 @@
 import { dirname } from "node:path";
 import { readRecoverableFile, updateProtectedFile } from "../config/protected-file.js";
 import { decryptDocument, encryptDocument, loadOrCreateConfigKey } from "../config/secret-envelope.js";
+import { isOAuthLlmConfig } from "./oauth-config.js";
+import type { OAuthLlmConfig } from "./types.js";
 
 export interface StoredToken {
   accessToken: string;
   refreshToken?: string;
   expiresAt: string; // ISO 8601
   scope?: string;
+  configVersion?: number;
+  llmConfig?: OAuthLlmConfig;
 }
 
 export interface OAuthTokenStore {
@@ -68,7 +72,9 @@ function sameToken(left: StoredToken | undefined, right: StoredToken): boolean {
     && left.accessToken === right.accessToken
     && left.refreshToken === right.refreshToken
     && left.expiresAt === right.expiresAt
-    && left.scope === right.scope;
+    && left.scope === right.scope
+    && left.configVersion === right.configVersion
+    && JSON.stringify(left.llmConfig) === JSON.stringify(right.llmConfig);
 }
 
 function isStoredToken(value: unknown): value is StoredToken {
@@ -79,6 +85,10 @@ function isStoredToken(value: unknown): value is StoredToken {
     typeof (value as StoredToken).accessToken === "string" &&
     (value as StoredToken).accessToken.length > 0 &&
     "expiresAt" in value &&
-    typeof (value as StoredToken).expiresAt === "string"
+    typeof (value as StoredToken).expiresAt === "string" &&
+    (!("configVersion" in value) || (value as StoredToken).configVersion === undefined
+      || (Number.isInteger((value as StoredToken).configVersion) && (value as StoredToken).configVersion! >= 1)) &&
+    (!("llmConfig" in value) || (value as StoredToken).llmConfig === undefined
+      || isOAuthLlmConfig((value as StoredToken).llmConfig))
   );
 }

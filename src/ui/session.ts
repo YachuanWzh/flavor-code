@@ -44,6 +44,7 @@ export interface SessionServices {
   workspace: string;
   mainModel(): string;
   subagentModel(): string;
+  llmServiceName?(): string | undefined;
   permissionMode(): PermissionMode;
   run(
     prompt: string,

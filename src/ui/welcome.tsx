@@ -4,6 +4,7 @@ import { Box, Text } from "../claude-ink/index.js";
 
 export interface WelcomeCardProps {
   model: string;
+  serviceName?: string;
   workspaceName: string;
   columns: number;
 }
@@ -16,7 +17,7 @@ const FLAVOR_WORDMARK = [
   "└  ┴─┘┴ ┴ └┘ └─┘┴└─",
 ].join("\n");
 
-export function WelcomeCard({ model, workspaceName, columns }: WelcomeCardProps): React.JSX.Element {
+export function WelcomeCard({ model, serviceName, workspaceName, columns }: WelcomeCardProps): React.JSX.Element {
   const wide = Math.max(1, Math.floor(columns)) >= WIDE_WELCOME_COLUMNS;
 
   return <Box width="100%" borderStyle="round" borderColor="yellow" paddingX={1}>
@@ -34,6 +35,7 @@ export function WelcomeCard({ model, workspaceName, columns }: WelcomeCardProps)
       >
         <Text bold color="yellowBright">Welcome back!</Text>
         <Text color={FLAVOR_ACCENT}>{FLAVOR_WORDMARK}</Text>
+        {serviceName === undefined ? null : <Text color="cyan" wrap="truncate-end">{serviceName}</Text>}
         <Text dimColor wrap="truncate-end">{model}</Text>
         <Text dimColor wrap="truncate-end">{workspaceName}</Text>
       </Box>

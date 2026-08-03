@@ -34,7 +34,7 @@ export interface HallucinationGuardConfig {
 
 export class HallucinationGuard {
   readonly #registry: ModelRegistry;
-  readonly #cheapModelId: string;
+  #cheapModelId: string;
   readonly #confidenceThreshold: number;
   readonly #evaluationTimeoutMs: number;
   readonly #retryMonitor: RetryMonitor;
@@ -58,6 +58,8 @@ export class HallucinationGuard {
     if (config.threshold !== undefined) retryConfig.threshold = config.threshold;
     this.#retryMonitor = new RetryMonitor(retryConfig);
   }
+
+  setModel(modelId: string): void { this.#cheapModelId = modelId; }
 
   recordToolCall(toolName: string, params: unknown, callId?: string): void {
     const resolvedCallId = callId ?? this.#createLegacyCallId(toolName);

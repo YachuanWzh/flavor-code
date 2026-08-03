@@ -45,6 +45,11 @@ export class GoalOrchestrator {
     this.#options = options;
   }
 
+  setModels(plannerModelId: string, classifierModelId: string): void {
+    this.#options.plannerModelId = plannerModelId;
+    this.#options.classifierModelId = classifierModelId;
+  }
+
   async *run(request: { goal: string; signal: AbortSignal }): AsyncIterable<GoalRuntimeEvent> {
     const timestamp = (): string => this.#options.now?.() ?? new Date().toISOString();
     const createdAt = timestamp();

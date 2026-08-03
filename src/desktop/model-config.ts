@@ -1,6 +1,8 @@
 import { loadConfig, setGlobalProviderConfig, setProjectProviderConfig } from "../config/load.js";
 import type { ProviderConfig } from "../config/schema.js";
 import type { AddDesktopModelInput, DesktopModelOption } from "./contracts.js";
+import { createFileTokenStore } from "../auth/store.js";
+import { join } from "node:path";
 
 export const DEFAULT_DESKTOP_MODELS: readonly DesktopModelOption[] = [
   {
@@ -22,6 +24,31 @@ export const DEFAULT_DESKTOP_MODELS: readonly DesktopModelOption[] = [
 ];
 
 export async function loadDesktopModels(workspace: string, home: string): Promise<DesktopModelOption[]> {
+  try {
+    const tokens = await createFileTokenStore(join(home, ".flavor-code", "auth.json")).load();
+    const pkceModels: DesktopModelOption[] = [];
+    const knownPkce = new Set<string>();
+    for (const token of Object.values(tokens)) {
+      if (token.llmConfig === undefined || new Date(token.expiresAt).getTime() <= Date.now()) continue;
+      for (const model of token.llmConfig.models) {
+        const id = `${token.llmConfig.providerId}:${model}`;
+        if (knownPkce.has(id)) continue;
+        knownPkce.add(id);
+        pkceModels.push({
+          id,
+          provider: token.llmConfig.providerId,
+          model,
+          label: `${token.llmConfig.serviceName} · ${model}`,
+          description: `PKCE · ${protocolLabel(token.llmConfig.apiType)}`,
+          source: "custom",
+        });
+      }
+    }
+    if (pkceModels.length > 0) return pkceModels;
+  } catch {
+    // A damaged credential cache is reported by runtime authentication; model
+    // discovery can still fall back to project configuration here.
+  }
   const { config } = await loadConfig({ cwd: workspace, home });
   const models = [...DEFAULT_DESKTOP_MODELS];
   const known = new Set(models.map((model) => model.id));

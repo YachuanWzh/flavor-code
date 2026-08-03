@@ -1,19 +1,20 @@
 {
   "providers": {
-    "anthropic": {
-      "type": "anthropic",
-      "baseURL": "${ANTHROPIC_BASE_URL}",
-      "defaultModel": "deepseek-v4-flash",
-      "cheapModel": "deepseek-v4-flash",
-      "maxOutputTokens": 65536
+    "pkce": {
+      "type": "oauth-callback",
+      "apiType": "anthropic",
+      "authorizationUrl": "http://192.168.5.7:8091/authorize",
+      "tokenUrl": "http://192.168.5.7:8091/token",
+      "clientId": "flavor-code-cli",
+      "scope": "models:read models:use"
     }
   },
   "agents": {
     "main": {
-      "model": "anthropic:deepseek-v4-flash"
+      "model": "pkce:bootstrap"
     },
     "subagent": {
-      "model": "anthropic:deepseek-v4-flash"
+      "model": "pkce:bootstrap"
     }
   },
   "mcpServers": {},

@@ -5,6 +5,7 @@ import { URL, URLSearchParams } from "node:url";
 
 import type { AuthProvider, AuthResult } from "./types.js";
 import type { OAuthTokenStore } from "./store.js";
+import { parseOAuthLlmConfig } from "./oauth-config.js";
 
 export interface OAuthCallbackAuthProviderOptions {
   authorizationUrl: string;
@@ -47,8 +48,16 @@ export class OAuthCallbackAuthProvider implements AuthProvider {
     this.#callbackHost = options.callbackHost ?? process.env.OAUTH_CALLBACK_HOST ?? "127.0.0.1";
   }
 
-  async resolve(providerId: string, signal?: AbortSignal): Promise<AuthResult> {
+  async resolve(providerId: string, signal?: AbortSignal, forceRefresh = false): Promise<AuthResult> {
     signal?.throwIfAborted();
+
+    if (forceRefresh) {
+      const tokens = await this.#store.load();
+      if (tokens[providerId] !== undefined) {
+        delete tokens[providerId];
+        await this.#store.save(tokens);
+      }
+    }
 
     const cached = await this.#loadCachedToken(providerId);
     if (cached !== undefined) return cached;
@@ -81,6 +90,8 @@ export class OAuthCallbackAuthProvider implements AuthProvider {
       return {
         headers: { authorization: `Bearer ${entry.accessToken}` },
         expiresAt: entry.expiresAt,
+        ...(entry.configVersion === undefined ? {} : { configVersion: entry.configVersion }),
+        ...(entry.llmConfig === undefined ? {} : { llmConfig: entry.llmConfig }),
       };
     }
 
@@ -114,6 +125,8 @@ export class OAuthCallbackAuthProvider implements AuthProvider {
     const code = await callbackResult.promise;
 
     const tokenResponse = await this.#exchangeCode(code, codeVerifier, callbackResult.redirectUri, signal);
+    const llmConfig = tokenResponse.llm_config === undefined
+      ? undefined : parseOAuthLlmConfig(tokenResponse.llm_config);
 
     const expiresAt = tokenResponse.expires_in !== undefined
       ? new Date(Date.now() + tokenResponse.expires_in * 1000).toISOString()
@@ -125,12 +138,16 @@ export class OAuthCallbackAuthProvider implements AuthProvider {
       ...(tokenResponse.refresh_token === undefined ? {} : { refreshToken: tokenResponse.refresh_token }),
       expiresAt,
       ...(this.#scope === undefined ? {} : { scope: this.#scope }),
+      ...(tokenResponse.config_version === undefined ? {} : { configVersion: tokenResponse.config_version }),
+      ...(llmConfig === undefined ? {} : { llmConfig }),
     };
     await this.#store.save(tokens);
 
     return {
       headers: { authorization: `Bearer ${tokenResponse.access_token}` },
       expiresAt,
+      ...(tokenResponse.config_version === undefined ? {} : { configVersion: tokenResponse.config_version }),
+      ...(llmConfig === undefined ? {} : { llmConfig }),
     };
   }
 
@@ -266,6 +283,8 @@ interface TokenResponse {
   token_type: string;
   expires_in?: number;
   refresh_token?: string;
+  config_version?: number;
+  llm_config?: unknown;
 }
 
 interface TokenErrorResponse {

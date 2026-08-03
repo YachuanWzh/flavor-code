@@ -1,6 +1,19 @@
 export interface AuthResult {
   headers: Record<string, string>;
   expiresAt?: string;
+  configVersion?: number;
+  llmConfig?: OAuthLlmConfig;
+}
+
+export interface OAuthLlmConfig {
+  providerId: string;
+  serviceName: string;
+  apiType: "openai" | "anthropic";
+  baseURL: string;
+  defaultModel: string;
+  cheapModel: string;
+  models: string[];
+  maxOutputTokens?: number;
 }
 
 export interface AuthProvider {

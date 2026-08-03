@@ -103,6 +103,17 @@ describe("OAuthCallbackAuthProvider", () => {
           access_token: lastIssuedToken,
           token_type: "Bearer",
           expires_in: 3600,
+          config_version: 7,
+          llm_config: {
+            provider_id: "deepseek",
+            service_name: "Enterprise DeepSeek",
+            api_type: "anthropic",
+            base_url: "http://127.0.0.1:8092",
+            default_model: "deepseek-v4-pro",
+            cheap_model: "deepseek-v4-flash",
+            models: ["deepseek-v4-pro", "deepseek-v4-flash"],
+            max_output_tokens: 65536,
+          },
         }));
       });
     });
@@ -149,6 +160,17 @@ describe("OAuthCallbackAuthProvider", () => {
     const expires = new Date(result.expiresAt!).getTime();
     expect(expires).toBeGreaterThan(Date.now());
     expect(expires).toBeLessThan(Date.now() + 3700_000);
+    expect(result.configVersion).toBe(7);
+    expect(result.llmConfig).toEqual({
+      providerId: "deepseek",
+      serviceName: "Enterprise DeepSeek",
+      apiType: "anthropic",
+      baseURL: "http://127.0.0.1:8092",
+      defaultModel: "deepseek-v4-pro",
+      cheapModel: "deepseek-v4-flash",
+      models: ["deepseek-v4-pro", "deepseek-v4-flash"],
+      maxOutputTokens: 65536,
+    });
   });
 
   it("caches the token and returns it on subsequent calls", async () => {
@@ -159,6 +181,15 @@ describe("OAuthCallbackAuthProvider", () => {
     const second = await provider.resolve("my-provider");
     expect(second.headers.authorization).toBe(firstToken);
     expect(issuedTokenCount).toBe(1);
+    expect(second.llmConfig?.defaultModel).toBe("deepseek-v4-pro");
+  });
+
+  it("forces a fresh authorization flow for explicit login", async () => {
+    const provider = createProvider();
+    await provider.resolve("my-provider");
+    const refreshed = await provider.resolve("my-provider", undefined, true);
+    expect(issuedTokenCount).toBe(2);
+    expect(refreshed.headers.authorization).toBe(`Bearer ${lastIssuedToken}`);
   });
 
   it("re-runs PKCE flow when cached token is expired", async () => {

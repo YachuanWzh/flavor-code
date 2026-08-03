@@ -744,8 +744,10 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     columns={columns}
     rows={rows}
   />;
+  const llmServiceName = runtime.services.llmServiceName?.();
   return <TerminalLayout
     model={runtime.services.mainModel()}
+    {...(llmServiceName === undefined ? {} : { serviceName: llmServiceName })}
     workspaceName={basename(workspace)}
     completed={transcript.completed}
     {...(transcript.active === undefined ? {} : { active: transcript.active })}
@@ -793,6 +795,7 @@ function StartingLayout({
 
 export interface TerminalLayoutProps {
   model: string;
+  serviceName?: string;
   workspaceName: string;
   completed: TranscriptTurn[];
   active?: TranscriptTurn;
@@ -823,7 +826,7 @@ export interface TerminalLayoutProps {
 }
 
 export function TerminalLayout({
-  model, workspaceName, completed, active, input, pastedBlocks = [], imageAttachments = [], clipboardNotice,
+  model, serviceName, workspaceName, completed, active, input, pastedBlocks = [], imageAttachments = [], clipboardNotice,
   promptCursor, columns, rows = 24, activeSession, pendingPrompt, approval,
   questions, memoryReviews = [], questionIndex = 0, questionAnswers = {}, customQuestionActive = false,
   completion, mentionCompletion, onMentionSelect, completedSlashTokenLength: tokenLength = 0, scrollRef,
@@ -859,7 +862,7 @@ export function TerminalLayout({
   return <Box height={rows} width="100%" flexDirection="column" overflow="hidden">
     <ScrollBox {...(scrollRef === undefined ? {} : { ref: scrollRef })} flexGrow={1} flexDirection="column" stickyScroll>
       {showWelcome
-        ? <WelcomeCard model={model} workspaceName={workspaceName} columns={columns} />
+        ? <WelcomeCard model={model} {...(serviceName === undefined ? {} : { serviceName })} workspaceName={workspaceName} columns={columns} />
         : <Text dimColor>{"flavor · "}{model}{" · "}{workspaceName}</Text>}
       <Box height={1} />
       {completed.map((turn, index) => (

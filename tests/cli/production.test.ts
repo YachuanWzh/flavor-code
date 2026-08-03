@@ -2,15 +2,107 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 
 import { createProductionRuntime, createPromptEnvironment } from "../../src/production.js";
 import { SessionStore } from "../../src/session/store.js";
 import { writeFile, mkdir } from "node:fs/promises";
+import { createFileTokenStore } from "../../src/auth/store.js";
+import { oauthCredentialId } from "../../src/auth/oauth-config.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("production runtime", () => {
+  it("uses PKCE runtime metadata instead of stale project model fields", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pkce-")); roots.push(workspace);
+    await mkdir(join(workspace, ".flavor"), { recursive: true });
+    const tokenUrl = "https://auth.example.test/token";
+    await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
+      providers: { company: {
+        type: "oauth-callback", authorizationUrl: "https://auth.example.test/authorize",
+        tokenUrl, clientId: "flavor-code-cli", defaultModel: "stale-main", cheapModel: "stale-child",
+      } },
+      agents: { main: { model: "company:stale-main" }, subagent: { model: "company:stale-child" } },
+    }));
+    const store = createFileTokenStore(join(workspace, ".flavor-code", "auth.json"));
+    await store.save({
+      [oauthCredentialId(tokenUrl, "flavor-code-cli")]: {
+        accessToken: "signed-gateway-jwt", expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        configVersion: 4,
+        llmConfig: {
+          providerId: "deepseek", serviceName: "Enterprise DeepSeek", apiType: "anthropic",
+          baseURL: "http://127.0.0.1:8092", defaultModel: "deepseek-v4-pro",
+          cheapModel: "deepseek-v4-flash", models: ["deepseek-v4-pro", "deepseek-v4-flash"],
+          maxOutputTokens: 65536,
+        },
+      },
+    });
+
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, approvalPolicy: "deny", output: () => {},
+    });
+    expect(runtime.services.mainModel()).toBe("deepseek:deepseek-v4-pro");
+    expect(runtime.services.subagentModel()).toBe("deepseek:deepseek-v4-flash");
+    expect(runtime.services.config()).toMatchObject({
+      effectiveLlm: { serviceName: "Enterprise DeepSeek", baseURL: "http://127.0.0.1:8092", configVersion: 4 },
+    });
+    await runtime.dispose();
+  });
+
+  it("sends the PKCE model name and JWT to the configured gateway", async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown>; apiKey?: string }> = [];
+    const gateway = createServer((request, response) => {
+      let raw = "";
+      request.on("data", (chunk: Buffer) => { raw += chunk.toString("utf8"); });
+      request.on("end", () => {
+        requests.push({
+          url: request.url ?? "", body: JSON.parse(raw),
+          ...(request.headers["x-api-key"] === undefined ? {} : { apiKey: String(request.headers["x-api-key"]) }),
+        });
+        response.writeHead(200, { "Content-Type": "text/event-stream" });
+        response.end([
+          'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":3,"output_tokens":0}}}\n',
+          'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n',
+          'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n',
+          'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+        ].join("\n"));
+      });
+    });
+    await new Promise<void>((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+    const port = (gateway.address() as AddressInfo).port;
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pkce-call-")); roots.push(workspace);
+    await mkdir(join(workspace, ".flavor"), { recursive: true });
+    const tokenUrl = "https://auth.example.test/token";
+    await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
+      providers: { company: { type: "oauth-callback", authorizationUrl: "https://auth.example.test/authorize", tokenUrl, clientId: "flavor-code-cli" } },
+      agents: { main: { model: "company:stale" }, subagent: { model: "company:stale-child" } },
+      memory: { enabled: false }, hallucination: { showWarnings: false }, sleep: false,
+    }));
+    await createFileTokenStore(join(workspace, ".flavor-code", "auth.json")).save({
+      [oauthCredentialId(tokenUrl, "flavor-code-cli")]: {
+        accessToken: "signed-gateway-jwt", expiresAt: new Date(Date.now() + 3600_000).toISOString(), configVersion: 9,
+        llmConfig: {
+          providerId: "deepseek", serviceName: "Enterprise DeepSeek", apiType: "anthropic",
+          baseURL: `http://127.0.0.1:${port}`, defaultModel: "deepseek-v4-pro", cheapModel: "deepseek-v4-flash",
+          models: ["deepseek-v4-pro", "deepseek-v4-flash"], maxOutputTokens: 1024,
+        },
+      },
+    });
+    const runtime = await createProductionRuntime({ workspace, home: workspace, environment: {}, approvalPolicy: "deny", output: () => {} });
+    try {
+      await runtime.session.submit("answer briefly");
+      expect(runtime.services.mainModel()).toBe("deepseek:deepseek-v4-pro");
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toMatchObject({
+        url: "/v1/messages", apiKey: "signed-gateway-jwt", body: { model: "deepseek-v4-pro" },
+      });
+    } finally {
+      await runtime.dispose();
+      await new Promise<void>((resolve) => gateway.close(() => resolve()));
+    }
+  }, 15_000);
   it("creates deterministic prompt environment data with explicit fallbacks", () => {
     expect(createPromptEnvironment({
       now: new Date("2026-07-13T23:59:00.000Z"),

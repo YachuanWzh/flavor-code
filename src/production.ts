@@ -37,6 +37,8 @@ import { connectMcpServers, McpManager, type McpClientFactory, type McpServerSum
 import { connectSdkMcpClient } from "./mcp/sdk.js";
 import { OAuthCallbackAuthProvider } from "./auth/oauth.js";
 import { createFileTokenStore } from "./auth/store.js";
+import { oauthCredentialId } from "./auth/oauth-config.js";
+import type { AuthResult, OAuthLlmConfig } from "./auth/types.js";
 import type { PermissionRequest } from "./permissions/engine.js";
 import { buildSubagentDirective, buildSystemPrompt, type PromptEnvironment } from "./prompts/system.js";
 import type { ApprovalDecision } from "./tools/runtime.js";
@@ -309,7 +311,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const mcpTools: ToolDefinition<unknown>[] = [];
   let mcpManager: McpManager | undefined;
 
-  const registeredProviders = await registerConfiguredAdapters(config.providers, registry, environment, diagnostics, home);
+  const registration = await registerConfiguredAdapters(config.providers, registry, environment, diagnostics, home);
+  const registeredProviders = registration.registered;
+  let effectiveLlm = registration.effectiveLlm;
 
   const pluginHost = new PluginHost({
     globalPluginDirs: [join(home, ".flavor-code", "plugins")],
@@ -392,8 +396,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     }
   }
   const selectedModels = selectModels(config, registeredProviders, diagnostics);
-  const mainModel = recovered?.models.main ?? selectedModels.main;
-  const childModel = recovered?.models.subagent ?? selectedModels.child;
+  let mainModel = effectiveLlm === undefined ? (recovered?.models.main ?? selectedModels.main) : selectedModels.main;
+  let childModel = effectiveLlm === undefined ? (recovered?.models.subagent ?? selectedModels.child) : selectedModels.child;
   let taskPlan: TaskPlan | undefined = recovered?.tasks.plan;
   let taskGraph: TaskGraph | undefined = recovered?.tasks.graph;
   let taskStates: Record<string, "pending" | "running" | "completed" | "failed" | "blocked" | "cancelled"> = { ...(recovered?.tasks.states ?? {}) };
@@ -901,6 +905,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     hooks, workspace,
     mainModel: () => harness.mainModelId,
     subagentModel: () => harness.subagentModelId,
+    llmServiceName: () => effectiveLlm?.serviceName,
     permissionMode: () => harness.permissionMode,
     run: (prompt, signal, runOptions) => persistAndCheckpointAfter(runMain(
       harness, skills, prompt, signal, selectedModels.mainError,
@@ -958,12 +963,21 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         ? `${action} ${targets.length} MCP server${targets.length === 1 ? "" : "s"}.`
         : `${action} MCP server "${command.target}".`;
     },
-    setModel: async (role, id) => { harness.setModel(role, id); await persist(); },
+    setModel: async (role, id) => {
+      if (effectiveLlm !== undefined) {
+        const parsed = parseModelId(id);
+        if (parsed.provider !== effectiveLlm.providerId || !effectiveLlm.models.includes(parsed.model)) {
+          throw new Error(`Model "${id}" is not allowed by the current PKCE configuration.`);
+        }
+      }
+      harness.setModel(role, id); await persist();
+    },
     setPermissionMode: async (mode) => { harness.setPermissionMode(mode); await persist(); },
     compact: async (signal) => { const changed = await harness.main.context.compact(signal); if (changed) await persist(); return changed; },
     initialize: () => initializeFlavor(workspace, config),
     config: () => ({
       ...config, sources: loaded.sources,
+      ...(effectiveLlm === undefined ? {} : { effectiveLlm: publicEffectiveLlm(effectiveLlm) }),
       diagnostics: [...diagnostics, ...pluginHost.diagnostics.map((item) => `${item.plugin}: ${item.message}`),
         ...skills.diagnostics.map((item) => `${item.path}: ${item.message}`)].map((item) => redactSecrets(item, secrets)),
     }),
@@ -1131,9 +1145,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       // Pick the provider to authenticate: prefer the main agent's provider
       let providerName: string | undefined;
       let providerConfig: ProviderRuntimeConfig | undefined;
-      const mainModel = config.agents?.main?.model;
-      if (mainModel !== undefined) {
-        const mainProvider = safeProvider(mainModel);
+      const configuredMainModel = config.agents?.main?.model;
+      if (configuredMainModel !== undefined) {
+        const mainProvider = safeProvider(configuredMainModel);
         if (config.providers[mainProvider] !== undefined) {
           providerName = mainProvider;
           providerConfig = config.providers[mainProvider];
@@ -1157,6 +1171,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
 
       try {
         const tokenStore = createFileTokenStore(join(home, ".flavor-code", "auth.json"));
+        const credentialId = oauthCredentialId(oauthConfig.tokenUrl, oauthConfig.clientId);
+        await migrateLegacyOAuthToken(tokenStore, providerName, credentialId);
         const oauth = new OAuthCallbackAuthProvider({
           authorizationUrl: oauthConfig.authorizationUrl,
           tokenUrl: oauthConfig.tokenUrl,
@@ -1164,8 +1180,32 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
           ...(oauthConfig.scope === undefined ? {} : { scope: oauthConfig.scope }),
           store: tokenStore,
         });
-        const result = await oauth.resolve(providerName);
-        return `Authenticated to "${providerName}". Token expires ${result.expiresAt ?? "unknown"}. Restart flavor-code for the new token to take effect.`;
+        const result = await oauth.resolve(credentialId, undefined, true);
+        if (result.llmConfig === undefined) {
+          return `Authenticated to "${providerName}". Token expires ${result.expiresAt ?? "unknown"}.`;
+        }
+        const next = effectiveRuntime(result, credentialId);
+        const provider = providerFromOAuthConfig(next);
+        const adapterOptions = {
+          apiKey: next.accessToken,
+          baseURL: next.baseURL,
+          ...(next.maxOutputTokens === undefined ? {} : { maxOutputTokens: next.maxOutputTokens }),
+        };
+        registry.register(next.providerId, next.apiType === "anthropic"
+          ? new AnthropicModelAdapter(adapterOptions)
+          : new OpenAIModelAdapter(adapterOptions));
+        effectiveLlm = next;
+        mainModel = `${next.providerId}:${next.defaultModel}`;
+        childModel = `${next.providerId}:${next.cheapModel}`;
+        harness.setModel("main", mainModel);
+        harness.setModel("subagent", childModel);
+        hallucinationGuard.setModel(childModel);
+        goalOrchestrator.setModels(mainModel, mainModel);
+        delete selectedModels.mainError;
+        delete selectedModels.childError;
+        if (!secrets.includes(next.accessToken)) secrets.push(next.accessToken);
+        await persist();
+        return `Authenticated to "${next.serviceName}". Main model ${mainModel}; subagent ${childModel}; gateway ${next.baseURL}. Configuration is active now.`;
       } catch (error) {
         return `Login failed: ${message(error)}`;
       }
@@ -1497,16 +1537,20 @@ async function registerConfiguredAdapters(
   environment: NodeJS.ProcessEnv,
   diagnostics: string[],
   home: string,
-): Promise<RegisteredProvider[]> {
+): Promise<{ registered: RegisteredProvider[]; effectiveLlm?: EffectiveLlmRuntime }> {
   const configured = { ...providers };
   if (configured.openai === undefined && environment.OPENAI_API_KEY) configured.openai = { type: "openai", apiKey: environment.OPENAI_API_KEY };
   if (configured.anthropic === undefined && environment.ANTHROPIC_API_KEY) configured.anthropic = { type: "anthropic", apiKey: environment.ANTHROPIC_API_KEY };
   const oauthTokenStore = createFileTokenStore(join(home, ".flavor-code", "auth.json"));
   const registered: RegisteredProvider[] = [];
+  let effectiveLlm: EffectiveLlmRuntime | undefined;
   for (const [name, provider] of Object.entries(configured)) {
     try {
       // Step 1: Determine the API protocol from provider type
       let apiProtocol: "openai" | "anthropic";
+      let runtimeName = name;
+      let runtimeProvider: ProviderRuntimeConfig = provider;
+      let authResult: AuthResult | undefined;
       if (provider.type === "oauth-callback") {
         apiProtocol = provider.apiType ?? "openai";
       } else if (provider.type === "openai" || provider.type === "openai-compatible") {
@@ -1533,8 +1577,17 @@ async function registerConfiguredAdapters(
             ...(oauthConfig.scope === undefined ? {} : { scope: oauthConfig.scope }),
             store: oauthTokenStore,
           });
-          const result = await oauth.resolve(name);
+          const credentialId = oauthCredentialId(oauthConfig.tokenUrl, oauthConfig.clientId);
+          await migrateLegacyOAuthToken(oauthTokenStore, name, credentialId);
+          const result = await oauth.resolve(credentialId);
+          authResult = result;
           apiKey = result.headers.authorization?.replace(/^Bearer /, "") ?? "";
+          if (result.llmConfig !== undefined) {
+            apiProtocol = result.llmConfig.apiType;
+            runtimeName = result.llmConfig.providerId;
+            runtimeProvider = providerFromOAuthConfig(result.llmConfig);
+            effectiveLlm ??= effectiveRuntime(result, credentialId);
+          }
         }
 
         // Fallback to environment variables
@@ -1566,18 +1619,23 @@ async function registerConfiguredAdapters(
       // Step 3: Create the adapter
       const adapterOptions = {
         apiKey,
-        ...(provider.baseURL === undefined ? {} : { baseURL: provider.baseURL }),
-        ...(provider.maxOutputTokens === undefined ? {} : { maxOutputTokens: provider.maxOutputTokens }),
+        ...(runtimeProvider.baseURL === undefined ? {} : { baseURL: runtimeProvider.baseURL }),
+        ...(runtimeProvider.maxOutputTokens === undefined ? {} : { maxOutputTokens: runtimeProvider.maxOutputTokens }),
       };
       const adapter: ModelAdapter = apiProtocol === "anthropic"
         ? new AnthropicModelAdapter(adapterOptions)
         : new OpenAIModelAdapter(adapterOptions);
 
-      registry.register(name, adapter);
-      registered.push({ name, ...provider });
+      registry.register(runtimeName, adapter);
+      registered.push({
+        name: runtimeName,
+        sourceName: name,
+        ...runtimeProvider,
+        ...(authResult?.llmConfig === undefined ? {} : { pkceManaged: true }),
+      });
     } catch (error) { diagnostics.push(`Provider "${name}" could not start: ${message(error)}`); }
   }
-  return registered;
+  return { registered, ...(effectiveLlm === undefined ? {} : { effectiveLlm }) };
 }
 
 interface ProviderRuntimeConfig {
@@ -1587,6 +1645,7 @@ interface ProviderRuntimeConfig {
   defaultModel?: string | undefined;
   cheapModel?: string | undefined;
   maxOutputTokens?: number | undefined;
+  models?: string[] | undefined;
   // OAuth PKCE fields — all have built-in defaults when type=oauth-callback
   apiType?: "openai" | "anthropic" | undefined;
   authorizationUrl?: string | undefined;
@@ -1638,13 +1697,74 @@ function resolveOAuthConfig(provider: ProviderRuntimeConfig): ResolvedOAuthConfi
   // If the user set them, they want PKCE regardless of provider type.
   return getOAuthDefaults();
 }
-interface RegisteredProvider extends ProviderRuntimeConfig { name: string }
+interface RegisteredProvider extends ProviderRuntimeConfig {
+  name: string;
+  sourceName?: string;
+  pkceManaged?: boolean;
+}
+
+interface EffectiveLlmRuntime extends OAuthLlmConfig {
+  credentialId: string;
+  configVersion: number;
+  accessToken: string;
+}
+
+async function migrateLegacyOAuthToken(
+  store: ReturnType<typeof createFileTokenStore>,
+  legacyId: string,
+  credentialId: string,
+): Promise<void> {
+  const tokens = await store.load();
+  if (tokens[credentialId] !== undefined || tokens[legacyId] === undefined) return;
+  tokens[credentialId] = tokens[legacyId]!;
+  delete tokens[legacyId];
+  await store.save(tokens);
+}
+
+function providerFromOAuthConfig(config: OAuthLlmConfig): ProviderRuntimeConfig {
+  return {
+    type: config.apiType === "anthropic" ? "anthropic" : "openai-compatible",
+    apiType: config.apiType,
+    baseURL: config.baseURL,
+    defaultModel: config.defaultModel,
+    cheapModel: config.cheapModel,
+    models: config.models,
+    ...(config.maxOutputTokens === undefined ? {} : { maxOutputTokens: config.maxOutputTokens }),
+  };
+}
+
+function effectiveRuntime(result: AuthResult, credentialId: string): EffectiveLlmRuntime {
+  if (result.llmConfig === undefined) throw new Error("PKCE token did not include llm_config");
+  if (result.configVersion === undefined) throw new Error("PKCE token did not include config_version");
+  const accessToken = result.headers.authorization?.replace(/^Bearer /, "");
+  if (!accessToken) throw new Error("PKCE token did not include an access token");
+  return {
+    ...result.llmConfig,
+    credentialId,
+    configVersion: result.configVersion,
+    accessToken,
+  };
+}
+
+function publicEffectiveLlm(value: EffectiveLlmRuntime): Omit<EffectiveLlmRuntime, "accessToken" | "credentialId"> {
+  const { accessToken: _accessToken, credentialId: _credentialId, ...visible } = value;
+  return visible;
+}
 
 function selectModels(
   config: { agents?: { main?: { model: string } | undefined; subagent?: { model: string } | undefined } | undefined; providers: Record<string, ProviderRuntimeConfig> },
   registered: readonly RegisteredProvider[], diagnostics: string[],
 ): { main: string; child: string; mainError?: string; childError?: string } {
   const configuredMain = config.agents?.main?.model;
+  const configuredProviderName = configuredMain === undefined ? undefined : safeProvider(configuredMain);
+  const pkce = registered.find((item) => item.pkceManaged
+    && (configuredProviderName === undefined || item.sourceName === configuredProviderName || item.name === configuredProviderName));
+  if (pkce !== undefined) {
+    return {
+      main: `${pkce.name}:${pkce.defaultModel}`,
+      child: `${pkce.name}:${pkce.cheapModel}`,
+    };
+  }
   const provider = configuredMain === undefined
     ? registered[0]
     : registered.find((item) => item.name === safeProvider(configuredMain));
