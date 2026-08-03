@@ -9,7 +9,7 @@
 
 `flavor-code` 是一个同时提供终端界面与 Electron 桌面应用的 AI 编程助手。它接入大语言模型（OpenAI GPT、Anthropic Claude 或任何兼容服务），能理解你的项目结构，在工作区范围内安全操作文件，甚至能把复杂任务拆成多块，分给多个"小助手"并行处理。
 
-当前稳定版本：**1.1.7**
+当前稳定版本：**1.1.8**
 
 ## 它能做什么
 
@@ -33,6 +33,7 @@
 - **可逆会话树** — 为上下文和工作区创建内容寻址 checkpoint，可 rewind、unrevert，并从历史节点继续分支
 - **SDK、JSONL RPC 与 Eval** — Node 调用方、IDE 和自动化评测共用同一套生产运行时
 - **图片上传与多模态** — CLI 中 Ctrl+V 粘贴剪贴板图片、桌面端文件选择器上传，支持 PNG/JPEG/WebP，每张 ≤5MB，去重存储，作为 user 消息的一部分发送给视觉模型分析 UI 截图、设计稿或错误日志
+- **PKCE 运行时 LLM 配置管理** — OAuth 令牌可随登录下发实际模型、网关地址与可用模型列表，运行时动态切换主/子 Agent 模型，`/login` 立即生效无需重启，项目文件不被改写
 - **Docker 沙箱** — 可选择让 Shell、自治 loop 及其验证命令在无网络、只读根文件系统的容器中运行
 
 ### 子 Agent 字节级提示词缓存（0.8.0）
@@ -382,8 +383,10 @@ sequenceDiagram
 | `tokenUrl` | 是 | 授权服务器的 `/token` 端点 |
 | `clientId` | 是 | 在授权服务器注册的客户端标识 |
 | `scope` | 否 | 空格分隔的权限范围，默认 `"models:read models:use"` |
-| `defaultModel` | 是 | 主 Agent 使用的模型 |
-| `cheapModel` | 是 | 子 Agent 使用的模型 |
+| `defaultModel` | 否 | 主 Agent 的默认模型；PKCE 令牌未下发 `llm_config` 时生效 |
+| `cheapModel` | 否 | 子 Agent 的默认模型；PKCE 令牌未下发 `llm_config` 时生效 |
+
+> **1.1.8 起，`defaultModel` / `cheapModel` 变为可选**：授权服务器可在令牌响应中下发 `llm_config`（模型、网关地址、API 协议等）。登录后这些运行时配置会优先于 `flavor.json` 中的 provider 连接与模型字段，详见下方 [PKCE 运行时配置管理](#pkce-运行时配置管理118)。
 
 #### 方式二：环境变量内建默认值
 
@@ -424,6 +427,32 @@ export OAUTH_SCOPE="models:read models:use"
 8. 后续 3 天内重启 flavor 无需再次授权
 
 Token 缓存文件位于 `~/.flavor-code/auth.json`。
+
+### PKCE 运行时配置管理（1.1.8）
+
+1.1.8 起，flavor-code 支持由 OAuth 令牌**运行时下发**实际的 LLM 配置：模型、网关地址、API 协议和可用模型列表都可以随 PKCE 登录一并下发，项目文件不会被登录改写。
+
+**工作原理：**
+
+1. 授权服务器在 `/token` 响应中携带 `config_version` 和 `llm_config` 字段，后者包含 `provider_id`、`service_name`、`api_type`、`base_url`、`default_model`、`cheap_model`、`models` 和可选的 `max_output_tokens`
+2. 令牌校验通过后，Flavor 在启动时加载该配置并生成一个**有效运行时 provider**，其优先级高于项目或全局 `flavor.json` 中的 provider 连接与模型字段；主 Agent、子 Agent、重试、权限分类、幻觉检查、记忆提取、上下文压缩、睡眠回顾和 goal 规划全部改用这份动态配置
+3. 每次 SDK 请求使用运行时动态获取的 API Key（即 OAuth access token）和网关 baseURL；`/config` 只暴露脱敏后的有效配置视图
+4. UI 的欢迎卡片同时展示 PKCE 服务名称与生效模型；Desktop 的模型列表优先展示 PKCE 令牌中的可用模型
+5. 切换模型时校验合法性——只能选择 PKCE 令牌 `models` 列表内的模型
+
+**登录后立即生效：**
+
+```text
+/login
+```
+
+显式执行 `/login` 会绕过有效缓存令牌，重新完成 PKCE 授权，并立即替换适配器、切换主/子 Agent 模型、更新 UI 状态，**无需重启**。
+
+**会话恢复与兼容：**
+
+- 恢复会话时，若已存储的模型 ID 与当前令牌的 `config_version` 不一致或模型已不在允许列表内，则该模型 ID 被忽略
+- 令牌凭据身份由「令牌端点 + client ID」派生，不同 PKCE 服务互不冲突；旧版以 provider 名称存储的令牌会在启动时自动迁移
+- `llm_config` 缺失的令牌保持旧版 OAuth 行为（使用 `flavor.json` 中的模型配置）
 
 ### 常见问题
 
@@ -467,7 +496,7 @@ npm run desktop:dist     # 生成 Windows NSIS 安装包
 Windows 打包产物位于：
 
 - 免安装目录：`release/win-unpacked/Flavor Code.exe`
-- NSIS 安装包：`release/Flavor-Code-1.1.7-x64.exe`
+- NSIS 安装包：`release/Flavor-Code-1.1.8-x64.exe`
 
 模型配置仍读取全局 `~/.flavor-code/flavor.json`、项目 `.flavor/flavor.json`、`.env` 和环境变量，因此 CLI 与桌面端可以共享配置与会话。生产版桌面窗口启用了 `contextIsolation` 和 Chromium 沙箱，关闭了渲染进程的 Node.js 集成；文件、命令和 Agent 操作只通过显式 IPC 接口进入主进程。Windows 的 `desktop:dev` 为兼容工作区内 Chromium 子进程启动，仅在本地开发启动器中使用 `--no-sandbox`，打包产物不携带该参数。
 
