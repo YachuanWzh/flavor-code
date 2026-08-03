@@ -14,8 +14,6 @@ export interface SystemPromptOptions {
   agent: PromptAgentRole;
   languageInstruction?: string;
   workspace: string;
-  model: string;
-  permissionMode: PermissionMode;
   toolNames: ReadonlySet<string>;
   environment: PromptEnvironment;
 }
@@ -39,6 +37,18 @@ export function buildSystemPrompt(options: SystemPromptOptions): string[] {
 
 export function buildCurrentDateSection(date: string): string {
   return `# Current date\n\n${data(date)}`;
+}
+
+/**
+ * Volatile runtime values that change with /model or /permission commands.
+ * Kept out of the stable system prefix so those switches do not invalidate
+ * the prompt-cache prefix.
+ */
+export function buildRuntimeEnvironmentSection(options: {
+  model: string;
+  permissionMode: PermissionMode;
+}): string {
+  return `# Runtime environment\n\n- Model: ${data(options.model)}\n- Permission mode: ${options.permissionMode}`;
 }
 
 export function buildSubagentDirective(): string {
@@ -142,9 +152,7 @@ function environmentSection(options: SystemPromptOptions): string {
 - Git repository: ${git}
 - Platform: ${data(options.environment.platform)}
 - OS version: ${data(options.environment.osVersion)}
-- Shell: ${data(options.environment.shell)}
-- Model: ${data(options.model)}
-- Permission mode: ${options.permissionMode}`;
+- Shell: ${data(options.environment.shell)}`;
 }
 
 function addToolRule(rules: string[], toolNames: ReadonlySet<string>, name: string, rule: string): void {

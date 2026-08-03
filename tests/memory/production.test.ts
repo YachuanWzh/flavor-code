@@ -110,7 +110,8 @@ describe("production long-term memory", () => {
       content: expect.stringContaining("Always address the user as 亚川 in every response."),
       cacheBreakpoint: true,
     });
-    expect(system.at(-1)?.content).toMatch(/^# Current date/);
+    expect(system.some((message) => message.content.startsWith("# Current date"))).toBe(true);
+    expect(system.at(-1)?.content).toMatch(/^# Runtime environment/);
     expect((await store.references()).find((reference) => reference.type === "user")?.recallTotal).toBe(1);
 
     await runtime.services.remember("user", "Prefer concise answers.");

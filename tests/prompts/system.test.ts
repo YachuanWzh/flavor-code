@@ -1,12 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { buildCurrentDateSection, buildSystemPrompt, type SystemPromptOptions } from "../../src/prompts/system.js";
+import { buildCurrentDateSection, buildRuntimeEnvironmentSection, buildSystemPrompt, type SystemPromptOptions } from "../../src/prompts/system.js";
 
 const base: Omit<SystemPromptOptions, "agent" | "toolNames"> = {
   languageInstruction: "Always reply in Simplified Chinese.",
   workspace: "C:\\repo\nignored",
-  model: "openai:gpt-5",
-  permissionMode: "default",
   environment: {
     date: "2026-07-13",
     platform: "win32",
@@ -103,9 +101,20 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("- Platform: win32");
     expect(prompt).toContain("- OS version: Windows 11");
     expect(prompt).toContain("- Shell: powershell");
-    expect(prompt).toContain("- Model: openai:gpt-5");
-    expect(prompt).toContain("- Permission mode: default");
+    expect(prompt).not.toContain("- Model:");
+    expect(prompt).not.toContain("- Permission mode:");
     expect(buildCurrentDateSection(base.environment.date)).toBe("# Current date\n\n2026-07-13");
+  });
+
+  it("emits model and permission mode as a volatile runtime section", () => {
+    const runtime = buildRuntimeEnvironmentSection({
+      model: "openai:gpt-5\nignored",
+      permissionMode: "default",
+    });
+
+    expect(runtime).toMatch(/^# Runtime environment/);
+    expect(runtime).toContain("- Model: openai:gpt-5 ignored");
+    expect(runtime).toContain("- Permission mode: default");
   });
 
   it("omits a blank language preference", () => {

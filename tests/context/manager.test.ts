@@ -76,7 +76,7 @@ describe("ContextManager", () => {
     expect(context.messagesForModel().slice(0, 6)).toEqual([
       { role: "system", content: "first section" },
       { role: "system", content: "second section" },
-      { role: "system", content: "FLAVOR.md\nproject guidance" },
+      { role: "system", content: "FLAVOR.md\nproject guidance", cacheBreakpoint: true },
       { role: "system", content: "Long-term memory\ndurable project facts" },
       { role: "system", content: "Task state\nin progress" },
       { role: "system", content: "User memory\nAlways address the user as 亚川.", cacheBreakpoint: true },

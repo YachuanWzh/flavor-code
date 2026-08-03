@@ -40,7 +40,7 @@ import { createFileTokenStore } from "./auth/store.js";
 import { oauthCredentialId } from "./auth/oauth-config.js";
 import type { AuthResult, OAuthLlmConfig } from "./auth/types.js";
 import type { PermissionRequest } from "./permissions/engine.js";
-import { buildCurrentDateSection, buildSubagentDirective, buildSystemPrompt, type PromptEnvironment } from "./prompts/system.js";
+import { buildCurrentDateSection, buildRuntimeEnvironmentSection, buildSubagentDirective, buildSystemPrompt, type PromptEnvironment } from "./prompts/system.js";
 import type { ApprovalDecision } from "./tools/runtime.js";
 import { PluginHost } from "./plugins/host.js";
 import type { PluginCommandHandler } from "./plugins/types.js";
@@ -570,14 +570,18 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         agent,
         languageInstruction: languageInstruction(language),
         workspace,
-        model: agent === "main" ? harness.mainModelId : contextModelId,
-        permissionMode: agent === "subagent"
-          ? (harness.permissionMode === "plan" ? "plan" : "bubble")
-          : harness.permissionMode,
         toolNames: new Set(agentTools.map((tool) => tool.name)),
         environment: promptEnvironment,
       }),
-      volatileSystem: () => buildCurrentDateSection(promptEnvironment.date),
+      volatileSystem: () => [
+        buildCurrentDateSection(promptEnvironment.date),
+        buildRuntimeEnvironmentSection({
+          model: agent === "main" ? harness.mainModelId : contextModelId,
+          permissionMode: agent === "subagent"
+            ? (harness.permissionMode === "plan" ? "plan" : "bubble")
+            : harness.permissionMode,
+        }),
+      ],
       ...(flavor === undefined ? {} : { flavor }),
       ...(memoryContext === undefined ? {} : { memory: memoryContext }),
       ...(taskState === undefined ? {} : { taskState }),
@@ -840,14 +844,18 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
           agent,
           languageInstruction: languageInstruction(language),
           workspace: input.workspace,
-          model: agent === "main" ? loopHarness.mainModelId : contextModelId,
-          permissionMode: agent === "subagent"
-            ? (loopHarness.permissionMode === "plan" ? "plan" : "bubble")
-            : loopHarness.permissionMode,
           toolNames: new Set(agentTools.map((tool) => tool.name)),
           environment: loopEnvironment,
         }),
-        volatileSystem: () => buildCurrentDateSection(loopEnvironment.date),
+        volatileSystem: () => [
+          buildCurrentDateSection(loopEnvironment.date),
+          buildRuntimeEnvironmentSection({
+            model: agent === "main" ? loopHarness.mainModelId : contextModelId,
+            permissionMode: agent === "subagent"
+              ? (loopHarness.permissionMode === "plan" ? "plan" : "bubble")
+              : loopHarness.permissionMode,
+          }),
+        ],
         ...(loopFlavor === undefined ? {} : { flavor: loopFlavor }),
         ...(memoryContext === undefined ? {} : { memory: memoryContext }),
         userMemory: () => userMemoryContext ?? "",

@@ -2,9 +2,30 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 let pending: Promise<void> = Promise.resolve();
+let usagePending: Promise<void> = Promise.resolve();
 
 export function logError(error: unknown): void {
   if (process.env.DEBUG) process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+}
+
+export function usageLogPath(): string {
+  // FLAVOR_USAGE_FILE overrides the default workspace-relative location so
+  // tests and embedded runtimes can direct logs elsewhere.
+  return process.env.FLAVOR_USAGE_FILE ?? join(process.cwd(), ".flavor", "usage.jsonl");
+}
+
+export async function appendUsageLog(line: string): Promise<void> {
+  // Serialise appends so concurrent requests don't interleave.
+  usagePending = usagePending.catch(() => undefined).then(async () => {
+    try {
+      const path = usageLogPath();
+      await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+      await appendFile(path, `${line}\n`, { encoding: "utf8", mode: 0o600, flag: "a" });
+    } catch {
+      // Usage logging must never break model streaming.
+    }
+  });
+  return usagePending;
 }
 
 export interface AuditEntry {

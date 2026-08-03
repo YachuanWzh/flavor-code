@@ -359,7 +359,13 @@ export class ContextManager {
     const userMemory = this.#resolvedUserMemory();
     const stable: ModelMessage[] = [
       ...resolveSystemSections(this.#system).map((content) => ({ role: "system" as const, content })),
-      ...(this.#flavor === undefined ? [] : [{ role: "system" as const, content: `FLAVOR.md\n${this.#flavor}` }]),
+      // Breakpoint after FLAVOR.md so the byte-stable system prompt plus project
+      // guidance stays cached while the volatile Task state below keeps changing.
+      ...(this.#flavor === undefined ? [] : [{
+        role: "system" as const,
+        content: `FLAVOR.md\n${this.#flavor}`,
+        cacheBreakpoint: true,
+      }]),
       ...(this.#memory === undefined ? [] : [{ role: "system" as const, content: `Long-term memory\n${this.#memory}` }]),
       ...(this.#taskState === undefined ? [] : [{ role: "system" as const, content: `Task state\n${this.#taskState}` }]),
       ...(userMemory === undefined ? [] : [{

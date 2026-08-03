@@ -1,7 +1,7 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   AnthropicModelAdapter,
@@ -13,7 +13,32 @@ import type { ModelEvent, ModelRequest } from "../../src/models/types.js";
 
 const signal = new AbortController().signal;
 const imageRoots: string[] = [];
-afterEach(async () => Promise.all(imageRoots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
+let usageRoot: string | undefined;
+let previousUsageFile: string | undefined;
+
+beforeEach(() => {
+  usageRoot = undefined;
+  previousUsageFile = process.env.FLAVOR_USAGE_FILE;
+});
+
+afterEach(async () => {
+  await Promise.all(imageRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  if (usageRoot !== undefined) {
+    await rm(usageRoot, { recursive: true, force: true });
+  }
+  if (previousUsageFile === undefined) {
+    delete process.env.FLAVOR_USAGE_FILE;
+  } else {
+    process.env.FLAVOR_USAGE_FILE = previousUsageFile;
+  }
+});
+
+async function usageLogFile(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "flavor-usage-"));
+  usageRoot = root;
+  process.env.FLAVOR_USAGE_FILE = join(root, "usage.jsonl");
+  return process.env.FLAVOR_USAGE_FILE;
+}
 
 async function imageFile(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "flavor-adapter-image-"));
@@ -300,6 +325,65 @@ describe("OpenAIModelAdapter", () => {
       },
       { signal },
     );
+  });
+
+  it("logs OpenAI cache breakdown when debugUsage is enabled", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const usagePath = await usageLogFile();
+    const client = {
+      responses: {
+        stream: () => events({
+          type: "response.completed",
+          response: {
+            usage: {
+              input_tokens: 50,
+              output_tokens: 5,
+              input_tokens_details: { cached_tokens: 150 },
+            },
+          },
+        }),
+      },
+    };
+
+    await collect(
+      new OpenAIModelAdapter({ client: asOpenAIClient(client), debugUsage: true }).stream(request),
+    );
+
+    const logged = stderr.mock.calls.map(([line]) => String(line)).join("");
+    expect(logged).toContain('"event":"flavor-usage"');
+    expect(logged).toContain('"cacheReadTokens":150');
+    expect(logged).toContain('"cacheHitRatio":0.75');
+
+    await vi.waitFor(async () => {
+      const content = await readFile(usagePath, "utf8").catch(() => "");
+      expect(content).toContain('"event":"flavor-usage"');
+      expect(content).toContain('"provider":"openai"');
+    });
+    stderr.mockRestore();
+  });
+
+  it("does not log OpenAI usage when debugUsage is disabled", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const usagePath = await usageLogFile();
+    const client = {
+      responses: {
+        stream: () => events({
+          type: "response.completed",
+          response: { usage: { input_tokens: 50, output_tokens: 5 } },
+        }),
+      },
+    };
+
+    await collect(
+      new OpenAIModelAdapter({ client: asOpenAIClient(client), debugUsage: false }).stream(request),
+    );
+
+    expect(stderr).not.toHaveBeenCalled();
+    await vi.waitFor(async () => {
+      const content = await readFile(usagePath, "utf8").catch(() => "");
+      expect(content).toBe("");
+    });
+    stderr.mockRestore();
   });
 });
 
@@ -754,6 +838,75 @@ describe("AnthropicModelAdapter", () => {
         { type: "text", text: "last shared system", cache_control: { type: "ephemeral" } },
       ],
     }), { signal });
+  });
+
+  it("logs Anthropic cache breakdown when debugUsage is enabled", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const usagePath = await usageLogFile();
+    const client = {
+      messages: {
+        create: () =>
+          events(
+            {
+              type: "message_start",
+              message: {
+                usage: {
+                  input_tokens: 100,
+                  cache_creation_input_tokens: 100,
+                  cache_read_input_tokens: 200,
+                  output_tokens: 0,
+                },
+              },
+            },
+            { type: "message_delta", delta: {}, usage: { output_tokens: 5 } },
+            { type: "message_stop" },
+          ),
+      },
+    };
+
+    await collect(
+      new AnthropicModelAdapter({ client: asAnthropicClient(client), debugUsage: true }).stream(request),
+    );
+
+    const logged = stderr.mock.calls.map(([line]) => String(line)).join("");
+    expect(logged).toContain('"event":"flavor-usage"');
+    expect(logged).toContain('"provider":"anthropic"');
+    expect(logged).toContain('"cacheReadTokens":200');
+    expect(logged).toContain('"cacheCreationTokens":100');
+    expect(logged).toContain('"cacheHitRatio":0.5');
+
+    await vi.waitFor(async () => {
+      const content = await readFile(usagePath, "utf8").catch(() => "");
+      expect(content).toContain('"provider":"anthropic"');
+      expect(content).toContain('"cacheReadTokens":200');
+    });
+    stderr.mockRestore();
+  });
+
+  it("does not log Anthropic usage when debugUsage is disabled", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const usagePath = await usageLogFile();
+    const client = {
+      messages: {
+        create: () =>
+          events(
+            { type: "message_start", message: { usage: { input_tokens: 5, output_tokens: 0 } } },
+            { type: "message_delta", delta: {}, usage: { output_tokens: 2 } },
+            { type: "message_stop" },
+          ),
+      },
+    };
+
+    await collect(
+      new AnthropicModelAdapter({ client: asAnthropicClient(client), debugUsage: false }).stream(request),
+    );
+
+    expect(stderr).not.toHaveBeenCalled();
+    await vi.waitFor(async () => {
+      const content = await readFile(usagePath, "utf8").catch(() => "");
+      expect(content).toBe("");
+    });
+    stderr.mockRestore();
   });
 });
 

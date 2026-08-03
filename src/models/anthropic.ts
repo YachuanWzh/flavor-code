@@ -16,6 +16,8 @@ import {
   modelContentText,
 } from "./types.js";
 import { normalizeToolCallInput } from "../utils/json.js";
+import { isEnvTruthy } from "../utils/envUtils.js";
+import { appendUsageLog } from "../utils/log.js";
 
 export interface AnthropicClient {
   messages: {
@@ -33,6 +35,8 @@ export interface AnthropicModelAdapterOptions {
   baseURL?: string;
   client?: AnthropicClient;
   maxOutputTokens?: number;
+  /** Log per-request cache breakdown to stderr. Defaults to FLAVOR_DEBUG_USAGE=1. */
+  debugUsage?: boolean;
 }
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
@@ -72,9 +76,25 @@ function updateInputUsage(snapshot: InputUsageSnapshot, usage: AnthropicUsage | 
   return snapshot.base + snapshot.cacheCreation + snapshot.cacheRead;
 }
 
+function formatCacheUsage(model: string, snapshot: InputUsageSnapshot): string {
+  const total = snapshot.base + snapshot.cacheCreation + snapshot.cacheRead;
+  const hitRatio = total > 0 ? snapshot.cacheRead / total : 0;
+  return JSON.stringify({
+    event: "flavor-usage",
+    provider: "anthropic",
+    model,
+    inputTokens: snapshot.base,
+    cacheReadTokens: snapshot.cacheRead,
+    cacheCreationTokens: snapshot.cacheCreation,
+    totalInputTokens: total,
+    cacheHitRatio: Number(hitRatio.toFixed(4)),
+  });
+}
+
 export class AnthropicModelAdapter implements ModelAdapter {
   private readonly client: AnthropicClient;
   private readonly maxOutputTokens: number;
+  private readonly debugUsage: boolean;
 
   constructor(options: AnthropicModelAdapterOptions) {
     const maxOutputTokens = options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
@@ -82,12 +102,24 @@ export class AnthropicModelAdapter implements ModelAdapter {
       throw new Error("maxOutputTokens must be a positive integer");
     }
     this.maxOutputTokens = maxOutputTokens;
+    this.debugUsage = options.debugUsage ?? isEnvTruthy(process.env.FLAVOR_DEBUG_USAGE);
     this.client =
       options.client ??
       new Anthropic({
         ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
         ...(options.baseURL === undefined ? {} : { baseURL: options.baseURL }),
       });
+  }
+
+  #logUsage(request: ModelRequest, snapshot: InputUsageSnapshot): void {
+    if (!this.debugUsage) return;
+    const line = formatCacheUsage(request.model, snapshot);
+    try {
+      process.stderr.write(`${line}\n`);
+    } catch {
+      // Debug logging must never break model streaming.
+    }
+    void appendUsageLog(line);
   }
 
   async *stream(request: ModelRequest): AsyncIterable<ModelEvent> {
@@ -199,7 +231,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
         stream: true,
         messages,
         ...(system ? { system } : {}),
-        tools: request.tools.map((tool) => ({
+        tools: [...request.tools].sort((a, b) => a.name.localeCompare(b.name)).map((tool) => ({
           name: tool.name,
           description: tool.description,
           input_schema: { ...tool.inputSchema, type: "object" as const },
@@ -245,6 +277,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
           inputTokens = updateInputUsage(inputUsage, event.usage);
           outputTokens = event.usage?.output_tokens ?? outputTokens;
         } else if (event.type === "message_stop") {
+          this.#logUsage(request, inputUsage);
           const usage = { inputTokens, outputTokens };
           if (stopReason === "max_tokens" || stopReason === "model_context_window_exceeded") {
             usageEmitted = true;
@@ -285,7 +318,10 @@ export class AnthropicModelAdapter implements ModelAdapter {
         }
       }
     } catch (error) {
-      if (hasUsage && !usageEmitted) yield { type: "usage", inputTokens, outputTokens };
+      if (hasUsage && !usageEmitted) {
+        this.#logUsage(request, inputUsage);
+        yield { type: "usage", inputTokens, outputTokens };
+      }
       yield { type: "error", error: normalizeProviderError(error) };
     }
   }
