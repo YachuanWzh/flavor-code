@@ -52,6 +52,7 @@ export interface SessionServices {
     options?: {
       getSteeringMessages(): readonly string[];
       initialUserMessage?: Extract<ModelMessage, { role: "user" }>;
+      additionalContext?: string;
     },
   ): AsyncIterable<AgentEvent>;
   runSkill(skill: string, prompt: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
@@ -212,6 +213,9 @@ export class FlavorSession {
       if (command !== null) await this.#dispatch(command, controller.signal);
       else for await (const event of this.#services.run(prompt, controller.signal, {
         getSteeringMessages: () => this.#queue.drain("steer"),
+        ...(decision.additionalContext === undefined
+          ? {}
+          : { additionalContext: decision.additionalContext }),
         ...(submission.initialUserMessage === undefined
           ? {}
           : { initialUserMessage: submission.initialUserMessage }),

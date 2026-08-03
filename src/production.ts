@@ -81,6 +81,12 @@ import { MemoryReviewBridge } from "./memory/review.js";
 import { createExecutionEnvironment } from "./execution/factory.js";
 import { FlavorIdeClient } from "./ide/client.js";
 
+const INTERRUPTED_TASK_PLAN_CONTEXT = [
+  "The previous turn's task plan was cancelled and archived, so it is no longer active.",
+  "Reassess the current query independently.",
+  "If the current work needs a plan, create a fresh one with TaskPlan before using TaskUpdate.",
+].join(" ");
+
 export interface ProductionRuntimeOptions {
   workspace?: string;
   home?: string;
@@ -684,8 +690,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   };
   let explicitMemoryRequest: { taskId: string; messageStart: number } | undefined;
   let automaticMemoryTask = false;
+  let interruptedTaskPlanNeedsReassessment = false;
   hooks.on("UserPromptSubmit", (event) => {
     const prompt = String(event.payload.prompt);
+    const reassessInterruptedPlan = interruptedTaskPlanNeedsReassessment && !prompt.startsWith("/");
     timelineState = transcriptReducer(timelineState, { type: "submit", prompt });
     automaticMemoryTask = !prompt.startsWith("/");
     if (automaticMemoryTask) memoryReviews.dismissAll();
@@ -701,7 +709,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         messageStart: harness.main.context.snapshot().messages.length,
       };
     }
-    return { decision: "allow" };
+    return {
+      decision: "allow",
+      ...(reassessInterruptedPlan ? { additionalContext: INTERRUPTED_TASK_PLAN_CONTEXT } : {}),
+    };
   });
   hooks.on("Stop", async (event) => {
     timelineState = transcriptReducer(timelineState, { type: "finish" });
@@ -731,6 +742,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       } else if (result.startsWith("Task completed. Review")) {
         emitOutput({ type: "notice", message: result });
       }
+    }
+    if (event.payload.outcome === "cancelled" && (taskPlan !== undefined || taskGraph !== undefined)) {
+      interruptedTaskPlanNeedsReassessment = true;
     }
     taskPlan = undefined;
     taskGraph = undefined;
@@ -946,20 +960,24 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     subagentModel: () => harness.subagentModelId,
     llmServiceName: () => effectiveLlm?.serviceName,
     permissionMode: () => harness.permissionMode,
-    run: (prompt, signal, runOptions) => persistAndCheckpointAfter(runMain(
-      harness, skills, prompt, signal, selectedModels.mainError,
-      memoryStore === undefined || (!memoryHasRoutableEntries && userMemoryContext === undefined) ? undefined : {
-        store: memoryStore, taskId: memoryLifecycle.taskId ?? sessionId,
-        topK: config.memory.retrievalTopK, maxChars: config.memory.maxPromptChars,
-      },
-      runOptions?.getSteeringMessages,
-      runOptions?.initialUserMessage,
-      ide,
-    ), persist, () => sessionHistory.append({
-      prompt,
-      context: harness.main.context.snapshot(),
-      label: `turn: ${prompt.slice(0, 80)}`,
-    })),
+    run: (prompt, signal, runOptions) => {
+      interruptedTaskPlanNeedsReassessment = false;
+      return persistAndCheckpointAfter(runMain(
+        harness, skills, prompt, signal, selectedModels.mainError,
+        memoryStore === undefined || (!memoryHasRoutableEntries && userMemoryContext === undefined) ? undefined : {
+          store: memoryStore, taskId: memoryLifecycle.taskId ?? sessionId,
+          topK: config.memory.retrievalTopK, maxChars: config.memory.maxPromptChars,
+        },
+        runOptions?.getSteeringMessages,
+        runOptions?.initialUserMessage,
+        runOptions?.additionalContext,
+        ide,
+      ), persist, () => sessionHistory.append({
+        prompt,
+        context: harness.main.context.snapshot(),
+        label: `turn: ${prompt.slice(0, 80)}`,
+      }));
+    },
     runSkill: (skill, prompt, signal) => persistAfter(
       runExplicitSkill(harness, skills, skill, prompt, signal, selectedModels.mainError), persist,
     ),
@@ -1421,6 +1439,7 @@ async function* runMain(
   memory?: { store: MemoryStore; taskId: string; topK: number; maxChars: number },
   getSteeringMessages?: () => readonly string[],
   initialUserMessage?: Extract<ModelMessage, { role: "user" }>,
+  promptContext?: string,
   ide?: FlavorIdeClient,
 ): AsyncIterable<AgentEvent> {
   const contexts: string[] = [];
@@ -1430,6 +1449,7 @@ async function* runMain(
       yield { type: "error", error: { code: "unknown", message: setupError } };
       return;
     }
+    if (promptContext !== undefined) contexts.push(promptContext);
     if (memory !== undefined) {
       try {
         const recalled = await memory.store.recall(prompt, {

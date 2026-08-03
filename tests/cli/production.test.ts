@@ -551,6 +551,82 @@ describe("production runtime", () => {
     }));
   });
 
+  it("publishes a fresh plan when a new query follows an interrupted planned turn", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-interrupted-replan-")); roots.push(workspace);
+    const pluginRoot = join(workspace, ".flavor", "plugins", "interrupted-replan-model");
+    await mkdir(pluginRoot, { recursive: true });
+    await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
+      providers: { capture: { type: "plugin", defaultModel: "main", cheapModel: "child" } },
+      agents: { main: { model: "capture:main" }, subagent: { model: "capture:child" } },
+      memory: { enabled: false }, hallucination: { showWarnings: false }, sleep: false,
+    }));
+    await writeFile(join(pluginRoot, "flavor-plugin.json"), JSON.stringify({
+      name: "interrupted-replan-model", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
+      contributes: { commands: [], tools: [], hooks: [], skillRoots: [], modelAdapters: [{ name: "capture" }] },
+    }));
+    await writeFile(join(pluginRoot, "index.mjs"), `export function activate(ctx) {
+      let phase = "first-plan";
+      ctx.registerModelAdapter("capture", { async *stream(request) {
+        if (phase === "first-plan") {
+          phase = "first-wait";
+          yield { type: "tool-call", id: "old-plan", name: "TaskPlan", input: { tasks: [{
+            id: "old-work", subject: "Implement old query", activeForm: "Implementing old query",
+            status: "pending", dependencies: [],
+          }] } };
+          yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
+          return;
+        }
+        if (phase === "first-wait") {
+          phase = "second-query";
+          if (!request.signal.aborted) {
+            await new Promise((resolve) => request.signal.addEventListener("abort", resolve, { once: true }));
+          }
+          yield { type: "error", error: { code: "cancelled", message: "cancelled by test" } };
+          return;
+        }
+        if (phase === "second-query") {
+          phase = "finish";
+          const reset = request.messages.some((message) => message.role === "system"
+            && String(message.content).includes("previous turn's task plan was cancelled"));
+          if (reset) {
+            yield { type: "tool-call", id: "fresh-plan", name: "TaskPlan", input: { tasks: [{
+              id: "new-work", subject: "Implement revised query", activeForm: "Implementing revised query",
+              status: "pending", dependencies: [],
+            }] } };
+          } else {
+            yield { type: "tool-call", id: "stale-update", name: "TaskUpdate", input: {
+              taskId: "old-work", status: "in_progress",
+            } };
+          }
+          yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
+          return;
+        }
+        yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
+      }});
+    }`);
+    const outputs: unknown[] = [];
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, approvalPolicy: "deny",
+      output: (event) => outputs.push(event),
+    });
+
+    const first = runtime.session.submit("implement the original multi-step query");
+    await vi.waitFor(() => expect(outputs).toContainEqual(expect.objectContaining({
+      type: "tasks",
+      snapshot: expect.objectContaining({ plan: { tasks: [expect.objectContaining({ id: "old-work" })] } }),
+    })));
+    expect(runtime.session.interrupt()).toBe("cancelled");
+    await first;
+    await runtime.session.submit("/tasks");
+    await runtime.session.submit("the requirement changed; implement the revised multi-step query");
+
+    expect(outputs).toContainEqual(expect.objectContaining({
+      type: "tasks",
+      snapshot: expect.objectContaining({ plan: { tasks: [expect.objectContaining({ id: "new-work" })] } }),
+    }));
+    await runtime.dispose();
+  });
+
   it("saves lifecycle state and resumes only when explicitly requested", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-")); roots.push(workspace);
     const pluginRoot = join(workspace, ".flavor", "plugins", "capture-lifecycle");

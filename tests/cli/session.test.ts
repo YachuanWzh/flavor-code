@@ -44,6 +44,26 @@ function services(events: string[], outputs: string[]): SessionServices {
 }
 
 describe("FlavorSession", () => {
+  it("forwards UserPromptSubmit context to the prompt-scoped model run", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    base.hooks.on("UserPromptSubmit", () => ({
+      decision: "allow",
+      additionalContext: "The previous task plan was cancelled; create a fresh plan.",
+    }));
+    const contexts: Array<string | undefined> = [];
+    base.run = async function* (_prompt, _signal, options) {
+      contexts.push(options?.additionalContext);
+      yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
+    };
+
+    await new FlavorSession(base).submit("continue with the revised requirement");
+
+    expect(contexts).toEqual([
+      "The previous task plan was cancelled; create a fresh plan.",
+    ]);
+  });
+
   it("forwards image content only to a normal main-model prompt", async () => {
     const events: string[] = []; const outputs: string[] = [];
     const base = services(events, outputs);
