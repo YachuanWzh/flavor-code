@@ -547,10 +547,21 @@ describe("production runtime", () => {
 
   it("saves lifecycle state and resumes only when explicitly requested", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-")); roots.push(workspace);
-    await mkdir(join(workspace, ".flavor"), { recursive: true });
+    const pluginRoot = join(workspace, ".flavor", "plugins", "capture-lifecycle");
+    await mkdir(pluginRoot, { recursive: true });
     await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
-      providers: { local: { type: "openai-compatible", baseURL: "http://127.0.0.1:1/v1", defaultModel: "large", cheapModel: "small" } },
+      providers: { capture: { type: "plugin", defaultModel: "main", cheapModel: "child" } },
+      agents: { main: { model: "capture:main" }, subagent: { model: "capture:child" } },
     }));
+    await writeFile(join(pluginRoot, "flavor-plugin.json"), JSON.stringify({
+      name: "capture-lifecycle", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
+      contributes: { commands: [], tools: [], hooks: [], skillRoots: [], modelAdapters: [{ name: "capture" }] },
+    }));
+    await writeFile(join(pluginRoot, "index.mjs"), `export function activate(ctx) {
+      ctx.registerModelAdapter("capture", { async *stream() {
+        yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
+      }});
+    }`);
     const first = await createProductionRuntime({ workspace, home: workspace, environment: {}, output: () => {} });
     await first.session.start();
     await first.services.setPermissionMode("acceptEdits");

@@ -9,6 +9,7 @@ import { initializeFlavor } from "./init/project.js";
 import { loadConfig } from "./config/load.js";
 import { message } from "./utils/error.js";
 import { redactErrorText } from "./utils/redact.js";
+import { packageVersion } from "./utils/version.js";
 import { staticTaskLines } from "./ui/task-progress-model.js";
 import { SkillManager } from "./skills/manager.js";
 import { registerMemoryCommands } from "./memory/cli.js";
@@ -22,7 +23,7 @@ export function createProgram(): Command {
   const program = new Command()
     .name("flavor")
     .description("Interactive coding agent")
-    .version("1.1.8")
+    .version(packageVersion())
     .option("-p, --print <prompt>", "run one prompt without the interactive UI")
     .option("--resume [session-id]", "resume a saved session (latest when id is omitted)")
     .option("--mode <mode>", "runtime mode: interactive or rpc")
