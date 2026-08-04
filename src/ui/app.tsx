@@ -434,6 +434,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
   const approval = runtime?.approvals.pending;
   const questions = runtime?.services.questions.pending;
   const memoryReviews = runtime?.memoryReviews.pending ?? [];
+  const memoryAutoDismissSeconds = runtime?.memoryReviews.autoDismissSeconds ?? 0;
   useEffect(() => {
     setQuestionIndex(0);
     setQuestionAnswers({});
@@ -770,6 +771,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
     {...(approval === undefined ? {} : { approval })}
     {...(questions === undefined ? {} : { questions })}
     memoryReviews={memoryReviews}
+    memoryAutoDismissSeconds={memoryAutoDismissSeconds}
     {...(pendingPrompt === undefined ? {} : { pendingPrompt })}
     questionIndex={questionIndex}
     questionAnswers={questionAnswers}
@@ -817,6 +819,7 @@ export interface TerminalLayoutProps {
   approval?: { tool: string; reason?: string };
   questions?: readonly Question[];
   memoryReviews?: readonly MemoryReviewItem[];
+  memoryAutoDismissSeconds?: number;
   questionIndex?: number;
   questionAnswers?: Readonly<Record<number, string>>;
   customQuestionActive?: boolean;
@@ -828,7 +831,7 @@ export interface TerminalLayoutProps {
 export function TerminalLayout({
   model, serviceName, workspaceName, completed, active, input, pastedBlocks = [], imageAttachments = [], clipboardNotice,
   promptCursor, columns, rows = 24, activeSession, pendingPrompt, approval,
-  questions, memoryReviews = [], questionIndex = 0, questionAnswers = {}, customQuestionActive = false,
+  questions, memoryReviews = [], memoryAutoDismissSeconds = 0, questionIndex = 0, questionAnswers = {}, customQuestionActive = false,
   completion, mentionCompletion, onMentionSelect, completedSlashTokenLength: tokenLength = 0, scrollRef,
   taskScrollRef, onTaskPanelHoverChange, onPromptCursorChange, ideContext,
 }: TerminalLayoutProps): React.JSX.Element {
@@ -897,7 +900,7 @@ export function TerminalLayout({
       {!questions || questions.length === 0 ? null : (
         <QuestionCards questions={questions} activeIndex={questionIndex} answers={questionAnswers} customActive={customQuestionActive} />
       )}
-      {memoryReviews.length === 0 ? null : <MemoryReviewCards reviews={memoryReviews} />}
+      {memoryReviews.length === 0 ? null : <MemoryReviewCards reviews={memoryReviews} autoDismissSeconds={memoryAutoDismissSeconds} />}
       {completion === undefined ? null : <SlashMenu completion={completion} />}
       {mentionCompletion === undefined ? null : (
         <MentionMenu completion={mentionCompletion} {...(onMentionSelect === undefined ? {} : { onSelect: onMentionSelect })} />
@@ -998,13 +1001,25 @@ function QuestionCards({ questions, activeIndex, answers, customActive }: {
   );
 }
 
-function MemoryReviewCards({ reviews }: { reviews: readonly MemoryReviewItem[] }): React.JSX.Element {
+function MemoryReviewCards({ reviews, autoDismissSeconds }: {
+  reviews: readonly MemoryReviewItem[];
+  autoDismissSeconds: number;
+}): React.JSX.Element {
   const review = reviews[0]!;
+  const [remaining, setRemaining] = useState(autoDismissSeconds);
+  useEffect(() => {
+    if (autoDismissSeconds <= 0) return;
+    setRemaining(autoDismissSeconds);
+    const timer = setInterval(() => setRemaining((current) => Math.max(0, current - 1)), 1_000);
+    return (): void => clearInterval(timer);
+  }, [review.id, autoDismissSeconds]);
   return <Box flexDirection="column" marginBottom={1}>
     <Text bold color="yellow">┌─ Long-term memory requires confirmation ({reviews.length})</Text>
     <Text color="yellowBright" wrap="truncate-end">│ [{review.type}] {review.content}</Text>
     <Text dimColor>│ Model-generated content is not stored until you approve it.</Text>
-    <Text color="yellow">└─ <Text bold>Ctrl+Y</Text> save / <Text bold>Ctrl+N</Text> ignore (conversation remains available)</Text>
+    <Text color="yellow">└─ <Text bold>Ctrl+Y</Text> save / <Text bold>Ctrl+N</Text> ignore{autoDismissSeconds > 0
+      ? ` (auto-dismiss in ${remaining}s)`
+      : " (conversation remains available)"}</Text>
   </Box>;
 }
 

@@ -496,6 +496,7 @@ export function DesktopApp(): React.JSX.Element {
     {snapshot.questions !== undefined && <QuestionSheet questions={snapshot.questions} onAnswer={(answers) => void window.flavorDesktop.answerQuestions(answers)} />}
     {snapshot.memoryReviews !== undefined && snapshot.memoryReviews.length > 0 && <MemoryReviewRail
       reviews={snapshot.memoryReviews}
+      autoDismissSeconds={snapshot.memoryAutoDismissSeconds ?? 0}
       onResolve={(id, decision) => {
         void window.flavorDesktop.resolveMemoryReview(id, decision).catch((cause) => setError(errorMessage(cause)));
       }}
@@ -971,8 +972,9 @@ export function QuestionSheet({ questions, onAnswer }: { questions: NonNullable<
   </section></div>;
 }
 
-export function MemoryReviewRail({ reviews, onResolve }: {
+export function MemoryReviewRail({ reviews, autoDismissSeconds, onResolve }: {
   reviews: NonNullable<DesktopSnapshot["memoryReviews"]>;
+  autoDismissSeconds: number;
   onResolve(id: string, decision: "accept" | "dismiss"): void;
 }): React.JSX.Element {
   return <aside className="memory-review-rail" aria-label="长期记忆写入确认">
@@ -980,9 +982,22 @@ export function MemoryReviewRail({ reviews, onResolve }: {
     <p className="memory-review-warning">以下内容由模型生成，确认前不会写入长期记忆，也不会影响后续会话。</p>
     <div className="memory-review-list">{reviews.map((review) => <article key={review.id}>
       <small>{review.type}</small><p>{review.content}</p>
+      <MemoryReviewCountdown seconds={autoDismissSeconds} />
       <div><button onClick={() => onResolve(review.id, "dismiss")}>忽略</button><button className="primary" onClick={() => onResolve(review.id, "accept")}>保存</button></div>
     </article>)}</div>
   </aside>;
+}
+
+function MemoryReviewCountdown({ seconds }: { seconds: number }): React.JSX.Element | null {
+  const [remaining, setRemaining] = useState(seconds);
+  useEffect(() => {
+    if (seconds <= 0) return;
+    setRemaining(seconds);
+    const timer = setInterval(() => setRemaining((current) => Math.max(0, current - 1)), 1_000);
+    return (): void => clearInterval(timer);
+  }, [seconds]);
+  if (seconds <= 0) return null;
+  return <small className="memory-review-countdown">未操作将在 {remaining}s 后自动忽略</small>;
 }
 
 function WelcomeState({ project, onStart }: { project: string; onStart(prompt: string): void }): React.JSX.Element {

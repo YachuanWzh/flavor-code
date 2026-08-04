@@ -53,6 +53,7 @@ export interface RuntimeLike {
   };
   readonly memoryReviews: {
     readonly pending: readonly MemoryReviewItem[];
+    readonly autoDismissSeconds: number;
     accept(id: string): Promise<boolean>;
     dismiss(id: string): boolean;
   };
@@ -147,6 +148,7 @@ export class DesktopRuntimeController {
         ...(runtime.approvals.pending === undefined ? {} : { approval: runtime.approvals.pending }),
         ...(runtime.services.questions.pending === undefined ? {} : { questions: runtime.services.questions.pending }),
         ...(runtime.memoryReviews.pending.length === 0 ? {} : { memoryReviews: runtime.memoryReviews.pending }),
+        ...((runtime.memoryReviews.autoDismissSeconds ?? 0) > 0 ? { memoryAutoDismissSeconds: runtime.memoryReviews.autoDismissSeconds } : {}),
       }),
       diagnostics: runtime?.diagnostics ?? [],
       models: this.#models,

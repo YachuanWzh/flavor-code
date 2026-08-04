@@ -603,9 +603,11 @@ Flavor 使用“任务级长期记忆”：交互式普通任务在 Agent 正常
 
 另有一个用户主动保存的快捷入口：当提示中出现“记住”“帮我记住”“加入长期记忆”“please remember that”等明确表达时，当前回复结束后立即调用 cheap 模型，只分析用户明确要求保存的内容，不必等到 `/finish`，也不受 200 字符下限影响。“不要记住”“不用帮我记住”“别记”“无需保存到长期记忆”等否定表达不会触发。因为保存意图已经由用户明确给出，合格候选通过敏感信息检查和相似度查重后直接写入，不再重复弹出确认栏；`/remember` 仍走不调用模型的精确手工写入。
 
-任务中的 user/assistant 可见文本不足 200 个 Unicode 字符时直接跳过，不产生额外 token；达到门槛后才调用配置的 cheap/subagent 模型。模型把候选归入 `user`（用户偏好）、`feedback`（行为反馈）、`project`（项目约定）或 `reference`（外部引用），并分别按“持久性、未来价值、来源权威性、是否难以从仓库重新推导”打 0–3 分。宿主只保留总分至少 9、且前三项都至少 2 分的最重要候选，每个任务最多 1 条。
+任务中的 user/assistant 可见文本不足 200 个 Unicode 字符时直接跳过，不产生额外 token；达到门槛后才调用配置的 cheap/subagent 模型。模型把候选归入 `user`（用户偏好）、`feedback`（行为反馈）、`project`（项目约定）或 `reference`（外部引用），并分别按“持久性、未来价值、来源权威性、是否难以从仓库重新推导”打 0–3 分。宿主只保留总分至少 9、且前三项都至少 2 分的最重要候选，每个任务最多 1 条；提取模型还被明确要求宁缺毋滥，常规操作、一次性任务细节、通用编程知识等一律不记。总分达到 `autoStoreThreshold`（默认 11）的高置信候选不再询问，直接写入并提示“已记住：…（`/forget` 可撤销）”；只有 9–10 分的候选才会进入确认栏。
 
 如果 `flavor.json` 配置了 `language`（例如 `zh-CN`），候选摘要、正文和关键词使用该语言，代码标识符、命令、路径和 URL 保持原样。待确认候选只对当前交互有效：用户不处理候选而直接发送新的普通 query 时，旧候选全部作废并立即从 CLI/Electron 隐藏。
+
+确认框也不会无休止打扰：候选默认带 10 秒倒计时（`reviewAutoDismissSeconds`，设 0 可关闭），超时未保存/未忽略会自动静默忽略，倒计时不作为“用户明确忽略”计入学习；连续忽略（CLI `Ctrl+N` 或 Electron 忽略按钮）累计达到 `ignoreStreakLimit`（默认 5）次后，自动评价自动暂停，之后的普通对话不再弹确认栏；暂停状态持久化在 `.flavor/memory/behavior.json`，重启后仍然生效。`/finish`、`/remember` 或显式“记住”成功保存一次即恢复自动提取。
 
 对于自动评价或 `/finish` 产生的隐式候选，通过评分仍不等于写入。CLI 使用 `Ctrl+Y` 保存当前候选、`Ctrl+N` 忽略；Electron 在右侧非阻塞审阅栏逐条处理。用户接受后，宿主再使用规范化文本、单词和字符 n-gram/Jaccard 相似度做最终查重；只有没有同类高置信重复时才追加。密钥、Token、私钥、提示词注入、临时进度、原始工具输出和模型猜测会被拒绝。非交互模式不会运行隐式评价，但用户在输入中明确要求“记住”时仍可执行这条主动保存路径。
 
@@ -653,6 +655,9 @@ flavor memory path
     "autoExtract": true,
     "autoExtractMinChars": 200,
     "scoreThreshold": 9,
+    "autoStoreThreshold": 11,
+    "ignoreStreakLimit": 5,
+    "reviewAutoDismissSeconds": 10,
     "maxCandidatesPerTask": 1,
     "retrievalTopK": 5,
     "maxEntries": 200,

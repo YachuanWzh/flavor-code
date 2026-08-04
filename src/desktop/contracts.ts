@@ -159,6 +159,8 @@ export interface DesktopSnapshot {
   approval?: DesktopApproval;
   questions?: readonly Question[];
   memoryReviews?: readonly MemoryReviewItem[];
+  /** Seconds an unconfirmed memory review stays visible before auto-dismissal; 0 disables it. */
+  memoryAutoDismissSeconds?: number;
   diagnostics: readonly string[];
   models: readonly DesktopModelOption[];
 }

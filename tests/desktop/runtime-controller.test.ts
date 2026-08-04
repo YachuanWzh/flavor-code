@@ -35,7 +35,7 @@ function fakeRuntime(output: (event: SessionOutput) => void, sessionId = "sessio
       questions: { pending: undefined, answer: vi.fn() },
     },
     approvals: { pending: undefined, resolve: vi.fn() },
-    memoryReviews: { pending: [], accept: vi.fn(async () => true), dismiss: vi.fn(() => true) },
+    memoryReviews: { pending: [], autoDismissSeconds: 0, accept: vi.fn(async () => true), dismiss: vi.fn(() => true) },
     dispose: vi.fn(async () => undefined),
   };
 }

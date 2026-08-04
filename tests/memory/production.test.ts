@@ -19,7 +19,9 @@ async function workspace(memory: Record<string, unknown>, config: Record<string,
   await writeFile(join(root, ".flavor", "flavor.json"), JSON.stringify({
     providers: { capture: { type: "plugin", defaultModel: "main", cheapModel: "child" } },
     agents: { main: { model: "capture:main" }, subagent: { model: "capture:child" } },
-    memory,
+    // Keep production tests deterministic: disable the review auto-dismiss timer
+    // unless a specific test opts into it by passing reviewAutoDismissSeconds.
+    memory: { reviewAutoDismissSeconds: 0, ...memory },
     ...config,
   }));
   await writeFile(join(pluginRoot, "flavor-plugin.json"), JSON.stringify({
@@ -32,12 +34,14 @@ async function workspace(memory: Record<string, unknown>, config: Record<string,
       globalThis.__flavorMemoryRequests.push(request.messages);
       const text = request.messages.map((message) => message.content).join("\\n");
       if (text.includes("Evaluate this completed coding task")) {
-        const memories = text.includes("NO_MEMORY") ? [] : text.includes("zh-CN") ? [
-          {"type":"project","summary":"仓库脚本使用 pnpm","content":"本项目的所有仓库脚本统一使用 pnpm。","topicKey":"project.package-manager","keywords":["pnpm","仓库脚本"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":2}},
-          {"type":"feedback","summary":"回答保持简洁","content":"回答用户时保持简洁。","topicKey":"user.response-style","keywords":["简洁"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":2}}
+        const memories = text.includes("NO_MEMORY") ? [] : text.includes("HIGH_SCORE") ? [
+          {"type":"project","summary":"Use pnpm for repository scripts","content":"Use pnpm for all repository scripts.","topicKey":"project.package-manager","keywords":["pnpm","scripts"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":3}}
+        ] : text.includes("zh-CN") ? [
+          {"type":"project","summary":"仓库脚本使用 pnpm","content":"本项目的所有仓库脚本统一使用 pnpm。","topicKey":"project.package-manager","keywords":["pnpm","仓库脚本"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":1}},
+          {"type":"feedback","summary":"回答保持简洁","content":"回答用户时保持简洁。","topicKey":"user.response-style","keywords":["简洁"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":1}}
         ] : [
-          {"type":"project","summary":"Use pnpm for repository scripts","content":"Use pnpm for all repository scripts.","topicKey":"project.package-manager","keywords":["pnpm","scripts","package manager"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":2}},
-          {"type":"feedback","summary":"Keep answers concise","content":"Keep answers concise for the user.","topicKey":"user.response-style","keywords":["concise"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":2}}
+          {"type":"project","summary":"Use pnpm for repository scripts","content":"Use pnpm for all repository scripts.","topicKey":"project.package-manager","keywords":["pnpm","scripts","package manager"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":1}},
+          {"type":"feedback","summary":"Keep answers concise","content":"Keep answers concise for the user.","topicKey":"user.response-style","keywords":["concise"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":1}}
         ];
         yield { type: "text", text: JSON.stringify({ memories }) };
       } else if (text.includes("FAIL_MAIN")) {
@@ -252,6 +256,55 @@ describe("production long-term memory", () => {
     expect(requests.some((messages) => messages.some((message) => message.content.includes("Evaluate this completed coding task")))).toBe(false);
     expect(runtime.memoryReviews.pending).toEqual([]);
     expect(await new MemoryStore({ workspace: root, maxEntries: 200, maxEntryChars: 1000 }).list()).toEqual([]);
+    await runtime.dispose();
+  });
+
+  it("auto-stores high-confidence candidates and reports the direct write", async () => {
+    const root = await workspace({ autoExtract: true, autoExtractMinChars: 200 });
+    const notices: string[] = [];
+    const runtime = await createProductionRuntime({
+      workspace: root, home: root, environment: {},
+      output: (event) => { if (event.type === "notice") notices.push(event.message); },
+    });
+
+    await runtime.session.submit(`HIGH_SCORE Remember our durable package-manager convention. ${"Useful durable context. ".repeat(12)}`);
+
+    const store = new MemoryStore({ workspace: root, maxEntries: 200, maxEntryChars: 1000 });
+    expect(await store.list()).toMatchObject([{ type: "project", content: "Use pnpm for repository scripts" }]);
+    expect(runtime.memoryReviews.pending).toEqual([]);
+    expect(notices.some((notice) => notice.includes("Stored high-confidence long-term memory directly"))).toBe(true);
+    expect(notices.some((notice) => notice.includes("Use pnpm for all repository scripts."))).toBe(true);
+    await runtime.dispose();
+  });
+
+  it("pauses automatic extraction after repeated dismissals and resumes after an explicit store", async () => {
+    const root = await workspace({ autoExtract: true, autoExtractMinChars: 200, ignoreStreakLimit: 2 });
+    const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
+    const extractions = () => ((globalThis as { __flavorMemoryRequests?: Array<Array<{ content: string }>> })
+      .__flavorMemoryRequests ?? []).filter((messages) => messages.some((message) => message.content.includes("Evaluate this completed coding task")));
+
+    await runtime.session.submit(`First durable task. ${"Useful durable context. ".repeat(12)}`);
+    expect(runtime.memoryReviews.pending).toHaveLength(1);
+    runtime.memoryReviews.dismiss(runtime.memoryReviews.pending[0]!.id);
+
+    await runtime.session.submit(`Second durable task. ${"Useful durable context. ".repeat(12)}`);
+    expect(runtime.memoryReviews.pending).toHaveLength(1);
+    runtime.memoryReviews.dismiss(runtime.memoryReviews.pending[0]!.id);
+
+    // Auto-extraction is paused: the third ordinary task is not evaluated at all.
+    await runtime.session.submit(`Third durable task. ${"Useful durable context. ".repeat(12)}`);
+    expect(runtime.memoryReviews.pending).toEqual([]);
+    expect(extractions()).toHaveLength(2);
+
+    // A manual /finish still works and bypasses the pause.
+    await expect(runtime.services.finishTask()).resolves.toContain("Task completed.");
+    expect(extractions()).toHaveLength(3);
+
+    // An explicit remember request restores automatic extraction.
+    await runtime.session.submit("请帮我记住：仓库脚本统一使用 pnpm。");
+    await runtime.session.submit(`Fourth durable task. ${"Useful durable context. ".repeat(12)}`);
+    expect(runtime.memoryReviews.pending).toHaveLength(1);
+    expect(extractions()).toHaveLength(4);
     await runtime.dispose();
   });
 });

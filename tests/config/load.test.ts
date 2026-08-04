@@ -35,6 +35,9 @@ it("uses bounded long-term-memory defaults and validates overrides", () => {
     autoExtract: true,
     autoExtractMinChars: 200,
     scoreThreshold: 9,
+    autoStoreThreshold: 11,
+    ignoreStreakLimit: 5,
+    reviewAutoDismissSeconds: 10,
     maxCandidatesPerTask: 1,
     retrievalTopK: 5,
     maxEntries: 200,
@@ -46,6 +49,8 @@ it("uses bounded long-term-memory defaults and validates overrides", () => {
   expect(() => FlavorConfigSchema.parse({ memory: { maxPromptChars: 100 } })).toThrow();
   expect(() => FlavorConfigSchema.parse({ memory: { autoExtractMinChars: 199 } })).toThrow();
   expect(() => FlavorConfigSchema.parse({ memory: { scoreThreshold: 13 } })).toThrow();
+  expect(() => FlavorConfigSchema.parse({ memory: { autoStoreThreshold: 13 } })).toThrow();
+  expect(() => FlavorConfigSchema.parse({ memory: { ignoreStreakLimit: 1 } })).toThrow();
 });
 
 it("uses Claude-style token compaction defaults and accepts explicit overrides", () => {

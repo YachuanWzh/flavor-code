@@ -23,6 +23,16 @@ export interface MemoryStoreOptions {
   maxEntryChars: number;
 }
 
+/** Cross-session state learned from how the user handles generated review candidates. */
+export interface MemoryBehavior {
+  /** Consecutive explicit dismissals of review candidates without any acceptance. */
+  ignoreStreak: number;
+  /** Auto-extraction paused after the ignore streak reached the configured limit. */
+  autoExtractPaused: boolean;
+}
+
+export const DEFAULT_MEMORY_BEHAVIOR: MemoryBehavior = { ignoreStreak: 0, autoExtractPaused: false };
+
 interface MemoryIndexDocument {
   version: 2;
   references: MemoryReference[];
@@ -44,6 +54,7 @@ export class MemoryStore {
   readonly workspace: string;
   readonly path: string;
   readonly #memoryRoot: string;
+  readonly #behaviorPath: string;
   readonly #maxEntries: number;
   readonly #maxEntryChars: number;
 
@@ -53,8 +64,23 @@ export class MemoryStore {
     this.workspace = resolve(options.workspace);
     this.#memoryRoot = join(this.workspace, ".flavor", "memory");
     this.path = join(this.#memoryRoot, "MEMORY.md");
+    this.#behaviorPath = join(this.#memoryRoot, "behavior.json");
     this.#maxEntries = options.maxEntries;
     this.#maxEntryChars = options.maxEntryChars;
+  }
+
+  async loadBehavior(): Promise<MemoryBehavior> {
+    const result = await readRecoverableFile(this.#behaviorPath, decodeBehavior);
+    return result?.value ?? DEFAULT_MEMORY_BEHAVIOR;
+  }
+
+  async saveBehavior(behavior: MemoryBehavior): Promise<void> {
+    await updateProtectedFile<MemoryBehavior>({
+      path: this.#behaviorPath,
+      decode: decodeBehavior,
+      encode: encodeBehavior,
+      update: () => behavior,
+    });
   }
 
   async references(): Promise<MemoryReference[]> {
@@ -398,6 +424,19 @@ function memoryId(type: MemoryType, content: string): string {
 
 function assertTaskId(taskId: string): void {
   if (!TASK_ID.test(taskId)) throw new Error(`Invalid memory task id: ${taskId}`);
+}
+
+function encodeBehavior(behavior: MemoryBehavior): string {
+  return JSON.stringify(behavior, null, 2);
+}
+
+function decodeBehavior(raw: string): MemoryBehavior {
+  const parsed = JSON.parse(raw) as { ignoreStreak?: unknown; autoExtractPaused?: unknown };
+  if (!Number.isSafeInteger(parsed.ignoreStreak) || (parsed.ignoreStreak as number) < 0) {
+    throw new Error("Invalid memory behavior: ignoreStreak must be a non-negative integer");
+  }
+  if (typeof parsed.autoExtractPaused !== "boolean") throw new Error("Invalid memory behavior: autoExtractPaused must be a boolean");
+  return { ignoreStreak: parsed.ignoreStreak as number, autoExtractPaused: parsed.autoExtractPaused };
 }
 
 function pruneRecalls(recalls: Record<string, string>, now: Date): Record<string, string> {

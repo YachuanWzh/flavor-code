@@ -19,6 +19,19 @@ describe("memory extraction", () => {
     expect(prompt).not.toContain("secret tool output");
   });
 
+  it("demands a conservative extractor that prefers storing nothing over noise", () => {
+    const prompt = buildMemoryExtractionPrompt([
+      { role: "user", content: "Remember our package-manager convention." },
+      { role: "assistant", content: "The repository uses pnpm." },
+    ]);
+
+    expect(prompt).toContain("routine operations");
+    expect(prompt).toContain("one-off task details");
+    expect(prompt).toContain("generic programming knowledge");
+    expect(prompt).toContain("an empty array is always better than storing noise");
+    expect(prompt).toContain("When in doubt, extract nothing");
+  });
+
   it("parses strict or fenced JSON and filters unsupported, duplicate, overlong, and sensitive candidates", () => {
     const parsed = parseMemoryCandidates(`\`\`\`json
       {"memories":[

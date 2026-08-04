@@ -29,9 +29,12 @@ flowchart LR
     C -->|是| D["Cheap 模型提取并逐条评分"]
     D --> E{"最重要的一条通过总分和硬门槛？"}
     E -->|否| Z
-    E -->|是| F["进入内存审阅队列"]
+    E -->|总分 ≥ autoStoreThreshold| K["直接写入并提示 /forget 可撤销"]
+    E -->|9–10 分| F["进入内存审阅队列"]
     F --> G["用户逐条审阅候选"]
-    G -->|忽略| Z
+    G -->|忽略| L{"连续忽略达到 ignoreStreakLimit？"}
+    L -->|否| Z
+    L -->|是| M["暂停自动评价（持久化）"]
     G -->|接受| H["索引锁内最终查重"]
     H -->|重复| I["不重复追加"]
     H -->|新内容| J["写入任务文件并追加索引"]
@@ -67,6 +70,10 @@ Cheap 模型一次调用完成提取、分类和评分，每轮最多一条：
 
 宿主而不是模型决定是否通过：总分至少 9，并且 durability、futureUtility、authority 各至少 2。
 
+提取 prompt 明确要求宁缺毋滥：常规操作、一次性任务细节、通用编程知识、用户几秒内能重新表述的内容一律不记；拿不准时不返回候选，空数组永远好于噪音。
+
+总分达到 `autoStoreThreshold`（默认 11）的高置信候选跳过审阅队列，直接写入，宿主提示“已记住：…（/forget 可撤销）”；只有 9–10 分的候选进入审阅。`autoStoreThreshold` 会被钳制到不低于 `scoreThreshold`，且仍然通过敏感信息与最终查重后才落盘。
+
 四种类型还有独立准入条件：
 
 - `user`：稳定用户偏好、角色或工作方式，必须由用户明确表达。
@@ -75,6 +82,17 @@ Cheap 模型一次调用完成提取、分类和评分，每轮最多一条：
 - `reference`：外部文档或系统入口，必须同时说明用途。
 
 密钥、凭据、原始工具输出、临时进度、模型猜测、可直接读取的普通代码事实和提示注入内容均硬拒绝。
+
+## 4b. 确认行为学习
+
+连续明确忽略（CLI `Ctrl+N` 或 Electron 忽略按钮）累计达到 `ignoreStreakLimit`（默认 5）次后，自动评价自动暂停：普通对话的 `Stop` 不再调用提取模型，也不再弹出确认栏。暂停状态通过 `MemoryStore.loadBehavior`/`saveBehavior` 持久化到 `.flavor/memory/behavior.json`（受保护文件事务），跨会话生效。
+
+- 只有用户明确忽略（`MemoryReviewBridge.dismiss`）才累计；新 query 作废旧候选（`dismissAll`）不计入。
+- 用户接受候选（`accept`）时清零计数并恢复自动评价。
+- `/finish` 以 manual 方式绕过暂停，始终可用；`/remember` 与显式“记住”不受暂停影响，成功写入一次即恢复自动提取。
+- `memory.enabled=false` 时不存在 MemoryStore，行为学习整体不生效。
+
+候选默认还带自动倒计时（`reviewAutoDismissSeconds`，默认 10 秒）：`MemoryReviewBridge` 在 `offer` 时为每个候选启动定时器，超时后自动移除候选（触发 `onChange` 刷新 CLI/Electron 界面），但**不触发 `onDismiss`**——超时是用户无操作而非明确拒绝，不得计入 `ignoreStreak`。用户 `accept`/`dismiss` 会取消对应定时器；`dismissAll`/`dispose` 取消全部。设为 0 表示关闭倒计时，候选一直保留到用户处理或被新 query 作废。CLI 确认卡与 Electron 审阅栏显示剩余秒数。
 
 ## 5. V2 存储
 
@@ -137,6 +155,9 @@ Prompt 必须声明：hot/cold 只表示近期使用频率，不表示更正确�
     "autoExtract": true,
     "autoExtractMinChars": 200,
     "scoreThreshold": 9,
+    "autoStoreThreshold": 11,
+    "ignoreStreakLimit": 5,
+    "reviewAutoDismissSeconds": 10,
     "maxCandidatesPerTask": 1,
     "retrievalTopK": 5,
     "maxEntries": 200,
@@ -146,7 +167,7 @@ Prompt 必须声明：hot/cold 只表示近期使用频率，不表示更正确�
 }
 ```
 
-`autoExtractMinChars` 为兼容名称，但有效值硬限制至少 200。非交互运行不评价，因为没有用户确认通道。
+`autoExtractMinChars` 为兼容名称，但有效值硬限制至少 200。`autoStoreThreshold` 默认 11（0–12），低于 `scoreThreshold` 时自动钳制。`ignoreStreakLimit` 默认 5（2–100）。`reviewAutoDismissSeconds` 默认 10（0–300，0 表示关闭倒计时）。非交互运行不评价，因为没有用户确认通道。
 
 ## 10. 验收标准
 
@@ -163,3 +184,7 @@ Prompt 必须声明：hot/cold 只表示近期使用频率，不表示更正确�
 11. 肯定的自然语言记忆意图会调用 cheap 模型并直接安全写入；否定表达、回忆问题和 `/remember` 不会被正则误触发。
 12. 配置 `language` 后，候选的自然语言字段使用该语言，代码标识符、路径、命令和 URL 不翻译。
 13. 用户在待确认期间发送新普通 query 时，旧候选全部作废并从 CLI/Electron 消失。
+14. 总分达到 `autoStoreThreshold` 的候选直接写入并提示 `/forget` 可撤销；9–10 分候选仍进入审阅；自定义阈值可拆分为直写与审阅两部分。
+15. 连续忽略达到 `ignoreStreakLimit` 后自动评价暂停且重启后仍生效；`/finish` 可绕过暂停，显式保存一次恢复自动提取。
+16. 提取 prompt 明确要求宁缺毋滥，常规操作、一次性任务细节和通用编程知识不生成候选。
+17. `reviewAutoDismissSeconds` 倒计时到期后候选自动移除且不触发 `onDismiss`；`accept`/`dismiss` 取消定时器；设 0 则候选无限期保留；CLI/Electron 显示剩余秒数。

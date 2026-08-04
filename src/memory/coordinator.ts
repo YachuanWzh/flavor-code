@@ -10,14 +10,19 @@ export interface MemoryCoordinatorOptions {
   maxEntryChars: number;
   scoreThreshold: number;
   maxCandidates: number;
+  /** Candidates at or above this total score are stored directly without user review. Defaults to 11. */
+  autoStoreThreshold?: number;
   language?: string;
 }
 
 const MAX_TASK_PROMPT_CHARS = 20_000;
+const DEFAULT_AUTO_STORE_THRESHOLD = 11;
 
 export interface MemoryFinalizationResult {
   evaluated: boolean;
   candidates: boolean;
+  /** Number of candidates stored directly without review because they met the auto-store threshold. */
+  stored: number;
 }
 
 export interface ExplicitMemoryResult extends MemoryFinalizationResult {
@@ -26,7 +31,7 @@ export interface ExplicitMemoryResult extends MemoryFinalizationResult {
 
 export class MemoryCoordinator {
   onError: ((error: unknown) => void) | undefined;
-  readonly #options: MemoryCoordinatorOptions;
+  readonly #options: MemoryCoordinatorOptions & { autoStoreThreshold: number; minChars: number; maxCandidates: number };
   readonly #controller = new AbortController();
   #tail: Promise<void> = Promise.resolve();
 
@@ -34,12 +39,22 @@ export class MemoryCoordinator {
     if (!Number.isSafeInteger(options.minChars) || options.minChars < 0) throw new Error("minChars must be a non-negative integer");
     if (!Number.isSafeInteger(options.scoreThreshold) || options.scoreThreshold < 0 || options.scoreThreshold > 12) throw new Error("scoreThreshold must be between 0 and 12");
     if (!Number.isSafeInteger(options.maxCandidates) || options.maxCandidates < 1) throw new Error("maxCandidates must be positive");
-    this.#options = { ...options, minChars: Math.max(200, options.minChars), maxCandidates: 1 };
+    const autoStoreThreshold = options.autoStoreThreshold ?? DEFAULT_AUTO_STORE_THRESHOLD;
+    if (!Number.isSafeInteger(autoStoreThreshold) || autoStoreThreshold < 0 || autoStoreThreshold > 12) {
+      throw new Error("autoStoreThreshold must be an integer between 0 and 12");
+    }
+    // Clamp below the review threshold so every candidate still passes the host gates before direct writes.
+    this.#options = {
+      ...options,
+      autoStoreThreshold: Math.max(options.scoreThreshold, autoStoreThreshold),
+      minChars: Math.max(200, options.minChars),
+      maxCandidates: 1,
+    };
   }
 
   async finalize(taskId: string, messages: readonly ModelMessage[]): Promise<MemoryFinalizationResult> {
     const result = await this.#evaluate(taskId, messages, false);
-    return { evaluated: result.evaluated, candidates: result.candidates };
+    return { evaluated: result.evaluated, candidates: result.candidates, stored: result.stored };
   }
 
   async rememberExplicit(taskId: string, messages: readonly ModelMessage[]): Promise<ExplicitMemoryResult> {
@@ -70,8 +85,14 @@ export class MemoryCoordinator {
         maxCandidates: this.#options.maxCandidates,
       });
       if (candidates.length > 0) {
-        if (explicit) stored = await this.#options.remember(taskId, candidates);
-        else await this.#options.review(taskId, candidates);
+        if (explicit) {
+          stored = await this.#options.remember(taskId, candidates);
+        } else {
+          const autoStored = candidates.filter((candidate) => totalScore(candidate) >= this.#options.autoStoreThreshold);
+          const needsReview = candidates.filter((candidate) => totalScore(candidate) < this.#options.autoStoreThreshold);
+          if (autoStored.length > 0) stored += await this.#options.remember(taskId, autoStored);
+          if (needsReview.length > 0) await this.#options.review(taskId, needsReview);
+        }
         accepted = true;
       }
     }).catch((error) => {
@@ -86,6 +107,10 @@ export class MemoryCoordinator {
   async flush(): Promise<void> { await this.#tail; }
 
   abort(reason: unknown = new Error("Memory coordinator disposed")): void { this.#controller.abort(reason); }
+}
+
+function totalScore(candidate: ScoredMemoryCandidate): number {
+  return candidate.scores.durability + candidate.scores.futureUtility + candidate.scores.authority + candidate.scores.nonDerivability;
 }
 
 function visibleMessages(messages: readonly ModelMessage[]): ModelMessage[] {

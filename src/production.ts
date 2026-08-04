@@ -76,7 +76,7 @@ import { HallucinationGuard } from "./hallucination/guard.js";
 import { AuditLogger } from "./utils/log.js";
 import { MemoryCoordinator } from "./memory/coordinator.js";
 import { isExplicitMemoryIntent } from "./memory/intent.js";
-import { MemoryStore, renderMemoryDocument } from "./memory/store.js";
+import { DEFAULT_MEMORY_BEHAVIOR, MemoryStore, renderMemoryDocument } from "./memory/store.js";
 import { MemoryReviewBridge } from "./memory/review.js";
 import { createExecutionEnvironment } from "./execution/factory.js";
 import { FlavorIdeClient } from "./ide/client.js";
@@ -183,6 +183,15 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     maxEntries: config.memory.maxEntries,
     maxEntryChars: config.memory.maxEntryChars,
   }) : undefined;
+  const autoStoredContents: string[] = [];
+  let memoryBehavior = DEFAULT_MEMORY_BEHAVIOR;
+  if (memoryStore !== undefined) {
+    try {
+      memoryBehavior = await memoryStore.loadBehavior();
+    } catch {
+      memoryBehavior = DEFAULT_MEMORY_BEHAVIOR;
+    }
+  }
   let memoryHasRoutableEntries = false;
   let userMemoryContext: string | undefined;
   const refreshMemoryState = async (): Promise<void> => {
@@ -196,6 +205,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     userMemoryContext = await memoryStore.userContext();
   };
   const memoryReviews = new MemoryReviewBridge({
+    autoDismissSeconds: config.memory.reviewAutoDismissSeconds,
     remember: async (candidate) => {
       if (memoryStore === undefined) throw new Error("Long-term memory is disabled");
       if (candidate.taskId !== undefined && candidate.summary !== undefined && candidate.topicKey !== undefined
@@ -211,6 +221,26 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       }
     },
     ...(options.onApprovalChange === undefined ? {} : { onChange: options.onApprovalChange }),
+    ...(memoryStore === undefined ? {} : {
+      onDismiss: () => {
+        memoryBehavior = { ...memoryBehavior, ignoreStreak: memoryBehavior.ignoreStreak + 1 };
+        const justPaused = memoryBehavior.ignoreStreak >= config.memory.ignoreStreakLimit
+          && !memoryBehavior.autoExtractPaused;
+        if (justPaused) memoryBehavior = { ...memoryBehavior, autoExtractPaused: true };
+        void memoryStore.saveBehavior(memoryBehavior).catch(() => undefined);
+        if (justPaused) {
+          emitOutput({
+            type: "notice",
+            message: `Long-term-memory auto-extraction paused after ${memoryBehavior.ignoreStreak} consecutive dismissals. Use /finish, /remember, or an explicit “remember” request to store memory manually.`,
+          });
+        }
+      },
+      onAccept: () => {
+        if (memoryBehavior.ignoreStreak === 0 && !memoryBehavior.autoExtractPaused) return;
+        memoryBehavior = { ignoreStreak: 0, autoExtractPaused: false };
+        void memoryStore.saveBehavior(memoryBehavior).catch(() => undefined);
+      },
+    }),
   });
   const auditLogger = new AuditLogger(workspace);
   const recovered = options.resumeSession === undefined
@@ -654,7 +684,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         let stored = 0;
         for (const candidate of candidates) {
           const result = await memoryStore.rememberForTask(taskId, candidate);
-          if (result.added) stored += 1;
+          if (result.added) {
+            stored += 1;
+            autoStoredContents.push(candidate.content);
+          }
         }
         if (stored > 0) await refreshMemoryState();
         return stored;
@@ -662,6 +695,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       minChars: config.memory.autoExtractMinChars,
       maxEntryChars: config.memory.maxEntryChars,
       scoreThreshold: config.memory.scoreThreshold,
+      autoStoreThreshold: config.memory.autoStoreThreshold,
       maxCandidates: Math.min(config.memory.maxCandidatesPerTask, 1),
       ...(config.language === undefined ? {} : { language: config.language }),
       generate: (prompt, signal) => generateMemoryExtraction(registry, childModel, prompt, signal),
@@ -670,15 +704,19 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   if (memoryCoordinator !== undefined) {
     memoryCoordinator.onError = (error) => diagnostics.push(`Long-term memory extraction failed: ${message(error)}`);
   }
-  const finalizeMemoryTask = async (): Promise<string> => {
+  const finalizeMemoryTask = async (manual = false): Promise<string> => {
     const allMessages = harness.main.context.snapshot().messages;
     const messages = allMessages.slice(memoryLifecycle.messageStart ?? 0);
     const transcriptHash = memoryTranscriptHash(messages);
     if (memoryLifecycle.status === "completed" && memoryLifecycle.transcriptHash === transcriptHash) {
       return "Task was already completed and evaluated for long-term memory.";
     }
+    if (!manual && memoryBehavior.autoExtractPaused) {
+      return "Automatic long-term-memory extraction is paused after repeated dismissals; use /finish, /remember, or an explicit “remember” request to store memory manually.";
+    }
+    autoStoredContents.length = 0;
     const finalization = memoryCoordinator === undefined || !config.memory.autoExtract || options.approvalPolicy === "deny"
-      ? { evaluated: true, candidates: false }
+      ? { evaluated: true, candidates: false, stored: 0 }
       : await memoryCoordinator.finalize(memoryLifecycle.taskId ?? sessionId, messages);
     if (!finalization.evaluated) {
       return "Task memory evaluation failed and was not marked complete; retry /finish after checking diagnostics.";
@@ -688,6 +726,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       messageStart: memoryLifecycle.messageStart ?? 0, finalizedAt: new Date().toISOString(), transcriptHash,
     };
     await persist();
+    if (finalization.candidates && finalization.stored > 0) {
+      const storedText = autoStoredContents[0] ?? "a high-confidence memory";
+      return `Task completed. Stored high-confidence long-term memory directly: "${storedText}". Run /forget to remove it if undesired.`;
+    }
     return finalization.candidates
       ? "Task completed. Review the generated long-term-memory candidates before anything is stored."
       : "Task completed; no durable long-term-memory candidates passed the threshold.";
@@ -731,6 +773,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       if (!result.evaluated) {
         emitOutput({ type: "notice", message: "Explicit long-term-memory request could not be analyzed; nothing was stored." });
       } else if (result.stored > 0) {
+        if (memoryBehavior.autoExtractPaused || memoryBehavior.ignoreStreak > 0) {
+          memoryBehavior = { ignoreStreak: 0, autoExtractPaused: false };
+          void memoryStore?.saveBehavior(memoryBehavior).catch(() => undefined);
+        }
         emitOutput({ type: "notice", message: `Stored ${result.stored} explicit long-term-memory ${result.stored === 1 ? "entry" : "entries"}.` });
       } else if (result.candidates) {
         emitOutput({ type: "notice", message: "The explicit memory already exists or the memory limit was reached." });
@@ -739,11 +785,12 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       }
     }
     if (explicit === undefined && automatic && event.payload.outcome === "completed"
-      && memoryCoordinator !== undefined && config.memory.autoExtract && options.approvalPolicy !== "deny") {
+      && memoryCoordinator !== undefined && config.memory.autoExtract && options.approvalPolicy !== "deny"
+      && !memoryBehavior.autoExtractPaused) {
       const result = await finalizeMemoryTask();
       if (result.startsWith("Task memory evaluation failed")) {
         emitOutput({ type: "notice", message: "Automatic long-term-memory evaluation failed; use /finish to retry after checking diagnostics." });
-      } else if (result.startsWith("Task completed. Review")) {
+      } else if (result.startsWith("Task completed. Review") || result.startsWith("Task completed. Stored")) {
         emitOutput({ type: "notice", message: result });
       }
     }
@@ -1168,7 +1215,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       if (removed > 0) await refreshMemoryState();
       return removed === 0 ? "No matching memory found." : `Forgot ${removed} memory ${removed === 1 ? "entry" : "entries"}.`;
     },
-    finishTask: finalizeMemoryTask,
+    finishTask: () => finalizeMemoryTask(true),
     pluginCommands: () => [...pluginCommands.keys()].sort(),
     runPluginCommand: async (name, args, signal) => {
       const handler = pluginCommands.get(name);

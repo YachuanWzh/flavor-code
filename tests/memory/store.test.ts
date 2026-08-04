@@ -180,4 +180,13 @@ describe("MemoryStore", () => {
 
     expect((await memory.list()).map((entry) => entry.content)).toEqual(["Keep this"]);
   });
+
+  it("persists and reloads the review-behavior state across sessions", async () => {
+    const memory = await store();
+
+    expect(await memory.loadBehavior()).toEqual({ ignoreStreak: 0, autoExtractPaused: false });
+    await memory.saveBehavior({ ignoreStreak: 3, autoExtractPaused: true });
+    expect(await new MemoryStore({ workspace: memory.workspace, maxEntries: 10, maxEntryChars: 200 }).loadBehavior())
+      .toEqual({ ignoreStreak: 3, autoExtractPaused: true });
+  });
 });
