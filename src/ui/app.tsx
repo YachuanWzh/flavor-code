@@ -1018,7 +1018,7 @@ function MemoryReviewCards({ reviews, autoDismissSeconds }: {
     <Text color="yellowBright" wrap="truncate-end">│ [{review.type}] {review.content}</Text>
     <Text dimColor>│ Model-generated content is not stored until you approve it.</Text>
     <Text color="yellow">└─ <Text bold>Ctrl+Y</Text> save / <Text bold>Ctrl+N</Text> ignore{autoDismissSeconds > 0
-      ? ` (auto-dismiss in ${remaining}s)`
+      ? <Text bold color="cyanBright">{` (auto-dismiss in ${remaining}s)`}</Text>
       : " (conversation remains available)"}</Text>
   </Box>;
 }

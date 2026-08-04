@@ -93,7 +93,7 @@ export const FlavorConfigSchema = z.object({
       scoreThreshold: z.number().int().min(0).max(12).default(9),
       autoStoreThreshold: z.number().int().min(0).max(12).default(11),
       ignoreStreakLimit: z.number().int().min(2).max(100).default(5),
-      reviewAutoDismissSeconds: z.number().int().min(0).max(300).default(10),
+      reviewAutoDismissSeconds: z.number().int().min(0).max(300).default(5),
       maxCandidatesPerTask: z.number().int().min(1).max(10).default(1),
       retrievalTopK: z.number().int().min(1).max(20).default(5),
       maxEntries: z.number().int().min(1).max(10_000).default(200),

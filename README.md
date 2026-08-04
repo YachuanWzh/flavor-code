@@ -607,7 +607,7 @@ Flavor 使用“任务级长期记忆”：交互式普通任务在 Agent 正常
 
 如果 `flavor.json` 配置了 `language`（例如 `zh-CN`），候选摘要、正文和关键词使用该语言，代码标识符、命令、路径和 URL 保持原样。待确认候选只对当前交互有效：用户不处理候选而直接发送新的普通 query 时，旧候选全部作废并立即从 CLI/Electron 隐藏。
 
-确认框也不会无休止打扰：候选默认带 10 秒倒计时（`reviewAutoDismissSeconds`，设 0 可关闭），超时未保存/未忽略会自动静默忽略，倒计时不作为“用户明确忽略”计入学习；连续忽略（CLI `Ctrl+N` 或 Electron 忽略按钮）累计达到 `ignoreStreakLimit`（默认 5）次后，自动评价自动暂停，之后的普通对话不再弹确认栏；暂停状态持久化在 `.flavor/memory/behavior.json`，重启后仍然生效。`/finish`、`/remember` 或显式“记住”成功保存一次即恢复自动提取。
+确认框也不会无休止打扰：候选默认带 5 秒倒计时（`reviewAutoDismissSeconds`，设 0 可关闭），超时未保存/未忽略会自动静默忽略，倒计时不作为“用户明确忽略”计入学习；连续忽略（CLI `Ctrl+N` 或 Electron 忽略按钮）累计达到 `ignoreStreakLimit`（默认 5）次后，自动评价自动暂停，之后的普通对话不再弹确认栏；暂停状态持久化在 `.flavor/memory/behavior.json`，重启后仍然生效。`/finish`、`/remember` 或显式“记住”成功保存一次即恢复自动提取。
 
 对于自动评价或 `/finish` 产生的隐式候选，通过评分仍不等于写入。CLI 使用 `Ctrl+Y` 保存当前候选、`Ctrl+N` 忽略；Electron 在右侧非阻塞审阅栏逐条处理。用户接受后，宿主再使用规范化文本、单词和字符 n-gram/Jaccard 相似度做最终查重；只有没有同类高置信重复时才追加。密钥、Token、私钥、提示词注入、临时进度、原始工具输出和模型猜测会被拒绝。非交互模式不会运行隐式评价，但用户在输入中明确要求“记住”时仍可执行这条主动保存路径。
 
@@ -657,7 +657,7 @@ flavor memory path
     "scoreThreshold": 9,
     "autoStoreThreshold": 11,
     "ignoreStreakLimit": 5,
-    "reviewAutoDismissSeconds": 10,
+    "reviewAutoDismissSeconds": 5,
     "maxCandidatesPerTask": 1,
     "retrievalTopK": 5,
     "maxEntries": 200,
