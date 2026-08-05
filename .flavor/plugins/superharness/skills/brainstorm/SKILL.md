@@ -5,7 +5,7 @@ disable-model-invocation: true
 argument-hint: [topic]
 ---
 
-# Superharness Brainstorm — 实时脑图需求设计
+# Superharness Brainstorm — live mind-map requirement design
 
 **Topic:** $ARGUMENTS
 
@@ -96,14 +96,14 @@ otherwise restart the server (Phase 1) or continue terminal-only.
 {
   "type": "mindmap:snapshot",
   "rev": 7,
-  "topic": "用户登录功能",
+  "topic": "User Login",
   "status": "exploring",
   "root": {
-    "id": "root", "label": "用户登录功能", "kind": "topic",
+    "id": "root", "label": "User Login", "kind": "topic",
     "children": [
-      { "id": "q1", "label": "认证方式？", "kind": "question", "state": "resolved",
+      { "id": "q1", "label": "Auth method?", "kind": "question", "state": "resolved",
         "children": [
-          { "id": "q1-a", "label": "JWT", "kind": "option", "state": "chosen", "note": "无状态、易扩展" },
+          { "id": "q1-a", "label": "JWT", "kind": "option", "state": "chosen", "note": "Stateless, easy to scale" },
           { "id": "q1-b", "label": "Session", "kind": "option", "state": "rejected" }
         ] }
     ]
@@ -137,7 +137,7 @@ Node `label`/`note` edits and the submit marker land here. Unlike `events`, this
 is **NOT cleared on snapshot push** — it persists until you merge and clear it.
 
 ```json
-{"type":"node:edit","id":"q1-a","label":"新标签","note":"新备注","timestamp":1760000000}
+{"type":"node:edit","id":"q1-a","label":"New label","note":"New note","timestamp":1760000000}
 {"type":"submit","timestamp":1760000005}
 ```
 
@@ -150,7 +150,7 @@ When you invite the user to edit node text:
 1. **Establish the baseline first.** Clear `<state_dir>/edits` (truncate it) so a stale
    submit from an earlier round can't immediately satisfy the wait. Do this BEFORE
    inviting the user, so the window where an eager submit lands un-watched is closed.
-2. Tell them: 去浏览器双击节点改 label/note，逐个保存，改完点顶栏「提交」。
+2. Tell them: double-click a node in the browser to edit its label/note, save each one, then click "Submit" in the top bar when done.
 3. Do NOT end the turn. Block-wait for a `{"type":"submit"}` line in
    `<state_dir>/edits` using `Monitor` (fall back to `ScheduleWakeup`, ≤60s, if
    `Monitor` is unavailable). This only works while you are parked in this wait.
@@ -165,8 +165,8 @@ When you invite the user to edit node text:
 
 | Thought | Reality |
 |---------|---------|
-| "服务器起不来，先修它" | 降级纯终端继续，brainstorm 不被脑图阻塞。 |
-| "一次问三个问题快一点" | 一次一个问题。 |
-| "设计批了，顺手开始写代码" | 终点是设计文档 + 提示 /superharness:go。 |
-| "脑图更新太频繁，攒一批再推" | 每个问题/决策都推送，实时性就是这个技能的价值。 |
-| "用户在浏览器改了就直接采纳" | label/note 编辑要等「提交」，且与终端结论冲突时当面确认。 |
+| "The server won't start, fix it first" | Degrade to terminal-only and keep going; brainstorming must not be blocked by the mind map. |
+| "Asking three questions at once is faster" | One question at a time. |
+| "The design is approved, start coding right away" | The endpoint is a design document + a prompt to run /superharness:go. |
+| "Snapshots push too often, batch them" | Push every question/decision; real-time-ness is this skill's value. |
+| "Take browser edits as final" | label/note edits wait for "Submit" and are confirmed in the terminal when they conflict with the dialogue. |

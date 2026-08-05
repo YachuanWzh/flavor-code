@@ -40,10 +40,11 @@ This project has **superharness** installed as a flavor-code plugin under
 `.flavor/plugins/superharness/`. It registers a skill root that provides
 engineering-discipline skills for autonomous development.
 
-Installed skills: `brainstorm`, `go`, `requesting-code-review`, `subagent-driven-development`, `systematic-debugging`, `test-driven-development`, `using-git-worktrees`, `verification-before-completion`, `writing-plans`
+Installed skills: `brainstorm`, `go`, `light`, `requesting-code-review`, `subagent-driven-development`, `systematic-debugging`, `test-driven-development`, `using-git-worktrees`, `verification-before-completion`, `writing-plans`
 
 Key capabilities:
 - **go** -- Drive a task end-to-end under strict TDD + verification + code review discipline.
+- **light** -- Lightweight mode for small focused tasks: TDD with exemptions, real-output verification, no worktree/plan-file/ralph overhead.
 - **brainstorm** -- Explore requirements with a live browser mind map (manual trigger only).
 - **test-driven-development** -- RED-GREEN-REFACTOR cycle. No production code without a failing test first.
 - **systematic-debugging** -- Root-cause tracing, defense-in-depth, no guess-and-patch.
