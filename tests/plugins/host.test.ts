@@ -126,6 +126,24 @@ describe("PluginHost", () => {
     ]));
   });
 
+  it("allows multiple plugins to register the same hook while other contributions stay unique", async () => {
+    const f = await fixture();
+    await plugin(f.project, "first-hook", "export function activate(ctx) { ctx.registerHook('SessionStart', () => ({ decision: 'allow' })); }", {
+      contributes: { ...baseManifest.contributes, hooks: [{ name: "SessionStart" }] },
+    });
+    await plugin(f.project, "second-hook", "export function activate(ctx) { ctx.registerHook('SessionStart', () => ({ decision: 'allow' })); }", {
+      contributes: { ...baseManifest.contributes, hooks: [{ name: "SessionStart" }] },
+    });
+    const r = registrations();
+    const host = new PluginHost({ projectPluginDirs: [f.project], registrations: r.callbacks });
+
+    await host.loadAll();
+
+    expect(host.loadedPlugins.map(({ name }) => name)).toEqual(["first-hook", "second-hook"]);
+    expect(r.active).toEqual(["SessionStart", "SessionStart"]);
+    expect(host.diagnostics).toEqual([]);
+  });
+
   it("provides scoped logging, redacted immutable config, mediated filesystem, lifecycle events, and idempotent unload", async () => {
     const f = await fixture();
     const readable = join(f.root, "readable.txt");

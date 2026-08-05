@@ -38,7 +38,9 @@ No verified lint or format command detected.
 
 This project has **superharness** installed as a flavor-code plugin under
 `.flavor/plugins/superharness/`. It registers a skill root that provides
-engineering-discipline skills for autonomous development.
+engineering-discipline skills for autonomous development, plus SessionStart /
+UserPromptSubmit / Stop hooks that inject `HARNESS.md` into every session and
+track `/go` tasks under `.claude/superharness/ralph/`.
 
 Installed skills: `brainstorm`, `go`, `light`, `requesting-code-review`, `subagent-driven-development`, `systematic-debugging`, `test-driven-development`, `using-git-worktrees`, `verification-before-completion`, `writing-plans`
 

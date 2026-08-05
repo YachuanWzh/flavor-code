@@ -35,7 +35,7 @@ export class PluginHost {
   readonly #activationTimeoutMs: number;
   readonly #unloadTimeoutMs: number;
   readonly #active: ActivePlugin[] = [];
-  readonly #claimed = new Map<string, string>();
+  readonly #claimed = new Map<string, string[]>();
   #diagnostics: PluginDiagnostic[] = [];
   #loaded = false;
 
@@ -203,20 +203,30 @@ export class PluginHost {
       assertActive();
       if (!contributionNames(manifest, kind).has(name)) throw new Error(`${kind} contribution "${name}" was not declared by ${manifest.name}`);
       const key = `${kind}:${name}`;
-      const owner = this.#claimed.get(key);
-      if (owner !== undefined) throw new Error(`${kind} contribution conflict for "${name}" with plugin ${owner}`);
+      const owners = this.#claimed.get(key) ?? [];
+      // Hooks are broadcast events: multiple plugins may register the same hook name.
+      // All other contribution kinds remain globally unique per name.
+      if (owners.length > 0 && kind !== "hook") {
+        throw new Error(`${kind} contribution conflict for "${name}" with plugin ${owners[0]}`);
+      }
       const callback = this.#options.registrations[kind] as (...values: unknown[]) => PluginDisposer;
       const underlying = callback(name, ...args);
       let disposed = false;
       const disposer = () => {
         if (disposed) return;
         disposed = true;
-        this.#claimed.delete(key);
+        const list = this.#claimed.get(key);
+        if (list !== undefined) {
+          const index = list.indexOf(manifest.name);
+          if (index >= 0) list.splice(index, 1);
+          if (list.length === 0) this.#claimed.delete(key);
+        }
         const index = claimed.indexOf(key);
         if (index >= 0) claimed.splice(index, 1);
         return underlying();
       };
-      this.#claimed.set(key, manifest.name);
+      owners.push(manifest.name);
+      this.#claimed.set(key, owners);
       claimed.push(key);
       disposers.push(disposer);
       return disposer;
@@ -282,7 +292,13 @@ export class PluginHost {
     }
   }
 
-  #releaseClaims(plugin: string): void { for (const [key, owner] of this.#claimed) if (owner === plugin) this.#claimed.delete(key); }
+  #releaseClaims(plugin: string): void {
+    for (const [key, owners] of this.#claimed) {
+      const index = owners.indexOf(plugin);
+      if (index >= 0) owners.splice(index, 1);
+      if (owners.length === 0) this.#claimed.delete(key);
+    }
+  }
   #diagnose(plugin: string, error: unknown, path?: string): void {
     this.#diagnostics.push({ plugin, ...(path === undefined ? {} : { path }), message: message(error) });
   }
