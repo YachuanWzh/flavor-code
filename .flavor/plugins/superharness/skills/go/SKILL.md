@@ -17,6 +17,10 @@ You will now drive this goal to completion under the constraints in `HARNESS.md`
 Work autonomously: only stop to ask when a decision genuinely belongs to your human
 partner (destructive actions, ambiguous product choices). Everything else, decide and proceed.
 
+**State root:** the superharness state root follows the host — `.claude/superharness/`
+under Claude Code, `.flavor/superharness/` under flavor-code. Everywhere below,
+`.claude/superharness/` stands for whichever state root applies to your host.
+
 ## Phase 0 — Understand
 
 1. Restate the goal in one sentence.
@@ -50,8 +54,10 @@ worktree creation fails, work in place — never block. Everything after this
   `/superharness:go` prompt was submitted, the UserPromptSubmit hook bootstrapped the
   ralph state under `.claude/superharness/ralph/`: it ran `Set-RalphCurrentTask` to
   write the `.current-task` pointer (the single active-task marker), seeded an empty
-  `task.json`, and opened `trace.jsonl` with a `task:started` event. Dot-source
-  `.claude/superharness/plugins/superharness/scripts/ralph-lib.ps1` first.
+  `task.json`, and opened `trace.jsonl` with a `task:started` event. Dot-source the
+  ralph library first: `.claude/superharness/plugins/superharness/scripts/ralph-lib.ps1`
+  (Claude Code) or `.flavor/plugins/superharness/scripts/ralph-lib.ps1` (flavor-code);
+  on macOS/Linux use the `ralph-lib.sh` counterpart at the same location.
   - **Fallback — guarantee the files exist.** Check `Get-RalphCurrentTask -Root <project>`.
     If it returns `$null` the hook did NOT fire (a brand-new session is needed to register
     hooks, or this runner skips UserPromptSubmit for slash commands). In that case

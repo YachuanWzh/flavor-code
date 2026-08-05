@@ -26,7 +26,9 @@ function projectRoot(event) {
 }
 
 function ralphDir(root) {
-  return join(root, ".claude", "superharness", "ralph");
+  // flavor-code host: runtime state lives under the .flavor state root
+  // (the Claude Code counterpart uses .claude/superharness/ralph).
+  return join(root, ".flavor", "superharness", "ralph");
 }
 
 function isoNow() {
