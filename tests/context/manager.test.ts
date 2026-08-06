@@ -77,10 +77,23 @@ describe("ContextManager", () => {
       { role: "system", content: "first section" },
       { role: "system", content: "second section" },
       { role: "system", content: "FLAVOR.md\nproject guidance", cacheBreakpoint: true },
+      { role: "system", content: "User memory\nAlways address the user as 亚川.", cacheBreakpoint: true },
       { role: "system", content: "Long-term memory\ndurable project facts" },
       { role: "system", content: "Task state\nin progress" },
-      { role: "system", content: "User memory\nAlways address the user as 亚川.", cacheBreakpoint: true },
     ]);
+  });
+
+  it("keeps the cached prefix byte-identical when task state or memory changes", () => {
+    const context = createContext({ memory: "durable project facts" });
+    const cachedPrefix = (messages: ReturnType<ContextManager["messagesForModel"]>) => {
+      let lastBreakpoint = -1;
+      messages.forEach((message, index) => { if (message.cacheBreakpoint) lastBreakpoint = index; });
+      return JSON.stringify(messages.slice(0, lastBreakpoint + 1));
+    };
+
+    const before = cachedPrefix(context.messagesForModel());
+    context.updateTaskState("rewritten by TaskUpdate");
+    expect(cachedPrefix(context.messagesForModel())).toBe(before);
   });
 
   it("preserves long-term memory across forks and compaction", async () => {
@@ -202,9 +215,11 @@ describe("ContextManager", () => {
 
     const messages = context.messagesForModel();
     const dateIndex = messages.findIndex((message) => message.content === "# Current date\n\n2026-08-03");
-    expect(dateIndex).toBeGreaterThan(0);
-    expect(messages[dateIndex - 1]?.cacheBreakpoint).toBe(true);
-    expect(messages[dateIndex]?.cacheBreakpoint).toBeUndefined();
+    const taskIndex = messages.findIndex((message) => message.content === "Task state\nin progress");
+    expect(dateIndex).toBeGreaterThan(taskIndex);
+    expect(taskIndex).toBeGreaterThan(0);
+    expect(messages.slice(0, taskIndex).at(-1)?.cacheBreakpoint).toBe(true);
+    expect(messages.slice(taskIndex).every((message) => message.cacheBreakpoint === undefined)).toBe(true);
   });
 
   it("includes model-visible tool-call arguments in compaction sizing", () => {

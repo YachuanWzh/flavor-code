@@ -30,6 +30,7 @@ import { LoopStore } from "./loop/store.js";
 import type { LoopStatus } from "./loop/types.js";
 import { inferVerificationPlan, runVerificationPlan } from "./loop/verifier.js";
 import { AnthropicModelAdapter } from "./models/anthropic.js";
+import { isDashScopeBaseURL, resolveCacheProfile, type CacheStrategy } from "./models/cache-profile.js";
 import { OpenAIModelAdapter } from "./models/openai.js";
 import { ModelRegistry, parseModelId } from "./models/registry.js";
 import { modelContentText, type ModelAdapter, type ModelMessage } from "./models/types.js";
@@ -1086,7 +1087,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     },
     setPermissionMode: async (mode) => { harness.setPermissionMode(mode); await persist(); },
     compact: async (signal) => { const changed = await harness.main.context.compact(signal); if (changed) await persist(); return changed; },
-    initialize: () => initializeFlavor(workspace, config),
+    initialize: () => initializeFlavor(workspace),
     config: () => ({
       ...config, sources: loaded.sources,
       ...(effectiveLlm === undefined ? {} : { effectiveLlm: publicEffectiveLlm(effectiveLlm) }),
@@ -1719,11 +1720,20 @@ async function registerConfiguredAdapters(
         ? new AnthropicModelAdapter(adapterOptions)
         : new OpenAIModelAdapter(adapterOptions);
 
+      // Step 4: Identify cache capability from apiType (flavor.json) and baseURL
+      const cacheProfile = resolveCacheProfile({ apiType: apiProtocol, baseURL: runtimeProvider.baseURL });
+      if (apiProtocol === "openai" && isDashScopeBaseURL(runtimeProvider.baseURL)) {
+        diagnostics.push(
+          `Provider "${runtimeName}" is a DashScope service called through the Responses API; DashScope Context Cache does not apply, so prompt cache hit ratio may stay low.`,
+        );
+      }
+
       registry.register(runtimeName, adapter);
       registered.push({
         name: runtimeName,
         sourceName: name,
         ...runtimeProvider,
+        cacheStrategy: cacheProfile.strategy,
         ...(authResult?.llmConfig === undefined ? {} : { pkceManaged: true }),
       });
     } catch (error) { diagnostics.push(`Provider "${name}" could not start: ${message(error)}`); }
@@ -1794,6 +1804,7 @@ interface RegisteredProvider extends ProviderRuntimeConfig {
   name: string;
   sourceName?: string;
   pkceManaged?: boolean;
+  cacheStrategy?: CacheStrategy;
 }
 
 interface EffectiveLlmRuntime extends OAuthLlmConfig {

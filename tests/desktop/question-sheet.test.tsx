@@ -19,7 +19,7 @@ describe("desktop user confirmation surfaces", () => {
   it("renders memory confirmation as a non-modal review rail", () => {
     const html = renderToStaticMarkup(<MemoryReviewRail reviews={[
       { id: "memory-review-1", type: "project", content: "Use pnpm." },
-    ]} onResolve={vi.fn()} />);
+    ]} autoDismissSeconds={0} onResolve={vi.fn()} />);
 
     expect(html).toContain("memory-review-rail");
     expect(html).not.toContain("aria-modal");

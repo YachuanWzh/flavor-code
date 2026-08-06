@@ -300,11 +300,12 @@ describe("production long-term memory", () => {
     await expect(runtime.services.finishTask()).resolves.toContain("Task completed.");
     expect(extractions()).toHaveLength(3);
 
-    // An explicit remember request restores automatic extraction.
+    // An explicit remember request restores automatic extraction. It also calls
+    // the shared extraction prompt once, so the count advances by one here.
     await runtime.session.submit("请帮我记住：仓库脚本统一使用 pnpm。");
     await runtime.session.submit(`Fourth durable task. ${"Useful durable context. ".repeat(12)}`);
     expect(runtime.memoryReviews.pending).toHaveLength(1);
-    expect(extractions()).toHaveLength(4);
+    expect(extractions()).toHaveLength(5);
     await runtime.dispose();
   });
 });

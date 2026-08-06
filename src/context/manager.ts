@@ -357,29 +357,29 @@ export class ContextManager {
 
   #pinnedMessages(): ModelMessage[] {
     const userMemory = this.#resolvedUserMemory();
+    // Byte-stable prefix: identical across turns, so providers can cache it.
     const stable: ModelMessage[] = [
       ...resolveSystemSections(this.#system).map((content) => ({ role: "system" as const, content })),
       // Breakpoint after FLAVOR.md so the byte-stable system prompt plus project
-      // guidance stays cached while the volatile Task state below keeps changing.
+      // guidance stays cached even when the trailing user memory section changes.
       ...(this.#flavor === undefined ? [] : [{
         role: "system" as const,
         content: `FLAVOR.md\n${this.#flavor}`,
         cacheBreakpoint: true,
       }]),
+      // Stable user preferences close the cacheable prefix.
+      ...(userMemory === undefined ? [] : [{ role: "system" as const, content: `User memory\n${userMemory}` }]),
+    ];
+    // Dynamic sections change between turns: memory edits, task updates, date,
+    // model or permission switches. They follow the cache breakpoint so they
+    // never invalidate the cached prefix.
+    const dynamic: ModelMessage[] = [
       ...(this.#memory === undefined ? [] : [{ role: "system" as const, content: `Long-term memory\n${this.#memory}` }]),
       ...(this.#taskState === undefined ? [] : [{ role: "system" as const, content: `Task state\n${this.#taskState}` }]),
-      ...(userMemory === undefined ? [] : [{
-        role: "system" as const,
-        content: `User memory\n${userMemory}`,
-        cacheBreakpoint: true,
-      }]),
+      ...(this.#volatileSystem === undefined ? [] : resolveSystemSections(this.#volatileSystem).map((content) => ({ role: "system" as const, content }))),
     ];
-    const volatile = this.#volatileSystem === undefined ? [] : resolveSystemSections(this.#volatileSystem);
-    if (volatile.length > 0 && stable.length > 0) stable[stable.length - 1]!.cacheBreakpoint = true;
-    return [
-      ...stable,
-      ...volatile.map((content) => ({ role: "system" as const, content })),
-    ];
+    if (dynamic.length > 0 && stable.length > 0) stable[stable.length - 1]!.cacheBreakpoint = true;
+    return [...stable, ...dynamic];
   }
 
   #resolvedUserMemory(): string | undefined {

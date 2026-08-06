@@ -6,7 +6,6 @@ import { Command } from "commander";
 
 import { createProductionRuntime, type ProductionRuntime } from "./production.js";
 import { initializeFlavor } from "./init/project.js";
-import { loadConfig } from "./config/load.js";
 import { message } from "./utils/error.js";
 import { redactErrorText } from "./utils/redact.js";
 import { packageVersion } from "./utils/version.js";
@@ -38,9 +37,7 @@ export function createProgram(): Command {
     .action(async (directory?: string) => {
       const cwd = directory ? resolve(directory) : process.cwd();
       try {
-        const home = homedir();
-        const loaded = await loadConfig({ cwd, home });
-        const result = await initializeFlavor(cwd, loaded.config);
+        const result = await initializeFlavor(cwd);
         process.stdout.write(`${result.created ? "Created" : "Updated"} ${result.path}\n`);
       } catch (error) {
         process.stderr.write(`init: ${safeError(error)}\n`);
