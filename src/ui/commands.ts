@@ -1,6 +1,6 @@
 export const MVP_COMMANDS = [
   "model", "init", "config", "login", "permissions", "skills", "plugins", "hooks",
-  "tasks", "finish", "compact", "clear", "help", "exit", "audit",
+  "tasks", "finish", "compact", "clear", "help", "exit", "audit", "usage",
   "loop", "goal", "mcp",
   "ide",
   "memory", "remember", "forget",
@@ -23,6 +23,7 @@ export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string>
   help: "Show available commands",
   exit: "Exit Flavor",
   audit: "Query tool failure audit log",
+  usage: "Show cache hit statistics for this session",
   loop: "Run a verified autonomous loop toward a goal",
   goal: "Run a goal pipeline with adversarial verification",
   mcp: "Manage MCP servers",

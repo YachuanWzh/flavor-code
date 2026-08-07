@@ -51,6 +51,52 @@ describe("production runtime", () => {
     await runtime.dispose();
   });
 
+  it("summarises session cache usage from the usage log", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-usage-")); roots.push(workspace);
+    const usageFile = join(workspace, "usage.jsonl");
+    const previousUsageFile = process.env.FLAVOR_USAGE_FILE;
+    process.env.FLAVOR_USAGE_FILE = usageFile;
+    try {
+      await writeFile(usageFile, JSON.stringify({
+        event: "flavor-usage", sessionId: "session-a", provider: "anthropic", model: "qwen3.8-max",
+        inputTokens: 10, cacheReadTokens: 90, cacheCreationTokens: 20, totalInputTokens: 120, cacheHitRatio: 0.75,
+      }));
+      const runtime = await createProductionRuntime({
+        workspace, home: workspace, environment: {}, approvalPolicy: "deny", output: () => {},
+      });
+      try {
+        const text = await runtime.services.usage();
+        expect(text).toContain("Usage for session session-a (1 request):");
+        expect(text).toContain("qwen3.8-max");
+        expect(text).toContain("Total input tokens: 120 (cache read 90, 75.0%)");
+      } finally {
+        await runtime.dispose();
+      }
+    } finally {
+      if (previousUsageFile === undefined) delete process.env.FLAVOR_USAGE_FILE;
+      else process.env.FLAVOR_USAGE_FILE = previousUsageFile;
+    }
+  });
+
+  it("reports a friendly message when the usage log does not exist yet", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-usage-empty-")); roots.push(workspace);
+    const previousUsageFile = process.env.FLAVOR_USAGE_FILE;
+    process.env.FLAVOR_USAGE_FILE = join(workspace, "missing-usage.jsonl");
+    try {
+      const runtime = await createProductionRuntime({
+        workspace, home: workspace, environment: {}, approvalPolicy: "deny", output: () => {},
+      });
+      try {
+        expect(await runtime.services.usage()).toBe("No usage recorded in this session yet.");
+      } finally {
+        await runtime.dispose();
+      }
+    } finally {
+      if (previousUsageFile === undefined) delete process.env.FLAVOR_USAGE_FILE;
+      else process.env.FLAVOR_USAGE_FILE = previousUsageFile;
+    }
+  });
+
   it("sends the PKCE model name and JWT to the configured gateway", async () => {
     const requests: Array<{ url: string; body: Record<string, unknown>; apiKey?: string }> = [];
     const gateway = createServer((request, response) => {

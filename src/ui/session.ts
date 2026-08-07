@@ -72,6 +72,7 @@ export interface SessionServices {
   hooksStatus(): readonly unknown[];
   tasks(): unknown;
   audit(toolFilter?: string): string | Promise<string>;
+  usage(): string | Promise<string>;
   cancelActiveTask(): void | Promise<void>;
   clearContext(): void | Promise<void>;
   checkpoint?(label?: string): Promise<SessionTreeNode>;
@@ -325,6 +326,7 @@ export class FlavorSession {
     else if (command.name === "hooks") this.#notice(format(this.#services.hooksStatus()));
     else if (command.name === "tasks") this.#notice(format(this.#services.tasks()));
     else if (command.name === "audit") this.#notice(await this.#services.audit(command.toolFilter));
+    else if (command.name === "usage") this.#notice(await this.#services.usage());
     else if (command.name === "clear") {
       await this.#services.clearContext();
       this.#services.output({ type: "clear" });

@@ -74,7 +74,8 @@ import { message } from "./utils/error.js";
 import { execFileNoThrow } from "./utils/execFileNoThrow.js";
 import { redactSecrets } from "./utils/redact.js";
 import { HallucinationGuard } from "./hallucination/guard.js";
-import { AuditLogger, setUsageSession } from "./utils/log.js";
+import { AuditLogger, setUsageSession, usageLogPath } from "./utils/log.js";
+import { formatUsageSummary, parseUsageEntries, summarizeUsage } from "./utils/usage-summary.js";
 import { MemoryCoordinator } from "./memory/coordinator.js";
 import { isExplicitMemoryIntent } from "./memory/intent.js";
 import { DEFAULT_MEMORY_BEHAVIOR, MemoryStore, renderMemoryDocument } from "./memory/store.js";
@@ -1144,6 +1145,17 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
           return "No audit log exists yet. Tool failures will be recorded here as they occur.";
         }
         return `Failed to read audit log: ${message(error)}`;
+      }
+    },
+    usage: async () => {
+      try {
+        const raw = await readFile(usageLogPath(), "utf8");
+        return formatUsageSummary(summarizeUsage(parseUsageEntries(raw)));
+      } catch (error) {
+        if (typeof error === "object" && error !== null && "code" in error && (error as Record<string, unknown>).code === "ENOENT") {
+          return "No usage recorded in this session yet.";
+        }
+        return `Failed to read usage log: ${message(error)}`;
       }
     },
     cancelActiveTask: async () => {
