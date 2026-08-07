@@ -662,4 +662,54 @@ describe("transcriptReducer", () => {
     ]);
     expect("hint" in (state.active!.blocks[0] as object)).toBe(false);
   });
+
+  it("shows cache hit percentage and hint when done usage carries cache tokens", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "cached" });
+    state = transcriptReducer(state, { type: "session", event: { type: "text", text: "ok" } });
+    state = transcriptReducer(state, {
+      type: "session",
+      event: {
+        type: "done",
+        usage: { inputTokens: 25000, outputTokens: 456, cacheReadTokens: 23000, cacheCreationTokens: 2000 },
+      },
+    });
+
+    expect(state.active).toBeUndefined();
+    expect(state.completed[0]?.blocks).toEqual([
+      { kind: "text", text: "ok" },
+      {
+        kind: "status",
+        id: "usage:1",
+        state: "info",
+        text: "· 25000 in · 92% cached · 456 out",
+        hint: "cache 23000/25000",
+      },
+    ]);
+  });
+
+  it("keeps the plain token format when done usage has no cache fields", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "plain" });
+    state = transcriptReducer(state, { type: "session", event: { type: "text", text: "y" } });
+    state = transcriptReducer(state, {
+      type: "session",
+      event: { type: "done", usage: { inputTokens: 12345, outputTokens: 67 } },
+    });
+
+    expect(state.completed[0]?.blocks).toContainEqual(
+      expect.objectContaining({ id: "usage:1", text: "· 12345 in · 67 out" }),
+    );
+  });
+
+  it("renders 0% cached without division by zero when input tokens are zero", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "edge" });
+    state = transcriptReducer(state, { type: "session", event: { type: "text", text: "x" } });
+    state = transcriptReducer(state, {
+      type: "session",
+      event: { type: "done", usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 } },
+    });
+
+    expect(state.completed[0]?.blocks).toContainEqual(
+      expect.objectContaining({ id: "usage:1", text: "· 0 in · 0% cached · 0 out" }),
+    );
+  });
 });

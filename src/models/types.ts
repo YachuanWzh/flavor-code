@@ -98,9 +98,23 @@ export type ModelEvent =
     rawInput: string;
     error: ProviderError;
   }
-  | { type: "usage"; inputTokens: number; outputTokens: number }
+  | {
+    type: "usage";
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
+  }
   | { type: "error"; error: ProviderError }
-  | { type: "done"; usage: { inputTokens: number; outputTokens: number } };
+  | {
+    type: "done";
+    usage: {
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens?: number;
+      cacheCreationTokens?: number;
+    };
+  };
 
 export interface ModelAdapter {
   stream(request: ModelRequest): AsyncIterable<ModelEvent>;

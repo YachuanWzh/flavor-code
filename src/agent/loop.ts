@@ -84,6 +84,9 @@ export class AgentLoop {
     this.#options.context.append(request.initialUserMessage ?? { role: "user", content: request.prompt });
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
+    let totalCacheReadTokens = 0;
+    let totalCacheCreationTokens = 0;
+    let hasCacheData = false;
     let accumulatedText = "";
     let modelInvocation = 0;
 
@@ -189,7 +192,12 @@ export class AgentLoop {
         completed = false;
         let terminalError: AgentError | undefined;
         let providerError = false;
-        let usage: { inputTokens: number; outputTokens: number } | undefined;
+        let usage: {
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens?: number;
+      cacheCreationTokens?: number;
+    } | undefined;
         const modelCallId = String(++modelInvocation);
         yield { type: "model-start", id: modelCallId };
         try {
@@ -209,7 +217,16 @@ export class AgentLoop {
                 error: event.error,
               });
             } else if (event.type === "usage") {
-              usage = { inputTokens: event.inputTokens, outputTokens: event.outputTokens };
+              usage = {
+                inputTokens: event.inputTokens,
+                outputTokens: event.outputTokens,
+                ...(event.cacheReadTokens === undefined
+                  ? {}
+                  : { cacheReadTokens: event.cacheReadTokens }),
+                ...(event.cacheCreationTokens === undefined
+                  ? {}
+                  : { cacheCreationTokens: event.cacheCreationTokens }),
+              };
             } else if (event.type === "error") {
               terminalError = event.error;
               break;
@@ -257,6 +274,11 @@ export class AgentLoop {
           this.#options.context.recordModelUsage(usage.inputTokens);
           totalInputTokens += usage.inputTokens;
           totalOutputTokens += usage.outputTokens;
+          if (usage.cacheReadTokens !== undefined || usage.cacheCreationTokens !== undefined) {
+            hasCacheData = true;
+          }
+          totalCacheReadTokens += usage.cacheReadTokens ?? 0;
+          totalCacheCreationTokens += usage.cacheCreationTokens ?? 0;
           yield { type: "usage", ...usage, totalInputTokens, totalOutputTokens };
         }
         const providerProducedOutput = assistantText.length > 0 || collectedToolCalls.length > 0;
@@ -474,7 +496,19 @@ export class AgentLoop {
             // Guard failure is non-fatal for interactive sessions
           }
         }
-        yield { type: "done", usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens } };
+        yield {
+          type: "done",
+          usage: {
+            inputTokens: totalInputTokens,
+            outputTokens: totalOutputTokens,
+            ...(hasCacheData
+              ? {
+                  cacheReadTokens: totalCacheReadTokens,
+                  cacheCreationTokens: totalCacheCreationTokens,
+                }
+              : {}),
+          },
+        };
         return;
       }
 

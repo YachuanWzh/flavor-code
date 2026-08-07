@@ -43,7 +43,15 @@ export type AgentEvent =
   | { type: "tool-end"; id: string; name: string; result: ToolResult; label?: string; hint?: string }
   | { type: "tasks"; snapshot: TaskSnapshot }
   | { type: "tasks-cleared" }
-  | { type: "usage"; inputTokens: number; outputTokens: number; totalInputTokens: number; totalOutputTokens: number }
+  | {
+    type: "usage";
+    inputTokens: number;
+    outputTokens: number;
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
+  }
   | { type: "model-retry"; attempt: number; maxAttempts: number; delayMs: number }
   | {
     type: "structured-output-retry";
@@ -66,5 +74,13 @@ export type AgentEvent =
   | { type: "notice"; message: string }
   | { type: "warning"; message: string }
   | { type: "limit_reached"; iteration: number; maxIterations: number; extended: boolean }
-  | { type: "done"; usage: { inputTokens: number; outputTokens: number } }
+  | {
+    type: "done";
+    usage: {
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens?: number;
+      cacheCreationTokens?: number;
+    };
+  }
   | { type: "error"; error: AgentError };

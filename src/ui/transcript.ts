@@ -144,9 +144,18 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
     active: withoutModelActivity(state.active, `model:${event.id}`),
   };
   if (event.type === "done") {
+    const usage = event.usage;
+    const cacheRead = usage.cacheReadTokens;
+    const hasCache = cacheRead !== undefined;
+    const percent = !hasCache || usage.inputTokens <= 0
+      ? 0
+      : Math.round((cacheRead / usage.inputTokens) * 100);
     const withUsage = upsertStatus({ ...state, active: withoutModelActivity(state.active) }, {
       kind: "status", id: `usage:${state.active.id}`, state: "info",
-      text: `· ${event.usage.inputTokens} in · ${event.usage.outputTokens} out`,
+      text: hasCache
+        ? `· ${usage.inputTokens} in · ${percent}% cached · ${usage.outputTokens} out`
+        : `· ${usage.inputTokens} in · ${usage.outputTokens} out`,
+      ...(hasCache ? { hint: `cache ${cacheRead}/${usage.inputTokens}` } : {}),
     });
     return finishActive(withUsage);
   }

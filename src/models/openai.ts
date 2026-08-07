@@ -199,20 +199,34 @@ export class OpenAIModelAdapter implements ModelAdapter {
             });
           }
         } else if (event.type === "response.completed") {
+          const breakdown = breakdownFromUsage(event.response?.usage);
           const usage = {
             inputTokens: event.response?.usage?.input_tokens ?? 0,
             outputTokens: event.response?.usage?.output_tokens ?? 0,
+            ...(breakdown === undefined
+              ? {}
+              : {
+                  cacheReadTokens: breakdown.cacheRead,
+                  cacheCreationTokens: breakdown.cacheCreation,
+                }),
           };
-          this.#logUsage(request.model, breakdownFromUsage(event.response?.usage));
+          this.#logUsage(request.model, breakdown);
           yield { type: "usage", ...usage };
           yield { type: "done", usage };
         } else if (event.type === "response.incomplete") {
+          const breakdown = breakdownFromUsage(event.response?.usage);
           const usage = {
             inputTokens: event.response?.usage?.input_tokens ?? 0,
             outputTokens: event.response?.usage?.output_tokens ?? 0,
+            ...(breakdown === undefined
+              ? {}
+              : {
+                  cacheReadTokens: breakdown.cacheRead,
+                  cacheCreationTokens: breakdown.cacheCreation,
+                }),
           };
           const reason = event.response?.incomplete_details?.reason ?? "unknown reason";
-          this.#logUsage(request.model, breakdownFromUsage(event.response?.usage));
+          this.#logUsage(request.model, breakdown);
           yield { type: "usage", ...usage };
           yield {
             type: "error",
@@ -224,11 +238,18 @@ export class OpenAIModelAdapter implements ModelAdapter {
           return;
         } else if (event.type === "response.failed") {
           if (event.response?.usage !== undefined) {
-            this.#logUsage(request.model, breakdownFromUsage(event.response.usage));
+            const breakdown = breakdownFromUsage(event.response.usage);
+            this.#logUsage(request.model, breakdown);
             yield {
               type: "usage",
               inputTokens: event.response.usage.input_tokens ?? 0,
               outputTokens: event.response.usage.output_tokens ?? 0,
+              ...(breakdown === undefined
+                ? {}
+                : {
+                    cacheReadTokens: breakdown.cacheRead,
+                    cacheCreationTokens: breakdown.cacheCreation,
+                  }),
             };
           }
           yield {

@@ -364,7 +364,12 @@ export class AnthropicModelAdapter implements ModelAdapter {
           outputTokens = event.usage?.output_tokens ?? outputTokens;
         } else if (event.type === "message_stop") {
           this.#logUsage(request, inputUsage, requestShape);
-          const usage = { inputTokens, outputTokens };
+          const usage = {
+            inputTokens,
+            outputTokens,
+            cacheReadTokens: inputUsage.cacheRead,
+            cacheCreationTokens: inputUsage.cacheCreation,
+          };
           if (stopReason === "max_tokens" || stopReason === "model_context_window_exceeded") {
             usageEmitted = true;
             yield { type: "usage", ...usage };
@@ -406,7 +411,13 @@ export class AnthropicModelAdapter implements ModelAdapter {
     } catch (error) {
       if (hasUsage && !usageEmitted) {
         this.#logUsage(request, inputUsage, requestShape);
-        yield { type: "usage", inputTokens, outputTokens };
+        yield {
+          type: "usage",
+          inputTokens,
+          outputTokens,
+          cacheReadTokens: inputUsage.cacheRead,
+          cacheCreationTokens: inputUsage.cacheCreation,
+        };
       }
       yield { type: "error", error: normalizeProviderError(error) };
     }

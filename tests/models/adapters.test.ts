@@ -150,8 +150,17 @@ describe("OpenAIModelAdapter", () => {
         name: "weather",
         input: { city: "Paris" },
       },
-      { type: "usage", inputTokens: 4, outputTokens: 3 },
-      { type: "done", usage: { inputTokens: 4, outputTokens: 3 } },
+      {
+        type: "usage",
+        inputTokens: 4,
+        outputTokens: 3,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      },
+      {
+        type: "done",
+        usage: { inputTokens: 4, outputTokens: 3, cacheReadTokens: 0, cacheCreationTokens: 0 },
+      },
     ]);
     expect(stream).toHaveBeenCalledWith(
       expect.objectContaining({ model: "example-model", input: request.messages }),
@@ -270,7 +279,7 @@ describe("OpenAIModelAdapter", () => {
     await expect(
       collect(new OpenAIModelAdapter({ client: asOpenAIClient(client) }).stream(request)),
     ).resolves.toEqual([
-      { type: "usage", inputTokens: 6, outputTokens: 7 },
+      { type: "usage", inputTokens: 6, outputTokens: 7, cacheReadTokens: 0, cacheCreationTokens: 0 },
       {
         type: "error",
         error: { code: "unknown", message: "Response incomplete: max_output_tokens" },
@@ -284,7 +293,7 @@ describe("OpenAIModelAdapter", () => {
       response: { usage: { input_tokens: 8, output_tokens: 3 }, error: { message: "failed" } },
     }) } };
     await expect(collect(new OpenAIModelAdapter({ client: asOpenAIClient(client) }).stream(request))).resolves.toEqual([
-      { type: "usage", inputTokens: 8, outputTokens: 3 },
+      { type: "usage", inputTokens: 8, outputTokens: 3, cacheReadTokens: 0, cacheCreationTokens: 0 },
       { type: "error", error: { code: "unknown", message: "failed" } },
     ]);
   });
@@ -387,6 +396,83 @@ describe("OpenAIModelAdapter", () => {
     });
     stderr.mockRestore();
   });
+
+  it("carries Responses cache tokens into usage and done events", async () => {
+    const client = {
+      responses: {
+        stream: () => events({
+          type: "response.completed",
+          response: {
+            usage: {
+              input_tokens: 50,
+              output_tokens: 5,
+              input_tokens_details: { cached_tokens: 150 },
+            },
+          },
+        }),
+      },
+    };
+
+    await expect(
+      collect(new OpenAIModelAdapter({ client: asOpenAIClient(client) }).stream(request)),
+    ).resolves.toEqual([
+      {
+        type: "usage",
+        inputTokens: 50,
+        outputTokens: 5,
+        cacheReadTokens: 150,
+        cacheCreationTokens: 0,
+      },
+      {
+        type: "done",
+        usage: {
+          inputTokens: 50,
+          outputTokens: 5,
+          cacheReadTokens: 150,
+          cacheCreationTokens: 0,
+        },
+      },
+    ]);
+  });
+
+  it("carries DeepSeek-style cache tokens into usage and done events", async () => {
+    const client = {
+      responses: {
+        stream: () => events({
+          type: "response.completed",
+          response: {
+            usage: {
+              input_tokens: 120,
+              output_tokens: 4,
+              prompt_cache_hit_tokens: 100,
+              prompt_cache_miss_tokens: 20,
+            },
+          },
+        }),
+      },
+    };
+
+    await expect(
+      collect(new OpenAIModelAdapter({ client: asOpenAIClient(client) }).stream(request)),
+    ).resolves.toEqual([
+      {
+        type: "usage",
+        inputTokens: 120,
+        outputTokens: 4,
+        cacheReadTokens: 100,
+        cacheCreationTokens: 20,
+      },
+      {
+        type: "done",
+        usage: {
+          inputTokens: 120,
+          outputTokens: 4,
+          cacheReadTokens: 100,
+          cacheCreationTokens: 20,
+        },
+      },
+    ]);
+  });
 });
 
 describe("AnthropicModelAdapter", () => {
@@ -454,8 +540,17 @@ describe("AnthropicModelAdapter", () => {
         name: "weather",
         input: { city: "Paris" },
       },
-      { type: "usage", inputTokens: 5, outputTokens: 2 },
-      { type: "done", usage: { inputTokens: 5, outputTokens: 2 } },
+      {
+        type: "usage",
+        inputTokens: 5,
+        outputTokens: 2,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      },
+      {
+        type: "done",
+        usage: { inputTokens: 5, outputTokens: 2, cacheReadTokens: 0, cacheCreationTokens: 0 },
+      },
     ]);
     expect(stream).toHaveBeenCalledWith(
       expect.objectContaining({ model: "example-model", max_tokens: 32_768 }),
@@ -537,7 +632,7 @@ describe("AnthropicModelAdapter", () => {
     await expect(
       collect(new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream(request)),
     ).resolves.toEqual([
-      { type: "usage", inputTokens: 5, outputTokens: 4096 },
+      { type: "usage", inputTokens: 5, outputTokens: 4096, cacheReadTokens: 0, cacheCreationTokens: 0 },
       {
         type: "error",
         error: {
@@ -589,8 +684,8 @@ describe("AnthropicModelAdapter", () => {
         message: expect.stringContaining('Invalid tool-call input for "weather"'),
       },
     });
-    expect(output[1]).toEqual({ type: "usage", inputTokens: 5, outputTokens: 12 });
-    expect(output[2]).toEqual({ type: "done", usage: { inputTokens: 5, outputTokens: 12 } });
+    expect(output[1]).toEqual({ type: "usage", inputTokens: 5, outputTokens: 12, cacheReadTokens: 0, cacheCreationTokens: 0 });
+    expect(output[2]).toEqual({ type: "done", usage: { inputTokens: 5, outputTokens: 12, cacheReadTokens: 0, cacheCreationTokens: 0 } });
     expect(output).not.toContainEqual(expect.objectContaining({ type: "tool-call", input: {} }));
   });
 
@@ -634,7 +729,7 @@ describe("AnthropicModelAdapter", () => {
       throw new Error("stream broke");
     })() } };
     await expect(collect(new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream(request))).resolves.toEqual([
-      { type: "usage", inputTokens: 5, outputTokens: 2 },
+      { type: "usage", inputTokens: 5, outputTokens: 2, cacheReadTokens: 0, cacheCreationTokens: 0 },
       { type: "error", error: { code: "unknown", message: "stream broke" } },
     ]);
   });
@@ -660,8 +755,8 @@ describe("AnthropicModelAdapter", () => {
     await expect(
       collect(new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream(request)),
     ).resolves.toEqual([
-      { type: "usage", inputTokens: 10, outputTokens: 2 },
-      { type: "done", usage: { inputTokens: 10, outputTokens: 2 } },
+      { type: "usage", inputTokens: 10, outputTokens: 2, cacheReadTokens: 3, cacheCreationTokens: 2 },
+      { type: "done", usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 3, cacheCreationTokens: 2 } },
     ]);
   });
 
@@ -699,8 +794,8 @@ describe("AnthropicModelAdapter", () => {
     await expect(
       collect(new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream(request)),
     ).resolves.toEqual([
-      { type: "usage", inputTokens: 11, outputTokens: 2 },
-      { type: "done", usage: { inputTokens: 11, outputTokens: 2 } },
+      { type: "usage", inputTokens: 11, outputTokens: 2, cacheReadTokens: 4, cacheCreationTokens: 2 },
+      { type: "done", usage: { inputTokens: 11, outputTokens: 2, cacheReadTokens: 4, cacheCreationTokens: 2 } },
     ]);
   });
 
@@ -1018,6 +1113,49 @@ describe("AnthropicModelAdapter", () => {
     });
     setUsageSession("unknown");
     stderr.mockRestore();
+  });
+
+  it("carries cache read and creation tokens into usage and done events", async () => {
+    const client = {
+      messages: {
+        create: () => events(
+          {
+            type: "message_start",
+            message: {
+              usage: {
+                input_tokens: 5,
+                cache_creation_input_tokens: 2,
+                cache_read_input_tokens: 3,
+                output_tokens: 0,
+              },
+            },
+          },
+          { type: "message_delta", delta: {}, usage: { output_tokens: 2 } },
+          { type: "message_stop" },
+        ),
+      },
+    };
+
+    await expect(
+      collect(new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream(request)),
+    ).resolves.toEqual([
+      {
+        type: "usage",
+        inputTokens: 10,
+        outputTokens: 2,
+        cacheReadTokens: 3,
+        cacheCreationTokens: 2,
+      },
+      {
+        type: "done",
+        usage: {
+          inputTokens: 10,
+          outputTokens: 2,
+          cacheReadTokens: 3,
+          cacheCreationTokens: 2,
+        },
+      },
+    ]);
   });
 });
 
