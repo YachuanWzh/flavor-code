@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   createAskUserQuestionTool,
+  hookAnswersFromUpdatedInput,
   QuestionBridge,
   type AskUserQuestionHandler,
 } from "../../src/tools/ask-user-question.js";
@@ -146,5 +147,33 @@ describe("QuestionBridge", () => {
   it("cancel is a no-op when nothing is pending", () => {
     const bridge = new QuestionBridge();
     expect(() => bridge.cancel()).not.toThrow();
+  });
+});
+
+describe("hookAnswersFromUpdatedInput", () => {
+  const qs = [
+    { question: "Which aspect?", header: "Focus", options: [{ label: "Performance", description: "Speed" }] },
+    { question: "Which style?", header: "Style", options: [{ label: "Minimal", description: "Less" }] },
+  ];
+
+  it("maps answers keyed by question text to question indexes", () => {
+    const updatedInput = {
+      tool: "AskUserQuestion",
+      input: { questions: qs, answers: { "Which aspect?": "Performance", "Which style?": "Minimal" } },
+      agent: "main",
+    };
+    expect(hookAnswersFromUpdatedInput(updatedInput, qs)).toEqual({ 0: "Performance", 1: "Minimal" });
+  });
+
+  it("returns undefined when an answer is missing or blank", () => {
+    expect(hookAnswersFromUpdatedInput({ input: { answers: { "Which aspect?": "Performance" } } }, qs)).toBeUndefined();
+    expect(hookAnswersFromUpdatedInput({ input: { answers: { "Which aspect?": "  ", "Which style?": "Minimal" } } }, qs)).toBeUndefined();
+  });
+
+  it("returns undefined for malformed updatedInput", () => {
+    expect(hookAnswersFromUpdatedInput(undefined, qs)).toBeUndefined();
+    expect(hookAnswersFromUpdatedInput({}, qs)).toBeUndefined();
+    expect(hookAnswersFromUpdatedInput({ input: "nope" }, qs)).toBeUndefined();
+    expect(hookAnswersFromUpdatedInput({ input: { answers: "nope" } }, qs)).toBeUndefined();
   });
 });

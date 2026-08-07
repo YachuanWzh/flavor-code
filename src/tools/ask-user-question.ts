@@ -24,6 +24,32 @@ export interface AskUserQuestionHandler {
 }
 
 /**
+ * Extracts answers a hook-relayed UI (e.g. the Flavor Island app) returned for
+ * an AskUserQuestion PermissionRequest. The decision's updatedInput carries the
+ * re-shaped hook payload, whose `input.answers` is keyed by question text. The
+ * result maps question index to answer; anything short of a complete non-empty
+ * answer set returns undefined so the terminal prompt remains the fallback.
+ */
+export function hookAnswersFromUpdatedInput(
+  updatedInput: unknown,
+  questions: readonly Question[],
+): Record<number, string> | undefined {
+  if (typeof updatedInput !== "object" || updatedInput === null) return undefined;
+  const input = (updatedInput as { input?: unknown }).input;
+  if (typeof input !== "object" || input === null) return undefined;
+  const answers = (input as { answers?: unknown }).answers;
+  if (typeof answers !== "object" || answers === null) return undefined;
+  const map = answers as Record<string, unknown>;
+  const result: Record<number, string> = {};
+  for (let index = 0; index < questions.length; index += 1) {
+    const answer = map[questions[index]!.question];
+    if (typeof answer !== "string" || answer.trim().length === 0) return undefined;
+    result[index] = answer;
+  }
+  return result;
+}
+
+/**
  * A simple bridge that holds pending questions and resolves when answers arrive.
  * The UI layer polls `pending` to render the question prompts and calls `answer()`
  * when the user responds.

@@ -19,7 +19,7 @@ import { ContextManager, type CompactProgressCallback, type ContextSnapshot } fr
 import { summarizeWithModel } from "./context/summarizer.js";
 import { LocalHarness } from "./harness/local.js";
 import { HookBus } from "./hooks/bus.js";
-import { HOOK_EVENT_NAMES, type HookEventName } from "./hooks/types.js";
+import { HOOK_EVENT_NAMES, type HookDecision, type HookEventName } from "./hooks/types.js";
 import { createIncidentReporter } from "./incidents/reporter.js";
 import { initializeFlavor } from "./init/project.js";
 import { LoopOrchestrator, type LoopRuntimeEvent } from "./loop/orchestrator.js";
@@ -60,7 +60,7 @@ import {
 import { createGlobTool, createGrepTool } from "./tools/search.js";
 import { createShellTool } from "./tools/shell.js";
 import { createLspTools } from "./tools/lsp.js";
-import { createAskUserQuestionTool, QuestionBridge, type AskUserQuestionHandler } from "./tools/ask-user-question.js";
+import { createAskUserQuestionTool, hookAnswersFromUpdatedInput, QuestionBridge, type AskUserQuestionHandler } from "./tools/ask-user-question.js";
 import { createTaskOutputTool } from "./tools/task-output.js";
 import { createTodoWriteTool } from "./tools/todo-write.js";
 import { createManagedToolManagementTools, ManagedToolStore } from "./tools/managed.js";
@@ -292,6 +292,26 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const questions = new QuestionBridge(options.onApprovalChange);
   const askUserQuestionHandler: AskUserQuestionHandler = async (qs, signal) => {
     if (options.approvalPolicy === "deny") throw new Error("AskUserQuestion is not available in non-interactive mode");
+    // Hook-relayed UIs (e.g. the Flavor Island desktop app) get first refusal:
+    // they answer an AskUserQuestion PermissionRequest whose updatedInput
+    // carries the answers keyed by question text. Anything less than a complete
+    // answer set falls through to the terminal prompt below.
+    if (hooks.hasListeners("PermissionRequest")) {
+      let decision: HookDecision;
+      try {
+        decision = await hooks.emit({
+          version: 1,
+          type: "PermissionRequest",
+          payload: { tool: "AskUserQuestion", input: { questions: qs }, agent: "main" },
+        }, signal);
+      } catch (error) {
+        if (signal.aborted) throw error;
+        decision = { decision: "ask", reason: message(error) };
+      }
+      if (decision.decision === "deny") throw new Error(decision.reason ?? "User skipped the question");
+      const hookAnswers = hookAnswersFromUpdatedInput(decision.updatedInput, qs);
+      if (hookAnswers !== undefined) return hookAnswers;
+    }
     return questions.ask(qs, signal);
   };
   const executionEnvironment = createExecutionEnvironment(workspace, config.execution);
