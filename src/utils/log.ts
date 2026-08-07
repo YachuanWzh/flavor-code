@@ -14,13 +14,29 @@ export function usageLogPath(): string {
   return process.env.FLAVOR_USAGE_FILE ?? join(process.cwd(), ".flavor", "usage.jsonl");
 }
 
+let usageSessionId = "unknown";
+// Each new session overwrites the previous session's log so the file always
+// reflects the current session only.
+let truncateOnNextAppend = false;
+
+export function setUsageSession(sessionId: string): void {
+  usageSessionId = sessionId;
+  truncateOnNextAppend = true;
+}
+
+export function currentUsageSession(): string {
+  return usageSessionId;
+}
+
 export async function appendUsageLog(line: string): Promise<void> {
   // Serialise appends so concurrent requests don't interleave.
   usagePending = usagePending.catch(() => undefined).then(async () => {
     try {
       const path = usageLogPath();
       await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-      await appendFile(path, `${line}\n`, { encoding: "utf8", mode: 0o600, flag: "a" });
+      const flag = truncateOnNextAppend ? "w" : "a";
+      truncateOnNextAppend = false;
+      await appendFile(path, `${line}\n`, { encoding: "utf8", mode: 0o600, flag });
     } catch {
       // Usage logging must never break model streaming.
     }

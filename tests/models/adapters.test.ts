@@ -10,6 +10,7 @@ import {
 import { OpenAIModelAdapter, type OpenAIClient } from "../../src/models/openai.js";
 import { normalizeProviderError } from "../../src/models/types.js";
 import type { ModelEvent, ModelRequest } from "../../src/models/types.js";
+import { setUsageSession } from "../../src/utils/log.js";
 
 const signal = new AbortController().signal;
 const imageRoots: string[] = [];
@@ -362,7 +363,7 @@ describe("OpenAIModelAdapter", () => {
     stderr.mockRestore();
   });
 
-  it("does not log OpenAI usage when debugUsage is disabled", async () => {
+  it("keeps stderr silent but still writes the usage file when debugUsage is disabled", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const usagePath = await usageLogFile();
     const client = {
@@ -381,7 +382,8 @@ describe("OpenAIModelAdapter", () => {
     expect(stderr).not.toHaveBeenCalled();
     await vi.waitFor(async () => {
       const content = await readFile(usagePath, "utf8").catch(() => "");
-      expect(content).toBe("");
+      expect(content).toContain('"event":"flavor-usage"');
+      expect(content).toContain('"provider":"openai"');
     });
     stderr.mockRestore();
   });
@@ -944,6 +946,7 @@ describe("AnthropicModelAdapter", () => {
 
     const logged = stderr.mock.calls.map(([line]) => String(line)).join("");
     expect(logged).toContain('"event":"flavor-usage"');
+    expect(logged).toContain('"sessionId"');
     expect(logged).toContain('"provider":"anthropic"');
     expect(logged).toContain('"cacheReadTokens":200');
     expect(logged).toContain('"cacheCreationTokens":100');
@@ -957,7 +960,7 @@ describe("AnthropicModelAdapter", () => {
     stderr.mockRestore();
   });
 
-  it("does not log Anthropic usage when debugUsage is disabled", async () => {
+  it("keeps stderr silent but still writes the usage file when debugUsage is disabled", async () => {
     const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const usagePath = await usageLogFile();
     const client = {
@@ -978,8 +981,42 @@ describe("AnthropicModelAdapter", () => {
     expect(stderr).not.toHaveBeenCalled();
     await vi.waitFor(async () => {
       const content = await readFile(usagePath, "utf8").catch(() => "");
-      expect(content).toBe("");
+      expect(content).toContain('"event":"flavor-usage"');
+      expect(content).toContain('"provider":"anthropic"');
     });
+    stderr.mockRestore();
+  });
+
+  it("tags usage lines with the session and overwrites the log when a new session starts", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const usagePath = await usageLogFile();
+    const client = {
+      messages: {
+        create: () =>
+          events(
+            { type: "message_start", message: { usage: { input_tokens: 5, output_tokens: 0 } } },
+            { type: "message_delta", delta: {}, usage: { output_tokens: 2 } },
+            { type: "message_stop" },
+          ),
+      },
+    };
+    const adapter = new AnthropicModelAdapter({ client: asAnthropicClient(client) });
+
+    setUsageSession("session-first");
+    await collect(adapter.stream(request));
+    await vi.waitFor(async () => {
+      const content = await readFile(usagePath, "utf8").catch(() => "");
+      expect(content).toContain('"sessionId":"session-first"');
+    });
+
+    setUsageSession("session-second");
+    await collect(adapter.stream(request));
+    await vi.waitFor(async () => {
+      const content = await readFile(usagePath, "utf8").catch(() => "");
+      expect(content).toContain('"sessionId":"session-second"');
+      expect(content).not.toContain('"sessionId":"session-first"');
+    });
+    setUsageSession("unknown");
     stderr.mockRestore();
   });
 });

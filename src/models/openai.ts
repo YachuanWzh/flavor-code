@@ -15,7 +15,7 @@ import {
 } from "./types.js";
 import { normalizeToolCallInput } from "../utils/json.js";
 import { isEnvTruthy } from "../utils/envUtils.js";
-import { appendUsageLog } from "../utils/log.js";
+import { appendUsageLog, currentUsageSession } from "../utils/log.js";
 
 type OpenAIStreamRequest = Parameters<OpenAI["responses"]["stream"]>[0];
 
@@ -32,7 +32,7 @@ export interface OpenAIModelAdapterOptions {
   apiKey?: string;
   baseURL?: string;
   client?: OpenAIClient;
-  /** Log per-request cache breakdown to stderr. Defaults to FLAVOR_DEBUG_USAGE=1. */
+  /** Mirror the per-request cache breakdown to stderr. Defaults to FLAVOR_DEBUG_USAGE=1. File logging to usage.jsonl is always on. */
   debugUsage?: boolean;
 }
 
@@ -112,6 +112,7 @@ function formatOpenAIUsage(model: string, breakdown: OpenAIUsageBreakdown): stri
   const hitRatio = total > 0 ? breakdown.cacheRead / total : 0;
   return JSON.stringify({
     event: "flavor-usage",
+    sessionId: currentUsageSession(),
     provider: "openai",
     model,
     inputTokens: breakdown.base,
@@ -137,13 +138,16 @@ export class OpenAIModelAdapter implements ModelAdapter {
   }
 
   #logUsage(model: string, breakdown: OpenAIUsageBreakdown | undefined): void {
-    if (!this.debugUsage || breakdown === undefined) return;
+    if (breakdown === undefined) return;
     const line = formatOpenAIUsage(model, breakdown);
-    try {
-      process.stderr.write(`${line}\n`);
-    } catch {
-      // Debug logging must never break model streaming.
+    if (this.debugUsage) {
+      try {
+        process.stderr.write(`${line}\n`);
+      } catch {
+        // Debug logging must never break model streaming.
+      }
     }
+    // File logging is always on; a new session truncates the previous log.
     void appendUsageLog(line);
   }
 

@@ -34,7 +34,7 @@
 - **SDK、JSONL RPC 与 Eval** — Node 调用方、IDE 和自动化评测共用同一套生产运行时
 - **图片上传与多模态** — CLI 中 Ctrl+V 粘贴剪贴板图片、桌面端文件选择器上传，支持 PNG/JPEG/WebP，每张 ≤5MB，去重存储，作为 user 消息的一部分发送给视觉模型分析 UI 截图、设计稿或错误日志
 - **PKCE 运行时 LLM 配置管理** — OAuth 令牌可随登录下发实际模型、网关地址与可用模型列表，运行时动态切换主/子 Agent 模型，`/login` 立即生效无需重启，项目文件不被改写
-- **提示词缓存优化与命中率量化** — 稳定前缀（系统提示词 + FLAVOR.md + 用户偏好）与动态段严格分离，缓存断点固定在前缀末尾，任务状态更新、记忆修改、`/model` 切换都不再改写前缀字节；对话历史通过滚动尾部断点整段纳入缓存，稳态命中率可达 90~98%；按 `apiType` / `baseURL` 自动识别缓存策略；设置 `FLAVOR_DEBUG_USAGE=1` 即可逐请求观测 cache 命中率
+- **提示词缓存优化与命中率量化** — 稳定前缀（系统提示词 + FLAVOR.md + 用户偏好）与动态段严格分离，缓存断点固定在前缀末尾，任务状态更新、记忆修改、`/model` 切换都不再改写前缀字节；对话历史通过滚动尾部断点整段纳入缓存，稳态命中率可达 90~98%；按 `apiType` / `baseURL` 自动识别缓存策略；命中率日志默认写入 `.flavor/usage.jsonl`（无需任何开关，每个新 session 覆盖上一次），携带 `sessionId`
 - **Docker 沙箱** — 可选择让 Shell、自治 loop 及其验证命令在无网络、只读根文件系统的容器中运行
 
 ### 子 Agent 字节级提示词缓存（0.8.0）
@@ -48,22 +48,23 @@ Anthropic 请求会在 fork 边界发送显式 `cache_control`；OpenAI 与 Open
 1.1.9 把字节级缓存思想扩展到**主会话本身**；1.2.0 重新划分了缓存布局，并加入了按 provider 的缓存能力识别；1.2.1 用滚动尾部断点把**整段对话历史**纳入缓存：
 
 - **主会话滚动缓存断点（1.2.1）** — Anthropic 适配器在每次请求的最后一条消息末尾自动追加 `cache_control` 断点：本轮把全部对话历史写入缓存，下一轮前缀与本轮完全一致、整段命中，只付增量的写入成本。缓存覆盖面从「仅系统前缀」扩展到全部历史，DashScope / Anthropic 兼容端点的命中率从 ~5% 提升到稳态 90~98%，输入成本约为优化前的 1/10。断点固定在请求末尾的 text / tool_result 块上（DashScope 会静默忽略 assistant `tool_use` 块上的标记）；单请求标记预算 4 个，满额时自动淘汰价值最低的既有标记（如 fork 边界）
+- **命中率日志默认开启（1.2.1）** — 每次模型请求结束的命中率 JSON 默认写入 `.flavor/usage.jsonl`，不再需要设置 `FLAVOR_DEBUG_USAGE`；每条日志携带 `sessionId`，每个新 session（含清空上下文）会覆盖上一次的文件，始终只反映当前会话。`FLAVOR_DEBUG_USAGE=1` 仍可将同一条日志镜像到 stderr（交互式 TUI 下 ink 会拦截 stderr，以文件为准）
 - **缓存布局重构（1.2.0）** — 稳定前缀固定为「系统提示词 + FLAVOR.md + User memory（用户偏好）」，缓存断点设在稳定段末尾；Long-term memory（任务记忆）、Task state、`# Runtime environment`（Model、Permission mode）与 `# Current date` 全部移到断点之后。用户偏好跨任务稳定，而任务记忆、任务状态每轮都会变化，因此重新排序后，记忆更新、`/model`、`/permission` 切换和日期变化都不再改写缓存前缀字节——DeepSeek 等自动前缀缓存服务可持续整段命中。
 - **缓存能力识别（1.2.0）** — 新增 `resolveCacheProfile`，根据 provider 的 `apiType`（来自 `.flavor/flavor.json` 或 PKCE 令牌 `llm_config`）与 `baseURL` 识别缓存策略：Anthropic → 显式 `cache_control` 断点；OpenAI 通用端点 → 服务端自动前缀缓存；DashScope / MaaS 网关（`dashscope*.aliyuncs.com`、`*.maas.aliyuncs.com`）经 Responses API 调用时提示 Context Cache 不适用、命中率可能偏低。provider 注册信息附带缓存策略，便于定位命中率问题。
 - **FLAVOR.md 缓存断点（1.1.9）** — FLAVOR 段携带 `cacheBreakpoint`，把「系统提示词 + FLAVOR.md」固化为独立缓存单元；Task state 每轮变化只影响其后的小段，DeepSeek 等自动前缀缓存服务仍能命中大块稳定前缀。
 - **tools 字节序稳定（1.1.9）** — Anthropic / OpenAI 适配器发送 tools 前按名称排序，MCP 工具重连造成的顺序漂移不再破坏请求前缀字节。
-- **命中率量化（1.1.9）** — 设置环境变量后每次请求输出一行 JSON,同时写入 `process.stderr` 与 `.flavor/usage.jsonl`(可用 `FLAVOR_USAGE_FILE` 覆盖路径):
+- **命中率量化（1.1.9，1.2.1 起默认开启）** — 每次请求输出一行 JSON，默认写入 `.flavor/usage.jsonl`（可用 `FLAVOR_USAGE_FILE` 覆盖路径），无需任何环境变量；设置 `FLAVOR_DEBUG_USAGE=1` 可额外镜像到 `process.stderr`：
 
 ```bash
-set FLAVOR_DEBUG_USAGE=1 && flavor   # Windows CMD
-$env:FLAVOR_DEBUG_USAGE="1"; flavor  # PowerShell
+set FLAVOR_DEBUG_USAGE=1 && flavor   # Windows CMD，仅 stderr 镜像需要
+$env:FLAVOR_DEBUG_USAGE="1"; flavor  # PowerShell，仅 stderr 镜像需要
 ```
 
 ```json
-{"event":"flavor-usage","provider":"anthropic","model":"qwen3.8-max","inputTokens":6,"cacheReadTokens":23965,"cacheCreationTokens":2562,"totalInputTokens":26533,"cacheHitRatio":0.9032,"requestMessages":15,"requestMarkers":3}
+{"event":"flavor-usage","sessionId":"session-202608050818405-ab12cd34","provider":"anthropic","model":"qwen3.8-max","inputTokens":6,"cacheReadTokens":23965,"cacheCreationTokens":2562,"totalInputTokens":26533,"cacheHitRatio":0.9032,"requestMessages":15,"requestMarkers":3}
 ```
 
-**查看位置**:交互式 TUI 下 ink 会拦截 stderr 输出,请以文件为准——另开一个终端实时观察:
+**查看位置**:日志文件每个新 session 覆盖上一次的内容,另开一个终端实时观察:
 
 ```powershell
 Get-Content .flavor\usage.jsonl -Wait

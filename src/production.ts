@@ -74,7 +74,7 @@ import { message } from "./utils/error.js";
 import { execFileNoThrow } from "./utils/execFileNoThrow.js";
 import { redactSecrets } from "./utils/redact.js";
 import { HallucinationGuard } from "./hallucination/guard.js";
-import { AuditLogger } from "./utils/log.js";
+import { AuditLogger, setUsageSession } from "./utils/log.js";
 import { MemoryCoordinator } from "./memory/coordinator.js";
 import { isExplicitMemoryIntent } from "./memory/intent.js";
 import { DEFAULT_MEMORY_BEHAVIOR, MemoryStore, renderMemoryDocument } from "./memory/store.js";
@@ -442,6 +442,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const subagentStartedAt: Record<string, number> = {};
   const subagentElapsedMs: Record<string, number> = {};
   let sessionId = recovered?.sessionId ?? `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
+  // Tag usage.jsonl with this session; the file is overwritten per session.
+  setUsageSession(sessionId);
   ideSessionId = sessionId;
   await ide.startSession(sessionId);
   let createdAt = recovered?.createdAt ?? new Date().toISOString();
@@ -1164,6 +1166,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       for (const key of Object.keys(subagentElapsedMs)) delete subagentElapsedMs[key];
       const previousIdeSessionId = ideSessionId;
       sessionId = `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
+      setUsageSession(sessionId);
       ideSessionId = sessionId;
       if (previousIdeSessionId !== undefined) await ide.endSession(previousIdeSessionId);
       await ide.startSession(sessionId);
