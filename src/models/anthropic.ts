@@ -65,6 +65,62 @@ interface InputUsageSnapshot {
   cacheRead: number;
 }
 
+/** Shape of the outgoing request, kept for FLAVOR_DEBUG_USAGE diagnosis. */
+interface RequestShape {
+  messages: number;
+  markers: number;
+}
+
+/** Provider-side cap on cache markers per request (Anthropic and DashScope both enforce 4). */
+const MAX_CACHE_MARKERS = 4;
+
+interface CacheMarkerRef {
+  blocks: unknown[];
+  index: number;
+}
+
+function collectCacheMarkers(system: MessageCreateParamsStreaming["system"], messages: MessageParam[]): CacheMarkerRef[] {
+  const markers: CacheMarkerRef[] = [];
+  const visit = (blocks: unknown[], index: number): void => {
+    const block = blocks[index];
+    if (
+      typeof block === "object" &&
+      block !== null &&
+      "cache_control" in block &&
+      (block as { cache_control?: unknown }).cache_control !== undefined
+    ) {
+      markers.push({ blocks, index });
+    }
+  };
+  if (Array.isArray(system)) system.forEach((_block, index) => visit(system as unknown[], index));
+  for (const message of messages) {
+    if (Array.isArray(message.content)) {
+      const blocks = message.content as unknown[];
+      blocks.forEach((_block, index) => visit(blocks, index));
+    }
+  }
+  return markers;
+}
+
+function stripCacheControl(marker: CacheMarkerRef): void {
+  const block = marker.blocks[marker.index] as Record<string, unknown>;
+  delete block.cache_control;
+}
+
+/** Attach a cache marker to the last content block of a message (in place). */
+function markLastBlock(message: MessageParam): void {
+  const blocks: unknown[] = typeof message.content === "string"
+    ? [{ type: "text", text: message.content }]
+    : [...message.content];
+  if (blocks.length === 0) return;
+  const index = blocks.length - 1;
+  blocks[index] = {
+    ...(blocks[index] as Record<string, unknown>),
+    cache_control: { type: "ephemeral" },
+  };
+  message.content = blocks as unknown as MessageParam["content"];
+}
+
 function updateInputUsage(snapshot: InputUsageSnapshot, usage: AnthropicUsage | undefined): number {
   if (usage?.input_tokens != null) snapshot.base = usage.input_tokens;
   if (usage?.cache_creation_input_tokens != null) {
@@ -76,7 +132,7 @@ function updateInputUsage(snapshot: InputUsageSnapshot, usage: AnthropicUsage | 
   return snapshot.base + snapshot.cacheCreation + snapshot.cacheRead;
 }
 
-function formatCacheUsage(model: string, snapshot: InputUsageSnapshot): string {
+function formatCacheUsage(model: string, snapshot: InputUsageSnapshot, shape?: RequestShape): string {
   const total = snapshot.base + snapshot.cacheCreation + snapshot.cacheRead;
   const hitRatio = total > 0 ? snapshot.cacheRead / total : 0;
   return JSON.stringify({
@@ -88,6 +144,7 @@ function formatCacheUsage(model: string, snapshot: InputUsageSnapshot): string {
     cacheCreationTokens: snapshot.cacheCreation,
     totalInputTokens: total,
     cacheHitRatio: Number(hitRatio.toFixed(4)),
+    ...(shape === undefined ? {} : { requestMessages: shape.messages, requestMarkers: shape.markers }),
   });
 }
 
@@ -111,9 +168,9 @@ export class AnthropicModelAdapter implements ModelAdapter {
       });
   }
 
-  #logUsage(request: ModelRequest, snapshot: InputUsageSnapshot): void {
+  #logUsage(request: ModelRequest, snapshot: InputUsageSnapshot, shape?: RequestShape): void {
     if (!this.debugUsage) return;
-    const line = formatCacheUsage(request.model, snapshot);
+    const line = formatCacheUsage(request.model, snapshot, shape);
     try {
       process.stderr.write(`${line}\n`);
     } catch {
@@ -129,6 +186,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
     let usageEmitted = false;
     let stopReason: string | null | undefined;
     const inputUsage = { base: 0, cacheCreation: 0, cacheRead: 0 };
+    let requestShape: RequestShape | undefined;
     const pendingTools = new Map<number, PendingToolCall>();
     const completedTools: PendingToolCall[] = [];
 
@@ -225,6 +283,31 @@ export class AnthropicModelAdapter implements ModelAdapter {
         }
       }
 
+      // Rolling tail breakpoint: cache the conversation up to the final
+      // message so the next turn reuses it as a prefix hit. The marker must
+      // sit on the last message — DashScope's Anthropic-compatible endpoint
+      // honors markers on text/tool_result blocks at the request tail but
+      // silently ignores markers placed on assistant tool_use blocks.
+      // Providers cap markers per request (Anthropic and DashScope both at 4)
+      // and silently ignore markers beyond the cap, so when the budget is
+      // already spent we evict the least valuable marker: the fork boundary
+      // only matters for the first subagent request, while the rolling block
+      // protects the entire conversation history every turn.
+      if (messages.length >= 2) {
+        const markers = collectCacheMarkers(system, messages);
+        if (markers.length < MAX_CACHE_MARKERS) {
+          markLastBlock(messages[messages.length - 1]!);
+        } else if (markers.length > 2) {
+          stripCacheControl(markers[markers.length - 2]!);
+          markLastBlock(messages[messages.length - 1]!);
+        }
+      }
+      // Request shape captured for FLAVOR_DEBUG_USAGE cache diagnostics.
+      requestShape = {
+        messages: messages.length,
+        markers: collectCacheMarkers(system, messages).length,
+      };
+
       const body: MessageCreateParamsStreaming = {
         model: request.model,
         max_tokens: this.maxOutputTokens,
@@ -277,7 +360,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
           inputTokens = updateInputUsage(inputUsage, event.usage);
           outputTokens = event.usage?.output_tokens ?? outputTokens;
         } else if (event.type === "message_stop") {
-          this.#logUsage(request, inputUsage);
+          this.#logUsage(request, inputUsage, requestShape);
           const usage = { inputTokens, outputTokens };
           if (stopReason === "max_tokens" || stopReason === "model_context_window_exceeded") {
             usageEmitted = true;
@@ -319,7 +402,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
       }
     } catch (error) {
       if (hasUsage && !usageEmitted) {
-        this.#logUsage(request, inputUsage);
+        this.#logUsage(request, inputUsage, requestShape);
         yield { type: "usage", inputTokens, outputTokens };
       }
       yield { type: "error", error: normalizeProviderError(error) };

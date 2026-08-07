@@ -9,7 +9,7 @@
 
 `flavor-code` 是一个同时提供终端界面与 Electron 桌面应用的 AI 编程助手。它接入大语言模型（OpenAI GPT、Anthropic Claude 或任何兼容服务），能理解你的项目结构，在工作区范围内安全操作文件，甚至能把复杂任务拆成多块，分给多个"小助手"并行处理。
 
-当前稳定版本：**1.2.0**
+当前稳定版本：**1.2.1**
 
 ## 它能做什么
 
@@ -34,7 +34,7 @@
 - **SDK、JSONL RPC 与 Eval** — Node 调用方、IDE 和自动化评测共用同一套生产运行时
 - **图片上传与多模态** — CLI 中 Ctrl+V 粘贴剪贴板图片、桌面端文件选择器上传，支持 PNG/JPEG/WebP，每张 ≤5MB，去重存储，作为 user 消息的一部分发送给视觉模型分析 UI 截图、设计稿或错误日志
 - **PKCE 运行时 LLM 配置管理** — OAuth 令牌可随登录下发实际模型、网关地址与可用模型列表，运行时动态切换主/子 Agent 模型，`/login` 立即生效无需重启，项目文件不被改写
-- **提示词缓存优化与命中率量化** — 稳定前缀（系统提示词 + FLAVOR.md + 用户偏好）与动态段严格分离，缓存断点固定在前缀末尾，任务状态更新、记忆修改、`/model` 切换都不再改写前缀字节；按 `apiType` / `baseURL` 自动识别缓存策略；设置 `FLAVOR_DEBUG_USAGE=1` 即可逐请求观测 cache 命中率
+- **提示词缓存优化与命中率量化** — 稳定前缀（系统提示词 + FLAVOR.md + 用户偏好）与动态段严格分离，缓存断点固定在前缀末尾，任务状态更新、记忆修改、`/model` 切换都不再改写前缀字节；对话历史通过滚动尾部断点整段纳入缓存，稳态命中率可达 90~98%；按 `apiType` / `baseURL` 自动识别缓存策略；设置 `FLAVOR_DEBUG_USAGE=1` 即可逐请求观测 cache 命中率
 - **Docker 沙箱** — 可选择让 Shell、自治 loop 及其验证命令在无网络、只读根文件系统的容器中运行
 
 ### 子 Agent 字节级提示词缓存（0.8.0）
@@ -43,10 +43,11 @@
 
 Anthropic 请求会在 fork 边界发送显式 `cache_control`；OpenAI 与 OpenAI-compatible 服务继续使用自动缓存，不注入可能与旧模型不兼容的专用字段。缓存仍受提供商规则限制：短于最小 token 门槛的前缀不会缓存；主/子 Agent 工具定义或模型不同会阻止整包父子命中；首批完全并发的 Anthropic 子请求也可能在缓存写入可见前同时发生 miss。后续兄弟任务、依赖节点和重试仍可复用相同的父前缀。
 
-### 提示词缓存优化与命中率量化（1.2.0）
+### 提示词缓存优化与命中率量化（1.2.0 / 1.2.1）
 
-1.1.9 把字节级缓存思想扩展到**主会话本身**；1.2.0 重新划分了缓存布局，并加入了按 provider 的缓存能力识别：
+1.1.9 把字节级缓存思想扩展到**主会话本身**；1.2.0 重新划分了缓存布局，并加入了按 provider 的缓存能力识别；1.2.1 用滚动尾部断点把**整段对话历史**纳入缓存：
 
+- **主会话滚动缓存断点（1.2.1）** — Anthropic 适配器在每次请求的最后一条消息末尾自动追加 `cache_control` 断点：本轮把全部对话历史写入缓存，下一轮前缀与本轮完全一致、整段命中，只付增量的写入成本。缓存覆盖面从「仅系统前缀」扩展到全部历史，DashScope / Anthropic 兼容端点的命中率从 ~5% 提升到稳态 90~98%，输入成本约为优化前的 1/10。断点固定在请求末尾的 text / tool_result 块上（DashScope 会静默忽略 assistant `tool_use` 块上的标记）；单请求标记预算 4 个，满额时自动淘汰价值最低的既有标记（如 fork 边界）
 - **缓存布局重构（1.2.0）** — 稳定前缀固定为「系统提示词 + FLAVOR.md + User memory（用户偏好）」，缓存断点设在稳定段末尾；Long-term memory（任务记忆）、Task state、`# Runtime environment`（Model、Permission mode）与 `# Current date` 全部移到断点之后。用户偏好跨任务稳定，而任务记忆、任务状态每轮都会变化，因此重新排序后，记忆更新、`/model`、`/permission` 切换和日期变化都不再改写缓存前缀字节——DeepSeek 等自动前缀缓存服务可持续整段命中。
 - **缓存能力识别（1.2.0）** — 新增 `resolveCacheProfile`，根据 provider 的 `apiType`（来自 `.flavor/flavor.json` 或 PKCE 令牌 `llm_config`）与 `baseURL` 识别缓存策略：Anthropic → 显式 `cache_control` 断点；OpenAI 通用端点 → 服务端自动前缀缓存；DashScope / MaaS 网关（`dashscope*.aliyuncs.com`、`*.maas.aliyuncs.com`）经 Responses API 调用时提示 Context Cache 不适用、命中率可能偏低。provider 注册信息附带缓存策略，便于定位命中率问题。
 - **FLAVOR.md 缓存断点（1.1.9）** — FLAVOR 段携带 `cacheBreakpoint`，把「系统提示词 + FLAVOR.md」固化为独立缓存单元；Task state 每轮变化只影响其后的小段，DeepSeek 等自动前缀缓存服务仍能命中大块稳定前缀。
@@ -59,7 +60,7 @@ $env:FLAVOR_DEBUG_USAGE="1"; flavor  # PowerShell
 ```
 
 ```json
-{"event":"flavor-usage","provider":"anthropic","model":"deepseek-v4-flash","inputTokens":8123,"cacheReadTokens":14250,"cacheCreationTokens":2100,"totalInputTokens":24473,"cacheHitRatio":0.5823}
+{"event":"flavor-usage","provider":"anthropic","model":"qwen3.8-max","inputTokens":6,"cacheReadTokens":23965,"cacheCreationTokens":2562,"totalInputTokens":26533,"cacheHitRatio":0.9032,"requestMessages":15,"requestMarkers":3}
 ```
 
 **查看位置**:交互式 TUI 下 ink 会拦截 stderr 输出,请以文件为准——另开一个终端实时观察:
@@ -68,7 +69,7 @@ $env:FLAVOR_DEBUG_USAGE="1"; flavor  # PowerShell
 Get-Content .flavor\usage.jsonl -Wait
 ```
 
-命中率 = `cacheReadTokens / totalInputTokens`。同一会话内连续请求应逐步接近 90%+；命中率骤降说明前缀字节发生了变化,可按 `event:flavor-usage` 从文件中检索排查。OpenAI 侧同时兼容 Responses 的 `input_tokens_details.cached_tokens` 与 DeepSeek 的 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`。
+命中率 = `cacheReadTokens / totalInputTokens`。同一会话内连续请求应逐步接近 90%+；命中率骤降说明前缀字节发生了变化,可按 `event:flavor-usage` 从文件中检索排查。`requestMessages` / `requestMarkers`（1.2.1）记录本次发送的消息数与实际挂载的缓存标记数，与服务端返回的 `cacheCreationTokens` 对照可快速判定命中率异常是客户端没发标记还是服务端不创建缓存块。OpenAI 侧同时兼容 Responses 的 `input_tokens_details.cached_tokens` 与 DeepSeek 的 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`。
 
 ### 工具结果溢出保护（0.7.0）
 
@@ -524,7 +525,7 @@ npm run desktop:dist     # 生成 Windows NSIS 安装包
 Windows 打包产物位于：
 
 - 免安装目录：`release/win-unpacked/Flavor Code.exe`
-- NSIS 安装包：`release/Flavor-Code-1.2.0-x64.exe`
+- NSIS 安装包：`release/Flavor-Code-1.2.1-x64.exe`
 
 模型配置仍读取全局 `~/.flavor-code/flavor.json`、项目 `.flavor/flavor.json`、`.env` 和环境变量，因此 CLI 与桌面端可以共享配置与会话。生产版桌面窗口启用了 `contextIsolation` 和 Chromium 沙箱，关闭了渲染进程的 Node.js 集成；文件、命令和 Agent 操作只通过显式 IPC 接口进入主进程。Windows 的 `desktop:dev` 为兼容工作区内 Chromium 子进程启动，仅在本地开发启动器中使用 `--no-sandbox`，打包产物不携带该参数。
 

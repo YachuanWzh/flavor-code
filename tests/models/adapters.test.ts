@@ -735,7 +735,12 @@ describe("AnthropicModelAdapter", () => {
             role: "user",
             content: [
               { type: "tool_result", tool_use_id: "t1", content: "sunny" },
-              { type: "tool_result", tool_use_id: "t2", content: "rainy" },
+              {
+                type: "tool_result",
+                tool_use_id: "t2",
+                content: "rainy",
+                cache_control: { type: "ephemeral" },
+              },
             ],
           },
         ],
@@ -774,7 +779,12 @@ describe("AnthropicModelAdapter", () => {
           },
           {
             role: "user",
-            content: [{ type: "tool_result", tool_use_id: "tool_7", content: "sunny" }],
+            content: [{
+              type: "tool_result",
+              tool_use_id: "tool_7",
+              content: "sunny",
+              cache_control: { type: "ephemeral" },
+            }],
           },
         ],
         tools: [
@@ -814,7 +824,10 @@ describe("AnthropicModelAdapter", () => {
             cache_control: { type: "ephemeral" },
           }],
         },
-        { role: "user", content: "child-only directive" },
+        {
+          role: "user",
+          content: [{ type: "text", text: "child-only directive", cache_control: { type: "ephemeral" } }],
+        },
       ],
     }), { signal });
   });
@@ -836,6 +849,67 @@ describe("AnthropicModelAdapter", () => {
       system: [
         { type: "text", text: "first" },
         { type: "text", text: "last shared system", cache_control: { type: "ephemeral" } },
+      ],
+    }), { signal });
+  });
+
+  it("adds a rolling cache marker to the final message of the conversation", async () => {
+    const stream = vi.fn(() => events());
+    const client = { messages: { create: stream } };
+
+    await collect(new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream({
+      ...request,
+      messages: [
+        { role: "user", content: "first turn" },
+        { role: "assistant", content: "first reply" },
+        { role: "user", content: "second turn" },
+      ],
+    }));
+
+    expect(stream).toHaveBeenCalledWith(expect.objectContaining({
+      messages: [
+        { role: "user", content: "first turn" },
+        { role: "assistant", content: "first reply" },
+        {
+          role: "user",
+          content: [{ type: "text", text: "second turn", cache_control: { type: "ephemeral" } }],
+        },
+      ],
+    }), { signal });
+  });
+
+  it("evicts the least valuable marker to keep the rolling marker within the provider cap", async () => {
+    const stream = vi.fn(() => events());
+    const client = { messages: { create: stream } };
+
+    await collect(new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream({
+      ...request,
+      messages: [
+        { role: "system", content: "s1", cacheBreakpoint: true },
+        { role: "system", content: "s2", cacheBreakpoint: true },
+        { role: "system", content: "s3", cacheBreakpoint: true },
+        { role: "user", content: "history", cacheBreakpoint: true },
+        { role: "assistant", content: "reply" },
+        { role: "user", content: "latest" },
+      ],
+    }));
+
+    expect(stream).toHaveBeenCalledWith(expect.objectContaining({
+      system: [
+        { type: "text", text: "s1", cache_control: { type: "ephemeral" } },
+        { type: "text", text: "s2", cache_control: { type: "ephemeral" } },
+        { type: "text", text: "s3" },
+      ],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "history", cache_control: { type: "ephemeral" } }],
+        },
+        { role: "assistant", content: "reply" },
+        {
+          role: "user",
+          content: [{ type: "text", text: "latest", cache_control: { type: "ephemeral" } }],
+        },
       ],
     }), { signal });
   });
