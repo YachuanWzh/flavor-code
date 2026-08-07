@@ -384,8 +384,6 @@ function parsePatch(patch: string): PatchFile[] {
       const header = lines[index]?.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
       if (!header) throw new Error(`Unsupported unified diff metadata or line: ${lines[index]}`);
       const hunk: PatchHunk = { oldStart: Number(header[1]), newStart: Number(header[3]), lines: [] };
-      const expectedOld = header[2] === undefined ? 1 : Number(header[2]);
-      const expectedNew = header[4] === undefined ? 1 : Number(header[4]);
       index += 1;
       while (index < lines.length && !lines[index]?.startsWith("@@ ") && !lines[index]?.startsWith("--- ")) {
         const line = lines[index]!;
@@ -396,11 +394,9 @@ function parsePatch(patch: string): PatchFile[] {
         hunk.lines.push(line);
         index += 1;
       }
-      const actualOld = hunk.lines.filter((line) => line[0] === " " || line[0] === "-").length;
-      const actualNew = hunk.lines.filter((line) => line[0] === " " || line[0] === "+").length;
-      if (actualOld !== expectedOld || actualNew !== expectedNew) {
-        throw new Error(`Patch hunk count mismatch: expected ${expectedOld}/${expectedNew}, received ${actualOld}/${actualNew}`);
-      }
+      // Header counts are advisory: models frequently miscount them. The
+      // counts are recomputed implicitly from the body, and application stays
+      // safe because it relies on exact unique context matching below.
       hunks.push(hunk);
     }
     if (hunks.length === 0) throw new Error("Invalid unified diff: no hunks");

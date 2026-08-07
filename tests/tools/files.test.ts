@@ -360,15 +360,40 @@ describe("file tools", () => {
     expect(readFileSync(join(workspace, "b.txt"), "utf8")).toBe("old-b\n");
   });
 
-  it("ApplyPatch rejects malformed hunk counts without changing the file", async () => {
+  it("ApplyPatch recomputes overcounted hunk headers from the body", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
     const path = join(workspace, "file.txt");
     writeFileSync(path, "old\n");
     const patch = "--- a/file.txt\n+++ b/file.txt\n@@ -1,2 +1,2 @@\n-old\n+new\n";
 
+    await createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal);
+
+    expect(readFileSync(path, "utf8")).toBe("new\n");
+  });
+
+  it("ApplyPatch recomputes undercounted hunk headers with context and additions", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "alpha\nbeta\ngamma\ndelta\n");
+    const patch = [
+      "--- a/file.txt", "+++ b/file.txt",
+      "@@ -1,2 +1,3 @@", " alpha", " beta", "+beta-2", " gamma", "",
+    ].join("\n");
+
+    await createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal);
+
+    expect(readFileSync(path, "utf8")).toBe("alpha\nbeta\nbeta-2\ngamma\ndelta\n");
+  });
+
+  it("ApplyPatch keeps exact context matching as the safety net after count recomputation", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "alpha\nactual\ngamma\n");
+    const patch = "--- a/file.txt\n+++ b/file.txt\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+new\n";
+
     await expect(createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal))
-      .rejects.toThrow(/count/i);
-    expect(readFileSync(path, "utf8")).toBe("old\n");
+      .rejects.toThrow(/hunk 1.*does not match/i);
+    expect(readFileSync(path, "utf8")).toBe("alpha\nactual\ngamma\n");
   });
 
   it("ApplyPatch rejects no-final-newline markers instead of changing semantics", async () => {
