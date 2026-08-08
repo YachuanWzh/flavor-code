@@ -2,17 +2,30 @@
 import sharp from 'sharp';
 import { writeFile } from 'node:fs/promises';
 
-// 图标母版为像素风 PNG（assets/icon-source.png），不再从 SVG 生成，
-// 避免构建时覆盖手工确认的图标。
-const SOURCE = 'assets/icon-source.png';
+// 图标母版为像素风透明底 PNG（assets/icon-transparent.png），不再从 SVG 生成，
+// 避免构建时覆盖手工确认的图标。所有产物均为透明底。
+const SOURCE = 'assets/icon-transparent.png';
 
 console.log(`Building icons from ${SOURCE}...`);
 
+// 透明底母版四周有空白，先裁剪到角色包围盒，再按 88% 占比居中放入方形透明画布，
+// 避免图标里角色显得偏小
+const TRIMMED = await sharp(SOURCE).trim().png().toBuffer();
+const TRANSPARENT_BG = { r: 0, g: 0, b: 0, alpha: 0 };
+const iconAt = (size) => {
+  const inner = Math.round(size * 0.88);
+  const pad = Math.floor((size - inner) / 2);
+  return sharp(TRIMMED)
+    .resize(inner, inner, { fit: 'contain', background: TRANSPARENT_BG })
+    .extend({ top: pad, bottom: size - inner - pad, left: pad, right: size - inner - pad, background: TRANSPARENT_BG })
+    .png();
+};
+
 await Promise.all([
-  sharp(SOURCE).resize(512, 512).png().toFile('assets/icon.png'),
-  sharp(SOURCE).resize(256, 256).png().toFile('assets/icon-256.png'),
-  sharp(SOURCE).resize(256, 256).png().toFile('assets/icon-preview.png'),
-  sharp(SOURCE).resize(256, 256).png().toFile('extensions/vscode/media/flavor.png')
+  iconAt(512).toFile('assets/icon.png'),
+  iconAt(256).toFile('assets/icon-256.png'),
+  iconAt(256).toFile('assets/icon-preview.png'),
+  iconAt(256).toFile('extensions/vscode/media/flavor.png')
 ]);
 
 console.log('✓ Generated assets/icon.png (512x512)');
@@ -24,7 +37,7 @@ console.log('✓ Generated extensions/vscode/media/flavor.png (256x256)');
 // electron-builder 通过 package.json 的 "icon": "assets/icon" 使用 assets/icon.ico。
 const sizes = [16, 24, 32, 48, 64, 128, 256];
 const pngs = await Promise.all(
-  sizes.map((size) => sharp(SOURCE).resize(size, size).png().toBuffer())
+  sizes.map((size) => iconAt(size).toBuffer())
 );
 
 const header = Buffer.alloc(6);

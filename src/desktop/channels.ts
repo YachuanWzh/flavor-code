@@ -1,5 +1,6 @@
 export const DESKTOP_CHANNELS = {
   bootstrap: "desktop:bootstrap",
+  appIcon: "desktop:app-icon",
   chooseWorkspace: "desktop:choose-workspace",
   openWorkspace: "desktop:open-workspace",
   startSession: "desktop:start-session",

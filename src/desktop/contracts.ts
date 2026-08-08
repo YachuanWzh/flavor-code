@@ -184,6 +184,8 @@ export type DesktopEvent =
 
 export interface FlavorDesktopApi {
   bootstrap(): Promise<DesktopSnapshot>;
+  /** App icon as data URL (from assets/icon.png); undefined when the asset is missing. */
+  appIcon(): Promise<string | undefined>;
   chooseWorkspace(): Promise<DesktopSnapshot | undefined>;
   openWorkspace(path: string): Promise<DesktopSnapshot>;
   startSession(resumeSession?: string): Promise<SessionStartedPayload>;

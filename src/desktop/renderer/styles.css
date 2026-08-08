@@ -49,6 +49,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .brand-row .flavor-mark { width: 25px; height: 25px; }
 .brand-chevron { margin-left: auto; color: var(--muted); font-size: 16px; }
 .flavor-mark { width: 28px; height: 28px; overflow: visible; }
+img.flavor-mark { object-fit: contain; }
 .flavor-mark path:first-child { fill: #fff; stroke: var(--sky); stroke-width: 2.1; }
 .flavor-mark circle { fill: var(--sky-dark); }
 .flavor-mark .mark-smile { fill: none; stroke: var(--sky-dark); stroke-width: 1.7; stroke-linecap: round; }

@@ -99,7 +99,19 @@ async function chooseAndOpenWorkspace() {
   return result.canceled || path === undefined ? undefined : openWorkspace(path);
 }
 
+// 应用内品牌图标：读取 assets/icon.png 转为 data URL 供渲染进程显示，
+// app.getAppPath() 在开发与打包模式下均可定位到资源目录。
+let cachedAppIconDataUrl: string | undefined;
+function appIconDataUrl(): string | undefined {
+  if (cachedAppIconDataUrl !== undefined) return cachedAppIconDataUrl;
+  const icon = nativeImage.createFromPath(join(app.getAppPath(), "assets", "icon.png"));
+  if (icon.isEmpty()) return undefined;
+  cachedAppIconDataUrl = icon.toDataURL();
+  return cachedAppIconDataUrl;
+}
+
 function installIpcHandlers(): void {
+  ipcMain.handle(DESKTOP_CHANNELS.appIcon, () => appIconDataUrl());
   ipcMain.handle(DESKTOP_CHANNELS.bootstrap, async () => {
     const workspace = await loadPersistedWorkspace();
     if (workspace === undefined) return controller.snapshot();
@@ -233,11 +245,11 @@ async function createWindow(): Promise<void> {
       webSecurity: true,
     },
   });
-  // 设置窗口图标（开发模式）
-  if (!app.isPackaged) {
-    const iconPath = join(app.getAppPath(), "assets", "icon.png");
-    const icon = nativeImage.createFromPath(iconPath);
-    console.log("Setting icon from:", iconPath, "isEmpty:", icon.isEmpty());
+  // 设置窗口/任务栏图标：开发与打包模式都生效，
+  // assets/icon.png 已包含在 electron-builder 的 files 清单中
+  const iconPath = join(app.getAppPath(), "assets", "icon.png");
+  const icon = nativeImage.createFromPath(iconPath);
+  if (!icon.isEmpty()) {
     mainWindow.setIcon(icon);
   }
 

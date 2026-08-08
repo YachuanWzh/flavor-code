@@ -1012,7 +1012,29 @@ function OpenProjectState({ onOpen }: { onOpen(): void }): React.JSX.Element {
 
 function LoadingState(): React.JSX.Element { return <div className="loading-state"><FlavorMark /><span>正在准备桌面工作区…</span></div>; }
 
+// 应用内品牌图标优先使用主进程下发的 assets/icon.png data URL，
+// 多个 FlavorMark 实例共享同一次 IPC 请求；加载失败时回退到内置 SVG。
+let appIconPromise: Promise<string | undefined> | undefined;
+function loadAppIcon(): Promise<string | undefined> {
+  appIconPromise ??= window.flavorDesktop.appIcon().catch(() => undefined);
+  return appIconPromise;
+}
+
+function useAppIcon(): string | undefined {
+  const [url, setUrl] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    let cancelled = false;
+    void loadAppIcon().then((next) => { if (!cancelled) setUrl(next); });
+    return () => { cancelled = true; };
+  }, []);
+  return url;
+}
+
 function FlavorMark(): React.JSX.Element {
+  const appIcon = useAppIcon();
+  if (appIcon !== undefined) {
+    return <img className="flavor-mark" src={appIcon} alt="" aria-hidden="true" />;
+  }
   return (
     <svg className="flavor-mark" viewBox="0 0 36 36" aria-hidden="true">
       <path d="M8 17.5C8 11.7 12.5 7 18 7s10 4.7 10 10.5c0 2.7-1 5.1-2.7 7l1 3.8-4-1.2A9.5 9.5 0 0 1 18 28c-5.5 0-10-4.7-10-10.5Z"/>

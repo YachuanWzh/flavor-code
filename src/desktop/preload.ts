@@ -5,6 +5,7 @@ import type { DesktopEvent, FlavorDesktopApi } from "./contracts.js";
 
 const api: FlavorDesktopApi = {
   bootstrap: () => ipcRenderer.invoke(DESKTOP_CHANNELS.bootstrap),
+  appIcon: () => ipcRenderer.invoke(DESKTOP_CHANNELS.appIcon),
   chooseWorkspace: () => ipcRenderer.invoke(DESKTOP_CHANNELS.chooseWorkspace),
   openWorkspace: (path) => ipcRenderer.invoke(DESKTOP_CHANNELS.openWorkspace, { path }),
   startSession: (resumeSession) => ipcRenderer.invoke(DESKTOP_CHANNELS.startSession,
