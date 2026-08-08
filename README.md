@@ -1,4 +1,8 @@
-﻿# flavor-code
+﻿<p align="center">
+  <img src="./assets/icon-transparent.png" alt="flavor-code 辣椒像素吉祥物" width="168" />
+</p>
+
+# flavor-code
 
 <p align="center">
   <b>终端与桌面端的 AI 编程助手</b><br/>
