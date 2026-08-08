@@ -33,6 +33,16 @@ No verified lint or format command detected.
 - Do not inspect dependency directories or generated output unless explicitly required.
 <!-- flavor-code:end -->
 
+## Exploration discipline
+
+Token budget matters. When inspecting this repository:
+
+- Locate first, read second: use `Grep`/`Glob`/LSP tools to find the relevant spot, then `Read` only that file or region.
+- Prefer `startLine`/`endLine` on `Read` for large files; never read a whole file when a region is enough.
+- Never re-read a file whose unchanged content is already in the conversation; a `[Duplicate read suppressed]` result means the content is still available in context — quote it from there.
+- Do not browse documentation, specs, or tests speculatively; open a document only when it directly informs the current task.
+- Delegate broad open-ended investigation to a `Task` subagent so its reads stay out of the main context.
+
 <!-- SUPERHARNESS:FLAVOR-BEGIN -->
 ## Superharness
 

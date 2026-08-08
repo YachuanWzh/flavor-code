@@ -130,6 +130,89 @@ describe("file tools", () => {
     expect(tool.inputSchema.safeParse({ path, maxBytes }).success).toBe(false);
   });
 
+  it("Read returns the requested line range with a header", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "lines.txt");
+    writeFileSync(path, "one\ntwo\nthree\nfour\nfive\n");
+
+    const result = await createReadTool(workspace).execute({ path, startLine: 2, endLine: 4 }, new AbortController().signal);
+
+    expect(result).toBe("[Lines 2-4 of 5]\n\ntwo\nthree\nfour");
+  });
+
+  it("Read clamps endLine to the last line and defaults startLine to 1", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "lines.txt");
+    writeFileSync(path, "one\ntwo\nthree");
+
+    const result = await createReadTool(workspace).execute({ path, endLine: 99 }, new AbortController().signal);
+
+    expect(result).toBe("[Lines 1-3 of 3]\n\none\ntwo\nthree");
+  });
+
+  it("Read rejects line ranges outside the file or inverted", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "lines.txt");
+    writeFileSync(path, "one\ntwo");
+
+    await expect(createReadTool(workspace).execute({ path, startLine: 5 }, new AbortController().signal))
+      .rejects.toThrow(/beyond the 2 lines/);
+    await expect(createReadTool(workspace).execute({ path, startLine: 2, endLine: 1 }, new AbortController().signal))
+      .rejects.toThrow(/must not be below startLine/);
+  });
+
+  it("Read normalizes CRLF when extracting a line range", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "crlf.txt");
+    writeFileSync(path, "one\r\ntwo\r\nthree\r\n");
+
+    const result = await createReadTool(workspace).execute({ path, startLine: 2, endLine: 2 }, new AbortController().signal);
+
+    expect(result).toBe("[Lines 2-2 of 3]\n\ntwo");
+  });
+
+  it("Read suppresses a duplicate read of an unchanged file", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "content");
+    const tool = createReadTool(workspace);
+    const signal = new AbortController().signal;
+
+    expect(await tool.execute({ path }, signal)).toBe("content");
+
+    const second = await tool.execute({ path }, signal);
+    expect(second).toContain("[Duplicate read suppressed]");
+  });
+
+  it("Read serves again after the file changes or when force is set", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "old");
+    const tool = createReadTool(workspace);
+    const signal = new AbortController().signal;
+
+    expect(await tool.execute({ path }, signal)).toBe("old");
+    writeFileSync(path, "new");
+    expect(await tool.execute({ path }, signal)).toBe("new");
+    expect(await tool.execute({ path }, signal)).toContain("[Duplicate read suppressed]");
+    expect(await tool.execute({ path, force: true }, signal)).toBe("new");
+  });
+
+  it("Read suppresses only line ranges that were already served", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "lines.txt");
+    writeFileSync(path, "a\nb\nc\nd\ne");
+    const tool = createReadTool(workspace);
+    const signal = new AbortController().signal;
+
+    expect(await tool.execute({ path, startLine: 1, endLine: 2 }, signal)).toContain("a\nb");
+    expect(await tool.execute({ path, startLine: 4, endLine: 5 }, signal)).toContain("d\ne");
+    expect(await tool.execute({ path, startLine: 2, endLine: 4 }, signal)).toContain("b\nc\nd");
+    // Every line has now been served; overlapping and full re-reads are suppressed.
+    expect(await tool.execute({ path, startLine: 2, endLine: 4 }, signal)).toContain("[Duplicate read suppressed]");
+    expect(await tool.execute({ path }, signal)).toContain("[Duplicate read suppressed]");
+  });
+
   it("Edit fails unless oldText has exactly one match", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
     const path = join(workspace, "file.txt");

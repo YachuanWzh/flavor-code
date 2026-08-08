@@ -12,6 +12,11 @@ export const MAX_READ_BYTES = 1_048_576;
 const ReadInput = z.object({
   path: z.string().min(1),
   maxBytes: z.coerce.number().int().positive().max(MAX_READ_BYTES).nullable().optional(),
+  startLine: z.coerce.number().int().positive().nullable().optional(),
+  endLine: z.coerce.number().int().positive().nullable().optional(),
+  // Accepts booleans and their string forms (weak-typed models emit "true");
+  // kept transform-free so the schema converts to JSON Schema for providers.
+  force: z.union([z.boolean(), z.string().refine((value) => value === "true" || value === "false")]).nullable().optional(),
 });
 const WriteInput = z.object({ path: z.string().min(1), content: z.string() });
 const EditInput = z.object({ path: z.string().min(1), oldText: z.string().min(1), newText: z.string() });
@@ -40,9 +45,12 @@ export interface FileMutationOptions {
 export function createReadTool(workspace: string, options: ReadToolOptions = {}): ToolDefinition<z.infer<typeof ReadInput>> {
   const guard = createPathGuard(workspace);
   const openFile = options.openFile ?? ((path: string) => open(path, constants.O_RDONLY));
+  // Per-tool-instance read history backing duplicate-read detection. It lives
+  // for the whole run, so a file served once is not re-served while unchanged.
+  const readHistory = new Map<string, ReadRecord>();
   return {
     name: "Read",
-    description: "Read a UTF-8 text file",
+    description: "Read a UTF-8 text file, optionally restricted to a line range with startLine/endLine",
     inputSchema: ReadInput,
     paths: (input) => [guard.lexical(input.path)],
     execute: async (input, signal) => {
@@ -53,14 +61,55 @@ export function createReadTool(workspace: string, options: ReadToolOptions = {})
       if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > MAX_READ_BYTES) {
         throw new Error(`maxBytes must be a positive integer no greater than ${MAX_READ_BYTES}`);
       }
+      const startLine = input.startLine ?? undefined;
+      const endLine = input.endLine ?? undefined;
+      if (startLine !== undefined && endLine !== undefined && endLine < startLine) {
+        throw new Error(`endLine (${endLine}) must not be below startLine (${startLine})`);
+      }
       const contents = await readBounded(path, maxBytes, signal, openFile);
       if (isBinary(contents)) throw new Error("Cannot read binary file as text");
       // Trim to a UTF-8 character boundary so the returned text never ends
       // mid-character; the byte count may sit up to 3 bytes below maxBytes.
       const textEnd = utf8SafeEnd(contents, maxBytes);
-      const text = contents.subarray(0, textEnd).toString("utf8");
-      if (contents.length > maxBytes) {
-        return `[Truncated to ${maxBytes} bytes. File is ${info.size} bytes total. Request a higher maxBytes or read a specific range.]\n\n${text}`;
+      const truncated = contents.length > maxBytes;
+      const text = contents.subarray(0, textEnd).toString("utf8").replaceAll("\r\n", "\n");
+      const lines = text.split("\n");
+      if (lines.at(-1) === "") lines.pop();
+      const availableLines = lines.length;
+      const rangeRequested = startLine !== undefined || endLine !== undefined;
+      const start = startLine ?? 1;
+      const end = Math.min(endLine ?? availableLines, availableLines);
+      if (rangeRequested && start > availableLines) {
+        throw new Error(`startLine (${start}) is beyond the ${availableLines} line${availableLines === 1 ? "" : "s"} available${truncated ? ` in this read (truncated at ${maxBytes} bytes)` : " in this file"}`);
+      }
+      if (rangeRequested && end < start) {
+        throw new Error(`endLine (${endLine}) must not be below startLine (${start})`);
+      }
+
+      // Duplicate-read detection: unchanged content already served in this run
+      // is still in the model context, so re-serving it only spends tokens.
+      // A range-less read requests every visible line, so both forms reduce to
+      // the same coverage check against the served snapshot.
+      const record = readHistory.get(path);
+      const alreadyServed = record !== undefined
+        && record.snapshot === text
+        && rangeCovered(record.ranges, start, end);
+      if (alreadyServed && forceFlag(input.force) !== true) {
+        return `[Duplicate read suppressed] ${input.path} is unchanged since the last read and the requested ${rangeRequested ? `lines ${start}-${end} are` : "full content is"} already in your context — quote the earlier result instead of re-reading. Pass startLine/endLine for a region you have not seen, or force=true only if the earlier result has been compacted away.`;
+      }
+
+      if (record === undefined || record.snapshot !== text) {
+        readHistory.set(path, { snapshot: text, ranges: [[start, end]] });
+      } else {
+        record.ranges = mergeRange(record.ranges, start, end);
+      }
+
+      if (rangeRequested) {
+        const header = `[Lines ${start}-${end} of ${availableLines}${truncated ? ` visible in this read (truncated at ${maxBytes} bytes)` : ""}]`;
+        return `${header}\n\n${lines.slice(start - 1, end).join("\n")}`;
+      }
+      if (truncated) {
+        return `[Truncated to ${maxBytes} bytes. File is ${info.size} bytes total. Request a higher maxBytes or read a specific range with startLine/endLine.]\n\n${text}`;
       }
       return text;
     },
@@ -343,6 +392,37 @@ async function readBounded(
 function within(root: string, candidate: string): boolean {
   const delta = relative(root, candidate);
   return delta === "" || (!delta.startsWith(`..${sep}`) && delta !== ".." && !isAbsolute(delta));
+}
+
+interface ReadRecord {
+  /** Full served text of the last read at its maxBytes window, LF-normalized. */
+  snapshot: string;
+  /** Disjoint served line ranges within the snapshot, sorted by start. */
+  ranges: Array<[number, number]>;
+}
+
+function forceFlag(value: boolean | string | null | undefined): boolean {
+  return value === true || value === "true";
+}
+
+function rangeCovered(ranges: readonly [number, number][], start: number, end: number): boolean {
+  let cursor = start;
+  for (const [rangeStart, rangeEnd] of [...ranges].sort((a, b) => a[0] - b[0])) {
+    if (rangeStart > cursor) break;
+    cursor = Math.max(cursor, rangeEnd + 1);
+    if (cursor > end) return true;
+  }
+  return cursor > end;
+}
+
+function mergeRange(ranges: readonly [number, number][], start: number, end: number): Array<[number, number]> {
+  const merged: Array<[number, number]> = [];
+  for (const range of [...ranges, [start, end] as [number, number]].sort((a, b) => a[0] - b[0])) {
+    const last = merged.at(-1);
+    if (last !== undefined && range[0] <= last[1] + 1) last[1] = Math.max(last[1], range[1]);
+    else merged.push([range[0], range[1]]);
+  }
+  return merged;
 }
 
 function abortIfNeeded(signal: AbortSignal): void {
