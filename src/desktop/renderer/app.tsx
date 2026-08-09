@@ -35,7 +35,7 @@ import type { FileChangePresentation, FileDiffLine } from "../../tools/types.js"
 import { SkillManagerView } from "./skill-manager.js";
 import { MemoryManagerView } from "./memory-manager.js";
 import { McpManagerView } from "./mcp-manager.js";
-import { D2cViewer } from "./d2c-viewer.js";
+import { D2cViewer, type D2cPendingTask } from "./d2c-viewer.js";
 import type { ManagedSkillSummary } from "../../skills/manager.js";
 
 const EMPTY_SNAPSHOT: DesktopSnapshot = { sessions: [], diagnostics: [], models: [] };
@@ -96,6 +96,7 @@ export function DesktopApp(): React.JSX.Element {
   const [cursorPos, setCursorPos] = useState(0);
   const [view, setView] = useState<"conversation" | "skills" | "memory" | "mcp" | "d2c">("conversation");
   const [d2cRefreshKey, setD2cRefreshKey] = useState(0);
+  const [d2cPending, setD2cPending] = useState<D2cPendingTask>();
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const activeSessionIdRef = useRef<string | undefined>(undefined);
@@ -182,6 +183,7 @@ export function DesktopApp(): React.JSX.Element {
     const unsubscribe = window.flavorDesktop.onEvent((event) => {
       if (event.type === "d2c-report") {
         setD2cRefreshKey((key) => key + 1);
+        setD2cPending((current) => current !== undefined && current.task === event.payload.task ? undefined : current);
         setView("d2c");
         return;
       }
@@ -459,6 +461,8 @@ export function DesktopApp(): React.JSX.Element {
         : view === "memory" && snapshot.workspace !== undefined ? <MemoryManagerView onClose={() => setView("conversation")} onError={setError} />
           : view === "mcp" && snapshot.workspace !== undefined ? <McpManagerView onClose={() => setView("conversation")} onError={setError} />
             : view === "d2c" && snapshot.workspace !== undefined ? <D2cViewer onClose={() => setView("conversation")} onError={setError} refreshKey={d2cRefreshKey}
+                    pending={d2cPending}
+                    onLaunch={(task, framework) => setD2cPending({ task, framework, startedAt: Date.now() })}
                     onStartTask={async (prompt) => { await send(prompt, "prompt"); setView("conversation"); }} /> : <>
       <header className="workspace-header">
         <button className="mobile-rail-toggle" onClick={() => setRailOpen(true)} aria-label="打开项目栏">☰</button>

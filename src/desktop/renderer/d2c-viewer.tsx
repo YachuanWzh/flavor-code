@@ -10,9 +10,20 @@ interface D2cViewerProps {
   refreshKey: number;
   /** Sends the assembled D2C task prompt to the active conversation. */
   onStartTask(prompt: string): Promise<void>;
+  /** Task dispatched but not yet compared; cleared by the app when its report arrives. */
+  pending?: D2cPendingTask | undefined;
+  /** Records a freshly dispatched task so the running state survives view switches. */
+  onLaunch(task: string, framework: D2cFramework): void;
 }
 
 type D2cFramework = "vue" | "react";
+
+/** A D2C task that has been dispatched to the agent and is still coding/comparing. */
+export interface D2cPendingTask {
+  task: string;
+  framework: D2cFramework;
+  startedAt: number;
+}
 
 const TASK_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
@@ -61,7 +72,7 @@ function OffsetTag({ diff }: { diff: D2cElementDiff }): React.JSX.Element | null
   </span>;
 }
 
-export function D2cViewer({ onClose, onError, refreshKey, onStartTask }: D2cViewerProps): React.JSX.Element {
+export function D2cViewer({ onClose, onError, refreshKey, onStartTask, pending, onLaunch }: D2cViewerProps): React.JSX.Element {
   const [reports, setReports] = useState<readonly D2cReportListItem[]>([]);
   const [bundle, setBundle] = useState<D2cReportView>();
   const [loading, setLoading] = useState(true);
@@ -90,6 +101,7 @@ export function D2cViewer({ onClose, onError, refreshKey, onStartTask }: D2cView
     setLaunching(true);
     try {
       await onStartTask(buildTaskPrompt(imported.task, imported.entryHtml, imported.files.length, framework));
+      onLaunch(imported.task, framework);
     } catch (cause) { report(cause); }
     finally { setLaunching(false); }
   };
@@ -158,6 +170,7 @@ export function D2cViewer({ onClose, onError, refreshKey, onStartTask }: D2cView
           <input className="d2c-launch-input" value={taskName} placeholder="任务名，如 homepage"
             aria-label="D2C 任务名"
             onChange={(event) => { setTaskName(event.target.value.trim().toLowerCase()); setImported(undefined); }} />
+          {taskName !== "" && !taskValid && <small className="d2c-launch-hint">任务名只能用小写字母、数字和连字符，且以字母或数字开头</small>}
           <div className="d2c-launch-framework" role="radiogroup" aria-label="目标框架">
             <button role="radio" aria-checked={framework === "vue"} data-active={framework === "vue"}
               onClick={() => setFramework("vue")}>Vue 3</button>
@@ -190,9 +203,7 @@ export function D2cViewer({ onClose, onError, refreshKey, onStartTask }: D2cView
       </aside>
 
       <main className="d2c-canvas-area">
-        {bundle === undefined || canvas === undefined ? <div className="d2c-empty">
-          <span>▤</span><h2>暂无可展示的对比</h2><p>新建任务并开始实现后，Agent 完成对比时这里会自动展示设计稿与实现的叠加对比。</p>
-        </div> : <>
+        {bundle !== undefined && canvas !== undefined ? <>
           <div className="d2c-canvas-toolbar">
             <div className="d2c-mode-switch" role="tablist" aria-label="展示模式">
               {(Object.keys(MODE_LABELS) as D2cViewMode[]).map((value) =>
@@ -268,7 +279,14 @@ export function D2cViewer({ onClose, onError, refreshKey, onStartTask }: D2cView
               </li>)}
             </ol>}
           </div>
-        </>}
+        </> : pending !== undefined ? <div className="d2c-running">
+          <span className="d2c-running-spinner" aria-hidden="true" />
+          <h2>任务 “{pending.task}” 正在编码…</h2>
+          <p>Agent 正在按设计稿生成 {pending.framework === "vue" ? "Vue 3" : "React"} 实现，编码完成后会自动运行实现项目并对比，完成后结果将自动展示在本页。</p>
+          <small>开始于 {new Date(pending.startedAt).toLocaleTimeString()} · 可在左侧对话中查看编码进度</small>
+        </div> : <div className="d2c-empty">
+          <span>▤</span><h2>对比结果尚未就绪</h2><p>在左侧新建任务、导入设计稿并点击“开始实现”，Agent 编码完成后对比结果会自动展示在这里。</p>
+        </div>}
         {loadingReport && <div className="d2c-loading" aria-busy="true">正在加载报告…</div>}
       </main>
     </div>
