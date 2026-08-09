@@ -9,6 +9,7 @@ import {
   AnswerQuestionsInputSchema,
   AddDesktopModelInputSchema,
   AppMenuInputSchema,
+  D2cGetReportInputSchema,
   DeleteSessionInputSchema,
   DeleteMemoryInputSchema,
   DESKTOP_CHANNELS,
@@ -29,6 +30,9 @@ import {
   SubmitInputSchema,
   type DesktopEvent,
 } from "./contracts.js";
+import { createD2cCaptureService } from "./d2c-capture.js";
+import { createD2cTools } from "../d2c/tools.js";
+import { createProductionRuntime } from "../production.js";
 import { DesktopRuntimeController } from "./runtime-controller.js";
 import { isSafeExternalUrl, isTrustedNavigation, normalizePersistedWorkspace } from "./security.js";
 import { desktopWindowChrome } from "./window-options.js";
@@ -53,12 +57,26 @@ app.commandLine.appendSwitch("disable-gpu-sandbox");
 
 logStartup("module-loaded", `moduleDirectory=${moduleDirectory}, packaged=${app.isPackaged}`);
 
+function emitDesktopEvent(event: DesktopEvent): void {
+  if (mainWindow !== undefined && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(DESKTOP_CHANNELS.event, event);
+  }
+}
+
+// D2C（Design to Code）：隐藏窗口快照服务，仅供 D2cCompare 工具使用。
+const d2cCapture = createD2cCaptureService();
+
 const controller = new DesktopRuntimeController({
-  emit(event: DesktopEvent) {
-    if (mainWindow !== undefined && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send(DESKTOP_CHANNELS.event, event);
-    }
-  },
+  emit: emitDesktopEvent,
+  createRuntime: async (runtimeOptions) => createProductionRuntime({
+    ...runtimeOptions,
+    ...(runtimeOptions.workspace === undefined ? {} : {
+      extraTools: createD2cTools(runtimeOptions.workspace, {
+        capture: d2cCapture,
+        onReport: (report) => emitDesktopEvent({ type: "d2c-report", payload: report }),
+      }),
+    }),
+  }),
 });
 
 function statePath(): string {
@@ -203,6 +221,11 @@ function installIpcHandlers(): void {
   });
   ipcMain.handle(DESKTOP_CHANNELS.addModel, async (_event, value) => {
     return controller.addModel(AddDesktopModelInputSchema.parse(value));
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cListReports, async () => controller.listD2cReports());
+  ipcMain.handle(DESKTOP_CHANNELS.d2cGetReport, async (_event, value) => {
+    const { task, reportId } = D2cGetReportInputSchema.parse(value);
+    return controller.getD2cReport(task, reportId);
   });
 }
 

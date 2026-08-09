@@ -29,5 +29,7 @@ export const DESKTOP_CHANNELS = {
   deleteMemory: "desktop:delete-memory",
   switchModel: "desktop:switch-model",
   addModel: "desktop:add-model",
+  d2cListReports: "desktop:d2c-list-reports",
+  d2cGetReport: "desktop:d2c-get-report",
   event: "desktop:event",
 } as const;

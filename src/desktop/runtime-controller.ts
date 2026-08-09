@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import type { PermissionMode } from "../config/schema.js";
+import { listReports, listTasks, readReport } from "../d2c/store.js";
 import { createProductionRuntime, type ProductionRuntimeOptions } from "../production.js";
 import { SessionStore } from "../session/store.js";
 import {
@@ -21,7 +22,11 @@ import type { MemoryCandidate, MemoryEntry } from "../memory/types.js";
 import type { MemoryReviewItem } from "../memory/review.js";
 import { ProjectMcpConfigManager, type ManagedMcpServer, type ProjectMcpConfigManagerLike } from "../mcp/config-manager.js";
 import { DEFAULT_DESKTOP_MODELS, loadDesktopModels, saveDesktopModel } from "./model-config.js";
-import type { AddDesktopModelInput, DesktopEvent, DesktopMessageDelivery, DesktopModelOption, DesktopModelMutationResult, DesktopSessionSummary, DesktopSnapshot, McpServerDraft, SessionStartedPayload } from "./contracts.js";
+import type { AddDesktopModelInput, D2cReportListItem, D2cReportView, DesktopEvent, DesktopMessageDelivery, DesktopModelOption, DesktopModelMutationResult, DesktopSessionSummary, DesktopSnapshot, McpServerDraft, SessionStartedPayload } from "./contracts.js";
+
+function pngDataUrl(png: Uint8Array): string {
+  return `data:image/png;base64,${Buffer.from(png).toString("base64")}`;
+}
 
 export interface RuntimeLike {
   readonly sessionId: string;
@@ -61,7 +66,7 @@ export interface RuntimeLike {
 }
 
 export interface RuntimeFactoryOptions extends Pick<ProductionRuntimeOptions,
-  "workspace" | "home" | "output" | "onApprovalChange" | "approvalPolicy" | "resumeSession"> {}
+  "workspace" | "home" | "output" | "onApprovalChange" | "approvalPolicy" | "resumeSession" | "extraTools"> {}
 
 export interface DesktopRuntimeControllerOptions {
   home?: string;
@@ -413,6 +418,31 @@ export class DesktopRuntimeController {
 
   async interrupt(): Promise<void> {
     this.#runtime?.session.interrupt();
+  }
+
+  /** Lists stored D2C comparison reports across all tasks, newest first. */
+  async listD2cReports(): Promise<readonly D2cReportListItem[]> {
+    const workspace = this.#workspace;
+    if (workspace === undefined) return [];
+    const items: D2cReportListItem[] = [];
+    for (const task of await listTasks(workspace)) {
+      for (const report of await listReports(workspace, task)) {
+        items.push({ task, ...report });
+      }
+    }
+    return items.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.reportId.localeCompare(a.reportId));
+  }
+
+  async getD2cReport(task: string, reportId?: string): Promise<D2cReportView> {
+    const workspace = this.#workspace;
+    if (workspace === undefined) throw new Error("Open a project before viewing D2C reports");
+    const bundle = await readReport(workspace, task, reportId);
+    return {
+      report: bundle.report,
+      designPng: pngDataUrl(bundle.designPng),
+      implementationPng: pngDataUrl(bundle.implementationPng),
+      heatmapPng: pngDataUrl(bundle.heatmapPng),
+    };
   }
 
   resolveApproval(decision: "allow" | "deny" | "always"): void {

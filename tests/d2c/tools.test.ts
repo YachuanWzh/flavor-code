@@ -6,7 +6,7 @@ import { PNG } from "pngjs";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { importDesign, listReports, readManifest } from "../../src/d2c/store.js";
-import { createD2cTools } from "../../src/d2c/tools.js";
+import { createD2cTools, type D2cToolOptions } from "../../src/d2c/tools.js";
 import type { CapturedPage, D2cCaptureService, D2cCaptureSource } from "../../src/d2c/types.js";
 
 const directories: string[] = [];
@@ -43,6 +43,12 @@ async function workspaceWithDesign(): Promise<string> {
   return workspace;
 }
 
+function requireTool(workspace: string, name: "D2cImport" | "D2cCompare", options?: D2cToolOptions) {
+  const tool = createD2cTools(workspace, options).find((candidate) => candidate.name === name);
+  if (tool === undefined) throw new Error(`Tool not found: ${name}`);
+  return tool;
+}
+
 describe("createD2cTools", () => {
   it("exposes D2cImport and D2cCompare", () => {
     const tools = createD2cTools("ws");
@@ -55,7 +61,7 @@ describe("D2cImport", () => {
     const workspace = await tempDir();
     const exportDir = await tempDir();
     await writeFile(join(exportDir, "index.html"), "<html></html>");
-    const [tool] = createD2cTools(workspace);
+    const tool = requireTool(workspace, "D2cImport");
     const output = await tool.execute({ task: "homepage", exportDir }, new AbortController().signal) as Record<string, unknown>;
     expect(output.entryHtml).toBe("index.html");
     const manifest = await readManifest(workspace, "homepage");
@@ -68,7 +74,7 @@ describe("D2cImport", () => {
 
 describe("D2cCompare", () => {
   async function compareTool(workspace: string, options?: Parameters<typeof createD2cTools>[1]) {
-    return createD2cTools(workspace, options)[1];
+    return requireTool(workspace, "D2cCompare", options);
   }
 
   it("requires the desktop capture service", async () => {
@@ -98,7 +104,7 @@ describe("D2cCompare", () => {
     await writeFile(join(workspace, "dist", "index.html"), "<html></html>");
     const captured: D2cCaptureSource[] = [];
     const events: Array<{ task: string; reportId: string; total: number; grade: string }> = [];
-    const tool = await compareTool(workspace, { capture: fakeCapture(captured), onReport: (event) => events.push(event) });
+    const tool = await compareTool(workspace, { capture: fakeCapture(captured), onReport: (event) => { events.push(event); } });
     const output = await tool.execute({ task: "homepage", implementation: "dist/index.html" }, new AbortController().signal) as {
       report: { scores: { total: number; grade: string }; reportId: string };
       summary: string;

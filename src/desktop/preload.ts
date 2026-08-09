@@ -39,6 +39,10 @@ const api: FlavorDesktopApi = {
   deleteMemory: (id) => ipcRenderer.invoke(DESKTOP_CHANNELS.deleteMemory, { id }),
   switchModel: (modelId) => ipcRenderer.invoke(DESKTOP_CHANNELS.switchModel, { modelId }),
   addModel: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.addModel, input),
+  listD2cReports: () => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cListReports),
+  getD2cReport: (task, reportId) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cGetReport, {
+    task, ...(reportId === undefined ? {} : { reportId }),
+  }),
   onEvent(listener) {
     const handler = (_event: Electron.IpcRendererEvent, value: DesktopEvent) => listener(value);
     ipcRenderer.on(DESKTOP_CHANNELS.event, handler);

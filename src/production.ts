@@ -105,6 +105,8 @@ export interface ProductionRuntimeOptions {
   resumeSession?: string | true;
   /** Test and embedding seam for creating configured MCP clients. */
   mcpClientFactory?: McpClientFactory;
+  /** Additional tools provided by embedders (e.g. desktop-only D2C tools). */
+  extraTools?: readonly ToolDefinition<unknown>[];
 }
 
 export interface ProductionRuntime {
@@ -439,6 +441,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   });
   await skills.discover();
   tools.push(createSkillResourceTool(skills));
+  if (options.extraTools !== undefined) tools.push(...options.extraTools);
   const flavor = await optionalText(join(workspace, "FLAVOR.md"));
   let memoryContext: string | undefined;
   if (memoryStore !== undefined) {

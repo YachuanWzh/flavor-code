@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import type { AgentEvent } from "../agent/types.js";
+import type { D2cReport } from "../d2c/types.js";
 import { McpServerConfigSchema, McpServerNameSchema, type PermissionMode } from "../config/schema.js";
 import type { TranscriptState } from "../ui/transcript.js";
 import type { Question } from "../tools/ask-user-question.js";
@@ -115,6 +116,13 @@ export const SwitchDesktopModelInputSchema = z.object({
   }, "模型 ID 必须使用 provider:model 格式"),
 }).strict();
 
+const D2cTaskInput = z.string().trim().min(1).max(64)
+  .regex(/^[a-z0-9][a-z0-9-]{0,63}$/, "Invalid D2C task name");
+export const D2cGetReportInputSchema = z.object({
+  task: D2cTaskInput,
+  reportId: z.string().trim().min(1).max(128).optional(),
+}).strict();
+
 export type AddDesktopModelInput = z.infer<typeof AddDesktopModelInputSchema>;
 export type McpServerDraft = z.input<typeof SaveMcpServerInputSchema>["draft"];
 
@@ -176,10 +184,34 @@ export interface SessionStartedPayload {
   snapshot: DesktopSnapshot;
 }
 
+export interface D2cReportListItem {
+  task: string;
+  reportId: string;
+  createdAt: string;
+  total: number;
+  grade: string;
+}
+
+/** Report plus screenshots encoded as PNG data URLs for renderer display. */
+export interface D2cReportView {
+  report: D2cReport;
+  designPng: string;
+  implementationPng: string;
+  heatmapPng: string;
+}
+
+export interface D2cReportEventPayload {
+  task: string;
+  reportId: string;
+  total: number;
+  grade: string;
+}
+
 export type DesktopEvent =
   | { type: "snapshot"; snapshot: DesktopSnapshot }
   | { type: "session-started"; payload: SessionStartedPayload }
   | { type: "session-output"; sessionId: string; event: SessionOutput }
+  | { type: "d2c-report"; payload: D2cReportEventPayload }
   | { type: "runtime-error"; sessionId?: string; message: string };
 
 export interface FlavorDesktopApi {
@@ -218,6 +250,8 @@ export interface FlavorDesktopApi {
   deleteMemory(id: string): Promise<boolean>;
   switchModel(modelId: string): Promise<DesktopSnapshot>;
   addModel(input: AddDesktopModelInput): Promise<DesktopModelMutationResult>;
+  listD2cReports(): Promise<readonly D2cReportListItem[]>;
+  getD2cReport(task: string, reportId?: string): Promise<D2cReportView>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
 }
 
