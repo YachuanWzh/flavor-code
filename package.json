@@ -3,6 +3,9 @@
   "version": "1.2.3",
   "author": "YachuanWzh",
   "type": "module",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org"
+  },
   "main": "dist/desktop/main.js",
   "bin": {
     "flavor": "dist/cli.js"
@@ -16,6 +19,7 @@
   },
   "files": [
     "dist/",
+    "!dist/**/*.map",
     "README.md",
     "技术方案报告.md",
     "LICENSE"
@@ -55,6 +59,7 @@
     },
     "files": [
       "dist/**/*",
+      "!dist/**/*.map",
       "assets/icon.png",
       "package.json",
       "README.md",

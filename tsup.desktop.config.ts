@@ -1,5 +1,7 @@
 import { defineConfig } from "tsup";
 
+const sourceMap = process.env.FLAVOR_SOURCEMAP === "1";
+
 export default defineConfig([
   {
     entry: { main: "src/desktop/main.ts" },
@@ -8,7 +10,7 @@ export default defineConfig([
     platform: "node",
     target: "node20",
     splitting: false,
-    sourcemap: true,
+    sourcemap: sourceMap,
     clean: false,
     external: ["electron"],
   },
@@ -19,7 +21,7 @@ export default defineConfig([
     platform: "node",
     target: "node20",
     splitting: false,
-    sourcemap: true,
+    sourcemap: sourceMap,
     clean: false,
     external: ["electron"],
     outExtension: () => ({ js: ".cjs" }),

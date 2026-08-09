@@ -1,5 +1,7 @@
 import { defineConfig } from "tsup";
 
+const sourceMap = process.env.FLAVOR_SOURCEMAP === "1";
+
 export default defineConfig({
   entry: {
     cli: "src/cli.tsx",
@@ -8,7 +10,7 @@ export default defineConfig({
   format: ["esm"],
   dts: false,
   clean: true,
-  sourcemap: true,
+  sourcemap: sourceMap,
   banner: {
     // Claude Code's Ink fork includes CommonJS React internals such as
     // react-reconciler and react/compiler-runtime. The application bundle is

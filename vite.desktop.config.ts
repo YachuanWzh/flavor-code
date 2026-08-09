@@ -1,6 +1,8 @@
 import { resolve } from "node:path";
 import { defineConfig } from "vite";
 
+const sourceMap = process.env.FLAVOR_SOURCEMAP === "1";
+
 export default defineConfig({
   root: resolve("src/desktop/renderer"),
   base: "./",
@@ -8,7 +10,7 @@ export default defineConfig({
   build: {
     outDir: resolve("dist/desktop-renderer"),
     emptyOutDir: true,
-    sourcemap: true,
+    sourcemap: sourceMap,
   },
 });
 

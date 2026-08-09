@@ -1,5 +1,7 @@
 import { defineConfig } from "tsup";
 
+const sourceMap = process.env.FLAVOR_SOURCEMAP === "1";
+
 export default defineConfig({
   entry: ["extensions/vscode/src/extension.ts"],
   format: ["cjs"],
@@ -9,6 +11,6 @@ export default defineConfig({
   outDir: "extensions/vscode/dist",
   clean: true,
   dts: false,
-  sourcemap: true,
+  sourcemap: sourceMap,
   outExtension: () => ({ js: ".js" }),
 });
