@@ -13,7 +13,7 @@
 
 `flavor-code` 是一个同时提供终端界面与 Electron 桌面应用的 AI 编程助手。它接入大语言模型（OpenAI GPT、Anthropic Claude 或任何兼容服务），能理解你的项目结构，在工作区范围内安全操作文件，甚至能把复杂任务拆成多块，分给多个"小助手"并行处理。
 
-当前稳定版本：**1.2.1**
+当前稳定版本：**1.2.3**
 
 ## 它能做什么
 
@@ -46,6 +46,15 @@
 同一次 `Task` 调度现在只冻结一次主 Agent 的模型可见上下文。每个子 Agent 都从这份快照创建独立副本，完整复用 system prompt、`FLAVOR.md`、任务状态、压缩摘要和父会话历史，只在最后追加自己的角色约束与任务 directive。共享部分保持消息顺序和 UTF-8 字节一致，可提高 Anthropic Prompt Cache 与 OpenAI Automatic Prompt Caching 的命中机会，同时父子消息、压缩和 usage 状态仍然彼此隔离。
 
 Anthropic 请求会在 fork 边界发送显式 `cache_control`；OpenAI 与 OpenAI-compatible 服务继续使用自动缓存，不注入可能与旧模型不兼容的专用字段。缓存仍受提供商规则限制：短于最小 token 门槛的前缀不会缓存；主/子 Agent 工具定义或模型不同会阻止整包父子命中；首批完全并发的 Anthropic 子请求也可能在缓存写入可见前同时发生 miss。后续兄弟任务、依赖节点和重试仍可复用相同的父前缀。
+
+### OpenAI-compatible 工具调用兼容修复（1.2.3）
+
+OpenAI Responses 流式适配器现在同时兼容官方事件序列和部分兼容端点的精简事件序列：
+
+- 官方端点通过 `response.function_call_arguments.done` 完成工具参数时，保持原有解析行为。
+- 兼容端点省略参数完成事件、只在 `response.output_item.done` 中返回完整 `function_call` 时，也能正确提取工具名、调用 ID 和参数，不再把本轮误判为“无工具调用”并提前结束。
+- 同一工具调用同时出现两种完成事件时，按 `output_index` 去重，避免工具被重复执行。
+- 修复仅位于 OpenAI Responses 适配层；Anthropic Messages 请求、`tool_use` / `tool_result` 映射和缓存断点逻辑保持不变。
 
 ### 提示词缓存优化与命中率量化（1.2.0 / 1.2.1）
 
@@ -530,7 +539,7 @@ npm run desktop:dist     # 生成 Windows NSIS 安装包
 Windows 打包产物位于：
 
 - 免安装目录：`release/win-unpacked/Flavor Code.exe`
-- NSIS 安装包：`release/Flavor-Code-1.2.1-x64.exe`
+- NSIS 安装包：`release/Flavor-Code-1.2.3-x64.exe`
 
 模型配置仍读取全局 `~/.flavor-code/flavor.json`、项目 `.flavor/flavor.json`、`.env` 和环境变量，因此 CLI 与桌面端可以共享配置与会话。生产版桌面窗口启用了 `contextIsolation` 和 Chromium 沙箱，关闭了渲染进程的 Node.js 集成；文件、命令和 Agent 操作只通过显式 IPC 接口进入主进程。Windows 的 `desktop:dev` 为兼容工作区内 Chromium 子进程启动，仅在本地开发启动器中使用 `--no-sandbox`，打包产物不携带该参数。
 

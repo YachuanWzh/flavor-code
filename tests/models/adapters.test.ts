@@ -168,6 +168,94 @@ describe("OpenAIModelAdapter", () => {
     );
   });
 
+  it("emits a tool call from a completed output item when the arguments-done event is omitted", async () => {
+    const client = {
+      responses: {
+        stream: () => events(
+          {
+            type: "response.output_item.done",
+            output_index: 0,
+            item: {
+              type: "function_call",
+              call_id: "call_compat",
+              name: "weather",
+              arguments: '{"city":"Paris"}',
+              status: "completed",
+            },
+          },
+          {
+            type: "response.completed",
+            response: { usage: { input_tokens: 4, output_tokens: 3 } },
+          },
+        ),
+      },
+    };
+
+    const output = await collect(
+      new OpenAIModelAdapter({ client: asOpenAIClient(client) }).stream(request),
+    );
+
+    expect(output).toContainEqual({
+      type: "tool-call",
+      id: "call_compat",
+      name: "weather",
+      input: { city: "Paris" },
+    });
+  });
+
+  it("does not duplicate a tool call when both Responses completion events are present", async () => {
+    const client = {
+      responses: {
+        stream: () => events(
+          {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: {
+              type: "function_call",
+              call_id: "call_official",
+              name: "weather",
+              arguments: "",
+              status: "in_progress",
+            },
+          },
+          {
+            type: "response.function_call_arguments.done",
+            output_index: 0,
+            item_id: "item_official",
+            name: "weather",
+            arguments: '{"city":"Paris"}',
+          },
+          {
+            type: "response.output_item.done",
+            output_index: 0,
+            item: {
+              type: "function_call",
+              call_id: "call_official",
+              name: "weather",
+              arguments: '{"city":"Paris"}',
+              status: "completed",
+            },
+          },
+          {
+            type: "response.completed",
+            response: { usage: { input_tokens: 4, output_tokens: 3 } },
+          },
+        ),
+      },
+    };
+
+    const output = await collect(
+      new OpenAIModelAdapter({ client: asOpenAIClient(client) }).stream(request),
+    );
+
+    expect(output.filter((event) => event.type === "tool-call")).toEqual([{
+      type: "tool-call",
+      id: "call_official",
+      name: "weather",
+      input: { city: "Paris" },
+    }]);
+  });
+
   it("preserves malformed OpenAI tool arguments for structured repair", async () => {
     const raw = String.raw`{"path":"C:\Users\wangzh"}`;
     const client = {

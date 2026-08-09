@@ -154,6 +154,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
   async *stream(request: ModelRequest): AsyncIterable<ModelEvent> {
     const callIds = new Map<number, string>();
     const pendingCalls = new Map<number, { name: string; arguments: string }>();
+    const emittedCalls = new Set<number>();
     try {
       const body: OpenAIStreamRequest = {
         model: request.model,
@@ -170,16 +171,33 @@ export class OpenAIModelAdapter implements ModelAdapter {
 
       for await (const event of stream) {
         if (
-          (event.type === "response.output_item.added" ||
-            event.type === "response.output_item.done") &&
+          event.type === "response.output_item.added" &&
           event.item?.type === "function_call" &&
           event.output_index !== undefined &&
           event.item.call_id
         ) {
           callIds.set(event.output_index, event.item.call_id);
           const pending = pendingCalls.get(event.output_index);
-          if (pending) {
+          if (pending && !emittedCalls.has(event.output_index)) {
             yield toolCallEvent(event.item.call_id, pending.name, pending.arguments);
+            emittedCalls.add(event.output_index);
+            pendingCalls.delete(event.output_index);
+          }
+        } else if (
+          event.type === "response.output_item.done" &&
+          event.item?.type === "function_call" &&
+          event.output_index !== undefined &&
+          event.item.call_id
+        ) {
+          callIds.set(event.output_index, event.item.call_id);
+          if (!emittedCalls.has(event.output_index)) {
+            const pending = pendingCalls.get(event.output_index);
+            yield toolCallEvent(
+              event.item.call_id,
+              pending?.name ?? event.item.name,
+              pending?.arguments ?? event.item.arguments,
+            );
+            emittedCalls.add(event.output_index);
             pendingCalls.delete(event.output_index);
           }
         } else if (event.type === "response.output_text.delta" && event.delta) {
@@ -190,9 +208,10 @@ export class OpenAIModelAdapter implements ModelAdapter {
           event.name
         ) {
           const callId = callIds.get(event.output_index);
-          if (callId) {
+          if (callId && !emittedCalls.has(event.output_index)) {
             yield toolCallEvent(callId, event.name, event.arguments ?? "");
-          } else {
+            emittedCalls.add(event.output_index);
+          } else if (!emittedCalls.has(event.output_index)) {
             pendingCalls.set(event.output_index, {
               name: event.name,
               arguments: event.arguments ?? "",
