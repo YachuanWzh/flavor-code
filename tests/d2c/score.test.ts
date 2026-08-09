@@ -23,10 +23,11 @@ describe("computeScores", () => {
     expect(scores.layout).toBe(1);
     expect(scores.color).toBe(1);
     expect(scores.typography).toBe(1);
+    expect(scores.content).toBe(1);
     expect(scores.pixel).toBe(1);
   });
 
-  it("applies the documented weights (color mismatch over half the area yields 85)", () => {
+  it("applies the documented weights (color mismatch over half the area yields 90)", () => {
     nextId = 1;
     const design = page([
       element({ rect: { x: 0, y: 0, width: 10, height: 10 }, styles: { backgroundColor: "#333333" } }),
@@ -38,8 +39,8 @@ describe("computeScores", () => {
     ]);
     const scores = computeScores(design, diffPages(design, impl), 0);
     expect(scores.color).toBe(0.5);
-    expect(scores.total).toBe(85);
-    expect(scores.grade).toBe("合格");
+    expect(scores.total).toBe(90);
+    expect(scores.grade).toBe("优秀");
   });
 
   it("penalizes missing elements through the layout score", () => {
@@ -68,7 +69,8 @@ describe("computeScores", () => {
     const design = page([element({ tag: "h1", text: "Checkout", rect: { x: 0, y: 0, width: 200, height: 40 }, styles: { fontSize: 32 } })]);
     const impl = page([element({ tag: "h1", text: "Checkuot", rect: { x: 0, y: 0, width: 200, height: 40 }, styles: { fontSize: 32 } })]);
     const scores = computeScores(design, diffPages(design, impl), 0.001);
-    expect(scores.typography).toBe(0);
+    expect(scores.typography).toBe(1);
+    expect(scores.content).toBeLessThan(1);
     expect(scores.total).toBeLessThan(95);
   });
 

@@ -74,6 +74,7 @@ const controller = new DesktopRuntimeController({
     ...(runtimeOptions.workspace === undefined ? {} : {
       extraTools: createD2cTools(runtimeOptions.workspace, {
         capture: d2cCapture,
+        onProgress: (progress) => emitDesktopEvent({ type: "d2c-progress", payload: progress }),
         onReport: (report) => emitDesktopEvent({ type: "d2c-report", payload: report }),
       }),
     }),
@@ -158,8 +159,8 @@ function installIpcHandlers(): void {
     appMenu?.items[index]?.submenu?.popup({ window, x, y });
   });
   ipcMain.handle(DESKTOP_CHANNELS.submit, async (_event, value) => {
-    const { prompt, delivery, attachments } = SubmitInputSchema.parse(value);
-    void controller.submit(prompt, delivery ?? "prompt", attachments ?? []).catch(() => undefined);
+    const { prompt, delivery, attachments, permissionProfile } = SubmitInputSchema.parse(value);
+    void controller.submit(prompt, delivery ?? "prompt", attachments ?? [], permissionProfile).catch(() => undefined);
   });
   ipcMain.handle(DESKTOP_CHANNELS.finishTask, async () => controller.finishTask());
   ipcMain.handle(DESKTOP_CHANNELS.interrupt, async () => controller.interrupt());

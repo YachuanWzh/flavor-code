@@ -12,8 +12,9 @@ const api: FlavorDesktopApi = {
     resumeSession === undefined ? {} : { resumeSession }),
   deleteSession: (sessionId) => ipcRenderer.invoke(DESKTOP_CHANNELS.deleteSession, { sessionId }),
   showAppMenu: (menu, x, y) => ipcRenderer.invoke(DESKTOP_CHANNELS.showAppMenu, { menu, x, y }),
-  submit: (prompt, delivery = "prompt", attachments = []) => ipcRenderer.invoke(DESKTOP_CHANNELS.submit, {
+  submit: (prompt, delivery = "prompt", attachments = [], permissionProfile) => ipcRenderer.invoke(DESKTOP_CHANNELS.submit, {
     prompt, delivery, ...(attachments.length === 0 ? {} : { attachments }),
+    ...(permissionProfile === undefined ? {} : { permissionProfile }),
   }),
   finishTask: () => ipcRenderer.invoke(DESKTOP_CHANNELS.finishTask),
   interrupt: () => ipcRenderer.invoke(DESKTOP_CHANNELS.interrupt),

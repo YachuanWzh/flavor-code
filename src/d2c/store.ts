@@ -2,7 +2,7 @@ import type { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { z } from "zod";
 
@@ -21,6 +21,8 @@ export interface D2cManifest {
   task: string;
   /** Relative path of the entry HTML inside the design copy. */
   entryHtml: string;
+  /** Every imported HTML page, with the primary entry first. */
+  pages: D2cDesignPage[];
   /** All files of the design copy, relative paths with forward slashes. */
   files: string[];
   importedAt: string;
@@ -28,32 +30,117 @@ export interface D2cManifest {
   designHash: string;
 }
 
+export interface D2cDesignPage {
+  id: string;
+  label: string;
+  html: string;
+}
+
+const DesignPageSchema = z.object({
+  id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/),
+  label: z.string().min(1).max(120),
+  html: z.string().min(1),
+}).strict();
+
 const ManifestSchema = z.object({
   task: z.string().regex(D2C_TASK_PATTERN),
   entryHtml: z.string().min(1),
+  pages: z.array(DesignPageSchema).min(1).max(64).optional(),
   files: z.array(z.string().min(1)).max(MAX_IMPORT_FILES),
   importedAt: z.iso.datetime(),
   designHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 }).strict();
 
-const ReportSchema = z.object({
-  schema: z.literal(1),
+const ReportBaseSchema = z.object({
   task: z.string().regex(D2C_TASK_PATTERN),
   reportId: z.string().regex(D2C_REPORT_PATTERN),
+  batchId: z.string().min(1).max(120).optional(),
+  page: z.object({
+    id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/), label: z.string().min(1).max(120), html: z.string().min(1),
+    index: z.number().int().nonnegative(), count: z.number().int().positive(),
+  }).strict().optional(),
   createdAt: z.iso.datetime(),
   design: z.object({ source: z.string(), width: z.number(), height: z.number(), elementCount: z.number(), designHash: z.string().optional() }).passthrough(),
   implementation: z.object({ source: z.string(), width: z.number(), height: z.number(), elementCount: z.number() }).passthrough(),
-  scores: z.object({ total: z.number(), grade: z.string() }).passthrough(),
   diffs: z.array(z.unknown()),
   missing: z.array(z.unknown()),
   extra: z.array(z.unknown()),
 }).passthrough();
+
+const ReportSchema = z.discriminatedUnion("schema", [
+  ReportBaseSchema.extend({
+    schema: z.literal(1),
+    scores: z.object({ total: z.number(), grade: z.string() }).passthrough(),
+  }),
+  ReportBaseSchema.extend({
+    schema: z.literal(2),
+    scores: z.object({
+      layout: z.number(), color: z.number(), typography: z.number(), content: z.number(),
+      pixel: z.number().optional(), total: z.number(), grade: z.string(),
+    }).passthrough(),
+    evaluation: z.object({
+      status: z.enum(["valid", "warning", "invalid"]),
+      confidence: z.enum(["high", "medium", "low"]),
+      verdict: z.enum(["pass", "conditional", "fail", "invalid"]),
+      summary: z.string(),
+      checks: z.array(z.object({
+        key: z.enum(["viewport", "dpr", "fonts", "images", "clipping", "capture-metadata"]),
+        label: z.string(), status: z.enum(["pass", "warn", "fail"]), message: z.string(),
+      })),
+    }),
+  }),
+]);
+
+function normalizeStoredReport(value: z.infer<typeof ReportSchema>): D2cReport {
+  if (value.schema === 2) return value as unknown as D2cReport;
+  const raw = value as typeof value & Record<string, unknown>;
+  const scores = raw.scores as Record<string, unknown>;
+  const total = typeof scores.total === "number" ? scores.total : 0;
+  const upgradeItems = (items: unknown[], kind: string, unmatched: boolean): unknown[] => items.map((item, index) => {
+    const current = typeof item === "object" && item !== null ? item as Record<string, unknown> : {};
+    if (!unmatched) {
+      return {
+        ...current,
+        fingerprint: typeof current.fingerprint === "string" ? current.fingerprint : `legacy-${kind}-${index + 1}`,
+        impact: typeof current.impact === "number" ? current.impact : current.severity === "major" ? 6 : 3,
+      };
+    }
+    return {
+      ...current,
+      text: typeof current.text === "string" ? current.text : "",
+      hasImage: current.hasImage === true,
+      severity: current.severity === "major" ? "major" : "minor",
+      fingerprint: typeof current.fingerprint === "string" ? current.fingerprint : `legacy-${kind}-${index + 1}`,
+      impact: typeof current.impact === "number" ? current.impact : 3,
+    };
+  });
+  return {
+    ...raw,
+    schema: 2,
+    scores: { ...scores, content: typeof scores.content === "number" ? scores.content : 1 },
+    diffs: upgradeItems(value.diffs, "changed", false),
+    missing: upgradeItems(value.missing, "missing", true),
+    extra: upgradeItems(value.extra, "extra", true),
+    evaluation: {
+      status: "warning",
+      confidence: "medium",
+      verdict: total < 80 ? "fail" : "conditional",
+      summary: "旧版报告缺少完整评测环境信息，分数仅供参考。",
+      checks: [{ key: "capture-metadata", label: "采集元数据", status: "warn", message: "由 Report v1 兼容升级" }],
+    },
+  } as unknown as D2cReport;
+}
 
 export interface D2cReportSummary {
   reportId: string;
   createdAt: string;
   total: number;
   grade: string;
+  evaluationStatus: D2cReport["evaluation"]["status"];
+  verdict: D2cReport["evaluation"]["verdict"];
+  issueCount: number;
+  batchId?: string;
+  page?: D2cReport["page"];
 }
 
 export interface D2cReportArtifacts {
@@ -86,11 +173,16 @@ export function taskDir(workspace: string, task: string): string {
 
 /** Absolute path of the imported entry HTML for a task. */
 export function designEntryPath(workspace: string, task: string, manifest: D2cManifest): string {
+  return designPagePath(workspace, task, manifest.entryHtml);
+}
+
+/** Absolute path of one imported HTML page for a task. */
+export function designPagePath(workspace: string, task: string, html: string): string {
   const base = resolve(taskDir(workspace, task), "design");
-  const target = resolve(base, manifest.entryHtml);
+  const target = resolve(base, html);
   const delta = relative(base, target);
   if (delta === ".." || delta.startsWith(`..${sep}`) || isAbsolute(delta)) {
-    throw new Error(`Invalid D2C design entry path: ${manifest.entryHtml}`);
+    throw new Error(`Invalid D2C design page path: ${html}`);
   }
   return target;
 }
@@ -144,6 +236,29 @@ async function hashFiles(root: string, files: readonly string[]): Promise<string
 
 async function exists(path: string): Promise<boolean> {
   try { await lstat(path); return true; } catch { return false; }
+}
+
+function decodeTitle(value: string): string {
+  return value.replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'").replace(/\s+/g, " ").trim();
+}
+
+async function discoverPages(root: string, htmlFiles: readonly string[], entryHtml: string): Promise<D2cDesignPage[]> {
+  const ordered = [entryHtml, ...htmlFiles.filter((file) => file !== entryHtml)];
+  const used = new Set<string>();
+  return Promise.all(ordered.map(async (html) => {
+    const stem = basename(html, extname(html)).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "page";
+    let id = stem.slice(0, 64);
+    let suffix = 2;
+    while (used.has(id)) {
+      const marker = `-${suffix++}`;
+      id = `${stem.slice(0, 64 - marker.length)}${marker}`;
+    }
+    used.add(id);
+    const source = await readFile(join(root, html), "utf8");
+    const title = /<title(?:\s[^>]*)?>([\s\S]*?)<\/title>/i.exec(source)?.[1];
+    return { id, label: title === undefined || decodeTitle(title) === "" ? stem : decodeTitle(title), html };
+  }));
 }
 
 async function withImportLock<T>(key: string, work: () => Promise<T>): Promise<T> {
@@ -204,10 +319,12 @@ async function importDesignUnlocked(workspace: string, task: string, exportDir: 
     await mkdir(dirname(target), { recursive: true });
     await cp(join(sourceReal, file), target);
   }
+  const pages = await discoverPages(sourceReal, htmlFiles, entryHtml);
   const designHash = await hashFiles(stageDir, files);
   const manifest: D2cManifest = {
     task,
     entryHtml,
+    pages,
     files,
     importedAt: new Date().toISOString(),
     designHash,
@@ -262,11 +379,20 @@ export async function readManifest(workspace: string, task: string): Promise<D2c
       if (!pathIsInside(resolve(dirname(path), "design"), resolved)) throw new Error("Invalid manifest file path");
     }
     const designHash = parsed.designHash ?? await hashFiles(resolve(dirname(path), "design"), parsed.files);
-    const manifest: D2cManifest = { ...parsed, designHash };
-    const entry = designEntryPath(workspace, task, manifest);
+    const pages = parsed.pages ?? [{
+      id: basename(parsed.entryHtml, extname(parsed.entryHtml)).toLowerCase().replace(/[^a-z0-9]+/g, "-") || "page",
+      label: basename(parsed.entryHtml, extname(parsed.entryHtml)),
+      html: parsed.entryHtml,
+    }];
+    if (pages[0]?.html !== parsed.entryHtml || pages.some((page) => !parsed.files.includes(page.html))) {
+      throw new Error("Manifest pages must reference imported HTML files with the entry first");
+    }
+    const manifest: D2cManifest = { ...parsed, pages, designHash };
     const designRootReal = await realpath(resolve(dirname(path), "design"));
-    const entryReal = await realpath(entry);
-    if (!pathIsInside(designRootReal, entryReal)) throw new Error("Manifest entry escapes the design directory");
+    for (const page of pages) {
+      const pageReal = await realpath(designPagePath(workspace, task, page.html));
+      if (!pathIsInside(designRootReal, pageReal)) throw new Error("Manifest page escapes the design directory");
+    }
     return manifest;
   } catch {
     throw new Error(`No D2C design imported for task "${task}"`);
@@ -362,18 +488,24 @@ export async function listReports(workspace: string, task: string): Promise<D2cR
     try {
       const reportPath = join(reportDir(workspace, task, entry.name), "report.json");
       if ((await stat(reportPath)).size > MAX_REPORT_JSON_BYTES) continue;
-      const report = ReportSchema.parse(JSON.parse(await readFile(reportPath, "utf8"))) as unknown as D2cReport;
+      const report = normalizeStoredReport(ReportSchema.parse(JSON.parse(await readFile(reportPath, "utf8"))));
       summaries.push({
         reportId: report.reportId,
         createdAt: report.createdAt,
         total: report.scores.total,
         grade: report.scores.grade,
+        evaluationStatus: report.evaluation.status,
+        verdict: report.evaluation.verdict,
+        issueCount: report.diffs.length + report.missing.length + report.extra.length,
+        ...(report.batchId === undefined ? {} : { batchId: report.batchId }),
+        ...(report.page === undefined ? {} : { page: report.page }),
       });
     } catch {
       // Skip incomplete report directories.
     }
   }
-  return summaries.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.reportId.localeCompare(a.reportId));
+  return summaries.sort((a, b) => b.createdAt.localeCompare(a.createdAt)
+    || (a.batchId !== undefined && a.batchId === b.batchId ? (a.page?.index ?? 0) - (b.page?.index ?? 0) : b.reportId.localeCompare(a.reportId)));
 }
 
 /** Loads a report bundle; without a report id the newest one is returned. */
@@ -395,7 +527,7 @@ export async function readReport(workspace: string, task: string, reportId?: str
     if ((await lstat(dir)).isSymbolicLink()) throw new Error("Report symbolic links are not allowed");
     const reportPath = join(dir, "report.json");
     if ((await stat(reportPath)).size > MAX_REPORT_JSON_BYTES) throw new Error("D2C report exceeds the supported size");
-    report = ReportSchema.parse(JSON.parse(await readFile(reportPath, "utf8"))) as unknown as D2cReport;
+    report = normalizeStoredReport(ReportSchema.parse(JSON.parse(await readFile(reportPath, "utf8"))));
   } catch {
     throw new Error(`No D2C report "${target}" found for task "${task}"`);
   }

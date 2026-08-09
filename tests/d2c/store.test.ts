@@ -88,6 +88,22 @@ describe("importDesign", () => {
     expect(reread.designHash).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  it("discovers every HTML page with index first and stable labels", async () => {
+    const dir = await workspace();
+    const source = await exportDir({
+      "settings.html": "<html><head><title>团队设置</title></head></html>",
+      "index.html": "<html><head><title>数据概览</title></head></html>",
+      "reports/monthly.html": "<html><head><title>月度报告</title></head></html>",
+    });
+    const manifest = await importDesign(dir, "workspace", source);
+    expect(manifest.pages).toEqual([
+      { id: "index", label: "数据概览", html: "index.html" },
+      { id: "monthly", label: "月度报告", html: "reports/monthly.html" },
+      { id: "settings", label: "团队设置", html: "settings.html" },
+    ]);
+    expect((await readManifest(dir, "workspace")).pages).toEqual(manifest.pages);
+  });
+
   it("re-import overwrites the previous design copy", async () => {
     const dir = await workspace();
     const first = await exportDir({ "index.html": "<html>v1</html>", "old.css": "a{}" });
@@ -124,8 +140,11 @@ describe("importDesign", () => {
     const manifestPath = join(dir, ".flavor", "d2c", "homepage", "manifest.json");
     const legacy = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
     delete legacy.designHash;
+    delete legacy.pages;
     await writeFile(manifestPath, JSON.stringify(legacy));
-    expect((await readManifest(dir, "homepage")).designHash).toMatch(/^[a-f0-9]{64}$/);
+    const normalized = await readManifest(dir, "homepage");
+    expect(normalized.designHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(normalized.pages).toEqual([{ id: "index", label: "index", html: "index.html" }]);
   });
 });
 
@@ -165,5 +184,25 @@ describe("report storage", () => {
     await importDesign(dir, "homepage", source);
     await expect(readReport(dir, "homepage", "run-19700101-000000")).rejects.toThrow(/no d2c report/i);
     await expect(readReport(dir, "homepage", "../escape")).rejects.toThrow(/report id/i);
+  });
+
+  it("upgrades stored Report v1 data into a warning-level Report v2 view", async () => {
+    const dir = await workspace();
+    const source = await exportDir({ "index.html": "<html></html>" });
+    await importDesign(dir, "homepage", source);
+    const artifacts = { designPng: pngBuffer(), implementationPng: pngBuffer(), heatmapPng: pngBuffer() };
+    const reportId = "run-20260809-100000";
+    await writeReport(dir, "homepage", sampleReport("homepage", reportId), artifacts);
+    const reportPath = join(dir, ".flavor", "d2c", "homepage", "reports", reportId, "report.json");
+    const legacy = JSON.parse(await readFile(reportPath, "utf8")) as Record<string, unknown>;
+    legacy.schema = 1;
+    delete legacy.evaluation;
+    delete (legacy.scores as Record<string, unknown>).content;
+    await writeFile(reportPath, JSON.stringify(legacy));
+
+    const upgraded = (await readReport(dir, "homepage", reportId)).report;
+    expect(upgraded.schema).toBe(2);
+    expect(upgraded.scores.content).toBe(1);
+    expect(upgraded.evaluation).toMatchObject({ status: "warning", confidence: "medium" });
   });
 });

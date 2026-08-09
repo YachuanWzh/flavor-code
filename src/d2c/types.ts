@@ -24,6 +24,8 @@ export interface D2cElementSnapshot {
   rect: D2cRect;
   styles: D2cElementStyles;
   hasImage: boolean;
+  /** Stable CSS-like locator captured from the rendered document. */
+  selector?: string;
 }
 
 export interface D2cPageSnapshot {
@@ -82,12 +84,24 @@ export interface D2cElementDiff {
   textIssue?: { expected: string; actual: string };
   imageIssue?: { expected: boolean; actual: boolean };
   severity: D2cSeverity;
+  /** Stable across runs when the same semantic issue remains. */
+  fingerprint: string;
+  /** Product-facing priority from 1 (low) to 10 (blocking). */
+  impact: number;
+  designSelector?: string;
+  implementationSelector?: string;
 }
 
 export interface D2cUnmatchedElement {
   id: number;
   label: string;
   rect: D2cRect;
+  text: string;
+  hasImage: boolean;
+  selector?: string;
+  fingerprint: string;
+  impact: number;
+  severity: D2cSeverity;
 }
 
 export interface D2cMatchedPair {
@@ -108,20 +122,73 @@ export interface D2cScores {
   layout: number;
   color: number;
   typography: number;
+  /** Semantic text and image fidelity. */
+  content: number;
   /** Undefined when no screenshot comparison was performed. */
   pixel?: number;
   total: number;
   grade: string;
 }
 
+export interface D2cCaptureDiagnostics {
+  devicePixelRatio: number;
+  fontsReady: boolean;
+  imageCount: number;
+  failedImages: number;
+  naturalWidth: number;
+  naturalHeight: number;
+  clipped: boolean;
+}
+
+export type D2cProgressStage =
+  | "prepare"
+  | "dependencies"
+  | "server"
+  | "capture-design"
+  | "capture-implementation"
+  | "pixel-diff"
+  | "report";
+
+export interface D2cProgressEvent {
+  task: string;
+  /** One-based comparison attempt within the current desktop runtime. */
+  cycle: number;
+  stage: D2cProgressStage;
+  state: "running" | "completed" | "failed";
+  message: string;
+  cached?: boolean;
+}
+
+export type D2cCheckStatus = "pass" | "warn" | "fail";
+
+export interface D2cValidityCheck {
+  key: "viewport" | "dpr" | "fonts" | "images" | "clipping" | "capture-metadata";
+  label: string;
+  status: D2cCheckStatus;
+  message: string;
+}
+
+export interface D2cEvaluation {
+  status: "valid" | "warning" | "invalid";
+  confidence: "high" | "medium" | "low";
+  verdict: "pass" | "conditional" | "fail" | "invalid";
+  summary: string;
+  checks: D2cValidityCheck[];
+}
+
 export interface D2cReport {
-  schema: 1;
+  schema: 2;
   task: string;
   reportId: string;
+  /** Groups independently stored page reports produced by one comparison call. */
+  batchId?: string;
+  /** Present for multi-page aware reports; legacy reports are treated as one page. */
+  page?: { id: string; label: string; html: string; index: number; count: number };
   createdAt: string;
-  design: { source: string; width: number; height: number; elementCount: number; designHash?: string };
-  implementation: { source: string; width: number; height: number; elementCount: number };
+  design: { source: string; width: number; height: number; elementCount: number; designHash?: string; capture?: D2cCaptureDiagnostics };
+  implementation: { source: string; width: number; height: number; elementCount: number; capture?: D2cCaptureDiagnostics };
   scores: D2cScores;
+  evaluation: D2cEvaluation;
   diffs: D2cElementDiff[];
   missing: D2cUnmatchedElement[];
   extra: D2cUnmatchedElement[];
@@ -137,6 +204,7 @@ export interface CapturedPage {
   height: number;
   elements: D2cElementSnapshot[];
   screenshotPng: Buffer;
+  diagnostics: D2cCaptureDiagnostics;
 }
 
 export interface D2cCaptureService {

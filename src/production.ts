@@ -40,7 +40,7 @@ import { OAuthCallbackAuthProvider } from "./auth/oauth.js";
 import { createFileTokenStore } from "./auth/store.js";
 import { oauthCredentialId } from "./auth/oauth-config.js";
 import type { AuthResult, OAuthLlmConfig } from "./auth/types.js";
-import type { PermissionRequest } from "./permissions/engine.js";
+import type { PermissionProfile, PermissionRequest } from "./permissions/engine.js";
 import { buildCurrentDateSection, buildRuntimeEnvironmentSection, buildSubagentDirective, buildSystemPrompt, type PromptEnvironment } from "./prompts/system.js";
 import type { ApprovalDecision } from "./tools/runtime.js";
 import { PluginHost } from "./plugins/host.js";
@@ -112,6 +112,10 @@ export interface ProductionRuntimeOptions {
 export interface ProductionRuntime {
   session: FlavorSession;
   services: SessionServices;
+  authorization: {
+    permissionProfile(): PermissionProfile;
+    setPermissionProfile(profile: PermissionProfile): void;
+  };
   approvals: ApprovalBridge;
   memoryReviews: MemoryReviewBridge;
   diagnostics: readonly string[];
@@ -1363,9 +1367,13 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     sleepScheduler.start();
   }
   const session = new FlavorSession(services);
+  const authorization = {
+    permissionProfile: () => harness.permissionProfile,
+    setPermissionProfile: (profile: PermissionProfile) => harness.setPermissionProfile(profile),
+  };
   let disposed = false;
   return {
-    session, services, approvals, memoryReviews, restoredTranscript,
+    session, services, authorization, approvals, memoryReviews, restoredTranscript,
     get sessionId() { return sessionId; },
     get diagnostics() { return diagnostics.map((item) => redactSecrets(item, secrets)); },
     async dispose() {

@@ -7,6 +7,7 @@ import type {
   DesktopEvent,
   DesktopImageAttachmentInput,
   DesktopModelOption,
+  DesktopPermissionProfile,
   DesktopSnapshot,
   DesktopSessionSummary,
 } from "../contracts.js";
@@ -35,7 +36,13 @@ import type { FileChangePresentation, FileDiffLine } from "../../tools/types.js"
 import { SkillManagerView } from "./skill-manager.js";
 import { MemoryManagerView } from "./memory-manager.js";
 import { McpManagerView } from "./mcp-manager.js";
-import { D2cViewer, type D2cPendingTask } from "./d2c-viewer.js";
+import { D2cViewer } from "./d2c-viewer.js";
+import {
+  applyD2cAgentProgress,
+  applyD2cEngineProgress,
+  createD2cPendingTask,
+  type D2cPendingTask,
+} from "./d2c-progress.js";
 import type { ManagedSkillSummary } from "../../skills/manager.js";
 
 const EMPTY_SNAPSHOT: DesktopSnapshot = { sessions: [], diagnostics: [], models: [] };
@@ -187,6 +194,13 @@ export function DesktopApp(): React.JSX.Element {
         setView("d2c");
         return;
       }
+      if (event.type === "d2c-progress") {
+        setD2cPending((current) => current === undefined ? current : applyD2cEngineProgress(current, event.payload));
+        return;
+      }
+      if (event.type === "session-output" && event.sessionId === activeSessionIdRef.current) {
+        setD2cPending((current) => current === undefined ? current : applyD2cAgentProgress(current, event.event));
+      }
       if ((event.type === "session-output"
           && event.sessionId === activeSessionIdRef.current
           && ["done", "error", "exit"].includes(event.event.type))
@@ -333,7 +347,11 @@ export function DesktopApp(): React.JSX.Element {
     } catch (cause) { setError(errorMessage(cause)); }
   };
 
-  const send = async (override?: string, delivery?: "prompt" | "steer" | "followUp"): Promise<boolean> => {
+  const send = async (
+    override?: string,
+    delivery?: "prompt" | "steer" | "followUp",
+    permissionProfile?: DesktopPermissionProfile,
+  ): Promise<boolean> => {
     const prompt = (override ?? input).trim();
     const selectedAttachments = override === undefined ? attachments : [];
     if (!prompt && selectedAttachments.length === 0) return false;
@@ -361,6 +379,7 @@ export function DesktopApp(): React.JSX.Element {
         prompt,
         effectiveDelivery,
         selectedAttachments.map(({ name, mediaType, dataBase64 }) => ({ name, mediaType, dataBase64 })),
+        permissionProfile,
       );
       if (selectedAttachments.length > 0) clearAttachments();
       return true;
@@ -448,7 +467,13 @@ export function DesktopApp(): React.JSX.Element {
               {group.sessions.map((session) => <div className="session-item-shell" key={session.sessionId}
                 onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setSessionMenu(undefined); }}>
                 <button className="session-item" data-active={session.sessionId === snapshot.activeSession?.sessionId}
-                  onClick={() => void startSession(session)}>
+                  disabled={busy && session.sessionId !== snapshot.activeSession?.sessionId}
+                  onClick={() => {
+                    if (session.sessionId === snapshot.activeSession?.sessionId) {
+                      setRailOpen(false);
+                      setView("conversation");
+                    } else void startSession(session);
+                  }}>
                   <span>{sessionTitle(session)}</span><time>{formatSessionTime(session.updatedAt)}</time>
                 </button>
                 <button className="session-more" aria-label={`管理会话：${sessionTitle(session)}`} aria-expanded={sessionMenu === session.sessionId}
@@ -469,15 +494,11 @@ export function DesktopApp(): React.JSX.Element {
       {view === "skills" && snapshot.workspace !== undefined ? <SkillManagerView onClose={() => setView("conversation")} onError={setError} />
         : view === "memory" && snapshot.workspace !== undefined ? <MemoryManagerView onClose={() => setView("conversation")} onError={setError} />
           : view === "mcp" && snapshot.workspace !== undefined ? <McpManagerView onClose={() => setView("conversation")} onError={setError} />
-            : view === "d2c" && snapshot.workspace !== undefined ? <D2cViewer onClose={() => setView("conversation")} onError={setError} refreshKey={d2cRefreshKey}
+            : view === "d2c" && snapshot.workspace !== undefined ? <D2cViewer onClose={() => setView("conversation")} onInterrupt={() => void window.flavorDesktop.interrupt()} onError={setError} refreshKey={d2cRefreshKey}
                     pending={d2cPending}
                     disabled={busy}
-                    onLaunch={(task, framework) => setD2cPending({ task, framework, startedAt: Date.now() })}
-                    onStartTask={async (prompt) => {
-                      const submitted = await send(prompt, "prompt");
-                      if (submitted) setView("conversation");
-                      return submitted;
-                    }} /> : <>
+                    onLaunch={(task, framework) => setD2cPending(createD2cPendingTask(task, framework))}
+                    onStartTask={(prompt) => send(prompt, "prompt", "d2c")} /> : <>
       <header className="workspace-header">
         <button className="mobile-rail-toggle" onClick={() => setRailOpen(true)} aria-label="打开项目栏">☰</button>
         <div className="workspace-breadcrumb">
@@ -963,10 +984,10 @@ function DeleteSessionSheet({ session, deleting, onCancel, onDelete }: {
   </section></div>;
 }
 
-const DESTRUCTIVE_TOOLS = new Set(["Delete", "Move"]);
+const DESTRUCTIVE_TOOLS = new Set(["Delete", "Move", "RemoveTool"]);
 
 function ApprovalSheet({ approval, onResolve }: { approval: NonNullable<DesktopSnapshot["approval"]>; onResolve(decision: "allow" | "deny" | "always"): void }): React.JSX.Element {
-  const isDestructive = DESTRUCTIVE_TOOLS.has(approval.tool);
+  const isDestructive = DESTRUCTIVE_TOOLS.has(approval.tool) || approval.allowAlways === false;
   return <div className="modal-layer"><section className="decision-sheet" role="dialog" aria-modal="true" aria-labelledby="approval-title">
     <div className="sheet-icon warning">!</div><div><p className="sheet-kicker">权限确认 · {approval.agent === "main" ? "主 Agent" : "子 Agent"}</p><h2 id="approval-title">允许执行 {approval.tool}？</h2>
       <p>{approval.reason ?? "这项操作需要你的确认。"}</p>

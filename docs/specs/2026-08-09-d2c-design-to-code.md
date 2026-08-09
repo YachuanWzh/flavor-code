@@ -96,15 +96,17 @@ tools.ts         createD2cTools(workspace, { capture? })
   p=1 计入。
 - `S_color = 1 − 色差面积/总面积`（匹配元素中 ΔE>3 的 color/backgroundColor）。
 - `S_typography` = 含文本匹配元素中 font-size/weight/family 全一致占比。
+- `S_content` = 匹配元素中文本/图片语义一致占比，并计入缺失或多余的内容元素。
 - `S_pixel = 1 − pixelmatch 不一致像素占比`（两张截图 pad 到同尺寸后比较）。
-- 总分四舍五入到 0.1；等级：≥95 像素级还原、≥90 优秀、≥80 合格、<80 需修复。
+- 权重为 layout 30%、color 20%、typography 15%、content 20%、pixel 15%；pixel 不可用时其余权重归一化。
+  总分四舍五入到 0.1；错误文本最高 94.9，设计侧图片缺失最高 89.9。等级：≥95 像素级还原、≥90 优秀、≥80 合格、<80 需修复。
 
 ### 快照采集（注入式）
 
 ```ts
 interface D2cCaptureService {
   capture(source: D2cCaptureSource, viewport?: { width: number; height: number }):
-    Promise<CapturedPage>; // { width, height, elements, screenshotPng }
+    Promise<CapturedPage>; // { width, height, elements, screenshotPng, diagnostics }
 }
 ```
 
@@ -155,6 +157,45 @@ diagnostic 机制报告）。`RuntimeFactoryOptions` 的 Pick 同步扩展。桌
 - 只有消息提交成功才进入 pending；会话 busy 时禁止再次派发，提交失败、运行错误、
   中断或会话结束但没有报告时退出 pending。
 
+### Report v2 与验收语义
+
+报告不是单一分数，而是“评测有效性 → 视觉还原度 → 修复优先级”三层结论：
+
+- `validity.status`: `valid | warning | invalid`；检查两侧 viewport/DPR、字体、图片、
+  页面裁剪和截图尺寸。关键条件不成立时不得给出正式通过结论。
+- `confidence`: `high | medium | low`，由 validity checks 计算并说明原因。
+- `verdict`: `pass | conditional | fail | invalid`。错误文本、关键图片缺失等硬门槛
+  会限制最高等级，避免高像素分掩盖内容错误。
+- `scores.content` 衡量文本和图片内容一致性；保留 layout/color/typography/pixel，
+  总分仍为 0–100，但必须结合 verdict 和 confidence 展示。
+- 每个问题包含稳定 fingerprint、影响分、期望/实际矩形、内容差异、DOM selector
+  和局部证据所需坐标。旧 schema 1 报告可读取并在内存中升级。
+
+### 结果工作台与画布交互
+
+模块名称与一级标题统一为 `D2C`。创建态是 D2C 的主流程，而不是评测结果的空壳：用户输入
+任务名、选择 Vue 3/React 后，点击“导入 HTML 并开始 D2C”；目录选择成功即派发实现任务，
+不再要求第二次点击。任务执行期间停留在 D2C 模块并展示“已导入 → 生成中 → 完成后自动评测”的
+进度语义；只有选中已有报告或新报告到达后才进入评测结果工作台。
+
+结果态使用三栏结构：左侧任务/报告目录，中间证据画布，右侧问题队列。截图是视觉
+主角，顶部只呈现结论、总分、可信度和运行条件，不使用通用指标卡片堆叠。
+
+- 模式：叠加、拉帘、闪烁、设计、实现、热力图；拉帘可拖动，闪烁支持按住按钮
+  或 `B` 键临时切换。
+- 画布：25%–400% 缩放、适应窗口、100% 像素、滚轮/按钮缩放、拖拽平移；缩放
+  以指针或视口中心为锚点，模式切换不丢失观察位置。
+- 定位：点击问题或差异标尺后自动缩放并居中到问题区域；设计框使用青色，实现框
+  使用琥珀色，选中时同时显示并用测量线表达 dx/dy/dw/dh。
+- 证据：问题卡显示设计/实现局部裁剪、期望/实际数值、影响分和 selector；支持
+  复制修复描述与 DOM 定位。
+- 差异标尺：固定在画布右缘，按页面纵向位置显示问题密度和严重度，点击直接定位。
+- 性能：原图只保留一份 DOM 图像节点/模式，问题列表虚拟化或分批渲染；交互期间
+  只更新 transform/clip-path CSS 变量；拖拽和滚轮使用 requestAnimationFrame，
+  不在 render 中解码或复制 base64；尊重 prefers-reduced-motion。
+
+本轮非目标：报告间分数增减、问题新增/消失和趋势图等历史对比能力。
+
 ### 目录结构
 
 ```
@@ -163,6 +204,85 @@ diagnostic 机制报告）。`RuntimeFactoryOptions` 的 Pick 同步扩展。桌
   design/…                           # 导入的 Pixso 导出物
   reports/<run-id>/report.json|design.png|implementation.png|heatmap.png
 ```
+
+### Electron D2C authorization profile
+
+The Electron renderer marks only a newly launched D2C generation turn with the
+`d2c` permission profile. The main process owns this marker: it activates the
+profile immediately before `session.submit`, keeps it active for the complete
+turn (including subagents and steering messages), and restores the previous
+profile in `finally`. CLI, RPC, VS Code, and ordinary Electron conversation
+submissions never activate it.
+
+While the profile is active, workspace-scoped reads, writes, moves, shell
+commands, network/MCP calls, and otherwise unknown tools run without an
+approval prompt. Explicit deletion remains approval-gated, including `Delete`,
+`RemoveTool`, and recognizable shell deletion commands such as `rm`, `rmdir`,
+`del`, `Remove-Item`, `git rm`, and `git clean`. A move is not a deletion.
+
+This profile is not unrestricted filesystem access. Missing tool paths,
+workspace traversal/symlink escape, absolute paths outside the workspace,
+subagent delegation violations, and system/disk-level destructive commands are
+denied rather than presented as approvable actions. In `auto` mode, deletion
+requests bypass the model permission classifier so only the user can approve
+them.
+
+### 执行性能与实时可见性
+
+D2C 的等待页不得展示无法由真实事件支撑的百分比。Electron 渲染端将当前 D2C
+任务与 `session-output` 关联，按模型思考、文件读取、代码写入、命令执行和
+`D2cCompare` 工具调用形成最近活动流；评测工具另行发送依赖准备、预览启动、
+设计稿快照、实现快照、像素对比和报告写入等内部阶段。活动流最多保留最近 12 项，
+高频事件通过纯函数归并，不复制工具完整输入输出，不展示模型隐式推理。
+
+执行页使用“分析设计 → 生成代码 → 视觉评测”的真实阶段导航，显示当前动作、已完成
+动作、任务耗时和最近更新时间，并提供中断入口。状态动画遵守
+`prefers-reduced-motion`；计时器每秒更新一次，活动列表有界，不能因缓解等待而明显
+增加渲染负担。
+
+性能优化遵守结果一致性：同一运行时内按 task、设计 hash 和 viewport 缓存最多三份
+设计稿快照，重复修复评测只重新采集实现；依赖缺失时使用 npm 离线优先并关闭 audit、
+fund 网络请求；首次实现和修复均批量处理高影响问题，默认最多执行三次比较（首次评测
+加两轮集中修复），达到 90 分或有效通过后立即结束。缓存不跨进程持久化，设计 hash
+或 viewport 改变必须重新采集。
+
+### D2C runner resilience
+
+- The Electron D2C runner must not inherit a parent `npm_config_allow_scripts`
+  value. npm 11 treats the environment value as a project-scoped CLI policy;
+  values such as `true` fail with `EALLOWSCRIPTS`. Other environment variables
+  remain unchanged.
+- Dependency-install failures must include a bounded tail of npm stdout/stderr
+  in the `D2cCompare` error. The Agent must not need to inspect npm source or
+  cache logs outside the workspace to learn the actionable cause.
+- Preview readiness must not depend on Vite printing a URL. The runner selects
+  an available loopback port, starts Vite with that explicit strict port, and
+  probes `http://127.0.0.1:<port>/` until it is ready or the deadline expires.
+- Early exit and timeout errors include a bounded, ANSI-free output tail. The
+  runner still terminates the complete preview process tree on every failure.
+
+### Valid-result semantics and multi-page evaluation
+
+- A similarity value is an official score only when evaluation status is
+  `valid` or `warning`. For `invalid`, the primary result is “评测未完成”; raw
+  similarity remains available only as diagnostic evidence for the captured
+  region. Invalid results do not show a confidence badge or grade.
+- Clipping diagnostics state natural size, captured size, and coverage. The
+  report list also shows “未完成” instead of a misleading numeric score.
+- Capture separates responsive layout viewport from capture extent. Electron
+  uses device-metrics emulation plus a beyond-viewport screenshot so a long
+  page is not constrained by the physical Windows work area.
+- Import discovers every HTML file, keeps `index.html` first, and records a
+  stable page id, label, and relative HTML path in the manifest. Legacy
+  manifests are normalized to one page.
+- One `D2cCompare` call evaluates all imported pages against matching Vite
+  HTML entries (`index.html` maps to `/`; other files retain their relative
+  path). Page reports share a batch id and are stored independently so the
+  renderer loads only the selected page’s PNG evidence.
+- The workbench groups a batch as one run and presents a page rail containing
+  each page’s validity, official score or “未完成”, and issue count. Switching
+  pages preserves comparison mode but resets page-specific focus and fits the
+  new evidence canvas.
 
 ## Security and limits
 

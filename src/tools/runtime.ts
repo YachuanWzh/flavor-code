@@ -203,7 +203,8 @@ export class ToolRuntime {
       }
       if (
         permission.decision === "ask" && context.agent === "main"
-        && this.#permissions.mode === "auto" && this.#classify !== undefined
+        && this.#permissions.mode === "auto" && this.#permissions.profile === "standard"
+        && this.#classify !== undefined
       ) {
         try {
           const classified = await this.#classify(request, signal);
@@ -221,6 +222,7 @@ export class ToolRuntime {
       }
       if (pre.decision === "ask" || permission.decision === "ask") {
         const reason = [pre.reason, permission.reason].filter((value): value is string => value !== undefined).join("\n") || "Approval required";
+        const allowAlways = permission.allowAlways !== false;
         const requestDecision = await this.#hooks.emit({
           version: 1,
           type: "PermissionRequest",
@@ -240,7 +242,7 @@ export class ToolRuntime {
           const ctx = requestDecision.additionalContext ?? "";
           if (ctx.includes("codeisland:allow-all")) {
             const category = getToolCategory(tool.name);
-            if (category !== "destructive") this.#alwaysAllowed.add(category);
+            if (allowAlways && category !== "destructive") this.#alwaysAllowed.add(category);
           }
         } else if (context.agent !== "main" && this.#permissions.mode !== "bubble") {
           return this.#fail(tool.name, input, context.agent, "approval_required", reason);
@@ -249,16 +251,16 @@ export class ToolRuntime {
         } else {
           // Check if this tool's category has been always-allowed for this session.
           const category = getToolCategory(tool.name);
-          if (this.#alwaysAllowed.has(category)) {
+          if (allowAlways && this.#alwaysAllowed.has(category)) {
             // Skip the approval callback — already authorized for this tool type.
           } else if (this.#approve === undefined) {
             return this.#fail(tool.name, input, context.agent, "permission_denied", reason);
           } else {
-            const decision = await this.#approve({ ...request, reason }, signal);
+            const decision = await this.#approve({ ...request, reason, ...(allowAlways ? {} : { allowAlways: false }) }, signal);
             if (decision === "deny") {
               return this.#fail(tool.name, input, context.agent, "user_denied", reason);
             }
-            if (decision === "always" && category !== "destructive") {
+            if (decision === "always" && allowAlways && category !== "destructive") {
               this.#alwaysAllowed.add(category);
             }
           }

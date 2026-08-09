@@ -31,7 +31,21 @@ function fakeCapture(log: D2cCaptureSource[] = []): D2cCaptureService {
   return {
     capture: async (source): Promise<CapturedPage> => {
       log.push(source);
-      return { width: 2, height: 2, elements: [], screenshotPng: pngBuffer() };
+      return {
+        width: 2,
+        height: 2,
+        elements: [],
+        screenshotPng: pngBuffer(),
+        diagnostics: {
+          devicePixelRatio: 1,
+          fontsReady: true,
+          imageCount: 0,
+          failedImages: 0,
+          naturalWidth: 2,
+          naturalHeight: 2,
+          clipped: false,
+        },
+      };
     },
   };
 }
@@ -132,6 +146,42 @@ describe("D2cCompare", () => {
     expect(events).toEqual([{ task: "homepage", reportId: output.report.reportId, total: 100, grade: "像素级还原" }]);
   });
 
+  it("compares every imported HTML page in one batch and keeps page evidence switchable", async () => {
+    const workspace = await tempDir();
+    const exportDir = await tempDir();
+    await writeFile(join(exportDir, "index.html"), "<title>概览</title>");
+    await writeFile(join(exportDir, "analytics.html"), "<title>分析</title>");
+    await writeFile(join(exportDir, "settings.html"), "<title>设置</title>");
+    await importDesign(workspace, "suite", exportDir);
+    const projectDir = join(workspace, "app");
+    await mkdir(projectDir);
+    const captured: D2cCaptureSource[] = [];
+    const notifications: unknown[] = [];
+    const tool = await compareTool(workspace, {
+      capture: fakeCapture(captured),
+      runProject: async () => ({ url: "http://127.0.0.1:4173/", stop: async () => undefined }),
+      onReport: (event) => { notifications.push(event); },
+      now: () => new Date("2026-08-09T10:00:00Z"),
+    });
+
+    const output = await tool.execute({ task: "suite", implementation: "app" }, new AbortController().signal) as {
+      report: { reportId: string };
+      reports: Array<{ batchId: string; page: { id: string; label: string; html: string; index: number; count: number } }>;
+    };
+    expect(output.reports).toHaveLength(3);
+    expect(new Set(output.reports.map((report) => report.batchId))).toHaveLength(1);
+    expect(output.reports.map((report) => report.page.label)).toEqual(["概览", "分析", "设置"]);
+    expect(captured.filter((source) => source.kind === "url")).toEqual([
+      { kind: "url", url: "http://127.0.0.1:4173/" },
+      { kind: "url", url: "http://127.0.0.1:4173/analytics.html" },
+      { kind: "url", url: "http://127.0.0.1:4173/settings.html" },
+    ]);
+    const stored = await listReports(workspace, "suite");
+    expect(stored).toHaveLength(3);
+    expect(stored.map((item) => item.page?.id)).toEqual(["index", "analytics", "settings"]);
+    expect(notifications).toEqual([expect.objectContaining({ task: "suite", reportId: output.report.reportId, pageCount: 3 })]);
+  });
+
   it("generates unique report ids within the same second", async () => {
     const workspace = await workspaceWithDesign();
     await mkdir(join(workspace, "dist"), { recursive: true });
@@ -159,6 +209,28 @@ describe("D2cCompare", () => {
     ]) as Array<{ report: { reportId: string } }>;
     expect(new Set(results.map((item) => item.report.reportId)).size).toBe(2);
     expect(await listReports(workspace, "homepage")).toHaveLength(2);
+  });
+
+  it("reuses the immutable design snapshot across repair comparisons and emits real stages", async () => {
+    const workspace = await workspaceWithDesign();
+    await mkdir(join(workspace, "dist"), { recursive: true });
+    await writeFile(join(workspace, "dist", "index.html"), "<html></html>");
+    const captured: D2cCaptureSource[] = [];
+    const progress: Array<{ stage: string; state: string; cached?: boolean; cycle: number }> = [];
+    const tool = await compareTool(workspace, {
+      capture: fakeCapture(captured),
+      onProgress: (event) => { progress.push(event); },
+    });
+    const signal = new AbortController().signal;
+
+    await tool.execute({ task: "homepage", implementation: "dist/index.html" }, signal);
+    await tool.execute({ task: "homepage", implementation: "dist/index.html" }, signal);
+
+    expect(captured.filter((source) => source.kind === "file" && source.path.includes(".flavor"))).toHaveLength(1);
+    expect(captured.filter((source) => source.kind === "file" && source.path.includes("dist"))).toHaveLength(2);
+    expect(progress).toContainEqual(expect.objectContaining({ stage: "capture-design", state: "completed", cached: true, cycle: 2 }));
+    expect(progress).toContainEqual(expect.objectContaining({ stage: "pixel-diff", state: "running", cycle: 1 }));
+    expect(progress).toContainEqual(expect.objectContaining({ stage: "report", state: "completed", cycle: 2 }));
   });
 
   it("honors cancellation before capture starts", async () => {

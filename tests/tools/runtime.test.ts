@@ -182,6 +182,28 @@ describe("ToolRuntime", () => {
     expect(classifications).toBe(0);
   });
 
+  it("requires a fresh user approval for every D2C shell deletion", async () => {
+    const f = fixture();
+    let classifications = 0;
+    let approvals = 0;
+    const runtime = new ToolRuntime({
+      tools: [createShellTool(f.workspace)], hooks: f.hooks,
+      permissions: new PermissionEngine({ workspace: f.workspace, mode: "auto", profile: "d2c" }),
+      classify: async () => { classifications += 1; return { decision: "allow" }; },
+      approve: async (request) => {
+        approvals += 1;
+        expect(request.allowAlways).toBe(false);
+        return "always" as const;
+      },
+    });
+    const call = { name: "Shell", input: { command: "rm", args: ["old.tsx"], cwd: "." } };
+
+    await expect(runtime.execute(call, { agent: "main" })).resolves.toMatchObject({ ok: true });
+    await expect(runtime.execute(call, { agent: "main" })).resolves.toMatchObject({ ok: true });
+    expect(classifications).toBe(0);
+    expect(approvals).toBe(2);
+  });
+
   it("falls back to normal approval when auto classification is unavailable", async () => {
     const f = fixture();
     const tool = { ...f.tool, name: "WebFetch" };

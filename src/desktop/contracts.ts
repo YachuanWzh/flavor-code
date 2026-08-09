@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import type { AgentEvent } from "../agent/types.js";
-import type { D2cReport } from "../d2c/types.js";
+import type { D2cProgressEvent, D2cReport } from "../d2c/types.js";
 import { McpServerConfigSchema, McpServerNameSchema, type PermissionMode } from "../config/schema.js";
 import type { TranscriptState } from "../ui/transcript.js";
 import type { Question } from "../tools/ask-user-question.js";
@@ -31,6 +31,7 @@ export const AppMenuInputSchema = z.object({
   y: z.number().int().min(0).max(32_768),
 }).strict();
 const DesktopMessageDeliverySchema = z.enum(["prompt", "steer", "followUp"]);
+const DesktopPermissionProfileSchema = z.literal("d2c");
 const ImageAttachmentInputSchema = z.object({
   name: z.string().min(1).max(255),
   mediaType: z.enum(["image/png", "image/jpeg", "image/webp"]),
@@ -39,6 +40,7 @@ const ImageAttachmentInputSchema = z.object({
 export const SubmitInputSchema = z.object({
   prompt: z.string().max(1_000_000),
   delivery: DesktopMessageDeliverySchema.optional(),
+  permissionProfile: DesktopPermissionProfileSchema.optional(),
   attachments: z.array(ImageAttachmentInputSchema).max(DEFAULT_MAX_IMAGES).optional(),
 }).strict().superRefine((value, context) => {
   const attachments = value.attachments ?? [];
@@ -48,12 +50,16 @@ export const SubmitInputSchema = z.object({
   if (value.delivery !== undefined && value.delivery !== "prompt" && attachments.length > 0) {
     context.addIssue({ code: "custom", path: ["attachments"], message: "Images are only supported on new prompts" });
   }
+  if (value.permissionProfile !== undefined && value.delivery !== undefined && value.delivery !== "prompt") {
+    context.addIssue({ code: "custom", path: ["permissionProfile"], message: "Permission profiles require a new prompt" });
+  }
   if (attachments.length > 0 && value.prompt.trim().startsWith("/")) {
     context.addIssue({ code: "custom", path: ["attachments"], message: "Images cannot be attached to slash commands" });
   }
 });
 export type DesktopImageAttachmentInput = ImageAttachmentInput;
 export type DesktopMessageDelivery = z.infer<typeof DesktopMessageDeliverySchema>;
+export type DesktopPermissionProfile = z.infer<typeof DesktopPermissionProfileSchema>;
 export const ResolveApprovalInputSchema = z.object({ decision: z.enum(["allow", "deny", "always"]) }).strict();
 export const AnswerQuestionsInputSchema = z.object({
   answers: z.record(z.coerce.number().int().min(0).max(3), z.string().min(1).max(10_000)),
@@ -154,6 +160,7 @@ export interface DesktopApproval {
   command?: string;
   args?: readonly string[];
   cwd?: string;
+  allowAlways?: false;
 }
 
 export interface DesktopSnapshot {
@@ -193,6 +200,11 @@ export interface D2cReportListItem {
   createdAt: string;
   total: number;
   grade: string;
+  evaluationStatus: D2cReport["evaluation"]["status"];
+  verdict: D2cReport["evaluation"]["verdict"];
+  issueCount: number;
+  batchId?: string;
+  page?: D2cReport["page"];
 }
 
 /** Result of importing a Pixso export directory through the D2C view. */
@@ -200,6 +212,7 @@ export interface D2cImportResult {
   task: string;
   entryHtml: string;
   files: readonly string[];
+  pages: readonly { id: string; label: string; html: string }[];
 }
 
 /** Report plus screenshots encoded as PNG data URLs for renderer display. */
@@ -210,6 +223,8 @@ export interface D2cReportView {
   designPng: string;
   implementationPng: string;
   heatmapPng: string;
+  /** Other page reports from the same comparison batch; PNGs load on selection. */
+  relatedPages: readonly D2cReportListItem[];
 }
 
 export interface D2cReportEventPayload {
@@ -217,12 +232,14 @@ export interface D2cReportEventPayload {
   reportId: string;
   total: number;
   grade: string;
+  pageCount?: number;
 }
 
 export type DesktopEvent =
   | { type: "snapshot"; snapshot: DesktopSnapshot }
   | { type: "session-started"; payload: SessionStartedPayload }
   | { type: "session-output"; sessionId: string; event: SessionOutput }
+  | { type: "d2c-progress"; payload: D2cProgressEvent }
   | { type: "d2c-report"; payload: D2cReportEventPayload }
   | { type: "runtime-error"; sessionId?: string; message: string };
 
@@ -239,6 +256,7 @@ export interface FlavorDesktopApi {
     prompt: string,
     delivery?: DesktopMessageDelivery,
     attachments?: readonly DesktopImageAttachmentInput[],
+    permissionProfile?: DesktopPermissionProfile,
   ): Promise<void>;
   finishTask(): Promise<string>;
   interrupt(): Promise<void>;

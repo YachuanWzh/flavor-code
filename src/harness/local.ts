@@ -2,7 +2,7 @@ import { AgentLoop } from "../agent/loop.js";
 import { MAIN_TASK_TOOL_NAMES } from "../agent/task-tools.js";
 import type { TaskNode } from "../agent/planner.js";
 import type { HallucinationGuard } from "../hallucination/guard.js";
-import type { PermissionMode } from "../permissions/engine.js";
+import type { PermissionMode, PermissionProfile } from "../permissions/engine.js";
 import { PermissionEngine } from "../permissions/engine.js";
 import { createPermissionClassifier } from "../permissions/classifier.js";
 import type { ContextManager } from "../context/manager.js";
@@ -54,6 +54,7 @@ export class LocalHarness {
   readonly #options: LocalHarnessOptions;
   #subagentModelId: string;
   #mainPermissions!: PermissionEngine;
+  #permissionProfile: PermissionProfile = "standard";
   readonly #contexts = new WeakSet<ContextManager>();
   readonly #children = new Set<SubagentHarness>();
   readonly #mainDefinitions: ToolDefinition<unknown>[];
@@ -80,6 +81,7 @@ export class LocalHarness {
   get mainModelId(): string { return this.main.loop.modelId; }
   get subagentModelId(): string { return this.#subagentModelId; }
   get permissionMode(): PermissionMode { return this.#mainPermissions.mode; }
+  get permissionProfile(): PermissionProfile { return this.#permissionProfile; }
 
   setModel(role: "main" | "subagent", modelId: string): void {
     this.#options.registry.get(modelId);
@@ -91,6 +93,11 @@ export class LocalHarness {
   }
 
   setPermissionMode(mode: PermissionMode): void { this.#mainPermissions.setMode(mode); }
+
+  setPermissionProfile(profile: PermissionProfile): void {
+    this.#permissionProfile = profile;
+    this.#mainPermissions.setProfile(profile);
+  }
 
   replaceMainTools(definitions: readonly ToolDefinition<unknown>[]): void {
     if (this.#disposed) throw new Error("LocalHarness is disposed");
@@ -172,6 +179,7 @@ export class LocalHarness {
   ): HarnessProfile {
     const permissions = new PermissionEngine({
       workspace: this.#options.workspace,
+      profile: this.#permissionProfile,
       mode: this.#options.loopMode
         ? "bypassPermissions"
         : (agent === "subagent"

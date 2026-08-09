@@ -2,9 +2,16 @@ import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 import { BrowserWindow, type DownloadItem, type Event } from "electron";
+import { PNG } from "pngjs";
 
 import { D2C_MAX_PIXELS } from "../d2c/pixel.js";
-import type { CapturedPage, D2cCaptureService, D2cCaptureSource, D2cElementSnapshot } from "../d2c/types.js";
+import type {
+  CapturedPage,
+  D2cCaptureDiagnostics,
+  D2cCaptureService,
+  D2cCaptureSource,
+  D2cElementSnapshot,
+} from "../d2c/types.js";
 
 const DEFAULT_VIEWPORT = { width: 1280, height: 800 };
 const MAX_CAPTURE_DIMENSION = 4096;
@@ -22,6 +29,43 @@ export function fitCaptureSize(width: number, height: number): { width: number; 
     width: Math.max(1, Math.floor(safeWidth * scale)),
     height: Math.max(1, Math.floor(safeHeight * scale)),
   };
+}
+
+export function captureTileOffsets(pageLength: number, viewportLength: number): number[] {
+  const page = Math.max(1, Math.floor(pageLength));
+  const viewport = Math.max(1, Math.floor(viewportLength));
+  if (viewport >= page) return [0];
+  const last = page - viewport;
+  const offsets: number[] = [];
+  for (let offset = 0; offset < last; offset += viewport) offsets.push(offset);
+  if (offsets.at(-1) !== last) offsets.push(last);
+  return offsets;
+}
+
+export interface D2cCaptureTile {
+  x: number;
+  y: number;
+  png: Buffer;
+}
+
+export function stitchCaptureTiles(tiles: readonly D2cCaptureTile[], width: number, height: number): Buffer {
+  const targetWidth = Math.max(1, Math.floor(width));
+  const targetHeight = Math.max(1, Math.floor(height));
+  const output = new PNG({ width: targetWidth, height: targetHeight });
+  for (const tile of tiles) {
+    const image = PNG.sync.read(tile.png);
+    const x = Math.max(0, Math.floor(tile.x));
+    const y = Math.max(0, Math.floor(tile.y));
+    const copyWidth = Math.min(image.width, targetWidth - x);
+    const copyHeight = Math.min(image.height, targetHeight - y);
+    if (copyWidth <= 0 || copyHeight <= 0) continue;
+    for (let row = 0; row < copyHeight; row += 1) {
+      const sourceStart = row * image.width * 4;
+      const targetStart = ((y + row) * targetWidth + x) * 4;
+      image.data.copy(output.data, targetStart, sourceStart, sourceStart + copyWidth * 4);
+    }
+  }
+  return PNG.sync.write(output);
 }
 
 export function isAllowedCaptureNavigation(initialUrl: string, targetUrl: string): boolean {
@@ -43,7 +87,7 @@ export function isAllowedCaptureNavigation(initialUrl: string, targetUrl: string
 export const D2C_CAPTURE_PREPARATION_SCRIPT = `(() => {
   const style = document.createElement("style");
   style.dataset.d2cCapture = "true";
-  style.textContent = "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}";
+  style.textContent = "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}html{scrollbar-width:none!important}body{-ms-overflow-style:none!important}*::-webkit-scrollbar{display:none!important;width:0!important;height:0!important}";
   document.documentElement.appendChild(style);
   const fonts = document.fonts ? document.fonts.ready : Promise.resolve();
   const images = Array.from(document.images).map((image) => image.complete
@@ -57,6 +101,21 @@ const MEASURE_SCRIPT = `(() => ({
   height: Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight ?? 0, window.innerHeight),
 }))()`;
 
+export const D2C_CAPTURE_DIAGNOSTICS_SCRIPT = `(() => {
+  const naturalWidth = Math.max(document.documentElement.scrollWidth, document.body?.scrollWidth ?? 0, window.innerWidth);
+  const naturalHeight = Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight ?? 0, window.innerHeight);
+  const images = Array.from(document.images);
+  return {
+    devicePixelRatio: window.devicePixelRatio,
+    fontsReady: !document.fonts || document.fonts.status === "loaded",
+    imageCount: images.length,
+    failedImages: images.filter((image) => !image.complete || image.naturalWidth === 0).length,
+    naturalWidth,
+    naturalHeight,
+    clipped: naturalWidth > window.innerWidth + 1 || naturalHeight > window.innerHeight + 1,
+  };
+})()`;
+
 // Collects visible, styled elements for the DOM-level diff. Runs inside the
 // hidden capture window, so it must be self-contained and side-effect free.
 const COLLECT_SCRIPT = `(() => {
@@ -65,13 +124,32 @@ const COLLECT_SCRIPT = `(() => {
     .map((node) => node.textContent.trim())
     .filter(Boolean)
     .join(" ");
+  const selectorFor = (element) => {
+    if (element.id) return "#" + CSS.escape(element.id);
+    const parts = [];
+    let current = element;
+    while (current && current !== document.body && parts.length < 5) {
+      const tag = current.tagName.toLowerCase();
+      const siblings = current.parentElement
+        ? Array.from(current.parentElement.children).filter((sibling) => sibling.tagName === current.tagName)
+        : [];
+      const position = siblings.length > 1 ? ":nth-of-type(" + (siblings.indexOf(current) + 1) + ")" : "";
+      parts.unshift(tag + position);
+      current = current.parentElement;
+    }
+    return parts.join(" > ");
+  };
   const elements = [];
+  const pageWidth = Math.max(document.documentElement.scrollWidth, document.body?.scrollWidth ?? 0, window.innerWidth);
+  const pageHeight = Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight ?? 0, window.innerHeight);
   let id = 0;
   for (const element of document.body.querySelectorAll("*")) {
     if (elements.length >= ${MAX_ELEMENTS}) break;
     const rect = element.getBoundingClientRect();
-    if (rect.width * rect.height < 16 || rect.right <= 0 || rect.bottom <= 0
-      || rect.left >= window.innerWidth || rect.top >= window.innerHeight) continue;
+    const x = rect.x + window.scrollX;
+    const y = rect.y + window.scrollY;
+    if (rect.width * rect.height < 16 || x + rect.width <= 0 || y + rect.height <= 0
+      || x >= pageWidth || y >= pageHeight) continue;
     const style = getComputedStyle(element);
     if (style.display === "none" || style.visibility === "hidden") continue;
     const tag = element.tagName.toLowerCase();
@@ -84,7 +162,7 @@ const COLLECT_SCRIPT = `(() => {
       id: id++,
       tag,
       text,
-      rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      rect: { x, y, width: rect.width, height: rect.height },
       styles: {
         color: style.color,
         backgroundColor: style.backgroundColor,
@@ -93,11 +171,12 @@ const COLLECT_SCRIPT = `(() => {
         fontFamily: style.fontFamily,
       },
       hasImage,
+      selector: selectorFor(element),
     });
   }
   return {
-    width: window.innerWidth,
-    height: window.innerHeight,
+    width: pageWidth,
+    height: pageHeight,
     elements,
   };
 })()`;
@@ -139,6 +218,7 @@ function sanitizeSnapshot(raw: RawSnapshot): { width: number; height: number; el
           ...(typeof styles.fontFamily === "string" ? { fontFamily: styles.fontFamily } : {}),
         },
         hasImage: entry.hasImage === true,
+        ...(typeof entry.selector === "string" && entry.selector.length <= 512 ? { selector: entry.selector } : {}),
       });
     }
   }
@@ -155,6 +235,49 @@ function awaitWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T
       (error: unknown) => { signal.removeEventListener("abort", onAbort); rejectPromise(error); },
     );
   });
+}
+
+async function captureFullPage(
+  window: BrowserWindow,
+  width: number,
+  height: number,
+  signal: AbortSignal,
+): Promise<Buffer> {
+  const viewport = await awaitWithSignal(window.webContents.executeJavaScript(`(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }))()`) as Promise<{ width: number; height: number }>, signal);
+  const viewportWidth = Math.max(1, Math.floor(finiteNumber(viewport.width)));
+  const viewportHeight = Math.max(1, Math.floor(finiteNumber(viewport.height)));
+  const tiles: D2cCaptureTile[] = [];
+  const captured = new Set<string>();
+  try {
+    for (const y of captureTileOffsets(height, viewportHeight)) {
+      for (const x of captureTileOffsets(width, viewportWidth)) {
+        signal.throwIfAborted();
+        const position = await awaitWithSignal(window.webContents.executeJavaScript(`new Promise((resolve) => {
+          window.scrollTo(${x}, ${y});
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve({ x: window.scrollX, y: window.scrollY })));
+        })`) as Promise<{ x: number; y: number }>, signal);
+        const tileX = Math.max(0, Math.floor(finiteNumber(position.x)));
+        const tileY = Math.max(0, Math.floor(finiteNumber(position.y)));
+        const key = `${tileX}:${tileY}`;
+        if (captured.has(key)) continue;
+        captured.add(key);
+        let image = await awaitWithSignal(window.webContents.capturePage(), signal);
+        const size = image.getSize();
+        if (size.width !== viewportWidth || size.height !== viewportHeight) {
+          image = image.resize({ width: viewportWidth, height: viewportHeight, quality: "best" });
+        }
+        tiles.push({ x: tileX, y: tileY, png: Buffer.from(image.toPNG()) });
+      }
+    }
+  } finally {
+    if (!window.isDestroyed()) {
+      await window.webContents.executeJavaScript("window.scrollTo(0, 0)").catch(() => undefined);
+    }
+  }
+  return stitchCaptureTiles(tiles, width, height);
 }
 
 /**
@@ -211,22 +334,42 @@ export function createD2cCaptureService(): D2cCaptureService {
       captureSignal.addEventListener("abort", destroyOnAbort, { once: true });
       try {
         await awaitWithSignal(window.loadURL(url), captureSignal);
-        await awaitWithSignal(window.webContents.executeJavaScript(D2C_CAPTURE_PREPARATION_SCRIPT), captureSignal);
-        if (viewport === undefined) {
+        let captureSize = requested;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          await awaitWithSignal(window.webContents.executeJavaScript(D2C_CAPTURE_PREPARATION_SCRIPT), captureSignal);
           const measured = await awaitWithSignal(
             window.webContents.executeJavaScript(MEASURE_SCRIPT) as Promise<{ width: number; height: number }>,
             captureSignal,
           );
-          const natural = fitCaptureSize(finiteNumber(measured.width), finiteNumber(measured.height));
-          if (natural.width !== requested.width || natural.height !== requested.height) {
-            window.setContentSize(natural.width, natural.height);
-            await awaitWithSignal(window.webContents.executeJavaScript(D2C_CAPTURE_PREPARATION_SCRIPT), captureSignal);
-          }
+          const next = fitCaptureSize(
+            Math.max(requested.width, finiteNumber(measured.width)),
+            Math.max(requested.height, finiteNumber(measured.height)),
+          );
+          if (next.width === captureSize.width && next.height === captureSize.height) break;
+          captureSize = next;
+          window.setContentSize(captureSize.width, captureSize.height);
         }
-        const raw = await window.webContents.executeJavaScript(COLLECT_SCRIPT) as RawSnapshot;
-        const snapshot = sanitizeSnapshot(raw);
-        const page = await window.webContents.capturePage();
-        return { ...snapshot, screenshotPng: Buffer.from(page.toPNG()) };
+        await awaitWithSignal(window.webContents.executeJavaScript(D2C_CAPTURE_PREPARATION_SCRIPT), captureSignal);
+        const raw = await awaitWithSignal(window.webContents.executeJavaScript(COLLECT_SCRIPT) as Promise<RawSnapshot>, captureSignal);
+        const collected = sanitizeSnapshot(raw);
+        const snapshot = { ...collected, width: captureSize.width, height: captureSize.height };
+        const rawDiagnostics = await awaitWithSignal(
+          window.webContents.executeJavaScript(D2C_CAPTURE_DIAGNOSTICS_SCRIPT) as Promise<Partial<D2cCaptureDiagnostics>>,
+          captureSignal,
+        );
+        const naturalWidth = finiteNumber(rawDiagnostics.naturalWidth);
+        const naturalHeight = finiteNumber(rawDiagnostics.naturalHeight);
+        const diagnostics: D2cCaptureDiagnostics = {
+          devicePixelRatio: finiteNumber(rawDiagnostics.devicePixelRatio) || 1,
+          fontsReady: rawDiagnostics.fontsReady === true,
+          imageCount: Math.max(0, Math.round(finiteNumber(rawDiagnostics.imageCount))),
+          failedImages: Math.max(0, Math.round(finiteNumber(rawDiagnostics.failedImages))),
+          naturalWidth,
+          naturalHeight,
+          clipped: naturalWidth > captureSize.width + 1 || naturalHeight > captureSize.height + 1,
+        };
+        const screenshotPng = await captureFullPage(window, captureSize.width, captureSize.height, captureSignal);
+        return { ...snapshot, screenshotPng, diagnostics };
       } finally {
         captureSignal.removeEventListener("abort", destroyOnAbort);
         captureSession.removeListener("will-download", preventDownload);

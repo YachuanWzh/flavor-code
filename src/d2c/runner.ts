@@ -1,5 +1,6 @@
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { access, readFile, realpath } from "node:fs/promises";
+import { createServer } from "node:net";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** Extracts the first localhost dev server URL from process output. */
@@ -11,7 +12,7 @@ export function parseDevServerUrl(output: string): string | undefined {
 export type D2cSpawnFn = (
   command: string,
   args: readonly string[],
-  options: { cwd: string; shell?: boolean },
+  options: { cwd: string; shell?: boolean; env?: NodeJS.ProcessEnv },
 ) => ChildProcessWithoutNullStreams;
 
 export type D2cFetchFn = (url: string, signal?: AbortSignal) => Promise<{ status: number }>;
@@ -33,6 +34,19 @@ export interface RunFrontendProjectOptions {
   signal?: AbortSignal;
   /** Node executable used for Vite; defaults to `node` resolved from PATH. */
   nodeCommand?: string;
+  /** Process environment used only by npm install; defaults to process.env. */
+  environment?: NodeJS.ProcessEnv;
+  /** Fixed loopback port (tests only); production selects an available port. */
+  port?: number;
+  /** Reports coarse, real runner stages without exposing process output. */
+  onProgress?(event: D2cRunnerProgress): void | Promise<void>;
+}
+
+export interface D2cRunnerProgress {
+  stage: "dependencies" | "server";
+  state: "running" | "completed" | "failed";
+  message: string;
+  cached?: boolean;
 }
 
 export interface RunningProject {
@@ -46,6 +60,41 @@ const DEFAULT_READY_TIMEOUT_MS = 60_000;
 const DEFAULT_POLL_INTERVAL_MS = 500;
 const STOP_GRACE_MS = 3_000;
 const PROBE_TIMEOUT_MS = 5_000;
+const DIAGNOSTIC_OUTPUT_CHARS = 8_192;
+
+export function sanitizeNpmEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(environment).filter(([name]) => name.toLowerCase() !== "npm_config_allow_scripts"));
+}
+
+async function availableLoopbackPort(): Promise<number> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const server = createServer();
+    server.unref();
+    server.once("error", rejectPromise);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        server.close();
+        rejectPromise(new Error("D2C could not allocate a loopback port"));
+        return;
+      }
+      server.close((error) => error === undefined ? resolvePromise(address.port) : rejectPromise(error));
+    });
+  });
+}
+
+function outputTail(output: string): string {
+  const clean = output
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+    .trim();
+  return clean.length <= DIAGNOSTIC_OUTPUT_CHARS ? clean : clean.slice(-DIAGNOSTIC_OUTPUT_CHARS);
+}
+
+function withDiagnostics(message: string, output: string): string {
+  const tail = outputTail(output);
+  return tail.length === 0 ? message : `${message}\n\nProcess output:\n${tail}`;
+}
 
 function assertContained(workspace: string, resolved: string, original: string): string {
   const delta = relative(workspace, resolved);
@@ -117,11 +166,20 @@ function runNpmInstall(
   spawnFn: D2cSpawnFn,
   projectDir: string,
   timeoutMs: number,
+  environment: NodeJS.ProcessEnv,
   signal?: AbortSignal,
 ): Promise<void> {
   signal?.throwIfAborted();
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawnFn("npm", ["install"], { cwd: projectDir, shell: process.platform === "win32" });
+    const child = spawnFn(
+      "npm",
+      ["install", "--prefer-offline", "--no-audit", "--no-fund"],
+      { cwd: projectDir, shell: process.platform === "win32", env: sanitizeNpmEnvironment(environment) },
+    );
+    let output = "";
+    const append = (chunk: Buffer): void => { output = (output + chunk.toString("utf8")).slice(-DIAGNOSTIC_OUTPUT_CHARS * 2); };
+    child.stdout.on("data", append);
+    child.stderr.on("data", append);
     let settled = false;
     const finish = (callback: () => void): void => {
       if (settled) return;
@@ -142,7 +200,7 @@ function runNpmInstall(
     child.on("exit", (code) => {
       finish(() => {
         if (code === 0) resolvePromise();
-        else rejectPromise(new Error(`D2C dependency install failed with exit code ${code}`));
+        else rejectPromise(new Error(withDiagnostics(`D2C dependency install failed with exit code ${code}`, output)));
       });
     });
     child.on("error", (error) => {
@@ -192,6 +250,7 @@ export async function runFrontendProject(
   const installTimeoutMs = options.installTimeoutMs ?? DEFAULT_INSTALL_TIMEOUT_MS;
   const readyTimeoutMs = options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  const progress = async (event: D2cRunnerProgress): Promise<void> => { await options.onProgress?.(event); };
 
   options.signal?.throwIfAborted();
   const resolved = await resolveInsideWorkspace(options.workspace, projectDir);
@@ -199,7 +258,16 @@ export async function runFrontendProject(
 
   const viteBin = join(resolved, "node_modules", "vite", "bin", "vite.js");
   if (!(await fileExists(viteBin))) {
-    await runNpmInstall(spawnFn, resolved, installTimeoutMs, options.signal);
+    await progress({ stage: "dependencies", state: "running", message: "正在准备项目依赖" });
+    try {
+      await runNpmInstall(spawnFn, resolved, installTimeoutMs, options.environment ?? process.env, options.signal);
+      await progress({ stage: "dependencies", state: "completed", message: "项目依赖安装完成" });
+    } catch (error) {
+      await progress({ stage: "dependencies", state: "failed", message: "项目依赖安装失败" });
+      throw error;
+    }
+  } else {
+    await progress({ stage: "dependencies", state: "completed", message: "项目依赖已就绪", cached: true });
   }
   if (!(await fileExists(viteBin))) {
     throw new Error("D2C could not locate node_modules/vite/bin/vite.js after installing dependencies");
@@ -207,7 +275,15 @@ export async function runFrontendProject(
 
   const viteReal = await realpath(viteBin);
   assertContained(resolved, viteReal, viteBin);
-  const child = spawnFn(options.nodeCommand ?? "node", [viteReal, "--host", "127.0.0.1"], { cwd: resolved });
+  await progress({ stage: "server", state: "running", message: "正在启动本地预览" });
+  const port = options.port ?? await availableLoopbackPort();
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error(`Invalid D2C preview port: ${port}`);
+  const url = `http://127.0.0.1:${port}/`;
+  const child = spawnFn(
+    options.nodeCommand ?? "node",
+    [viteReal, "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
+    { cwd: resolved },
+  );
   let output = "";
   let exited = false;
   let stopping = false;
@@ -242,20 +318,6 @@ export async function runFrontendProject(
 
   try {
     const deadline = Date.now() + readyTimeoutMs;
-    let url: string | undefined;
-    while (url === undefined) {
-      if (exited) {
-        if (processError !== undefined) throw new Error(`D2C dev server could not start: ${processError.message}`);
-        throw new Error(`D2C dev server exited with code ${exitCode} before reporting a URL`);
-      }
-      url = parseDevServerUrl(output);
-      if (url === undefined) {
-        if (Date.now() > deadline) {
-          throw new Error(`D2C dev server did not report a localhost URL within ${readyTimeoutMs} ms`);
-        }
-        await wait(pollIntervalMs, options.signal);
-      }
-    }
     while (true) {
       try {
         const remaining = Math.max(1, deadline - Date.now());
@@ -264,21 +326,25 @@ export async function runFrontendProject(
           ? timeoutSignal
           : AbortSignal.any([options.signal, timeoutSignal]);
         const response = await awaitWithSignal(probe(url, probeSignal), probeSignal);
-        if (response.status < 500) return { url, stop };
+        if (response.status < 500) {
+          await progress({ stage: "server", state: "completed", message: "本地预览已就绪" });
+          return { url, stop };
+        }
       } catch (cause) {
         if (options.signal?.aborted === true) throw options.signal.reason;
         // Server not accepting connections yet; keep probing.
       }
       if (exited) {
         if (processError !== undefined) throw new Error(`D2C dev server could not start: ${processError.message}`);
-        throw new Error(`D2C dev server exited with code ${exitCode} before becoming ready`);
+        throw new Error(withDiagnostics(`D2C dev server exited with code ${exitCode} before becoming ready`, output));
       }
       if (Date.now() > deadline) {
-        throw new Error(`D2C dev server was not ready within ${readyTimeoutMs} ms: ${url}`);
+        throw new Error(withDiagnostics(`D2C dev server was not ready within ${readyTimeoutMs} ms: ${url}`, output));
       }
       await wait(pollIntervalMs, options.signal);
     }
   } catch (error) {
+    await progress({ stage: "server", state: "failed", message: "本地预览启动失败" });
     await stop();
     throw error;
   }

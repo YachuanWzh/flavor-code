@@ -24,6 +24,7 @@ interface SpawnCall {
   command: string;
   args: readonly string[];
   cwd: string;
+  env?: NodeJS.ProcessEnv;
 }
 
 interface FakeChild {
@@ -68,7 +69,7 @@ function createFakeChild(): FakeChild {
 
 interface FakeSpawn {
   calls: SpawnCall[];
-  spawn: (command: string, args: readonly string[], options: { cwd: string }) => ChildProcessWithoutNullStreams;
+  spawn: (command: string, args: readonly string[], options: { cwd: string; env?: NodeJS.ProcessEnv }) => ChildProcessWithoutNullStreams;
 }
 
 function fakeSpawn(children: FakeChild[]): FakeSpawn {
@@ -76,7 +77,7 @@ function fakeSpawn(children: FakeChild[]): FakeSpawn {
   return {
     calls,
     spawn: (command, args, options) => {
-      calls.push({ command, args: [...args], cwd: options.cwd });
+      calls.push({ command, args: [...args], cwd: options.cwd, ...(options.env === undefined ? {} : { env: options.env }) });
       const child = children[calls.length - 1] ?? createFakeChild();
       return child as unknown as ChildProcessWithoutNullStreams;
     },
@@ -137,7 +138,8 @@ describe("runFrontendProject", () => {
     await writeFile(viteBin, [
       "const http = require('node:http');",
       "const server = http.createServer((_req, res) => { res.statusCode = 200; res.end('ok'); });",
-      "server.listen(0, '127.0.0.1', () => console.log('http://127.0.0.1:' + server.address().port + '/'));",
+      "const port = Number(process.argv[process.argv.indexOf('--port') + 1]);",
+      "server.listen(port, '127.0.0.1');",
       "process.on('SIGTERM', () => server.close(() => process.exit(0)));",
     ].join("\n"));
     const running = await runFrontendProject(projectDir, {
@@ -181,6 +183,7 @@ describe("runFrontendProject", () => {
     const pending = runFrontendProject(projectDir, {
       workspace,
       ...readyOptions,
+      port: 43123,
       spawn: spawn.spawn,
       fetch: async (url) => {
         fetches.push(url);
@@ -191,13 +194,13 @@ describe("runFrontendProject", () => {
     server.stdout.write("  VITE v5.0.0  ready\n  ➜  Local:   http://localhost:5173/\n");
 
     const running = await pending;
-    expect(running.url).toBe("http://localhost:5173/");
+    expect(running.url).toBe("http://127.0.0.1:43123/");
     expect(spawn.calls).toHaveLength(1);
     expect(spawn.calls[0]?.command).toBe("node");
-    expect(spawn.calls[0]?.args).toEqual([viteBin, "--host", "127.0.0.1"]);
+    expect(spawn.calls[0]?.args).toEqual([viteBin, "--host", "127.0.0.1", "--port", "43123", "--strictPort"]);
     expect(spawn.calls[0]?.cwd).toBe(projectDir);
     expect(fetches.length).toBeGreaterThan(0);
-    expect(fetches[0]).toBe("http://localhost:5173/");
+    expect(fetches[0]).toBe("http://127.0.0.1:43123/");
 
     await running.stop();
     expect(server.signals).toContain("SIGTERM");
@@ -216,23 +219,24 @@ describe("runFrontendProject", () => {
       workspace,
       ...readyOptions,
       installTimeoutMs: 2000,
+      port: 43124,
       spawn: spawn.spawn,
       fetch: async () => ({ status: 200 }),
     });
     await until(() => spawn.calls.length === 1);
     expect(spawn.calls[0]?.command).toBe("npm");
-    expect(spawn.calls[0]?.args).toEqual(["install"]);
+    expect(spawn.calls[0]?.args).toEqual(["install", "--prefer-offline", "--no-audit", "--no-fund"]);
 
     await installViteBin(projectDir);
     installer.emitExit(0);
     await until(() => spawn.calls.length === 2);
     server.stdout.write("http://localhost:5173/");
     const running = await pending;
-    expect(running.url).toBe("http://localhost:5173/");
+    expect(running.url).toBe("http://127.0.0.1:43124/");
     await running.stop();
   });
 
-  it("rejects when npm install fails", async () => {
+  it("sanitizes an inherited npm allow-scripts flag and reports install diagnostics inline", async () => {
     const workspace = await tempDir();
     const projectDir = await viteProject(workspace);
     const installer = createFakeChild();
@@ -241,15 +245,18 @@ describe("runFrontendProject", () => {
     const pending = runFrontendProject(projectDir, {
       workspace,
       ...readyOptions,
+      environment: { PATH: "test-path", npm_config_allow_scripts: "true", NPM_CONFIG_ALLOW_SCRIPTS: "vite" },
       spawn: spawn.spawn,
       fetch: async () => ({ status: 200 }),
     });
     await until(() => spawn.calls.length === 1);
+    expect(spawn.calls[0]?.env).toEqual({ PATH: "test-path" });
+    installer.stderr.write("npm error code EALLOWSCRIPTS\ninvalid inherited allow-scripts policy\n");
     installer.emitExit(1);
-    await expect(pending).rejects.toThrow(/install/i);
+    await expect(pending).rejects.toThrow(/EALLOWSCRIPTS/);
   });
 
-  it("rejects and kills the server when no url appears in time", async () => {
+  it("rejects and kills the server when the explicit loopback URL never becomes ready", async () => {
     const workspace = await tempDir();
     const projectDir = await viteProject(workspace);
     await installViteBin(projectDir);
@@ -261,10 +268,11 @@ describe("runFrontendProject", () => {
         workspace,
         readyTimeoutMs: 60,
         pollIntervalMs: 5,
+        port: 43125,
         spawn: spawn.spawn,
-        fetch: async () => ({ status: 200 }),
+        fetch: async () => { throw new Error("connection refused"); },
       }),
-    ).rejects.toThrow(/url|dev server/i);
+    ).rejects.toThrow(/not ready|dev server/i);
     expect(server.signals.length).toBeGreaterThan(0);
   });
 
@@ -279,6 +287,7 @@ describe("runFrontendProject", () => {
     const pending = runFrontendProject(projectDir, {
       workspace,
       ...readyOptions,
+      port: 43126,
       spawn: spawn.spawn,
       fetch: async () => {
         const status = statuses.shift() ?? 200;
@@ -288,7 +297,7 @@ describe("runFrontendProject", () => {
     await until(() => spawn.calls.length === 1);
     server.stdout.write("http://localhost:5173/");
     const running = await pending;
-    expect(running.url).toBe("http://localhost:5173/");
+    expect(running.url).toBe("http://127.0.0.1:43126/");
     await running.stop();
   });
 
@@ -302,12 +311,14 @@ describe("runFrontendProject", () => {
     const pending = runFrontendProject(projectDir, {
       workspace,
       ...readyOptions,
+      port: 43127,
       spawn: spawn.spawn,
-      fetch: async () => ({ status: 200 }),
+      fetch: async () => { throw new Error("connection refused"); },
     });
     await until(() => spawn.calls.length === 1);
+    server.stderr.write("failed to load config: missing plugin\n");
     server.emitExit(1);
-    await expect(pending).rejects.toThrow(/exit/i);
+    await expect(pending).rejects.toThrow(/missing plugin/i);
   });
 
   it("rejects cleanly when the server process emits an error", async () => {
@@ -321,7 +332,7 @@ describe("runFrontendProject", () => {
       workspace,
       ...readyOptions,
       spawn: spawn.spawn,
-      fetch: async () => ({ status: 200 }),
+      fetch: async () => { throw new Error("connection refused"); },
     });
     await until(() => spawn.calls.length === 1);
     server.emitError(new Error("spawn denied"));
@@ -339,6 +350,7 @@ describe("runFrontendProject", () => {
     const pending = runFrontendProject(projectDir, {
       workspace,
       ...readyOptions,
+      port: 43128,
       signal: controller.signal,
       spawn: spawn.spawn,
       fetch: async () => new Promise(() => undefined),

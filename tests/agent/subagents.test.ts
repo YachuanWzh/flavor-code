@@ -298,6 +298,37 @@ describe("LocalHarness", () => {
     expect(harness.createSubagent(node("fresh")).modelId).toBe("fake:new-child");
   });
 
+  it("propagates the temporary D2C profile to subagents created during the turn", async () => {
+    const hooks = new HookBus();
+    const adapter: ModelAdapter = { async *stream() { yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } }; } };
+    const registry = new ModelRegistry().register("fake", adapter);
+    const approvals: string[] = [];
+    const tools: ToolDefinition<{ path: string }>[] = ["Write", "Delete"].map((name) => ({
+      name,
+      description: name,
+      inputSchema: z.object({ path: z.string() }),
+      paths: (input) => [input.path],
+      execute: async () => name,
+    }));
+    const harness = new LocalHarness({
+      registry, hooks, workspace: process.cwd(), mainModelId: "fake:main", subagentModelId: "fake:child", tools,
+      approve: (request) => { approvals.push(`${request.agent}:${request.tool}`); return "once"; },
+      createContext: () => contextFixture(hooks),
+    });
+    harness.setPermissionProfile("d2c");
+    const child = harness.createSubagent(node("d2c-child"));
+
+    await expect(child.runtime.execute(
+      { name: "Write", input: { path: "generated.tsx" } }, { agent: "subagent" },
+    )).resolves.toMatchObject({ ok: true });
+    await expect(child.runtime.execute(
+      { name: "Delete", input: { path: "generated.tsx" } }, { agent: "subagent" },
+    )).resolves.toMatchObject({ ok: true });
+    expect(approvals).toEqual(["subagent:Delete"]);
+    child.dispose();
+    harness.dispose();
+  });
+
   it("creates isolated cheaper subagents without Task and with bubble permissions", async () => {
     const hooks = new HookBus();
     const adapter: ModelAdapter = { async *stream() { yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } }; } };

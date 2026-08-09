@@ -16,6 +16,7 @@ import type { TranscriptState } from "../ui/transcript.js";
 import { message } from "../utils/error.js";
 import { modelContentText } from "../models/types.js";
 import type { ApprovalDecision } from "../tools/runtime.js";
+import type { PermissionProfile } from "../permissions/engine.js";
 import { createGlobTool, type SearchResult } from "../tools/search.js";
 import { SkillManager, type ManagedSkill, type ManagedSkillSummary, type SkillDraft } from "../skills/manager.js";
 import { createProjectMemoryManager, type MemoryManagerLike, type MemorySnapshot } from "../memory/manager.js";
@@ -23,7 +24,7 @@ import type { MemoryCandidate, MemoryEntry } from "../memory/types.js";
 import type { MemoryReviewItem } from "../memory/review.js";
 import { ProjectMcpConfigManager, type ManagedMcpServer, type ProjectMcpConfigManagerLike } from "../mcp/config-manager.js";
 import { DEFAULT_DESKTOP_MODELS, loadDesktopModels, saveDesktopModel } from "./model-config.js";
-import type { AddDesktopModelInput, D2cImportResult, D2cReportListItem, D2cReportView, DesktopEvent, DesktopMessageDelivery, DesktopModelOption, DesktopModelMutationResult, DesktopSessionSummary, DesktopSnapshot, McpServerDraft, SessionStartedPayload } from "./contracts.js";
+import type { AddDesktopModelInput, D2cImportResult, D2cReportListItem, D2cReportView, DesktopEvent, DesktopMessageDelivery, DesktopModelOption, DesktopModelMutationResult, DesktopPermissionProfile, DesktopSessionSummary, DesktopSnapshot, McpServerDraft, SessionStartedPayload } from "./contracts.js";
 
 function pngDataUrl(png: Uint8Array): string {
   const buffer = Buffer.from(png);
@@ -58,6 +59,10 @@ export interface RuntimeLike {
   readonly approvals: {
     readonly pending: DesktopSnapshot["approval"];
     resolve(decision: ApprovalDecision): void;
+  };
+  readonly authorization: {
+    permissionProfile(): PermissionProfile;
+    setPermissionProfile(profile: PermissionProfile): void;
   };
   readonly memoryReviews: {
     readonly pending: readonly MemoryReviewItem[];
@@ -176,7 +181,9 @@ export class DesktopRuntimeController {
   }
 
   async refreshSessions(): Promise<DesktopSnapshot> {
-    if (this.#workspace !== undefined) this.#sessions = await this.#listSessions(this.#workspace);
+    if (this.#workspace !== undefined) {
+      this.#sessions = this.#withActiveSession(await this.#listSessions(this.#workspace));
+    }
     return this.#publishSnapshot();
   }
 
@@ -206,6 +213,15 @@ export class DesktopRuntimeController {
     outputSessionId = runtime.sessionId;
     this.#runtime = runtime;
     await runtime.session.start();
+    if (!this.#sessions.some((session) => session.sessionId === runtime.sessionId)) {
+      const now = new Date().toISOString();
+      this.#sessions = [{
+        sessionId: runtime.sessionId,
+        createdAt: now,
+        updatedAt: now,
+        mainModel: runtime.services.mainModel(),
+      }, ...this.#sessions];
+    }
     const payload = { sessionId: runtime.sessionId, restoredTranscript: runtime.restoredTranscript, snapshot: this.snapshot() };
     this.#emit({ type: "session-started", payload });
     outputReady = true;
@@ -232,11 +248,15 @@ export class DesktopRuntimeController {
     prompt: string,
     delivery: DesktopMessageDelivery = "prompt",
     attachments: readonly ImageAttachmentInput[] = [],
+    permissionProfile?: DesktopPermissionProfile,
   ): Promise<void> {
     const runtime = this.#runtime;
     if (runtime === undefined) throw new Error("Start a session before sending a message");
     if (attachments.length > 0 && delivery !== "prompt") {
       throw new Error("Images are only supported on new prompts");
+    }
+    if (permissionProfile !== undefined && (delivery !== "prompt" || this.#busy)) {
+      throw new Error("D2C permission profile requires a new idle prompt");
     }
     if (delivery === "followUp") {
       runtime.session.followUp(prompt);
@@ -248,6 +268,15 @@ export class DesktopRuntimeController {
       this.#publishSnapshot();
       return;
     }
+    const preview = prompt.trim();
+    const now = new Date().toISOString();
+    this.#sessions = this.#sessions.map((session) => session.sessionId !== runtime.sessionId ? session : {
+      ...session,
+      updatedAt: now,
+      ...(session.preview !== undefined || preview.length === 0 ? {} : { preview }),
+    });
+    const previousPermissionProfile = runtime.authorization.permissionProfile();
+    if (permissionProfile !== undefined) runtime.authorization.setPermissionProfile(permissionProfile);
     this.#busy = true;
     this.#publishSnapshot();
     try {
@@ -267,13 +296,14 @@ export class DesktopRuntimeController {
       }
       throw error;
     } finally {
+      if (permissionProfile !== undefined) runtime.authorization.setPermissionProfile(previousPermissionProfile);
       if (this.#runtime === runtime) {
         this.#busy = false;
         const sessions = this.#workspace === undefined
           ? this.#sessions
           : await this.#listSessions(this.#workspace).catch(() => this.#sessions);
         if (this.#runtime === runtime) {
-          this.#sessions = sessions;
+          this.#sessions = this.#withActiveSession(sessions);
           this.#publishSnapshot();
         }
       }
@@ -319,7 +349,7 @@ export class DesktopRuntimeController {
           ? this.#sessions
           : await this.#listSessions(this.#workspace).catch(() => this.#sessions);
         if (this.#runtime === runtime) {
-          this.#sessions = sessions;
+          this.#sessions = this.#withActiveSession(sessions);
           this.#publishSnapshot();
         }
       }
@@ -428,7 +458,7 @@ export class DesktopRuntimeController {
     const workspace = this.#workspace;
     if (workspace === undefined) throw new Error("Open a project before importing a D2C design");
     const manifest = await importDesign(workspace, task, exportDir);
-    return { task, entryHtml: manifest.entryHtml, files: manifest.files };
+    return { task, entryHtml: manifest.entryHtml, files: manifest.files, pages: manifest.pages };
   }
 
   /** Lists stored D2C comparison reports across all tasks, newest first. */
@@ -449,6 +479,9 @@ export class DesktopRuntimeController {
     if (workspace === undefined) throw new Error("Open a project before viewing D2C reports");
     const bundle = await readReport(workspace, task, reportId);
     const currentManifest = await readManifest(workspace, task);
+    const relatedPages = bundle.report.batchId === undefined ? [] : (await listReports(workspace, task))
+      .filter((item) => item.batchId === bundle.report.batchId)
+      .map((item) => ({ task, ...item }));
     return {
       report: bundle.report,
       designOutdated: bundle.report.design.designHash !== undefined
@@ -456,6 +489,7 @@ export class DesktopRuntimeController {
       designPng: pngDataUrl(bundle.designPng),
       implementationPng: pngDataUrl(bundle.implementationPng),
       heatmapPng: pngDataUrl(bundle.heatmapPng),
+      relatedPages,
     };
   }
 
@@ -483,6 +517,15 @@ export class DesktopRuntimeController {
     const snapshot = this.snapshot();
     this.#emit({ type: "snapshot", snapshot });
     return snapshot;
+  }
+
+  #withActiveSession(sessions: readonly DesktopSessionSummary[]): readonly DesktopSessionSummary[] {
+    const activeSessionId = this.#runtime?.sessionId;
+    if (activeSessionId === undefined || sessions.some((session) => session.sessionId === activeSessionId)) {
+      return sessions;
+    }
+    const active = this.#sessions.find((session) => session.sessionId === activeSessionId);
+    return active === undefined ? sessions : [active, ...sessions];
   }
 
   async #disposeRuntime(): Promise<void> {

@@ -50,6 +50,53 @@ describe("PermissionEngine", () => {
     expect(engine.decide(request).decision).toBe("allow");
   });
 
+  it("auto-allows Electron D2C work except deletion while retaining workspace boundaries", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-d2c-permissions-"));
+    const outside = mkdtempSync(join(tmpdir(), "flavor-d2c-outside-"));
+    const engine = new PermissionEngine({ workspace, mode: "auto", profile: "d2c" });
+
+    expect(engine.decide({ agent: "main", tool: "Write", paths: [join(workspace, "src", "App.tsx")] }).decision).toBe("allow");
+    expect(engine.decide({ agent: "main", tool: "Move", paths: [join(workspace, "a"), join(workspace, "b")] }).decision).toBe("allow");
+    expect(engine.decide({ agent: "main", tool: "Shell", command: "npm install", cwd: workspace }).decision).toBe("allow");
+    expect(engine.decide({ agent: "main", tool: "mcp__docs__search" }).decision).toBe("allow");
+    expect(engine.decide({ agent: "main", tool: "mcp__github__delete_file" }).decision).toBe("ask");
+    expect(engine.decide({ agent: "main", tool: "CustomD2cTool" }).decision).toBe("allow");
+
+    expect(engine.decide({ agent: "main", tool: "Delete", paths: [join(workspace, "old.tsx")] })).toMatchObject({
+      decision: "ask", reason: expect.stringMatching(/delet/i), allowAlways: false,
+    });
+    expect(engine.decide({ agent: "main", tool: "RemoveTool", paths: [join(workspace, ".flavor", "tools", "old.json")] }).decision).toBe("ask");
+    for (const command of [
+      "rm old.tsx",
+      "rmdir generated",
+      "del /q old.tsx",
+      "powershell -Command 'Remove-Item old.tsx'",
+      "git rm old.tsx",
+      "git clean -fd",
+      "npm test && rm old.tsx",
+    ]) {
+      expect(engine.decide({ agent: "main", tool: "Shell", command, cwd: workspace }).decision, command).toBe("ask");
+    }
+
+    expect(engine.decide({ agent: "main", tool: "Write", paths: [join(outside, "App.tsx")] }).decision).toBe("deny");
+    expect(engine.decide({ agent: "main", tool: "Shell", command: "npm install", cwd: outside }).decision).toBe("deny");
+    expect(engine.decide({ agent: "main", tool: "Shell", command: "rm -rf /", cwd: workspace }).decision).toBe("deny");
+  });
+
+  it("switches the D2C profile without changing the configured permission mode", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-d2c-profile-"));
+    const engine = new PermissionEngine({ workspace, mode: "default" });
+    const write = { agent: "main" as const, tool: "Write", paths: [join(workspace, "App.tsx")] };
+
+    expect(engine.decide(write).decision).toBe("ask");
+    engine.setProfile("d2c");
+    expect(engine.mode).toBe("default");
+    expect(engine.profile).toBe("d2c");
+    expect(engine.decide(write).decision).toBe("allow");
+    engine.setProfile("standard");
+    expect(engine.decide(write).decision).toBe("ask");
+  });
+
   it("allows the internal Task tool only for the main agent", () => {
     const engine = new PermissionEngine({ workspace: process.cwd() });
     expect(engine.decide({ agent: "main", tool: "Task" }).decision).toBe("allow");

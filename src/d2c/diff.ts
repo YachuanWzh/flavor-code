@@ -80,8 +80,52 @@ function fontIssues(design: D2cElementSnapshot, impl: D2cElementSnapshot): D2cFo
   return issues;
 }
 
-function unmatched(element: D2cElementSnapshot): D2cUnmatchedElement {
-  return { id: element.id, label: elementLabel(element), rect: element.rect };
+function hashIssueKey(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function issueFingerprint(kind: string, element: D2cElementSnapshot): string {
+  const { x, y, width, height } = element.rect;
+  const location = [x, y, width, height].map((value) => Math.round(value)).join(":");
+  const identity = element.selector ?? `${element.tag}|${normalizeText(element.text)}|${location}`;
+  return `issue-${hashIssueKey(`${kind}|${identity}`)}`;
+}
+
+function impactFor(
+  element: D2cElementSnapshot,
+  page: D2cPageSnapshot,
+  severity: D2cSeverity,
+  contentBlocking = false,
+): number {
+  const pageArea = Math.max(1, page.width * page.height);
+  const coverageBoost = Math.min(2, (element.rect.width * element.rect.height / pageArea) * 20);
+  const base = contentBlocking ? 8 : severity === "major" ? 6 : 3;
+  return Math.round(Math.min(10, base + coverageBoost) * 10) / 10;
+}
+
+function unmatched(
+  kind: "missing" | "extra",
+  element: D2cElementSnapshot,
+  page: D2cPageSnapshot,
+): D2cUnmatchedElement {
+  const contentBlocking = kind === "missing" && (element.text.trim() !== "" || element.hasImage);
+  const severity: D2cSeverity = contentBlocking ? "major" : "minor";
+  return {
+    id: element.id,
+    label: elementLabel(element),
+    rect: element.rect,
+    text: element.text,
+    hasImage: element.hasImage,
+    ...(element.selector === undefined ? {} : { selector: element.selector }),
+    fingerprint: issueFingerprint(kind, element),
+    impact: impactFor(element, page, severity, contentBlocking),
+    severity,
+  };
 }
 
 /** Compares two rendered pages and produces per-element diffs plus unmatched lists. */
@@ -117,6 +161,7 @@ export function diffPages(
       || imageIssue !== undefined
       ? "major"
       : "minor";
+    const contentBlocking = textIssue !== undefined || imageIssue !== undefined;
     diffs.push({
       designId: expected.id,
       implId: actual.id,
@@ -129,6 +174,10 @@ export function diffPages(
       ...(textIssue === undefined ? {} : { textIssue }),
       ...(imageIssue === undefined ? {} : { imageIssue }),
       severity,
+      fingerprint: issueFingerprint("changed", expected),
+      impact: impactFor(expected, design, severity, contentBlocking),
+      ...(expected.selector === undefined ? {} : { designSelector: expected.selector }),
+      ...(actual.selector === undefined ? {} : { implementationSelector: actual.selector }),
     });
   }
   diffs.sort((left, right) => {
@@ -140,7 +189,7 @@ export function diffPages(
   return {
     matched: alignment.matched,
     diffs,
-    missing: alignment.missing.map(unmatched),
-    extra: alignment.extra.map(unmatched),
+    missing: alignment.missing.map((element) => unmatched("missing", element, design)),
+    extra: alignment.extra.map((element) => unmatched("extra", element, implementation)),
   };
 }

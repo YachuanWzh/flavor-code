@@ -26,6 +26,8 @@ describe("desktop IPC contracts", () => {
     expect(OpenWorkspaceInputSchema.parse({ path: "C:\\work\\demo" })).toEqual({ path: "C:\\work\\demo" });
     expect(StartSessionInputSchema.parse({ resumeSession: "session-1" })).toEqual({ resumeSession: "session-1" });
     expect(SubmitInputSchema.parse({ prompt: "fix the tests" })).toEqual({ prompt: "fix the tests" });
+    expect(SubmitInputSchema.parse({ prompt: "build from design", permissionProfile: "d2c" }))
+      .toEqual({ prompt: "build from design", permissionProfile: "d2c" });
     expect(SubmitInputSchema.parse({
       prompt: "",
       attachments: [{ name: "screen.png", mediaType: "image/png", dataBase64: "iVBORw0KGgo=" }],
@@ -62,6 +64,8 @@ describe("desktop IPC contracts", () => {
 
   it("rejects blank prompts, unknown approval decisions and oversized question indexes", () => {
     expect(() => SubmitInputSchema.parse({ prompt: "   " })).toThrow();
+    expect(() => SubmitInputSchema.parse({ prompt: "build", permissionProfile: "unrestricted" })).toThrow();
+    expect(() => SubmitInputSchema.parse({ prompt: "build", delivery: "steer", permissionProfile: "d2c" })).toThrow();
     expect(() => SubmitInputSchema.parse({
       prompt: "look",
       delivery: "steer",

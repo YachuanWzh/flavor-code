@@ -1,7 +1,7 @@
 import type { D2cDiffResult, D2cPageSnapshot, D2cScores } from "./types.js";
 import { rectArea } from "./types.js";
 
-const WEIGHTS = { layout: 0.4, color: 0.3, typography: 0.15, pixel: 0.15 } as const;
+const WEIGHTS = { layout: 0.3, color: 0.2, typography: 0.15, content: 0.2, pixel: 0.15 } as const;
 const FULL_PENALTY_PX = 8;
 
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
@@ -51,23 +51,34 @@ export function computeScores(
   const textPairs = diff.matched.filter(({ design: expected }) => expected.text.trim() !== "");
   const consistentPairs = textPairs.filter(({ design: expected }) => {
     const item = diffsByDesignId.get(expected.id);
-    return item === undefined || (item.fontIssues.length === 0 && item.textIssue === undefined);
+    return item === undefined || item.fontIssues.length === 0;
   });
   const typography = textPairs.length === 0 ? 1 : consistentPairs.length / textPairs.length;
 
+  const semanticDiffs = diff.diffs.filter((item) => item.textIssue !== undefined || item.imageIssue !== undefined).length;
+  const missingContent = diff.missing.filter((item) => item.text.trim() !== "" || item.hasImage).length;
+  const extraContent = diff.extra.filter((item) => item.text.trim() !== "" || item.hasImage).length;
+  const contentTargets = Math.max(1, diff.matched.length + diff.missing.length + extraContent);
+  const content = clamp01(1 - (semanticDiffs + missingContent + extraContent) / contentTargets);
+
   const pixel = pixelMismatchRate === undefined ? undefined : clamp01(1 - pixelMismatchRate);
 
-  let weighted = layout * WEIGHTS.layout + color * WEIGHTS.color + typography * WEIGHTS.typography;
-  let weightSum = WEIGHTS.layout + WEIGHTS.color + WEIGHTS.typography;
+  let weighted = layout * WEIGHTS.layout + color * WEIGHTS.color
+    + typography * WEIGHTS.typography + content * WEIGHTS.content;
+  let weightSum = WEIGHTS.layout + WEIGHTS.color + WEIGHTS.typography + WEIGHTS.content;
   if (pixel !== undefined) {
     weighted += pixel * WEIGHTS.pixel;
     weightSum += WEIGHTS.pixel;
   }
-  const total = Math.round((100 * weighted) / weightSum * 10) / 10;
+  let total = Math.round((100 * weighted) / weightSum * 10) / 10;
+  if (diff.diffs.some((item) => item.textIssue !== undefined)) total = Math.min(total, 94.9);
+  if (diff.diffs.some((item) => item.imageIssue?.expected === true && item.imageIssue.actual === false)
+    || diff.missing.some((item) => item.hasImage)) total = Math.min(total, 89.9);
   return {
     layout: Math.round(layout * 10_000) / 10_000,
     color: Math.round(color * 10_000) / 10_000,
     typography: Math.round(typography * 10_000) / 10_000,
+    content: Math.round(content * 10_000) / 10_000,
     ...(pixel === undefined ? {} : { pixel: Math.round(pixel * 10_000) / 10_000 }),
     total,
     grade: gradeFor(total),

@@ -28,7 +28,7 @@ describe("buildReport", () => {
       implementation: { source: "http://127.0.0.1:5173/", snapshot: impl },
       pixelMismatchRate: 0.02,
     });
-    expect(report.schema).toBe(1);
+    expect(report.schema).toBe(2);
     expect(report.task).toBe("homepage");
     expect(report.reportId).toBe("run-test");
     expect(report.design.elementCount).toBe(2);
@@ -38,7 +38,57 @@ describe("buildReport", () => {
     expect(report.missing).toHaveLength(1);
     expect(report.extra).toEqual([]);
     expect(report.scores.pixel).toBeCloseTo(0.98, 5);
+    expect(report.scores.content).toBeDefined();
+    expect(report.evaluation.confidence).toBe("medium");
+    expect(report.evaluation.verdict).toMatch(/conditional|fail/);
     expect(report.scores.total).toBeGreaterThan(0);
+  });
+
+  it("invalidates a report when the two captured viewports differ", () => {
+    const design = page([], 1280, 800);
+    const implementation = page([], 1024, 768);
+    const report = buildReport({
+      task: "viewport",
+      reportId: "run-test",
+      createdAt: new Date(),
+      design: { source: "d", snapshot: design, capture: { devicePixelRatio: 1, fontsReady: true, imageCount: 0, failedImages: 0, naturalWidth: 1280, naturalHeight: 800, clipped: false } },
+      implementation: { source: "i", snapshot: implementation, capture: { devicePixelRatio: 1, fontsReady: true, imageCount: 0, failedImages: 0, naturalWidth: 1024, naturalHeight: 768, clipped: false } },
+      pixelMismatchRate: 0,
+    });
+    expect(report.evaluation.status).toBe("invalid");
+    expect(report.evaluation.confidence).toBe("low");
+    expect(report.evaluation.verdict).toBe("invalid");
+    expect(report.evaluation.checks).toContainEqual(expect.objectContaining({ key: "viewport", status: "fail" }));
+  });
+
+  it("reports exact capture coverage instead of presenting a clipped raw score as valid", () => {
+    const clipped = { devicePixelRatio: 1, fontsReady: true, imageCount: 0, failedImages: 0, naturalWidth: 1440, naturalHeight: 2420, clipped: true };
+    const report = buildReport({
+      task: "long-page", reportId: "run-test", createdAt: new Date(),
+      design: { source: "d", snapshot: page([], 1440, 1032), capture: clipped },
+      implementation: { source: "i", snapshot: page([], 1440, 1032), capture: clipped },
+      pixelMismatchRate: 0,
+    });
+    expect(report.scores.total).toBe(100);
+    expect(report.evaluation.status).toBe("invalid");
+    expect(report.evaluation.checks).toContainEqual(expect.objectContaining({
+      key: "clipping", status: "fail", message: expect.stringMatching(/42\.6%|1032.*2420/),
+    }));
+    expect(summarizeReport(report)).toContain("评测未完成");
+    expect(summarizeReport(report)).not.toContain("总分 100.0");
+  });
+
+  it("uses a hard gate for incorrect text despite a near-perfect pixel score", () => {
+    const design = page([element({ tag: "h1", text: "Buy now", rect: { x: 0, y: 0, width: 200, height: 50 } })]);
+    const implementation = page([element({ tag: "h1", text: "Buy nao", rect: { x: 0, y: 0, width: 200, height: 50 } })]);
+    const report = buildReport({
+      task: "content", reportId: "run-test", createdAt: new Date(),
+      design: { source: "d", snapshot: design }, implementation: { source: "i", snapshot: implementation },
+      pixelMismatchRate: 0.001,
+    });
+    expect(report.scores.total).toBeLessThan(95);
+    expect(report.evaluation.verdict).not.toBe("pass");
+    expect(report.evaluation.summary).toMatch(/text|文本/i);
   });
 });
 

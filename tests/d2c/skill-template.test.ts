@@ -14,6 +14,7 @@ describe("d2cSkillContent", () => {
     const content = d2cSkillContent();
     expect(content).toContain("D2cImport");
     expect(content).toContain("D2cCompare");
+    expect(content).toContain("at most three comparisons");
     expect(content).toMatch(/Vue/i);
     expect(content).toMatch(/React/i);
     expect(content).toMatch(/which framework/i);

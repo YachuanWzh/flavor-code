@@ -1,10 +1,20 @@
 import { describe, expect, it } from "vitest";
+import { PNG } from "pngjs";
 
 import {
+  D2C_CAPTURE_DIAGNOSTICS_SCRIPT,
   D2C_CAPTURE_PREPARATION_SCRIPT,
+  captureTileOffsets,
   fitCaptureSize,
   isAllowedCaptureNavigation,
+  stitchCaptureTiles,
 } from "../../src/desktop/d2c-capture.js";
+
+function solidPng(width: number, height: number, color: readonly [number, number, number, number]): Buffer {
+  const image = new PNG({ width, height });
+  for (let index = 0; index < image.data.length; index += 4) image.data.set(color, index);
+  return PNG.sync.write(image);
+}
 
 describe("D2C capture helpers", () => {
   it("waits for fonts and images and disables motion before capture", () => {
@@ -12,6 +22,52 @@ describe("D2C capture helpers", () => {
     expect(D2C_CAPTURE_PREPARATION_SCRIPT).toContain("decode()");
     expect(D2C_CAPTURE_PREPARATION_SCRIPT).toContain("animation");
     expect(D2C_CAPTURE_PREPARATION_SCRIPT).toContain("transition");
+    expect(D2C_CAPTURE_PREPARATION_SCRIPT).toContain("::-webkit-scrollbar");
+    expect(D2C_CAPTURE_PREPARATION_SCRIPT).toContain("scrollbar-width:none");
+  });
+
+  it("records the diagnostics needed to judge whether a comparison is trustworthy", () => {
+    expect(D2C_CAPTURE_DIAGNOSTICS_SCRIPT).toContain("devicePixelRatio");
+    expect(D2C_CAPTURE_DIAGNOSTICS_SCRIPT).toContain("fontsReady");
+    expect(D2C_CAPTURE_DIAGNOSTICS_SCRIPT).toContain("failedImages");
+    expect(D2C_CAPTURE_DIAGNOSTICS_SCRIPT).toContain("clipped");
+  });
+
+  it("uses native window resizing and capturePage for long pages", async () => {
+    const source = await import("node:fs/promises").then(({ readFile }) =>
+      readFile(new URL("../../src/desktop/d2c-capture.ts", import.meta.url), "utf8"));
+    expect(source).toContain("window.setContentSize");
+    expect(source).toContain("window.webContents.capturePage");
+    expect(source).not.toContain("webContents.debugger");
+    expect(source).not.toContain("Page.captureScreenshot");
+  });
+
+  it("loads the page before resizing and capturing it", async () => {
+    const source = await import("node:fs/promises").then(({ readFile }) =>
+      readFile(new URL("../../src/desktop/d2c-capture.ts", import.meta.url), "utf8"));
+    const service = source.slice(source.indexOf("export function createD2cCaptureService"));
+    const loadPage = service.indexOf("await awaitWithSignal(window.loadURL(url), captureSignal)");
+    const resizeWindow = service.indexOf("window.setContentSize");
+    const capturePage = service.indexOf("await captureFullPage");
+    expect(loadPage).toBeGreaterThan(-1);
+    expect(loadPage).toBeLessThan(resizeWindow);
+    expect(resizeWindow).toBeLessThan(capturePage);
+  });
+
+  it("covers a long page with non-duplicated viewport offsets", () => {
+    expect(captureTileOffsets(2420, 1032)).toEqual([0, 1032, 1388]);
+    expect(captureTileOffsets(800, 1032)).toEqual([0]);
+    expect(captureTileOffsets(2064, 1032)).toEqual([0, 1032]);
+  });
+
+  it("stitches captured viewport tiles into one full-page PNG", () => {
+    const result = PNG.sync.read(stitchCaptureTiles([
+      { x: 0, y: 0, png: solidPng(2, 2, [255, 0, 0, 255]) },
+      { x: 0, y: 2, png: solidPng(2, 2, [0, 0, 255, 255]) },
+    ], 2, 4));
+    expect({ width: result.width, height: result.height }).toEqual({ width: 2, height: 4 });
+    expect([...result.data.subarray(0, 4)]).toEqual([255, 0, 0, 255]);
+    expect([...result.data.subarray((3 * 2) * 4, (3 * 2) * 4 + 4)]).toEqual([0, 0, 255, 255]);
   });
 
   it("fits long pages within the pixel budget while retaining content", () => {

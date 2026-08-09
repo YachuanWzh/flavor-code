@@ -34,6 +34,8 @@ describe("diffPages", () => {
     expect(diff.dy).toBe(0);
     expect(diff.severity).toBe("minor");
     expect(diff.label).toContain("标题");
+    expect(diff.fingerprint).toMatch(/^issue-/);
+    expect(diff.impact).toBeGreaterThan(0);
   });
 
   it("marks large offsets as major", () => {
@@ -92,6 +94,7 @@ describe("diffPages", () => {
     const result = diffPages(design, implementation);
     expect(result.diffs).toHaveLength(1);
     expect(result.diffs[0]?.textIssue).toEqual({ expected: "提交", actual: "取消" });
+    expect(result.diffs[0]?.impact).toBeGreaterThanOrEqual(8);
   });
 
   it("reports image/content type changes", () => {
@@ -99,6 +102,13 @@ describe("diffPages", () => {
     const implementation = page([element({ tag: "div", hasImage: false, styles: { backgroundColor: "#ffffff" }, rect: { x: 10, y: 10, width: 80, height: 80 } })]);
     const result = diffPages(design, implementation);
     expect(result.diffs[0]?.imageIssue).toEqual({ expected: true, actual: false });
+  });
+
+  it("preserves design and implementation selectors as repair evidence", () => {
+    const design = page([element({ selector: "main > h1", text: "Title", rect: { x: 0, y: 0, width: 100, height: 30 } })]);
+    const implementation = page([element({ selector: "#app > h1", text: "Title", rect: { x: 5, y: 0, width: 100, height: 30 } })]);
+    const result = diffPages(design, implementation);
+    expect(result.diffs[0]).toMatchObject({ designSelector: "main > h1", implementationSelector: "#app > h1" });
   });
 
   it("normalizes raw colors before comparing", () => {

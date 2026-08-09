@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -8,14 +9,15 @@ import { D2C_MAX_PIXELS, type D2cPixelComparison } from "./pixel.js";
 import { comparePngsInWorker } from "./pixel-worker-client.js";
 import { buildReport, summarizeReport } from "./report.js";
 import { runFrontendProject, type RunningProject } from "./runner.js";
-import { D2cReportAlreadyExistsError, D2C_TASK_PATTERN, designEntryPath, importDesign, listReports, readManifest, writeReport } from "./store.js";
-import type { D2cCaptureService, D2cCaptureSource } from "./types.js";
+import { D2cReportAlreadyExistsError, D2C_TASK_PATTERN, designEntryPath, designPagePath, importDesign, listReports, readManifest, writeReport, type D2cDesignPage } from "./store.js";
+import type { CapturedPage, D2cCaptureService, D2cCaptureSource, D2cProgressEvent, D2cProgressStage, D2cReport } from "./types.js";
 
 export interface D2cReportEvent {
   task: string;
   reportId: string;
   total: number;
   grade: string;
+  pageCount?: number;
 }
 
 export interface D2cToolOptions {
@@ -23,6 +25,8 @@ export interface D2cToolOptions {
   capture?: D2cCaptureService;
   /** Invoked after each stored comparison report. */
   onReport?: (event: D2cReportEvent) => void | Promise<void>;
+  /** Emits real comparison stages for the Electron D2C execution view. */
+  onProgress?: (event: D2cProgressEvent) => void | Promise<void>;
   /** Injectable clock, used for report ids. */
   now?: () => Date;
   /** Launches a frontend project directory; defaults to the Vite runner. */
@@ -100,6 +104,19 @@ async function resolveImplementationSource(workspace: string, implementation: st
   );
 }
 
+function implementationPageSource(
+  source: D2cCaptureSource,
+  page: D2cDesignPage,
+  entryHtml: string,
+): D2cCaptureSource {
+  if (page.html === entryHtml) return source;
+  if (source.kind === "file") {
+    throw new Error("Multi-page D2C comparison requires a Vite project directory or localhost URL");
+  }
+  const base = source.url.endsWith("/") ? source.url : `${source.url}/`;
+  return { kind: "url", url: new URL(page.html, base).toString() };
+}
+
 function formatRunId(date: Date): string {
   const pad = (value: number): string => value.toString().padStart(2, "0");
   return `run-${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}`
@@ -108,6 +125,8 @@ function formatRunId(date: Date): string {
 
 /** Creates the D2C import and comparison tools bound to a workspace. */
 export function createD2cTools(workspace: string, options: D2cToolOptions = {}): ToolDefinition<unknown>[] {
+  const designSnapshotCache = new Map<string, CapturedPage>();
+  let comparisonCycle = 0;
   const importTool: ToolDefinition<D2cImportInput> = {
     name: "D2cImport",
     description:
@@ -121,6 +140,7 @@ export function createD2cTools(workspace: string, options: D2cToolOptions = {}):
       return {
         task: input.task,
         entryHtml: manifest.entryHtml,
+        pages: manifest.pages,
         files: manifest.files,
         designDir: join(".flavor", "d2c", input.task, "design"),
       };
@@ -136,13 +156,24 @@ export function createD2cTools(workspace: string, options: D2cToolOptions = {}):
     summarize: (input) => input.task,
     execute: async (input, signal) => {
       signal.throwIfAborted();
-      const { capture, onReport, now } = options;
+      const { capture, onProgress, onReport, now } = options;
       if (capture === undefined) {
         throw new Error("D2C comparison requires the desktop app; the capture service is not available in this session");
       }
+      const cycle = ++comparisonCycle;
+      const progress = async (
+        stage: D2cProgressStage,
+        state: D2cProgressEvent["state"],
+        message: string,
+        cached = false,
+      ): Promise<void> => {
+        await onProgress?.({ task: input.task, cycle, stage, state, message, ...(cached ? { cached: true } : {}) });
+      };
+      await progress("prepare", "running", "正在检查设计稿与实现入口");
       const manifest = await readManifest(workspace, input.task);
       const designPath = designEntryPath(workspace, input.task, manifest);
       const resolvedSource = await resolveImplementationSource(workspace, input.implementation);
+      await progress("prepare", "completed", "设计稿与实现入口已确认");
       let running: RunningProject | undefined;
       let source: D2cCaptureSource;
       if (resolvedSource.kind === "project") {
@@ -150,6 +181,7 @@ export function createD2cTools(workspace: string, options: D2cToolOptions = {}):
           ?? ((projectDir: string, runSignal?: AbortSignal) => runFrontendProject(projectDir, {
             workspace,
             ...(runSignal === undefined ? {} : { signal: runSignal }),
+            onProgress: (event) => progress(event.stage, event.state, event.message, event.cached === true),
           }));
         running = await runProject(resolvedSource.path, signal);
         source = { kind: "url", url: running.url };
@@ -160,14 +192,168 @@ export function createD2cTools(workspace: string, options: D2cToolOptions = {}):
         ? { width: input.viewportWidth, height: input.viewportHeight }
         : undefined;
       try {
+        if (manifest.pages.length > 1) {
+          const comparePixels = options.comparePixels ?? comparePngsInWorker;
+          const createdAt = (now ?? (() => new Date()))();
+          const batchId = `${formatRunId(createdAt)}-${randomUUID().slice(0, 8)}`;
+          const existing = new Set((await listReports(workspace, input.task)).map((item) => item.reportId));
+          const reports: D2cReport[] = [];
+          let reportSuffix = 1;
+          const nextReportId = (): string => {
+            const base = formatRunId(createdAt);
+            while (true) {
+              const candidate = reportSuffix === 1 ? base : `${base}-${reportSuffix}`;
+              reportSuffix += 1;
+              if (!existing.has(candidate)) { existing.add(candidate); return candidate; }
+            }
+          };
+
+          await progress("report", "running", `准备生成 ${manifest.pages.length} 个页面的评测报告`);
+          for (const [index, page] of manifest.pages.entries()) {
+            signal.throwIfAborted();
+            const pageContext = `页面 ${index + 1}/${manifest.pages.length} · ${page.label}`;
+            const viewportKey = viewport === undefined ? "natural" : `${viewport.width}x${viewport.height}`;
+            const designCacheKey = `${input.task}:${manifest.designHash}:${page.html}:${viewportKey}`;
+            let designSnapshot = designSnapshotCache.get(designCacheKey);
+            if (designSnapshot === undefined) {
+              await progress("capture-design", "running", `${pageContext} · 正在渲染设计稿`);
+              try {
+                designSnapshot = await capture.capture(
+                  { kind: "file", path: designPagePath(workspace, input.task, page.html) },
+                  viewport,
+                  signal,
+                );
+              } catch (error) {
+                await progress("capture-design", "failed", `${pageContext} · 设计稿渲染失败`);
+                throw error;
+              }
+              designSnapshotCache.set(designCacheKey, designSnapshot);
+              while (designSnapshotCache.size > 24) designSnapshotCache.delete(designSnapshotCache.keys().next().value!);
+              await progress("capture-design", "completed", `${pageContext} · 设计稿已就绪`);
+            } else {
+              await progress("capture-design", "completed", `${pageContext} · 复用设计稿快照`, true);
+            }
+
+            const pageSource = implementationPageSource(source, page, manifest.entryHtml);
+            const implViewport = viewport ?? { width: designSnapshot.width, height: designSnapshot.height };
+            await progress("capture-implementation", "running", `${pageContext} · 正在渲染实现`);
+            let implSnapshot: CapturedPage;
+            try {
+              implSnapshot = await capture.capture(pageSource, implViewport, signal);
+            } catch (error) {
+              await progress("capture-implementation", "failed", `${pageContext} · 实现渲染失败`);
+              throw error;
+            }
+            await progress("capture-implementation", "completed", `${pageContext} · 实现已就绪`);
+            await progress("pixel-diff", "running", `${pageContext} · 正在计算差异`);
+            let pixel: D2cPixelComparison;
+            try {
+              pixel = await comparePixels(designSnapshot.screenshotPng, implSnapshot.screenshotPng, signal);
+            } catch (error) {
+              await progress("pixel-diff", "failed", `${pageContext} · 像素对比失败`);
+              throw error;
+            }
+            await progress("pixel-diff", "completed", `${pageContext} · 差异已计算`);
+
+            let report: D2cReport;
+            while (true) {
+              report = buildReport({
+                task: input.task,
+                reportId: nextReportId(),
+                batchId,
+                page: { ...page, index, count: manifest.pages.length },
+                createdAt,
+                design: {
+                  source: join(".flavor", "d2c", input.task, "design", page.html),
+                  designHash: manifest.designHash,
+                  snapshot: { width: designSnapshot.width, height: designSnapshot.height, elements: designSnapshot.elements },
+                  capture: designSnapshot.diagnostics,
+                },
+                implementation: {
+                  source: pageSource.kind === "url" ? pageSource.url : pageSource.path,
+                  snapshot: { width: implSnapshot.width, height: implSnapshot.height, elements: implSnapshot.elements },
+                  capture: implSnapshot.diagnostics,
+                },
+                pixelMismatchRate: pixel.mismatchRate,
+              });
+              try {
+                await writeReport(workspace, input.task, report, {
+                  designPng: designSnapshot.screenshotPng,
+                  implementationPng: implSnapshot.screenshotPng,
+                  heatmapPng: pixel.heatmapPng,
+                });
+                break;
+              } catch (cause) {
+                if (!(cause instanceof D2cReportAlreadyExistsError)) {
+                  await progress("report", "failed", `${pageContext} · 报告保存失败`);
+                  throw cause;
+                }
+              }
+            }
+            reports.push(report);
+          }
+
+          const primary = reports[0]!;
+          await progress("report", "completed", `${manifest.pages.length} 个页面的评测报告已生成`);
+          await onReport?.({
+            task: input.task,
+            reportId: primary.reportId,
+            total: primary.scores.total,
+            grade: primary.scores.grade,
+            pageCount: reports.length,
+          });
+          return {
+            report: primary,
+            reports,
+            summary: reports.map((report) => `${report.page?.label ?? report.task}\n${summarizeReport(report)}`).join("\n\n"),
+          };
+        }
+
         signal.throwIfAborted();
-        const designSnapshot = await capture.capture({ kind: "file", path: designPath }, viewport, signal);
+        const viewportKey = viewport === undefined ? "natural" : `${viewport.width}x${viewport.height}`;
+        const designCacheKey = manifest.designHash === undefined
+          ? undefined
+          : `${input.task}:${manifest.designHash}:${viewportKey}`;
+        let designSnapshot = designCacheKey === undefined ? undefined : designSnapshotCache.get(designCacheKey);
+        if (designSnapshot === undefined) {
+          await progress("capture-design", "running", "正在渲染设计稿快照");
+          try {
+            designSnapshot = await capture.capture({ kind: "file", path: designPath }, viewport, signal);
+            if (designCacheKey !== undefined) {
+              designSnapshotCache.set(designCacheKey, designSnapshot);
+              while (designSnapshotCache.size > 3) designSnapshotCache.delete(designSnapshotCache.keys().next().value!);
+            }
+            await progress("capture-design", "completed", "设计稿快照已就绪");
+          } catch (error) {
+            await progress("capture-design", "failed", "设计稿快照失败");
+            throw error;
+          }
+        } else {
+          await progress("capture-design", "completed", "设计稿快照已就绪", true);
+        }
         const implViewport = viewport ?? { width: designSnapshot.width, height: designSnapshot.height };
-        const implSnapshot = await capture.capture(source, implViewport, signal);
+        await progress("capture-implementation", "running", "正在渲染实现快照");
+        let implSnapshot: CapturedPage;
+        try {
+          implSnapshot = await capture.capture(source, implViewport, signal);
+          await progress("capture-implementation", "completed", "实现快照已就绪");
+        } catch (error) {
+          await progress("capture-implementation", "failed", "实现快照失败");
+          throw error;
+        }
         const comparePixels = options.comparePixels ?? comparePngsInWorker;
-        const pixel = await comparePixels(designSnapshot.screenshotPng, implSnapshot.screenshotPng, signal);
+        await progress("pixel-diff", "running", "正在计算像素与结构差异");
+        let pixel: D2cPixelComparison;
+        try {
+          pixel = await comparePixels(designSnapshot.screenshotPng, implSnapshot.screenshotPng, signal);
+          await progress("pixel-diff", "completed", "像素与结构差异已计算");
+        } catch (error) {
+          await progress("pixel-diff", "failed", "像素对比失败");
+          throw error;
+        }
 
         const createdAt = (now ?? (() => new Date()))();
+        await progress("report", "running", "正在生成评测报告");
         const existing = new Set((await listReports(workspace, input.task)).map((item) => item.reportId));
         const baseReportId = formatRunId(createdAt);
         let suffix = 1;
@@ -185,10 +371,12 @@ export function createD2cTools(workspace: string, options: D2cToolOptions = {}):
               source: join(".flavor", "d2c", input.task, "design", manifest.entryHtml),
               designHash: manifest.designHash,
               snapshot: { width: designSnapshot.width, height: designSnapshot.height, elements: designSnapshot.elements },
+              capture: designSnapshot.diagnostics,
             },
             implementation: {
               source: input.implementation,
               snapshot: { width: implSnapshot.width, height: implSnapshot.height, elements: implSnapshot.elements },
+              capture: implSnapshot.diagnostics,
             },
             pixelMismatchRate: pixel.mismatchRate,
           });
@@ -203,6 +391,7 @@ export function createD2cTools(workspace: string, options: D2cToolOptions = {}):
             if (!(cause instanceof D2cReportAlreadyExistsError)) throw cause;
           }
         }
+        await progress("report", "completed", "评测报告已生成");
         if (onReport !== undefined) {
           await onReport({ task: input.task, reportId: report.reportId, total: report.scores.total, grade: report.scores.grade });
         }
