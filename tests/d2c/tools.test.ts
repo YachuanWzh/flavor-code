@@ -57,18 +57,18 @@ describe("createD2cTools", () => {
 });
 
 describe("D2cImport", () => {
-  it("imports the export and installs the D2C skill", async () => {
+  it("imports the export without installing any skill", async () => {
     const workspace = await tempDir();
     const exportDir = await tempDir();
     await writeFile(join(exportDir, "index.html"), "<html></html>");
     const tool = requireTool(workspace, "D2cImport");
     const output = await tool.execute({ task: "homepage", exportDir }, new AbortController().signal) as Record<string, unknown>;
     expect(output.entryHtml).toBe("index.html");
+    expect(output).not.toHaveProperty("skillInstalled");
     const manifest = await readManifest(workspace, "homepage");
     expect(manifest.entryHtml).toBe("index.html");
-    const skill = await import("node:fs/promises").then((fs) =>
-      fs.readFile(join(workspace, ".flavor", "skills", "d2c-pixso", "SKILL.md"), "utf8"));
-    expect(skill).toContain("D2cImport");
+    const fs = await import("node:fs/promises");
+    await expect(fs.access(join(workspace, ".flavor", "skills"))).rejects.toThrow();
   });
 });
 
@@ -86,6 +86,8 @@ describe("D2cCompare", () => {
 
   it("rejects non-HTML implementation files", async () => {
     const workspace = await workspaceWithDesign();
+    await mkdir(join(workspace, "dist"), { recursive: true });
+    await writeFile(join(workspace, "dist", "page.txt"), "not html");
     const tool = await compareTool(workspace, { capture: fakeCapture() });
     await expect(tool.execute({ task: "homepage", implementation: "dist/page.txt" }, new AbortController().signal))
       .rejects.toThrow(/html/i);
@@ -129,5 +131,54 @@ describe("D2cCompare", () => {
     expect(first.report.reportId).toBe("run-20260809-100000");
     expect(second.report.reportId).not.toBe(first.report.reportId);
     expect(await listReports(workspace, "homepage")).toHaveLength(2);
+  });
+
+  it("runs a frontend project directory via the injected runner and stops it", async () => {
+    const workspace = await workspaceWithDesign();
+    const projectDir = join(workspace, "vue-app");
+    await mkdir(projectDir, { recursive: true });
+    const runs: string[] = [];
+    const stops: number[] = [];
+    const captured: D2cCaptureSource[] = [];
+    const tool = await compareTool(workspace, {
+      capture: fakeCapture(captured),
+      runProject: async (dir) => {
+        runs.push(dir);
+        return { url: "http://localhost:5173/", stop: async () => { stops.push(1); } };
+      },
+    });
+    const output = await tool.execute({ task: "homepage", implementation: "vue-app" }, new AbortController().signal) as {
+      report: { implementation: { source: string } };
+    };
+    expect(runs).toEqual([projectDir]);
+    expect(stops).toEqual([1]);
+    expect(captured.map((source) => source.kind)).toEqual(["file", "url"]);
+    expect(captured[1]).toEqual({ kind: "url", url: "http://localhost:5173/" });
+    expect(output.report.implementation.source).toBe("vue-app");
+  });
+
+  it("stops the runner even when the comparison fails", async () => {
+    const workspace = await workspaceWithDesign();
+    const projectDir = join(workspace, "react-app");
+    await mkdir(projectDir, { recursive: true });
+    const stops: number[] = [];
+    const tool = await compareTool(workspace, {
+      capture: {
+        capture: async (): Promise<CapturedPage> => {
+          throw new Error("capture exploded");
+        },
+      },
+      runProject: async () => ({ url: "http://localhost:5173/", stop: async () => { stops.push(1); } }),
+    });
+    await expect(tool.execute({ task: "homepage", implementation: "react-app" }, new AbortController().signal))
+      .rejects.toThrow(/capture exploded/);
+    expect(stops).toEqual([1]);
+  });
+
+  it("rejects implementation paths that do not exist", async () => {
+    const workspace = await workspaceWithDesign();
+    const tool = await compareTool(workspace, { capture: fakeCapture() });
+    await expect(tool.execute({ task: "homepage", implementation: "missing-dir" }, new AbortController().signal))
+      .rejects.toThrow(/does not exist/i);
   });
 });

@@ -3,10 +3,11 @@
 ## Goal
 
 为 Electron 桌面端提供独立的 D2C 功能模块：导入 Pixso 导出的 HTML 设计稿，
-在 Agent 按 `d2c-pixso` 技能指导生成 Vue 实现后，对"设计稿渲染"与"实现渲染"
-做像素级差异评估，输出结构化差异报告（区域偏移量、色值偏差、字体差异）、
-视觉还原度相似度评分，并在桌面端提供叠加对比视图（设计稿在底层、实现在上层
-半透明叠加，标注各区域 px 偏移与色值对照）。
+在 Agent 按 `d2c-pixso` 技能指导生成前端实现（Vue 或 React，由用户选择）后，
+**实际运行**该项目（自动安装依赖并启动 Vite dev server），对"设计稿渲染"与
+"运行中的实现页面"做像素级差异评估，输出结构化差异报告（区域偏移量、色值偏差、
+字体差异）、视觉还原度相似度评分，并在桌面端提供叠加对比视图（设计稿在底层、
+实现在上层半透明叠加，标注各区域 px 偏移与色值对照）。
 
 ## Scope
 
@@ -14,12 +15,16 @@ MVP 包含：
 
 - 纯逻辑差异引擎 `src/d2c/`：颜色计算、元素对齐、逐元素 diff、加权评分、报告装配。
 - 两个桌面端专属 Agent 工具：`D2cImport`（导入 Pixso 导出目录并安装技能模板）、
-  `D2cCompare`（渲染两侧页面、生成报告）。
+  `D2cCompare`（必要时启动前端项目、渲染两侧页面、生成报告）。
+- 前端项目运行器 `runner.ts`：识别 Vite 项目（package.json 含 vite 依赖）、
+  缺 node_modules 时自动 `npm install`、直接拉起 `node node_modules/vite/bin/vite.js`
+  dev server、从输出解析 localhost URL、fetch 探活就绪、对比完成后关闭进程。
+  Vue 与 React 项目共用同一运行路径（均为 Vite 驱动）。
 - 快照采集走注入式 `D2cCaptureService` 接口；桌面端提供 Electron 隐藏窗口实现，
   CLI 场景下工具明确报"仅桌面端支持"。
 - 报告落盘 `.flavor/d2c/<task>/reports/<run-id>/`（report.json + 三张 PNG）。
 - 桌面端新增 D2C 视图：报告列表、叠加/并排模式、不透明度滑块、SVG 标注层、问题列表。
-- 随 `D2cImport` 自动安装 `d2c-pixso` 项目技能模板（已存在则不覆盖）。
+- D2C 工作流技能（SOP）由用户自行导入；系统不生成、不写入任何技能文件。
 
 MVP 不包含：
 
@@ -30,14 +35,17 @@ MVP 不包含：
 
 ## Product behavior
 
-1. 用户把 Pixso 导出的 HTML 目录放进项目，向 Agent 提出 D2C 任务。
-2. Agent 匹配 `d2c-pixso` 技能，先调用 `D2cImport { task, exportDir }`：
-   校验导出目录（必须含入口 HTML）、复制到 `.flavor/d2c/<task>/design/`、
-   写 `manifest.json`、按需安装技能模板。
-3. Agent 依据技能指导委派生成 Vue 实现（构建产物或 dev server URL）。
+1. 用户把 Pixso 导出的 HTML 目录放进项目，并自行导入 D2C 工作流技能（SOP），
+   向 Agent 提出 D2C 任务。
+2. Agent 先调用 `D2cImport { task, exportDir }`：校验导出目录（必须含入口
+   HTML）、复制到 `.flavor/d2c/<task>/design/`、写 `manifest.json`。
+3. Agent 依据用户导入的技能指导询问目标框架（Vue 3 或 React），在工作区内
+   生成可运行的 Vite 项目目录（package.json 含 vite 依赖与框架入口结构）。
 4. Agent 调用 `D2cCompare { task, implementation }`：implementation 支持
-   `http(s)://` URL 或本地 HTML 文件路径；工具完成两侧渲染快照、diff、评分，
-   写报告并推送 `d2c-report` 桌面事件，返回文本摘要（总分、等级、Top 差异）。
+   前端项目目录（首选，自动装依赖+起 dev server）、已启动服务的 `http(s)://`
+   localhost URL、或本地 HTML 文件路径；工具完成两侧渲染快照、diff、评分，
+   关闭自启的 dev server，写报告并推送 `d2c-report` 桌面事件，
+   返回文本摘要（总分、等级、Top 差异）。对比逻辑与框架无关。
 5. 桌面端侧栏新增 D2C 入口：查看任务报告，叠加模式下设计稿在底、实现半透明在上，
    标注层绘制偏移尺寸线（`[---3px---]`）与色值对照块（设计 #xxx → 实际 #yyy），
    右侧问题列表按严重度排序，点击联动高亮。
@@ -54,9 +62,27 @@ diff.ts          逐元素几何（dx/dy/dw/dh，容差 2px）、颜色（ΔE>3 
 score.ts         加权评分：layout 40% / color 30% / typography 15% / pixel 15%
 report.ts        报告装配 + Agent 可读文本摘要（Top N 问题）
 store.ts         .flavor/d2c 目录读写：manifest、报告列举、报告加载
-skill-template.ts  d2c-pixso 技能模板文本
+skill-template.ts  D2C 工作流参考模板（Vue/React 两套项目 SOP）；仅供测试
+                 校验文档化 SOP，系统不将其写入工作区（技能由用户自行导入）
+runner.ts        前端项目运行器：装依赖/起 vite dev server/探活/关闭
 tools.ts         createD2cTools(workspace, { capture? })
 ```
+
+### 前端项目运行器（runner.ts，仅被 D2cCompare 使用）
+
+`runFrontendProject(projectDir, options?): Promise<{ url, stop() }>`：
+
+- 前置校验：目录位于工作区内、含 `package.json`（devDependencies/dependencies
+  含 vite）、`node_modules/vite/bin/vite.js` 存在或可安装。不区分 Vue/React，
+  只要是 Vite 驱动的项目均可运行。
+- `node_modules` 缺失时先执行 `npm install`（一次性子进程，等待退出，超时 8 分钟）。
+- 直接 `spawn(process.execPath, [node_modules/vite/bin/vite.js])`，不经 npm 包装，
+  避免 Windows 下进程树残留；stdout/stderr 合并缓冲解析
+  `http://(localhost|127\.0\.0\.1):(\d+)` 得到 URL（vite 端口被占用时自动递增，
+  故以输出解析为准）。
+- 就绪判定：fetch 该 URL 直至返回非 5xx，超时（默认 60 秒）或子进程提前退出则报错。
+- `stop()`：SIGTERM → 3 秒宽限 → SIGKILL；`D2cCompare` 在 finally 中调用，
+  确保异常路径也关闭服务器。
 
 评分定义：
 
@@ -123,14 +149,20 @@ SVG 标注层）+ 问题列表。标注：几何差异画设计稿矩形框与�
 - 隐藏窗口禁用 nodeIntegration；不加载任意外部 URL；`setWindowOpenHandler` 拒绝弹窗。
 - 报告 data URL 只包含 PNG；report.json 大小上限 2 MiB。
 - 采集脚本为静态字符串常量，不接受用户输入拼接。
+- runner 只执行两条固定命令：工作区内 `npm install` 与
+  `node node_modules/vite/bin/vite.js`（路径经工作区内校验，不接受任意命令拼接）；
+  对比结束（含异常路径）必须关闭自启的服务器进程。
 
 ## Acceptance criteria
 
 1. 引擎单测：颜色解析/ΔE、文本与 IoU 对齐、容差内不报差异、评分与等级、
    缺失/多余元素扣分。
-2. 工具单测：`D2cImport` 校验失败路径、复制与 manifest、技能幂等安装；
+2. 工具单测：`D2cImport` 校验失败路径、复制与 manifest、不写入任何技能文件；
    `D2cCompare` 用 fake capture 完成端到端报告落盘；无 capture 服务时报
-   "仅桌面端支持"。
+   "仅桌面端支持"；implementation 为前端项目目录时经注入式 runner 启动并关闭。
+2a. runner 单测：URL 解析、缺依赖时执行 npm install、dev server 输出解析与
+   探活、stop 杀进程、超时/无 URL 报错（全部用注入的 fake spawn/fetch，
+   不真实启动进程）。
 3. contracts 单测：D2C 输入 schema 拒绝非法 task/reportId。
 4. `npm run typecheck`、`vitest run`、`npm run build`（含桌面端）全部通过。
 5. 现有文本/多模态请求不受影响：extraTools 为空时工具列表与现状一致。
