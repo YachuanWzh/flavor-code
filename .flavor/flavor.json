@@ -1,19 +1,20 @@
 {
   "providers": {
-    "openai": {
-      "type": "openai",
-      "baseURL": "https://api.deepseek.com",
-      "apiKey": "sk-6b8edc92d6c34e34a4173a7b4ce4e4e1",
-      "defaultModel": "deepseek-v4-flash",
-      "cheapModel": "deepseek-v4-flash"
+    "pkce": {
+      "type": "oauth-callback",
+      "apiType": "anthropic",
+      "authorizationUrl": "http://192.168.5.7:8091/authorize",
+      "tokenUrl": "http://192.168.5.7:8091/token",
+      "clientId": "flavor-code-cli",
+      "scope": "models:read models:use"
     }
   },
   "agents": {
     "main": {
-      "model": "openai:deepseek-v4-flash"
+      "model": "pkce:bootstrap"
     },
     "subagent": {
-      "model": "openai:deepseek-v4-flash"
+      "model": "pkce:bootstrap"
     }
   },
   "mcpServers": {},
