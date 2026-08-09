@@ -52,6 +52,26 @@ describe("computeScores", () => {
     expect(scores.grade).toBe("需修复");
   });
 
+  it("penalizes extra elements inside the design canvas", () => {
+    nextId = 1;
+    const design = page([element({ rect: { x: 0, y: 0, width: 10, height: 10 } })], 20, 20);
+    const impl = page([
+      element({ rect: { x: 0, y: 0, width: 10, height: 10 } }),
+      element({ rect: { x: 10, y: 0, width: 10, height: 10 }, styles: { backgroundColor: "#000000" } }),
+    ], 20, 20);
+    const scores = computeScores(design, diffPages(design, impl), 0);
+    expect(scores.layout).toBe(0);
+  });
+
+  it("does not award pixel-level fidelity when matched text is wrong", () => {
+    nextId = 1;
+    const design = page([element({ tag: "h1", text: "Checkout", rect: { x: 0, y: 0, width: 200, height: 40 }, styles: { fontSize: 32 } })]);
+    const impl = page([element({ tag: "h1", text: "Checkuot", rect: { x: 0, y: 0, width: 200, height: 40 }, styles: { fontSize: 32 } })]);
+    const scores = computeScores(design, diffPages(design, impl), 0.001);
+    expect(scores.typography).toBe(0);
+    expect(scores.total).toBeLessThan(95);
+  });
+
   it("penalizes geometry offsets proportionally to offset magnitude", () => {
     nextId = 1;
     const design = page([element({ rect: { x: 0, y: 0, width: 100, height: 100 } })]);

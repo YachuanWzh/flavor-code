@@ -60,8 +60,8 @@ D2C 是端到端模块（非单纯对比工具）：导入设计稿 → 选择�
 ```
 types.ts         D2cElementSnapshot / D2cPageSnapshot / D2cReport / 阈值常量
 color.ts         hex/rgb 解析、sRGB→Lab、CIE76 ΔE
-align.ts         元素对齐：文本签名精确匹配 → 剩余按 IoU 贪心（阈值 0.3）
-diff.ts          逐元素几何（dx/dy/dw/dh，容差 2px）、颜色（ΔE>3 记差异）、字体 diff
+align.ts         元素对齐：文本签名精确匹配 → 剩余按标签/内容类型/IoU 综合匹配
+diff.ts          几何、颜色、字体、文本和图片类型差异
 score.ts         加权评分：layout 40% / color 30% / typography 15% / pixel 15%
 report.ts        报告装配 + Agent 可读文本摘要（Top N 问题）
 store.ts         .flavor/d2c 目录读写：manifest、报告列举、报告加载
@@ -75,22 +75,25 @@ tools.ts         createD2cTools(workspace, { capture? })
 
 `runFrontendProject(projectDir, options?): Promise<{ url, stop() }>`：
 
-- 前置校验：目录位于工作区内、含 `package.json`（devDependencies/dependencies
+- 前置校验：目录经 `realpath` 后位于工作区内、含 `package.json`（devDependencies/dependencies
   含 vite）、`node_modules/vite/bin/vite.js` 存在或可安装。不区分 Vue/React，
   只要是 Vite 驱动的项目均可运行。
 - `node_modules` 缺失时先执行 `npm install`（一次性子进程，等待退出，超时 8 分钟）。
-- 直接 `spawn(process.execPath, [node_modules/vite/bin/vite.js])`，不经 npm 包装，
-  避免 Windows 下进程树残留；stdout/stderr 合并缓冲解析
+- 显式 `spawn("node", [node_modules/vite/bin/vite.js, "--host", "127.0.0.1"])`，
+  不使用 Electron 主进程的 `process.execPath`；stdout/stderr 合并缓冲解析
   `http://(localhost|127\.0\.0\.1):(\d+)` 得到 URL（vite 端口被占用时自动递增，
   故以输出解析为准）。
-- 就绪判定：fetch 该 URL 直至返回非 5xx，超时（默认 60 秒）或子进程提前退出则报错。
+- 就绪判定：带单次请求超时地 fetch 该 URL 直至返回非 5xx，整体超时（默认 60 秒）
+  或子进程提前退出则报错。
 - `stop()`：SIGTERM → 3 秒宽限 → SIGKILL；`D2cCompare` 在 finally 中调用，
-  确保异常路径也关闭服务器。
+  确保异常路径也关闭服务器。工具的 `AbortSignal` 必须传递到依赖安装、探活、
+  页面采集和像素对比；取消时立即进入同一清理路径。
 
 评分定义：
 
 - `S_layout = 1 − Σ(area_i·p_i)/Σ(area_i)`，`p_i = clamp(maxOffset/8, 0, 1)`，
-  area 加权遍历匹配元素；缺失/多余元素按面积占比以 p=1 计入。
+  area 加权遍历匹配元素；缺失元素与裁剪到设计画布内的多余元素按面积占比以
+  p=1 计入。
 - `S_color = 1 − 色差面积/总面积`（匹配元素中 ΔE>3 的 color/backgroundColor）。
 - `S_typography` = 含文本匹配元素中 font-size/weight/family 全一致占比。
 - `S_pixel = 1 − pixelmatch 不一致像素占比`（两张截图 pad 到同尺寸后比较）。
@@ -105,13 +108,16 @@ interface D2cCaptureService {
 }
 ```
 
-桌面端实现（`src/desktop/d2c-capture.ts`）：隐藏 `BrowserWindow`
-（`nodeIntegration: false, contextIsolation: true`），两段式——先按默认视口
+桌面端实现（`src/desktop/d2c-capture.ts`）：隐藏、无框、以内容区尺寸为准的
+`BrowserWindow`（`nodeIntegration: false, contextIsolation: true, sandbox: true`），两段式——先按默认视口
 测量页面自然尺寸（上限 4096），再按目标视口（实现页强制用设计稿尺寸）
 注入采集脚本并 `capturePage()`。采集脚本只收录可见且有直接文本、图片或
 非透明背景/边框的元素（面积 ≥ 16px²），降低包装节点噪声；采集前等待
-`document.fonts.ready` 并注入禁用动画样式。URL 来源仅允许
+`document.fonts.ready`、可见图片 `decode()` 并注入禁用动画/过渡样式。URL 来源仅允许
 `http(s)://127.0.0.1|localhost`；文件来源必须位于工作区内。
+
+像素比较在 worker thread 中执行。解码前后都校验尺寸，总像素上限为
+8,388,608，避免压缩 PNG 解码膨胀；报告 IPC 同样拒绝超过上限的图片。
 
 ### 工具注入接缝
 
@@ -145,38 +151,50 @@ diagnostic 机制报告）。`RuntimeFactoryOptions` 的 Pick 同步扩展。桌
 - 报告列表 → 画布（底图设计稿、上层实现图 opacity 可调、SVG 标注层）
   + 问题列表。标注：几何差异画设计稿矩形框与偏移尺寸线
   `[---{n}px---]`；颜色差异在区域旁渲染双色块与 `设计 #x → 实际 #y`。
+- 报告保存导入时的设计 hash；若同任务后来重新导入，查看旧报告时显示“对应旧版本”提示。
+- 只有消息提交成功才进入 pending；会话 busy 时禁止再次派发，提交失败、运行错误、
+  中断或会话结束但没有报告时退出 pending。
 
 ### 目录结构
 
 ```
 .flavor/d2c/<task>/
-  manifest.json                      # 入口 HTML、画布尺寸、导入时间
+  manifest.json                      # 入口 HTML、文件列表、设计 hash、导入时间
   design/…                           # 导入的 Pixso 导出物
   reports/<run-id>/report.json|design.png|implementation.png|heatmap.png
 ```
 
 ## Security and limits
 
-- 工具输入经 zod 校验；task 名限 `^[a-z0-9][a-z0-9-]{0,63}$`；路径全部解析后
-  校验位于工作区内，符号链接拒绝。
-- 隐藏窗口禁用 nodeIntegration；不加载任意外部 URL；`setWindowOpenHandler` 拒绝弹窗。
-- 报告 data URL 只包含 PNG；report.json 大小上限 2 MiB。
+- 工具输入经 zod 校验；task 名限 `^[a-z0-9][a-z0-9-]{0,63}$`，reportId 限制为
+  `run-YYYYMMDD-HHMMSS[-N]`；viewport 宽高必须同时提供；路径 `realpath` 后
+  校验位于工作区内，符号链接逃逸拒绝。manifest/report JSON 读取后经 schema 校验。
+- 隐藏窗口禁用 nodeIntegration；导航和重定向只允许初始本地文件或 localhost
+  来源；`setWindowOpenHandler` 拒绝弹窗，阻止下载。
+- 报告 data URL 只包含经过 PNG 签名、尺寸和像素上限校验的内容；report.json
+  大小上限 2 MiB。
 - 采集脚本为静态字符串常量，不接受用户输入拼接。
 - runner 只执行两条固定命令：工作区内 `npm install` 与
   `node node_modules/vite/bin/vite.js`（路径经工作区内校验，不接受任意命令拼接）；
   对比结束（含异常路径）必须关闭自启的服务器进程。
+- 设计导入和报告写入使用同父目录临时目录 + rename 发布；导入源不得与目标设计
+  目录重叠。manifest 保存设计内容 hash，报告保存对应 hash，重导入后旧报告可识别。
 
 ## Acceptance criteria
 
-1. 引擎单测：颜色解析/ΔE、文本与 IoU 对齐、容差内不报差异、评分与等级、
-   缺失/多余元素扣分。
+1. 引擎单测：颜色解析/ΔE、文本与类型感知对齐、错误文本/图片类型差异、容差内
+   不报差异、评分与等级、缺失/多余元素扣分、解码后像素上限与取消。
 2. 工具单测：`D2cImport` 校验失败路径、复制与 manifest、不写入任何技能文件；
    `D2cCompare` 用 fake capture 完成端到端报告落盘；无 capture 服务时报
    "仅桌面端支持"；implementation 为前端项目目录时经注入式 runner 启动并关闭。
-2a. runner 单测：URL 解析、缺依赖时执行 npm install、dev server 输出解析与
-   探活、stop 杀进程、超时/无 URL 报错（全部用注入的 fake spawn/fetch，
-   不真实启动进程）。
+2a. runner 单测：显式 Node 启动、URL 解析、缺依赖时执行 npm install、dev server
+   输出解析与带超时探活、stop 杀进程、AbortSignal、子进程 error 和超时/无 URL
+   报错；另有真实 Electron/打包 smoke test 验证 Vite 可启动。
 3. contracts 单测：D2C 输入 schema 拒绝非法 task/reportId；channel 白名单含
    三个 d2c 通道。
-4. `npm run typecheck`、`vitest run`、`npm run build`（含桌面端）全部通过。
-5. 现有文本/多模态请求不受影响：extraTools 为空时工具列表与现状一致。
+4. capture 单测/集成测试覆盖长页面、慢字体与图片、动画禁用、内容区 viewport、
+   localhost 导航边界和弹窗拦截。
+5. UI 测试覆盖 submit 失败不进入 pending、busy 时不错误派发，以及失败/取消后
+   pending 可恢复。
+6. `npm run typecheck`、`vitest run`、`npm run build`（含桌面端）全部通过。
+7. 现有文本/多模态请求不受影响：extraTools 为空时工具列表与现状一致。

@@ -74,14 +74,19 @@ export function alignElements(
 
   const remainingDesign = design.filter((element) => !usedDesign.has(element));
   const remainingImpl = implementation.filter((element) => !usedImpl.has(element));
-  const spatial: Array<{ d: D2cElementSnapshot; i: D2cElementSnapshot; iou: number }> = [];
+  const spatial: Array<{ d: D2cElementSnapshot; i: D2cElementSnapshot; iou: number; compatibility: number }> = [];
   for (const d of remainingDesign) {
     for (const i of remainingImpl) {
       const iou = intersectionOverUnion(d.rect, i.rect);
-      if (iou >= thresholds.iouMin) spatial.push({ d, i, iou });
+      if (iou >= thresholds.iouMin) {
+        const compatibility = (d.tag === i.tag ? 2 : 0)
+          + (d.hasImage === i.hasImage ? 2 : 0)
+          + ((d.text.trim() === "") === (i.text.trim() === "") ? 1 : 0);
+        spatial.push({ d, i, iou, compatibility });
+      }
     }
   }
-  spatial.sort((left, right) => right.iou - left.iou);
+  spatial.sort((left, right) => right.compatibility - left.compatibility || right.iou - left.iou);
   for (const candidate of spatial) {
     if (usedDesign.has(candidate.d) || usedImpl.has(candidate.i)) continue;
     pair(candidate.d, candidate.i);

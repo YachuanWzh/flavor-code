@@ -105,5 +105,7 @@ describe("D2C IPC contracts", () => {
     expect(() => D2cImportInputSchema.parse({ task: "", exportDir: "x" })).toThrow();
     expect(() => D2cImportInputSchema.parse({ task: "homepage", extra: 1 })).toThrow();
     expect(() => D2cGetReportInputSchema.parse({ task: "homepage", reportId: "" })).toThrow();
+    expect(() => D2cGetReportInputSchema.parse({ task: "homepage", reportId: "../escape" })).toThrow();
+    expect(() => D2cGetReportInputSchema.parse({ task: "homepage", reportId: "run-not-a-date" })).toThrow();
   });
 });

@@ -79,6 +79,8 @@ export interface D2cElementDiff {
   dh: number;
   colorIssues: D2cColorIssue[];
   fontIssues: D2cFontIssue[];
+  textIssue?: { expected: string; actual: string };
+  imageIssue?: { expected: boolean; actual: boolean };
   severity: D2cSeverity;
 }
 
@@ -117,7 +119,7 @@ export interface D2cReport {
   task: string;
   reportId: string;
   createdAt: string;
-  design: { source: string; width: number; height: number; elementCount: number };
+  design: { source: string; width: number; height: number; elementCount: number; designHash?: string };
   implementation: { source: string; width: number; height: number; elementCount: number };
   scores: D2cScores;
   diffs: D2cElementDiff[];
@@ -138,7 +140,11 @@ export interface CapturedPage {
 }
 
 export interface D2cCaptureService {
-  capture(source: D2cCaptureSource, viewport?: { width: number; height: number }): Promise<CapturedPage>;
+  capture(
+    source: D2cCaptureSource,
+    viewport?: { width: number; height: number },
+    signal?: AbortSignal,
+  ): Promise<CapturedPage>;
 }
 
 export function rectArea(rect: D2cRect): number {

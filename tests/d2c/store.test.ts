@@ -85,6 +85,7 @@ describe("importDesign", () => {
     expect(copied).toBe("<html></html>");
     const reread = await readManifest(dir, "homepage");
     expect(reread.entryHtml).toBe("index.html");
+    expect(reread.designHash).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it("re-import overwrites the previous design copy", async () => {
@@ -96,6 +97,35 @@ describe("importDesign", () => {
     const copied = await readFile(join(dir, ".flavor", "d2c", "homepage", "design", "index.html"), "utf8");
     expect(copied).toBe("<html>v2</html>");
     await expect(readFile(join(dir, ".flavor", "d2c", "homepage", "design", "old.css"), "utf8")).rejects.toThrow();
+  });
+
+  it("rejects an import source that overlaps the managed design directory", async () => {
+    const dir = await workspace();
+    const source = await exportDir({ "index.html": "<html></html>" });
+    await importDesign(dir, "homepage", source);
+    const managedDesign = join(dir, ".flavor", "d2c", "homepage", "design");
+    await expect(importDesign(dir, "homepage", managedDesign)).rejects.toThrow(/overlap|managed/i);
+    expect(await readFile(join(managedDesign, "index.html"), "utf8")).toBe("<html></html>");
+  });
+
+  it("changes the design hash when imported content changes", async () => {
+    const dir = await workspace();
+    const first = await exportDir({ "index.html": "<html>v1</html>" });
+    const second = await exportDir({ "index.html": "<html>v2</html>" });
+    const firstManifest = await importDesign(dir, "homepage", first);
+    const secondManifest = await importDesign(dir, "homepage", second);
+    expect(secondManifest.designHash).not.toBe(firstManifest.designHash);
+  });
+
+  it("derives a design hash for manifests created before hash tracking", async () => {
+    const dir = await workspace();
+    const source = await exportDir({ "index.html": "<html>legacy</html>" });
+    await importDesign(dir, "homepage", source);
+    const manifestPath = join(dir, ".flavor", "d2c", "homepage", "manifest.json");
+    const legacy = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+    delete legacy.designHash;
+    await writeFile(manifestPath, JSON.stringify(legacy));
+    expect((await readManifest(dir, "homepage")).designHash).toMatch(/^[a-f0-9]{64}$/);
   });
 });
 
@@ -134,5 +164,6 @@ describe("report storage", () => {
     const source = await exportDir({ "index.html": "<html></html>" });
     await importDesign(dir, "homepage", source);
     await expect(readReport(dir, "homepage", "run-19700101-000000")).rejects.toThrow(/no d2c report/i);
+    await expect(readReport(dir, "homepage", "../escape")).rejects.toThrow(/report id/i);
   });
 });

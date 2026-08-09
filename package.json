@@ -43,12 +43,16 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "smoke:install": "node scripts/smoke-install.mjs",
+    "smoke:d2c-worker": "npm run build:desktop:main && node scripts/smoke-d2c-worker.mjs",
     "prepack": "npm run build"
   },
   "build": {
     "appId": "dev.flavorcode.desktop",
     "productName": "Flavor Code",
     "asar": true,
+    "asarUnpack": [
+      "dist/desktop/pixel-worker.js"
+    ],
     "icon": "assets/icon",
     "directories": {
       "output": "release"

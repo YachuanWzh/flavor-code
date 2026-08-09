@@ -3,7 +3,7 @@ import { Buffer } from "node:buffer";
 import { PNG } from "pngjs";
 import { describe, expect, it } from "vitest";
 
-import { comparePngs } from "../../src/d2c/pixel.js";
+import { assertPngDimensions, comparePngs, D2C_MAX_PIXELS } from "../../src/d2c/pixel.js";
 
 function png(width: number, height: number, fill: (x: number, y: number) => [number, number, number]): Buffer {
   const image = new PNG({ width, height });
@@ -53,5 +53,15 @@ describe("comparePngs", () => {
     const valid = png(2, 2, red);
     expect(() => comparePngs(Buffer.alloc(0), valid)).toThrow();
     expect(() => comparePngs(valid, Buffer.alloc(0))).toThrow();
+  });
+
+  it("rejects decompression-bomb dimensions before decoding pixel data", () => {
+    const header = Buffer.alloc(24);
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(header);
+    header.write("IHDR", 12, "ascii");
+    header.writeUInt32BE(8192, 16);
+    header.writeUInt32BE(8192, 20);
+    expect(() => assertPngDimensions(header)).toThrow(/pixel|dimension|size/i);
+    expect(D2C_MAX_PIXELS).toBeLessThan(8192 * 8192);
   });
 });

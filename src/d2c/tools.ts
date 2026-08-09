@@ -1,13 +1,14 @@
-import { stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { z } from "zod";
 
 import type { ToolDefinition } from "../tools/types.js";
-import { comparePngs } from "./pixel.js";
+import { D2C_MAX_PIXELS, type D2cPixelComparison } from "./pixel.js";
+import { comparePngsInWorker } from "./pixel-worker-client.js";
 import { buildReport, summarizeReport } from "./report.js";
 import { runFrontendProject, type RunningProject } from "./runner.js";
-import { D2C_TASK_PATTERN, designEntryPath, importDesign, listReports, readManifest, writeReport } from "./store.js";
+import { D2cReportAlreadyExistsError, D2C_TASK_PATTERN, designEntryPath, importDesign, listReports, readManifest, writeReport } from "./store.js";
 import type { D2cCaptureService, D2cCaptureSource } from "./types.js";
 
 export interface D2cReportEvent {
@@ -25,7 +26,9 @@ export interface D2cToolOptions {
   /** Injectable clock, used for report ids. */
   now?: () => Date;
   /** Launches a frontend project directory; defaults to the Vite runner. */
-  runProject?: (projectDir: string) => Promise<RunningProject>;
+  runProject?: (projectDir: string, signal?: AbortSignal) => Promise<RunningProject>;
+  /** Injectable pixel worker seam for tests. */
+  comparePixels?: (left: Buffer, right: Buffer, signal?: AbortSignal) => Promise<D2cPixelComparison>;
 }
 
 const taskSchema = z.string().regex(D2C_TASK_PATTERN, "Task name must be lowercase letters, digits and dashes");
@@ -38,9 +41,16 @@ const D2cImportInput = z.object({
 const D2cCompareInput = z.object({
   task: taskSchema,
   implementation: z.string().trim().min(1),
-  viewportWidth: z.coerce.number().int().positive().max(8192).optional(),
-  viewportHeight: z.coerce.number().int().positive().max(8192).optional(),
-});
+  viewportWidth: z.coerce.number().int().positive().max(4096).optional(),
+  viewportHeight: z.coerce.number().int().positive().max(4096).optional(),
+}).refine(
+  (value) => (value.viewportWidth === undefined) === (value.viewportHeight === undefined),
+  { message: "viewportWidth and viewportHeight must be provided together" },
+).refine(
+  (value) => value.viewportWidth === undefined || value.viewportHeight === undefined
+    || value.viewportWidth * value.viewportHeight <= D2C_MAX_PIXELS,
+  { message: "viewport exceeds the supported pixel limit" },
+);
 
 type D2cImportInput = z.infer<typeof D2cImportInput>;
 type D2cCompareInput = z.infer<typeof D2cCompareInput>;
@@ -69,8 +79,11 @@ async function resolveImplementationSource(workspace: string, implementation: st
     }
     return { kind: "url", url: implementation };
   }
-  const resolved = isAbsolute(implementation) ? resolve(implementation) : resolve(workspace, implementation);
-  assertInsideWorkspace(workspace, resolved, implementation);
+  const workspaceReal = await realpath(resolve(workspace));
+  const candidate = isAbsolute(implementation) ? resolve(implementation) : resolve(workspace, implementation);
+  const resolved = await realpath(candidate).catch(() => undefined);
+  if (resolved === undefined) throw new Error(`D2C implementation source does not exist: ${implementation}`);
+  assertInsideWorkspace(workspaceReal, resolved, implementation);
   const info = await stat(resolved).catch(() => undefined);
   if (info?.isDirectory()) {
     return { kind: "project", path: resolved };
@@ -81,9 +94,7 @@ async function resolveImplementationSource(workspace: string, implementation: st
     }
     return { kind: "file", path: resolved };
   }
-  if (info === undefined) {
-    throw new Error(`D2C implementation source does not exist: ${implementation}`);
-  }
+  if (info === undefined) throw new Error(`D2C implementation source does not exist: ${implementation}`);
   throw new Error(
     `D2C implementation source must be a frontend project directory, an .html file or a localhost URL: ${implementation}`,
   );
@@ -104,7 +115,8 @@ export function createD2cTools(workspace: string, options: D2cToolOptions = {}):
     inputSchema: D2cImportInput,
     paths: (input) => [input.exportDir],
     summarize: (input) => `${input.task} ← ${input.exportDir}`,
-    execute: async (input) => {
+    execute: async (input, signal) => {
+      signal.throwIfAborted();
       const manifest = await importDesign(workspace, input.task, input.exportDir);
       return {
         task: input.task,
@@ -122,7 +134,8 @@ export function createD2cTools(workspace: string, options: D2cToolOptions = {}):
     inputSchema: D2cCompareInput,
     paths: (input) => [input.implementation],
     summarize: (input) => input.task,
-    execute: async (input) => {
+    execute: async (input, signal) => {
+      signal.throwIfAborted();
       const { capture, onReport, now } = options;
       if (capture === undefined) {
         throw new Error("D2C comparison requires the desktop app; the capture service is not available in this session");
@@ -134,8 +147,11 @@ export function createD2cTools(workspace: string, options: D2cToolOptions = {}):
       let source: D2cCaptureSource;
       if (resolvedSource.kind === "project") {
         const runProject = options.runProject
-          ?? ((projectDir: string) => runFrontendProject(projectDir, { workspace }));
-        running = await runProject(resolvedSource.path);
+          ?? ((projectDir: string, runSignal?: AbortSignal) => runFrontendProject(projectDir, {
+            workspace,
+            ...(runSignal === undefined ? {} : { signal: runSignal }),
+          }));
+        running = await runProject(resolvedSource.path, signal);
         source = { kind: "url", url: running.url };
       } else {
         source = resolvedSource;
@@ -144,36 +160,51 @@ export function createD2cTools(workspace: string, options: D2cToolOptions = {}):
         ? { width: input.viewportWidth, height: input.viewportHeight }
         : undefined;
       try {
-        const designSnapshot = await capture.capture({ kind: "file", path: designPath }, viewport);
-        const implSnapshot = await capture.capture(source, viewport);
-        const pixel = comparePngs(designSnapshot.screenshotPng, implSnapshot.screenshotPng);
+        signal.throwIfAborted();
+        const designSnapshot = await capture.capture({ kind: "file", path: designPath }, viewport, signal);
+        const implViewport = viewport ?? { width: designSnapshot.width, height: designSnapshot.height };
+        const implSnapshot = await capture.capture(source, implViewport, signal);
+        const comparePixels = options.comparePixels ?? comparePngsInWorker;
+        const pixel = await comparePixels(designSnapshot.screenshotPng, implSnapshot.screenshotPng, signal);
 
         const createdAt = (now ?? (() => new Date()))();
         const existing = new Set((await listReports(workspace, input.task)).map((item) => item.reportId));
-        let reportId = formatRunId(createdAt);
-        for (let suffix = 2; existing.has(reportId); suffix += 1) reportId = `${formatRunId(createdAt)}-${suffix}`;
-
-        const report = buildReport({
-          task: input.task,
-          reportId,
-          createdAt,
-          design: {
-            source: join(".flavor", "d2c", input.task, "design", manifest.entryHtml),
-            snapshot: { width: designSnapshot.width, height: designSnapshot.height, elements: designSnapshot.elements },
-          },
-          implementation: {
-            source: input.implementation,
-            snapshot: { width: implSnapshot.width, height: implSnapshot.height, elements: implSnapshot.elements },
-          },
-          pixelMismatchRate: pixel.mismatchRate,
-        });
-        await writeReport(workspace, input.task, report, {
-          designPng: designSnapshot.screenshotPng,
-          implementationPng: implSnapshot.screenshotPng,
-          heatmapPng: pixel.heatmapPng,
-        });
+        const baseReportId = formatRunId(createdAt);
+        let suffix = 1;
+        let report;
+        while (true) {
+          signal.throwIfAborted();
+          const reportId = suffix === 1 ? baseReportId : `${baseReportId}-${suffix}`;
+          suffix += 1;
+          if (existing.has(reportId)) continue;
+          report = buildReport({
+            task: input.task,
+            reportId,
+            createdAt,
+            design: {
+              source: join(".flavor", "d2c", input.task, "design", manifest.entryHtml),
+              designHash: manifest.designHash,
+              snapshot: { width: designSnapshot.width, height: designSnapshot.height, elements: designSnapshot.elements },
+            },
+            implementation: {
+              source: input.implementation,
+              snapshot: { width: implSnapshot.width, height: implSnapshot.height, elements: implSnapshot.elements },
+            },
+            pixelMismatchRate: pixel.mismatchRate,
+          });
+          try {
+            await writeReport(workspace, input.task, report, {
+              designPng: designSnapshot.screenshotPng,
+              implementationPng: implSnapshot.screenshotPng,
+              heatmapPng: pixel.heatmapPng,
+            });
+            break;
+          } catch (cause) {
+            if (!(cause instanceof D2cReportAlreadyExistsError)) throw cause;
+          }
+        }
         if (onReport !== undefined) {
-          await onReport({ task: input.task, reportId, total: report.scores.total, grade: report.scores.grade });
+          await onReport({ task: input.task, reportId: report.reportId, total: report.scores.total, grade: report.scores.grade });
         }
         return { report, summary: summarizeReport(report) };
       } finally {

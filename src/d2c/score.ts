@@ -6,6 +6,14 @@ const FULL_PENALTY_PX = 8;
 
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 
+function areaInsidePage(rect: { x: number; y: number; width: number; height: number }, page: D2cPageSnapshot): number {
+  const left = Math.max(0, rect.x);
+  const top = Math.max(0, rect.y);
+  const right = Math.min(page.width, rect.x + rect.width);
+  const bottom = Math.min(page.height, rect.y + rect.height);
+  return Math.max(0, right - left) * Math.max(0, bottom - top);
+}
+
 export function gradeFor(total: number): string {
   if (total >= 95) return "像素级还原";
   if (total >= 90) return "优秀";
@@ -31,6 +39,7 @@ export function computeScores(
     penaltyArea += rectArea(item.designRect) * clamp01(maxOffset / FULL_PENALTY_PX);
   }
   for (const item of diff.missing) penaltyArea += rectArea(item.rect);
+  for (const item of diff.extra) penaltyArea += areaInsidePage(item.rect, design);
   const layout = clamp01(1 - penaltyArea / baseArea);
 
   const colorMismatchArea = diff.diffs
@@ -42,7 +51,7 @@ export function computeScores(
   const textPairs = diff.matched.filter(({ design: expected }) => expected.text.trim() !== "");
   const consistentPairs = textPairs.filter(({ design: expected }) => {
     const item = diffsByDesignId.get(expected.id);
-    return item === undefined || item.fontIssues.length === 0;
+    return item === undefined || (item.fontIssues.length === 0 && item.textIssue === undefined);
   });
   const typography = textPairs.length === 0 ? 1 : consistentPairs.length / textPairs.length;
 

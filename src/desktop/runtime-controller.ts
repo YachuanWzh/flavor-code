@@ -2,7 +2,8 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import type { PermissionMode } from "../config/schema.js";
-import { importDesign, listReports, listTasks, readReport } from "../d2c/store.js";
+import { assertPngDimensions } from "../d2c/pixel.js";
+import { importDesign, listReports, listTasks, readManifest, readReport } from "../d2c/store.js";
 import { createProductionRuntime, type ProductionRuntimeOptions } from "../production.js";
 import { SessionStore } from "../session/store.js";
 import {
@@ -25,7 +26,9 @@ import { DEFAULT_DESKTOP_MODELS, loadDesktopModels, saveDesktopModel } from "./m
 import type { AddDesktopModelInput, D2cImportResult, D2cReportListItem, D2cReportView, DesktopEvent, DesktopMessageDelivery, DesktopModelOption, DesktopModelMutationResult, DesktopSessionSummary, DesktopSnapshot, McpServerDraft, SessionStartedPayload } from "./contracts.js";
 
 function pngDataUrl(png: Uint8Array): string {
-  return `data:image/png;base64,${Buffer.from(png).toString("base64")}`;
+  const buffer = Buffer.from(png);
+  assertPngDimensions(buffer);
+  return `data:image/png;base64,${buffer.toString("base64")}`;
 }
 
 export interface RuntimeLike {
@@ -445,8 +448,11 @@ export class DesktopRuntimeController {
     const workspace = this.#workspace;
     if (workspace === undefined) throw new Error("Open a project before viewing D2C reports");
     const bundle = await readReport(workspace, task, reportId);
+    const currentManifest = await readManifest(workspace, task);
     return {
       report: bundle.report,
+      designOutdated: bundle.report.design.designHash !== undefined
+        && bundle.report.design.designHash !== currentManifest.designHash,
       designPng: pngDataUrl(bundle.designPng),
       implementationPng: pngDataUrl(bundle.implementationPng),
       heatmapPng: pngDataUrl(bundle.heatmapPng),

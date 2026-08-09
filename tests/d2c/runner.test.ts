@@ -33,6 +33,7 @@ interface FakeChild {
   exitCode: number | null;
   kill(signal?: string): boolean;
   emitExit(code: number): void;
+  emitError(error: Error): void;
 }
 
 function createFakeChild(): FakeChild {
@@ -54,6 +55,9 @@ function createFakeChild(): FakeChild {
     emitExit(code: number): void {
       this.exitCode = code;
       emitter.emit("exit", code, null);
+    },
+    emitError(error: Error): void {
+      emitter.emit("error", error);
     },
     on: emitter.on.bind(emitter),
     once: emitter.once.bind(emitter),
@@ -126,6 +130,25 @@ describe("parseDevServerUrl", () => {
 });
 
 describe("runFrontendProject", () => {
+  it("starts an actual Node-hosted dev server instead of the Electron executable", async () => {
+    const workspace = await tempDir();
+    const projectDir = await viteProject(workspace, "real-node-app");
+    const viteBin = await installViteBin(projectDir);
+    await writeFile(viteBin, [
+      "const http = require('node:http');",
+      "const server = http.createServer((_req, res) => { res.statusCode = 200; res.end('ok'); });",
+      "server.listen(0, '127.0.0.1', () => console.log('http://127.0.0.1:' + server.address().port + '/'));",
+      "process.on('SIGTERM', () => server.close(() => process.exit(0)));",
+    ].join("\n"));
+    const running = await runFrontendProject(projectDir, {
+      workspace,
+      readyTimeoutMs: 5_000,
+      pollIntervalMs: 10,
+    });
+    expect(running.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/$/);
+    await running.stop();
+  });
+
   it("rejects when the directory is outside the workspace", async () => {
     const workspace = await tempDir();
     const projectDir = await viteProject(await tempDir());
@@ -170,8 +193,8 @@ describe("runFrontendProject", () => {
     const running = await pending;
     expect(running.url).toBe("http://localhost:5173/");
     expect(spawn.calls).toHaveLength(1);
-    expect(spawn.calls[0]?.command).toBe(process.execPath);
-    expect(spawn.calls[0]?.args[0]).toBe(viteBin);
+    expect(spawn.calls[0]?.command).toBe("node");
+    expect(spawn.calls[0]?.args).toEqual([viteBin, "--host", "127.0.0.1"]);
     expect(spawn.calls[0]?.cwd).toBe(projectDir);
     expect(fetches.length).toBeGreaterThan(0);
     expect(fetches[0]).toBe("http://localhost:5173/");
@@ -285,5 +308,54 @@ describe("runFrontendProject", () => {
     await until(() => spawn.calls.length === 1);
     server.emitExit(1);
     await expect(pending).rejects.toThrow(/exit/i);
+  });
+
+  it("rejects cleanly when the server process emits an error", async () => {
+    const workspace = await tempDir();
+    const projectDir = await viteProject(workspace);
+    await installViteBin(projectDir);
+    const server = createFakeChild();
+    const spawn = fakeSpawn([server]);
+
+    const pending = runFrontendProject(projectDir, {
+      workspace,
+      ...readyOptions,
+      spawn: spawn.spawn,
+      fetch: async () => ({ status: 200 }),
+    });
+    await until(() => spawn.calls.length === 1);
+    server.emitError(new Error("spawn denied"));
+    await expect(pending).rejects.toThrow(/spawn denied|could not start/i);
+  });
+
+  it("aborts startup and terminates the server", async () => {
+    const workspace = await tempDir();
+    const projectDir = await viteProject(workspace);
+    await installViteBin(projectDir);
+    const server = createFakeChild();
+    const spawn = fakeSpawn([server]);
+    const controller = new AbortController();
+
+    const pending = runFrontendProject(projectDir, {
+      workspace,
+      ...readyOptions,
+      signal: controller.signal,
+      spawn: spawn.spawn,
+      fetch: async () => new Promise(() => undefined),
+    });
+    await until(() => spawn.calls.length === 1);
+    server.stdout.write("http://localhost:5173/");
+    controller.abort(new Error("cancelled by test"));
+    await expect(pending).rejects.toThrow(/cancelled by test/);
+    expect(server.signals.length).toBeGreaterThan(0);
+  });
+
+  it("rejects a project whose real path escapes through a symlink", async () => {
+    const workspace = await tempDir();
+    const outside = await viteProject(await tempDir());
+    const link = join(workspace, "linked-app");
+    const { symlink } = await import("node:fs/promises");
+    await symlink(outside, link, "junction");
+    await expect(runFrontendProject(link, { workspace, ...readyOptions })).rejects.toThrow(/workspace/i);
   });
 });

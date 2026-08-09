@@ -6,7 +6,7 @@ export interface BuildReportInput {
   task: string;
   reportId: string;
   createdAt: Date;
-  design: { source: string; snapshot: D2cPageSnapshot };
+  design: { source: string; snapshot: D2cPageSnapshot; designHash?: string };
   implementation: { source: string; snapshot: D2cPageSnapshot };
   pixelMismatchRate?: number;
 }
@@ -24,6 +24,7 @@ export function buildReport(input: BuildReportInput): D2cReport {
       width: input.design.snapshot.width,
       height: input.design.snapshot.height,
       elementCount: input.design.snapshot.elements.length,
+      ...(input.design.designHash === undefined ? {} : { designHash: input.design.designHash }),
     },
     implementation: {
       source: input.implementation.source,
@@ -60,6 +61,13 @@ function describeDiff(item: D2cElementDiff): string {
   for (const issue of item.fontIssues) {
     const property = { fontSize: "字号", fontWeight: "字重", fontFamily: "字体" }[issue.property];
     parts.push(`[字体] ${item.label} ${property} 设计 ${issue.expected} → 实际 ${issue.actual}`);
+  }
+  if (item.textIssue !== undefined) {
+    parts.push(`[文本] ${item.label} 设计 “${item.textIssue.expected}” → 实际 “${item.textIssue.actual}”`);
+  }
+  if (item.imageIssue !== undefined) {
+    parts.push(`[图片] ${item.label} 设计 ${item.imageIssue.expected ? "有图片" : "无图片"}`
+      + ` → 实际 ${item.imageIssue.actual ? "有图片" : "无图片"}`);
   }
   return parts.join("\n");
 }

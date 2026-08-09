@@ -86,6 +86,21 @@ describe("diffPages", () => {
     expect(result.extra.map((item) => item.label)).toEqual([expect.stringContaining("B")]);
   });
 
+  it("reports changed text for spatially matched elements", () => {
+    const design = page([element({ tag: "button", text: "提交", rect: { x: 10, y: 10, width: 80, height: 32 } })]);
+    const implementation = page([element({ tag: "button", text: "取消", rect: { x: 10, y: 10, width: 80, height: 32 } })]);
+    const result = diffPages(design, implementation);
+    expect(result.diffs).toHaveLength(1);
+    expect(result.diffs[0]?.textIssue).toEqual({ expected: "提交", actual: "取消" });
+  });
+
+  it("reports image/content type changes", () => {
+    const design = page([element({ tag: "div", hasImage: true, rect: { x: 10, y: 10, width: 80, height: 80 } })]);
+    const implementation = page([element({ tag: "div", hasImage: false, styles: { backgroundColor: "#ffffff" }, rect: { x: 10, y: 10, width: 80, height: 80 } })]);
+    const result = diffPages(design, implementation);
+    expect(result.diffs[0]?.imageIssue).toEqual({ expected: true, actual: false });
+  });
+
   it("normalizes raw colors before comparing", () => {
     nextId = 1;
     const design = page([element({ rect: { x: 0, y: 0, width: 10, height: 10 }, styles: { color: "rgb(255,0,0)" } })]);

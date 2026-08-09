@@ -6,6 +6,7 @@ import { PNG } from "pngjs";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { importDesign, listReports, readManifest } from "../../src/d2c/store.js";
+import { comparePngs } from "../../src/d2c/pixel.js";
 import { createD2cTools, type D2cToolOptions } from "../../src/d2c/tools.js";
 import type { CapturedPage, D2cCaptureService, D2cCaptureSource } from "../../src/d2c/types.js";
 
@@ -74,8 +75,19 @@ describe("D2cImport", () => {
 
 describe("D2cCompare", () => {
   async function compareTool(workspace: string, options?: Parameters<typeof createD2cTools>[1]) {
-    return requireTool(workspace, "D2cCompare", options);
+    return requireTool(workspace, "D2cCompare", {
+      comparePixels: async (left, right) => comparePngs(left, right),
+      ...options,
+    });
   }
+
+  it("requires viewport width and height together and caps total pixels", async () => {
+    const workspace = await workspaceWithDesign();
+    const tool = await compareTool(workspace, { capture: fakeCapture() });
+    expect(tool.inputSchema.safeParse({ task: "homepage", implementation: "x.html", viewportWidth: 1280 }).success).toBe(false);
+    expect(tool.inputSchema.safeParse({ task: "homepage", implementation: "x.html", viewportWidth: 4096, viewportHeight: 4096 }).success).toBe(false);
+    expect(tool.inputSchema.safeParse({ task: "homepage", implementation: "x.html", viewportWidth: 1280, viewportHeight: 800 }).success).toBe(true);
+  });
 
   it("requires the desktop capture service", async () => {
     const workspace = await workspaceWithDesign();
@@ -131,6 +143,32 @@ describe("D2cCompare", () => {
     expect(first.report.reportId).toBe("run-20260809-100000");
     expect(second.report.reportId).not.toBe(first.report.reportId);
     expect(await listReports(workspace, "homepage")).toHaveLength(2);
+  });
+
+  it("publishes concurrent reports without overwriting either result", async () => {
+    const workspace = await workspaceWithDesign();
+    await mkdir(join(workspace, "dist"), { recursive: true });
+    await writeFile(join(workspace, "dist", "index.html"), "<html></html>");
+    const fixed = new Date("2026-08-09T10:00:00Z");
+    const firstTool = await compareTool(workspace, { capture: fakeCapture(), now: () => fixed });
+    const secondTool = await compareTool(workspace, { capture: fakeCapture(), now: () => fixed });
+    const signal = new AbortController().signal;
+    const results = await Promise.all([
+      firstTool.execute({ task: "homepage", implementation: "dist/index.html" }, signal),
+      secondTool.execute({ task: "homepage", implementation: "dist/index.html" }, signal),
+    ]) as Array<{ report: { reportId: string } }>;
+    expect(new Set(results.map((item) => item.report.reportId)).size).toBe(2);
+    expect(await listReports(workspace, "homepage")).toHaveLength(2);
+  });
+
+  it("honors cancellation before capture starts", async () => {
+    const workspace = await workspaceWithDesign();
+    const capture = fakeCapture();
+    const tool = await compareTool(workspace, { capture });
+    const controller = new AbortController();
+    controller.abort(new Error("cancel comparison"));
+    await expect(tool.execute({ task: "homepage", implementation: "unused.html" }, controller.signal))
+      .rejects.toThrow(/cancel comparison/);
   });
 
   it("runs a frontend project directory via the injected runner and stops it", async () => {

@@ -9,14 +9,16 @@ interface D2cViewerProps {
   /** Increments whenever a fresh D2C report event arrives, triggering a reload. */
   refreshKey: number;
   /** Sends the assembled D2C task prompt to the active conversation. */
-  onStartTask(prompt: string): Promise<void>;
+  onStartTask(prompt: string): Promise<boolean>;
   /** Task dispatched but not yet compared; cleared by the app when its report arrives. */
   pending?: D2cPendingTask | undefined;
   /** Records a freshly dispatched task so the running state survives view switches. */
   onLaunch(task: string, framework: D2cFramework): void;
+  /** Prevents starting a second prompt while the current session is busy. */
+  disabled?: boolean;
 }
 
-type D2cFramework = "vue" | "react";
+export type D2cFramework = "vue" | "react";
 
 /** A D2C task that has been dispatched to the agent and is still coding/comparing. */
 export interface D2cPendingTask {
@@ -35,6 +37,18 @@ function buildTaskPrompt(task: string, entryHtml: string, fileCount: number, fra
     `然后调用 D2cCompare，implementation 传该项目目录，对比设计稿与运行中的实现并评分。`,
     `若总分低于 90，依据差异报告迭代修复实现代码（不要修改设计稿）并重新对比，直至达到 90 或用户接受，最后汇报总分与等级。`,
   ].join("\n");
+}
+
+export async function dispatchD2cTask(
+  prompt: string,
+  task: string,
+  framework: D2cFramework,
+  submit: (prompt: string) => Promise<boolean>,
+  onLaunch: (task: string, framework: D2cFramework) => void,
+): Promise<boolean> {
+  const submitted = await submit(prompt);
+  if (submitted) onLaunch(task, framework);
+  return submitted;
 }
 
 type D2cViewMode = "overlay" | "design" | "implementation" | "heatmap";
@@ -72,7 +86,7 @@ function OffsetTag({ diff }: { diff: D2cElementDiff }): React.JSX.Element | null
   </span>;
 }
 
-export function D2cViewer({ onClose, onError, refreshKey, onStartTask, pending, onLaunch }: D2cViewerProps): React.JSX.Element {
+export function D2cViewer({ onClose, onError, refreshKey, onStartTask, pending, onLaunch, disabled = false }: D2cViewerProps): React.JSX.Element {
   const [reports, setReports] = useState<readonly D2cReportListItem[]>([]);
   const [bundle, setBundle] = useState<D2cReportView>();
   const [loading, setLoading] = useState(true);
@@ -97,11 +111,16 @@ export function D2cViewer({ onClose, onError, refreshKey, onStartTask, pending, 
     } catch (cause) { report(cause); }
   };
   const startTask = async () => {
-    if (imported === undefined || launching) return;
+    if (imported === undefined || launching || disabled) return;
     setLaunching(true);
     try {
-      await onStartTask(buildTaskPrompt(imported.task, imported.entryHtml, imported.files.length, framework));
-      onLaunch(imported.task, framework);
+      await dispatchD2cTask(
+        buildTaskPrompt(imported.task, imported.entryHtml, imported.files.length, framework),
+        imported.task,
+        framework,
+        onStartTask,
+        onLaunch,
+      );
     } catch (cause) { report(cause); }
     finally { setLaunching(false); }
   };
@@ -161,6 +180,7 @@ export function D2cViewer({ onClose, onError, refreshKey, onStartTask, pending, 
       {scores !== undefined && <div className="d2c-score" data-grade={scores.grade}>
         <strong>{scores.total.toFixed(1)}</strong><span>/ 100 · {scores.grade}</span>
       </div>}
+      {bundle?.designOutdated === true && <span className="d2c-report-stale">设计稿已重新导入，此报告对应旧版本</span>}
     </header>
 
     <div className="d2c-workbench-body">
@@ -181,9 +201,10 @@ export function D2cViewer({ onClose, onError, refreshKey, onStartTask, pending, 
             ? <button className="d2c-launch-action" disabled={!taskValid} onClick={() => void importDesign()}>导入设计稿…</button>
             : <p className="d2c-launch-imported">✓ 已导入 {imported.files.length} 个文件，入口 {imported.entryHtml}</p>}
           <button className="d2c-launch-action" data-primary={imported !== undefined}
-            disabled={imported === undefined || launching}
+            disabled={imported === undefined || launching || disabled}
             onClick={() => void startTask()}>{launching ? "正在派发…" : "开始实现"}</button>
           {imported !== undefined && <small>派发后 Agent 将按你导入的 D2C 技能编码并对比，完成后自动在此展示结果。</small>}
+          {disabled && <small className="d2c-launch-hint">当前会话正在运行，请完成或中断后再启动 D2C 任务。</small>}
         </div>
         <div className="d2c-catalog-tools"><span>⌕</span><strong>对比报告</strong><button onClick={() => void loadReports()} aria-label="刷新报告列表">↻</button></div>
         <div className="d2c-list" aria-busy={loading}>
@@ -270,6 +291,9 @@ export function D2cViewer({ onClose, onError, refreshKey, onStartTask, pending, 
                     {(Math.abs(diff.dw) > 0 || Math.abs(diff.dh) > 0) && ` · 尺寸 dw=${formatSigned(diff.dw)}px dh=${formatSigned(diff.dh)}px`}</span>}
                 {describeColorIssues(diff).map((line) => <span key={line}>[色差] {line}</span>)}
                 {describeFontIssues(diff).map((line) => <span key={line}>[字体] {line}</span>)}
+                {diff.textIssue !== undefined && <span>[文本] 设计 “{diff.textIssue.expected}” → 实际 “{diff.textIssue.actual}”</span>}
+                {diff.imageIssue !== undefined && <span>[图片] 设计 {diff.imageIssue.expected ? "有图片" : "无图片"}
+                  {` → 实际 ${diff.imageIssue.actual ? "有图片" : "无图片"}`}</span>}
               </li>)}
               {issues.missing.map((item) => <li key={`missing-${item.id}`} data-severity="major">
                 <strong>{item.label}</strong><span>[缺失] 设计稿中存在，实现中未找到（{Math.round(item.rect.width)}×{Math.round(item.rect.height)} @ {Math.round(item.rect.x)},{Math.round(item.rect.y)}）</span>

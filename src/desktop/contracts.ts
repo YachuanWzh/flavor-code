@@ -123,7 +123,7 @@ export const D2cImportInputSchema = z.object({
 }).strict();
 export const D2cGetReportInputSchema = z.object({
   task: D2cTaskInput,
-  reportId: z.string().trim().min(1).max(128).optional(),
+  reportId: z.string().trim().regex(/^run-\d{8}-\d{6}(?:-[2-9]\d*)?$/, "Invalid D2C report id").optional(),
 }).strict();
 
 export type AddDesktopModelInput = z.infer<typeof AddDesktopModelInputSchema>;
@@ -205,6 +205,8 @@ export interface D2cImportResult {
 /** Report plus screenshots encoded as PNG data URLs for renderer display. */
 export interface D2cReportView {
   report: D2cReport;
+  /** True when the task design was re-imported after this report was created. */
+  designOutdated: boolean;
   designPng: string;
   implementationPng: string;
   heatmapPng: string;

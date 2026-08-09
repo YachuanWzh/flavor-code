@@ -1,4 +1,4 @@
-import { alignElements } from "./align.js";
+import { alignElements, normalizeText } from "./align.js";
 import { deltaE76, normalizeColor } from "./color.js";
 import type {
   D2cColorIssue,
@@ -101,9 +101,20 @@ export function diffPages(
     const geometryIssue = maxOffset > thresholds.geometryTolerancePx;
     const colors = colorIssues(expected, actual, thresholds);
     const fonts = fontIssues(expected, actual);
-    if (!geometryIssue && colors.length === 0 && fonts.length === 0) continue;
+    const expectedText = normalizeText(expected.text);
+    const actualText = normalizeText(actual.text);
+    const textIssue = expectedText === actualText
+      ? undefined
+      : { expected: expected.text.trim(), actual: actual.text.trim() };
+    const imageIssue = expected.hasImage === actual.hasImage
+      ? undefined
+      : { expected: expected.hasImage, actual: actual.hasImage };
+    if (!geometryIssue && colors.length === 0 && fonts.length === 0
+      && textIssue === undefined && imageIssue === undefined) continue;
     const severity: D2cSeverity = maxOffset > thresholds.fullPenaltyPx
       || colors.some((issue) => issue.deltaE > MAJOR_COLOR_DELTA_E)
+      || textIssue !== undefined
+      || imageIssue !== undefined
       ? "major"
       : "minor";
     diffs.push({
@@ -115,6 +126,8 @@ export function diffPages(
       dx, dy, dw, dh,
       colorIssues: colors,
       fontIssues: fonts,
+      ...(textIssue === undefined ? {} : { textIssue }),
+      ...(imageIssue === undefined ? {} : { imageIssue }),
       severity,
     });
   }

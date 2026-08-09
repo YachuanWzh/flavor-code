@@ -187,6 +187,13 @@ export function DesktopApp(): React.JSX.Element {
         setView("d2c");
         return;
       }
+      if ((event.type === "session-output"
+          && event.sessionId === activeSessionIdRef.current
+          && ["done", "error", "exit"].includes(event.event.type))
+        || (event.type === "runtime-error"
+          && (event.sessionId === undefined || event.sessionId === activeSessionIdRef.current))) {
+        setD2cPending(undefined);
+      }
       handleEvent(event, activeSessionIdRef, setSnapshot, setTranscript, setError);
     });
     window.flavorDesktop.bootstrap().then((next) => {
@@ -326,10 +333,10 @@ export function DesktopApp(): React.JSX.Element {
     } catch (cause) { setError(errorMessage(cause)); }
   };
 
-  const send = async (override?: string, delivery?: "prompt" | "steer" | "followUp") => {
+  const send = async (override?: string, delivery?: "prompt" | "steer" | "followUp"): Promise<boolean> => {
     const prompt = (override ?? input).trim();
     const selectedAttachments = override === undefined ? attachments : [];
-    if (!prompt && selectedAttachments.length === 0) return;
+    if (!prompt && selectedAttachments.length === 0) return false;
     setError(undefined);
     try {
       let current = snapshot;
@@ -356,10 +363,12 @@ export function DesktopApp(): React.JSX.Element {
         selectedAttachments.map(({ name, mediaType, dataBase64 }) => ({ name, mediaType, dataBase64 })),
       );
       if (selectedAttachments.length > 0) clearAttachments();
+      return true;
     } catch (cause) {
       const value = errorMessage(cause);
       setError(value);
       setTranscript((state) => transcriptReducer(state, { type: "submit-error", message: value }));
+      return false;
     }
   };
 
@@ -462,8 +471,13 @@ export function DesktopApp(): React.JSX.Element {
           : view === "mcp" && snapshot.workspace !== undefined ? <McpManagerView onClose={() => setView("conversation")} onError={setError} />
             : view === "d2c" && snapshot.workspace !== undefined ? <D2cViewer onClose={() => setView("conversation")} onError={setError} refreshKey={d2cRefreshKey}
                     pending={d2cPending}
+                    disabled={busy}
                     onLaunch={(task, framework) => setD2cPending({ task, framework, startedAt: Date.now() })}
-                    onStartTask={async (prompt) => { await send(prompt, "prompt"); setView("conversation"); }} /> : <>
+                    onStartTask={async (prompt) => {
+                      const submitted = await send(prompt, "prompt");
+                      if (submitted) setView("conversation");
+                      return submitted;
+                    }} /> : <>
       <header className="workspace-header">
         <button className="mobile-rail-toggle" onClick={() => setRailOpen(true)} aria-label="打开项目栏">☰</button>
         <div className="workspace-breadcrumb">
@@ -488,7 +502,7 @@ export function DesktopApp(): React.JSX.Element {
 
       {snapshot.diagnostics.length > 0 && <details className="diagnostics"><summary>{snapshot.diagnostics.length} 条启动提示</summary><pre>{snapshot.diagnostics.join("\n")}</pre></details>}
       <Composer input={input} setInput={updateInput} onSend={(delivery) => void send(undefined, delivery)} busy={busy}
-        onInterrupt={() => void window.flavorDesktop.interrupt()} inputRef={inputRef} snapshot={snapshot}
+        onInterrupt={() => { setD2cPending(undefined); void window.flavorDesktop.interrupt(); }} inputRef={inputRef} snapshot={snapshot}
         attachments={attachments} onAddImages={(files) => void addImageFiles(files)}
         onRemoveImage={removeAttachment}
         setModel={setModel} addModel={addModel} setPermission={setPermission}
