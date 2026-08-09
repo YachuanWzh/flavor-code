@@ -1,0 +1,219 @@
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+
+import type { D2cElementDiff, D2cReport, D2cUnmatchedElement } from "../../d2c/types.js";
+import type { D2cReportListItem, D2cReportView } from "../contracts.js";
+
+interface D2cViewerProps {
+  onClose(): void;
+  onError(message: string): void;
+  /** Increments whenever a fresh D2C report event arrives, triggering a reload. */
+  refreshKey: number;
+}
+
+type D2cViewMode = "overlay" | "design" | "implementation" | "heatmap";
+
+const MODE_LABELS: Record<D2cViewMode, string> = {
+  overlay: "叠加对比",
+  design: "设计稿",
+  implementation: "实现",
+  heatmap: "像素热力图",
+};
+
+function formatSigned(value: number): string {
+  const rounded = Math.round(value);
+  if (rounded === 0) return "0";
+  return `${rounded > 0 ? "+" : ""}${rounded}`;
+}
+
+function describeColorIssues(diff: D2cElementDiff): string[] {
+  return diff.colorIssues.map((issue) =>
+    `${issue.property === "color" ? "文字色" : "背景色"}：设计 ${issue.expected} → 实际 ${issue.actual}（ΔE ${issue.deltaE}）`);
+}
+
+function describeFontIssues(diff: D2cElementDiff): string[] {
+  const labels = { fontSize: "字号", fontWeight: "字重", fontFamily: "字体" } as const;
+  return diff.fontIssues.map((issue) => `${labels[issue.property]}：设计 ${issue.expected} → 实际 ${issue.actual}`);
+}
+
+/** Offset tag like [---3px---] rendered next to an annotated region. */
+function OffsetTag({ diff }: { diff: D2cElementDiff }): React.JSX.Element | null {
+  const maxOffset = Math.max(Math.abs(diff.dx), Math.abs(diff.dy), Math.abs(diff.dw), Math.abs(diff.dh));
+  if (maxOffset === 0) return null;
+  const dashes = "-".repeat(Math.min(5, Math.max(2, Math.round(maxOffset))));
+  return <span className="d2c-offset-tag" data-severity={diff.severity}>
+    [{dashes}{formatSigned(diff.dx)}px,{formatSigned(diff.dy)}px{dashes}]
+  </span>;
+}
+
+export function D2cViewer({ onClose, onError, refreshKey }: D2cViewerProps): React.JSX.Element {
+  const [reports, setReports] = useState<readonly D2cReportListItem[]>([]);
+  const [bundle, setBundle] = useState<D2cReportView>();
+  const [loading, setLoading] = useState(true);
+  const [loadingReport, setLoadingReport] = useState(false);
+  const [mode, setMode] = useState<D2cViewMode>("overlay");
+  const [implOpacity, setImplOpacity] = useState(0.55);
+  const [selectedDiff, setSelectedDiff] = useState<number>();
+
+  const report = (cause: unknown) => onError(cause instanceof Error ? cause.message : String(cause));
+
+  const loadReports = useCallback(async (autoSelect?: { task: string; reportId: string }) => {
+    const entries = await window.flavorDesktop.listD2cReports();
+    setReports(entries);
+    const first = autoSelect ?? entries[0];
+    if (first !== undefined) {
+      try {
+        setLoadingReport(true);
+        setBundle(await window.flavorDesktop.getD2cReport(first.task, first.reportId));
+        setSelectedDiff(undefined);
+      } finally {
+        setLoadingReport(false);
+      }
+    } else {
+      setBundle(undefined);
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    loadReports().catch((cause) => { if (active) report(cause); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [refreshKey, loadReports]);
+
+  const select = async (item: D2cReportListItem) => {
+    try {
+      setLoadingReport(true);
+      setBundle(await window.flavorDesktop.getD2cReport(item.task, item.reportId));
+      setSelectedDiff(undefined);
+    } catch (cause) { report(cause); }
+    finally { setLoadingReport(false); }
+  };
+
+  const issues = useMemo(() => {
+    if (bundle === undefined) return { diffs: [] as D2cElementDiff[], missing: [] as D2cUnmatchedElement[], extra: [] as D2cUnmatchedElement[] };
+    return { diffs: bundle.report.diffs, missing: bundle.report.missing, extra: bundle.report.extra };
+  }, [bundle]);
+  const issueCount = issues.diffs.length + issues.missing.length + issues.extra.length;
+
+  const scores = bundle?.report.scores;
+  const canvas = bundle === undefined ? undefined : {
+    width: Math.max(bundle.report.design.width, bundle.report.implementation.width, 1),
+    height: Math.max(bundle.report.design.height, bundle.report.implementation.height, 1),
+  };
+
+  return <section className="d2c-workbench" aria-label="设计对比">
+    <header className="d2c-workbench-header">
+      <div>
+        <button className="d2c-back" onClick={onClose} aria-label="返回对话">‹</button>
+        <div><p>Design to Code</p><h1>D2C 设计对比</h1></div>
+      </div>
+      {scores !== undefined && <div className="d2c-score" data-grade={scores.grade}>
+        <strong>{scores.total.toFixed(1)}</strong><span>/ 100 · {scores.grade}</span>
+      </div>}
+    </header>
+
+    <div className="d2c-workbench-body">
+      <aside className="d2c-catalog">
+        <div className="d2c-catalog-tools"><span>⌕</span><strong>对比报告</strong><button onClick={() => void loadReports()} aria-label="刷新报告列表">↻</button></div>
+        <div className="d2c-list" aria-busy={loading}>
+          {loading && <p className="d2c-list-empty">正在读取报告…</p>}
+          {!loading && reports.length === 0 && <div className="d2c-list-empty">
+            <strong>还没有对比报告</strong>
+            <span>在任务中使用 D2cImport 导入 Pixso 设计稿，再用 D2cCompare 对比实现页面。</span>
+          </div>}
+          {reports.map((item) => <button className="d2c-list-item" key={`${item.task}/${item.reportId}`}
+            data-selected={bundle?.report.reportId === item.reportId && bundle.report.task === item.task}
+            onClick={() => void select(item)}>
+            <strong>{item.task}</strong>
+            <small>{item.reportId}</small>
+            <span className="d2c-list-meta"><em data-grade={item.grade}>{item.total.toFixed(1)}</em><time>{new Date(item.createdAt).toLocaleString()}</time></span>
+          </button>)}
+        </div>
+      </aside>
+
+      <main className="d2c-canvas-area">
+        {bundle === undefined || canvas === undefined ? <div className="d2c-empty">
+          <span>▤</span><h2>暂无可展示的对比</h2><p>运行一次 D2cCompare 后，这里会显示设计稿与实现的叠加对比。</p>
+        </div> : <>
+          <div className="d2c-canvas-toolbar">
+            <div className="d2c-mode-switch" role="tablist" aria-label="展示模式">
+              {(Object.keys(MODE_LABELS) as D2cViewMode[]).map((value) =>
+                <button key={value} role="tab" aria-selected={mode === value} data-active={mode === value}
+                  onClick={() => setMode(value)}>{MODE_LABELS[value]}</button>)}
+            </div>
+            {mode === "overlay" && <label className="d2c-opacity">
+              <span>实现透明度</span>
+              <input type="range" min={0} max={100} value={Math.round(implOpacity * 100)}
+                onChange={(event) => setImplOpacity(Number(event.target.value) / 100)} />
+            </label>}
+            <span className="d2c-canvas-size">{canvas.width} × {canvas.height}px</span>
+          </div>
+
+          <div className="d2c-canvas-scroll">
+            <div className="d2c-canvas" style={{ aspectRatio: `${canvas.width} / ${canvas.height}` }}>
+              {(mode === "overlay" || mode === "design") && <img className="d2c-layer d2c-layer-design" src={bundle.designPng} alt="设计稿截图" draggable={false} />}
+              {(mode === "overlay" || mode === "implementation") && <img className="d2c-layer d2c-layer-impl" src={bundle.implementationPng}
+                style={{ opacity: mode === "overlay" ? implOpacity : 1 }} alt="实现截图" draggable={false} />}
+              {mode === "heatmap" && <img className="d2c-layer" src={bundle.heatmapPng} alt="像素差异热力图" draggable={false} />}
+
+              {(mode === "overlay" || mode === "design") && <div className="d2c-annotations">
+                {issues.diffs.map((diff, index) => <div className="d2c-annotation" key={diff.implId} data-severity={diff.severity}
+                  data-selected={selectedDiff === index}
+                  style={{
+                    left: `${(diff.designRect.x / canvas.width) * 100}%`,
+                    top: `${(diff.designRect.y / canvas.height) * 100}%`,
+                    width: `${(diff.designRect.width / canvas.width) * 100}%`,
+                    height: `${(diff.designRect.height / canvas.height) * 100}%`,
+                  }}
+                  onClick={() => setSelectedDiff((current) => current === index ? undefined : index)}>
+                  <OffsetTag diff={diff} />
+                </div>)}
+                {issues.missing.map((item) => <div className="d2c-annotation d2c-annotation-missing" key={`missing-${item.id}`}
+                  style={{
+                    left: `${(item.rect.x / canvas.width) * 100}%`,
+                    top: `${(item.rect.y / canvas.height) * 100}%`,
+                    width: `${(item.rect.width / canvas.width) * 100}%`,
+                    height: `${(item.rect.height / canvas.height) * 100}%`,
+                  }} title={`缺失：${item.label}`}>
+                  <span className="d2c-offset-tag">[缺失]</span>
+                </div>)}
+              </div>}
+            </div>
+          </div>
+
+          <div className="d2c-issue-panel">
+            <header><h2>差异明细</h2><span>{issueCount} 处</span>
+              {bundle.report.pixelMismatchRate !== undefined &&
+                <small>像素不一致 {Math.round(bundle.report.pixelMismatchRate * 1000) / 10}%</small>}
+            </header>
+            <div className="d2c-score-strip" aria-label="分项得分">
+              <span>布局 {(scores!.layout * 100).toFixed(0)}</span>
+              <span>色彩 {(scores!.color * 100).toFixed(0)}</span>
+              <span>字体 {(scores!.typography * 100).toFixed(0)}</span>
+              {scores!.pixel !== undefined && <span>像素 {(scores!.pixel * 100).toFixed(0)}</span>}
+            </div>
+            {issueCount === 0 ? <p className="d2c-issue-empty">未发现差异，实现与设计稿一致。</p> : <ol className="d2c-issue-list">
+              {issues.diffs.map((diff, index) => <li key={diff.implId} data-severity={diff.severity} data-selected={selectedDiff === index}
+                onClick={() => setSelectedDiff((current) => current === index ? undefined : index)}>
+                <strong>{diff.label}</strong>
+                {(Math.abs(diff.dx) > 0 || Math.abs(diff.dy) > 0 || Math.abs(diff.dw) > 0 || Math.abs(diff.dh) > 0) &&
+                  <span>[偏移] dx={formatSigned(diff.dx)}px dy={formatSigned(diff.dy)}px
+                    {(Math.abs(diff.dw) > 0 || Math.abs(diff.dh) > 0) && ` · 尺寸 dw=${formatSigned(diff.dw)}px dh=${formatSigned(diff.dh)}px`}</span>}
+                {describeColorIssues(diff).map((line) => <span key={line}>[色差] {line}</span>)}
+                {describeFontIssues(diff).map((line) => <span key={line}>[字体] {line}</span>)}
+              </li>)}
+              {issues.missing.map((item) => <li key={`missing-${item.id}`} data-severity="major">
+                <strong>{item.label}</strong><span>[缺失] 设计稿中存在，实现中未找到（{Math.round(item.rect.width)}×{Math.round(item.rect.height)} @ {Math.round(item.rect.x)},{Math.round(item.rect.y)}）</span>
+              </li>)}
+              {issues.extra.map((item) => <li key={`extra-${item.id}`} data-severity="minor">
+                <strong>{item.label}</strong><span>[多余] 实现中存在，设计稿中没有（{Math.round(item.rect.width)}×{Math.round(item.rect.height)} @ {Math.round(item.rect.x)},{Math.round(item.rect.y)}）</span>
+              </li>)}
+            </ol>}
+          </div>
+        </>}
+        {loadingReport && <div className="d2c-loading" aria-busy="true">正在加载报告…</div>}
+      </main>
+    </div>
+  </section>;
+}

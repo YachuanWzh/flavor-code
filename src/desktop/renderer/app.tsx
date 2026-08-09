@@ -35,6 +35,7 @@ import type { FileChangePresentation, FileDiffLine } from "../../tools/types.js"
 import { SkillManagerView } from "./skill-manager.js";
 import { MemoryManagerView } from "./memory-manager.js";
 import { McpManagerView } from "./mcp-manager.js";
+import { D2cViewer } from "./d2c-viewer.js";
 import type { ManagedSkillSummary } from "../../skills/manager.js";
 
 const EMPTY_SNAPSHOT: DesktopSnapshot = { sessions: [], diagnostics: [], models: [] };
@@ -93,7 +94,8 @@ export function DesktopApp(): React.JSX.Element {
   const [dismissedMentionInput, setDismissedMentionInput] = useState<string>();
   const [mentionSpan, setMentionSpan] = useState<{ start: number; end: number }>();
   const [cursorPos, setCursorPos] = useState(0);
-  const [view, setView] = useState<"conversation" | "skills" | "memory" | "mcp">("conversation");
+  const [view, setView] = useState<"conversation" | "skills" | "memory" | "mcp" | "d2c">("conversation");
+  const [d2cRefreshKey, setD2cRefreshKey] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const activeSessionIdRef = useRef<string | undefined>(undefined);
@@ -178,6 +180,10 @@ export function DesktopApp(): React.JSX.Element {
 
   useEffect(() => {
     const unsubscribe = window.flavorDesktop.onEvent((event) => {
+      if (event.type === "d2c-report") {
+        setD2cRefreshKey((key) => key + 1);
+        return;
+      }
       handleEvent(event, activeSessionIdRef, setSnapshot, setTranscript, setError);
     });
     window.flavorDesktop.bootstrap().then((next) => {
@@ -416,6 +422,7 @@ export function DesktopApp(): React.JSX.Element {
         <button className="rail-action" data-active={view === "skills"} onClick={() => { setView("skills"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">◇</span><span>技能</span></button>
         <button className="rail-action" data-active={view === "memory"} onClick={() => { setView("memory"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">⌁</span><span>长期记忆</span></button>
         <button className="rail-action" data-active={view === "mcp"} onClick={() => { setView("mcp"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">◎</span><span>MCP 服务</span></button>
+        <button className="rail-action" data-active={view === "d2c"} onClick={() => { setView("d2c"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">▤</span><span>D2C 对比</span></button>
       </nav>
       <div className="sessions-scroll">
         <div className="rail-section-title">项目</div>
@@ -449,7 +456,8 @@ export function DesktopApp(): React.JSX.Element {
     <main className="workspace-panel">
       {view === "skills" && snapshot.workspace !== undefined ? <SkillManagerView onClose={() => setView("conversation")} onError={setError} />
         : view === "memory" && snapshot.workspace !== undefined ? <MemoryManagerView onClose={() => setView("conversation")} onError={setError} />
-          : view === "mcp" && snapshot.workspace !== undefined ? <McpManagerView onClose={() => setView("conversation")} onError={setError} /> : <>
+          : view === "mcp" && snapshot.workspace !== undefined ? <McpManagerView onClose={() => setView("conversation")} onError={setError} />
+            : view === "d2c" && snapshot.workspace !== undefined ? <D2cViewer onClose={() => setView("conversation")} onError={setError} refreshKey={d2cRefreshKey} /> : <>
       <header className="workspace-header">
         <button className="mobile-rail-toggle" onClick={() => setRailOpen(true)} aria-label="打开项目栏">☰</button>
         <div className="workspace-breadcrumb">
