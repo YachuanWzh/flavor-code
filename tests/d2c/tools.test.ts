@@ -182,6 +182,34 @@ describe("D2cCompare", () => {
     expect(notifications).toEqual([expect.objectContaining({ task: "suite", reportId: output.report.reportId, pageCount: 3 })]);
   });
 
+  it("does not publish a partial multi-page batch when a later route cannot render", async () => {
+    const workspace = await tempDir();
+    const exportDir = await tempDir();
+    await writeFile(join(exportDir, "index.html"), "<title>Home</title>");
+    await writeFile(join(exportDir, "broken.html"), "<title>Broken</title>");
+    await importDesign(workspace, "suite", exportDir);
+    const projectDir = join(workspace, "app");
+    await mkdir(projectDir);
+    const healthy = fakeCapture();
+    let implementationCaptures = 0;
+    const capture: D2cCaptureService = {
+      capture: async (source, viewport, signal) => {
+        if (source.kind === "url" && ++implementationCaptures === 2) {
+          throw new Error('D2C implementation could not render: Vite compilation error\nFailed to resolve import "./styles.css"');
+        }
+        return healthy.capture(source, viewport, signal);
+      },
+    };
+    const tool = await compareTool(workspace, {
+      capture,
+      runProject: async () => ({ url: "http://127.0.0.1:4173/", stop: async () => undefined }),
+    });
+
+    await expect(tool.execute({ task: "suite", implementation: "app" }, new AbortController().signal))
+      .rejects.toThrow(/styles\.css/);
+    expect(await listReports(workspace, "suite")).toEqual([]);
+  });
+
   it("generates unique report ids within the same second", async () => {
     const workspace = await workspaceWithDesign();
     await mkdir(join(workspace, "dist"), { recursive: true });

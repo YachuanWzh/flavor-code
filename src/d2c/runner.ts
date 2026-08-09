@@ -12,7 +12,7 @@ export function parseDevServerUrl(output: string): string | undefined {
 export type D2cSpawnFn = (
   command: string,
   args: readonly string[],
-  options: { cwd: string; shell?: boolean; env?: NodeJS.ProcessEnv },
+  options: { cwd: string; shell?: boolean; env?: NodeJS.ProcessEnv; windowsHide?: boolean },
 ) => ChildProcessWithoutNullStreams;
 
 export type D2cFetchFn = (url: string, signal?: AbortSignal) => Promise<{ status: number }>;
@@ -59,6 +59,8 @@ const DEFAULT_INSTALL_TIMEOUT_MS = 8 * 60_000;
 const DEFAULT_READY_TIMEOUT_MS = 60_000;
 const DEFAULT_POLL_INTERVAL_MS = 500;
 const STOP_GRACE_MS = 3_000;
+const STOP_FORCE_GRACE_MS = 1_000;
+const TREE_KILL_TIMEOUT_MS = 5_000;
 const PROBE_TIMEOUT_MS = 5_000;
 const DIAGNOSTIC_OUTPUT_CHARS = 8_192;
 
@@ -133,11 +135,21 @@ async function terminateProcessTree(child: ChildProcessWithoutNullStreams, force
       ["/pid", String(child.pid), "/T", ...(force ? ["/F"] : [])],
       { windowsHide: true, stdio: "ignore" },
     );
-    killer.once("exit", () => resolvePromise());
-    killer.once("error", () => {
-      child.kill(force ? "SIGKILL" : "SIGTERM");
+    let settled = false;
+    const finish = (fallback: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (fallback) child.kill(force ? "SIGKILL" : "SIGTERM");
       resolvePromise();
-    });
+    };
+    const timer = setTimeout(() => {
+      killer.kill();
+      finish(true);
+    }, TREE_KILL_TIMEOUT_MS);
+    timer.unref();
+    killer.once("exit", () => finish(false));
+    killer.once("error", () => finish(true));
   });
 }
 
@@ -174,7 +186,12 @@ function runNpmInstall(
     const child = spawnFn(
       "npm",
       ["install", "--prefer-offline", "--no-audit", "--no-fund"],
-      { cwd: projectDir, shell: process.platform === "win32", env: sanitizeNpmEnvironment(environment) },
+      {
+        cwd: projectDir,
+        shell: process.platform === "win32",
+        env: sanitizeNpmEnvironment(environment),
+        windowsHide: true,
+      },
     );
     let output = "";
     const append = (chunk: Buffer): void => { output = (output + chunk.toString("utf8")).slice(-DIAGNOSTIC_OUTPUT_CHARS * 2); };
@@ -236,6 +253,17 @@ function awaitWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T
   });
 }
 
+function waitForExit(exitPromise: Promise<void>, timeoutMs: number): Promise<void> {
+  return new Promise((resolvePromise) => {
+    const timer = setTimeout(resolvePromise, timeoutMs);
+    timer.unref();
+    exitPromise.then(() => {
+      clearTimeout(timer);
+      resolvePromise();
+    });
+  });
+}
+
 /**
  * Runs a Vite-based frontend project (Vue or React) for D2C comparison:
  * installs dependencies when missing, starts the dev server, waits until it
@@ -282,11 +310,11 @@ export async function runFrontendProject(
   const child = spawnFn(
     options.nodeCommand ?? "node",
     [viteReal, "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
-    { cwd: resolved },
+    { cwd: resolved, windowsHide: true },
   );
   let output = "";
   let exited = false;
-  let stopping = false;
+  let stopPromise: Promise<void> | undefined;
   let exitCode: number | null = null;
   let processError: Error | undefined;
   const exitPromise = new Promise<void>((resolvePromise) => {
@@ -307,13 +335,17 @@ export async function runFrontendProject(
   child.stdout.on("data", append);
   child.stderr.on("data", append);
 
-  const stop = async (): Promise<void> => {
-    if (exited || stopping) return;
-    stopping = true;
-    await terminateProcessTree(child, false);
-    const grace = wait(STOP_GRACE_MS);
-    await Promise.race([exitPromise, grace]);
-    if (exitCode === null) await terminateProcessTree(child, true);
+  const stop = (): Promise<void> => {
+    if (exited) return Promise.resolve();
+    if (stopPromise !== undefined) return stopPromise;
+    stopPromise = (async () => {
+      await terminateProcessTree(child, false);
+      await waitForExit(exitPromise, STOP_GRACE_MS);
+      if (exited) return;
+      await terminateProcessTree(child, true);
+      await waitForExit(exitPromise, STOP_FORCE_GRACE_MS);
+    })();
+    return stopPromise;
   };
 
   try {

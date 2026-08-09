@@ -35,7 +35,7 @@ Use this skill when the user wants to turn an imported Pixso design into fronten
    - \`vite.config.js\` using \`@vitejs/plugin-react\`; \`index.html\` loading \`/src/main.jsx\`.
    - \`src/main.jsx\` rendering \`<App />\`; \`src/App.jsx\` as a function component with a plain CSS file that reproduces the design.
 5. **Verify with D2C diff.** Call the \`D2cCompare\` tool with the same task name and the **project directory** as the implementation. The tool installs dependencies if needed, starts the dev server, renders the running page against the design, and shuts the server down again. It returns a similarity score plus a structured list of offsets, color deviations, font mismatches, missing and extra elements.
-6. **Repair loop.** Batch the highest-impact content and geometry fixes from each report, then re-run \`D2cCompare\`. Stop as soon as the total reaches 90 (grade 优秀 or better). Use at most three comparisons (the initial evaluation plus two batched repair rounds) unless the evaluation is invalid and the environment itself must be repaired. Never modify the design.
+6. **Repair loop.** Batch the highest-impact content and geometry fixes from each report, then re-run \`D2cCompare\`. Continue within the D2C iteration budget until the total reaches 90 (grade 优秀 or better) with no blocking content issue. Invalid evaluations and build failures must be repaired and retried. The runtime automatically expands the base iteration limit when needed, up to 10 expansions. Never modify the design.
 7. **Report.** Summarize the final score, grade and any remaining accepted deviations to the user.
 
 ## Notes
@@ -43,5 +43,6 @@ Use this skill when the user wants to turn an imported Pixso design into fronten
 - The design export is the single source of truth. Never edit files under \`.flavor/d2c/<task>/design/\`.
 - Comparison needs the desktop app to render pages; \`D2cCompare\` is unavailable in a plain terminal session.
 - Keep each repair cycle focused, but batch related high-impact fixes before re-comparing instead of running one comparison per issue.
+- Never retry the same \`D2cCompare\` failure unchanged. First repair the project using the reported capture stage, Renderer diagnostics or Process output. If it cannot be repaired, stop and report the concrete error instead of launching another preview process.
 `;
 }

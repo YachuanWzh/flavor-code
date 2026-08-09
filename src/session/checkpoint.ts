@@ -147,6 +147,7 @@ async function gitFiles(workspace: string): Promise<string[]> {
       encoding: "buffer",
       windowsHide: true,
       maxBuffer: 16 * 1024 * 1024,
+      timeout: 30_000,
     }, (error, stdout, stderr) => {
       if (error !== null) {
         reject(new Error(`Cannot enumerate checkpoint files with git: ${stderr.toString("utf8").trim() || error.message}`));

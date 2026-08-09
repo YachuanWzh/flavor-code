@@ -1,6 +1,8 @@
 import type { ExecutionEnvironment } from "../execution/types.js";
 import type { SessionOutput } from "../ui/session.js";
 
+const DEFAULT_VERIFICATION_TIMEOUT_MS = 10 * 60_000;
+
 export interface EvaluationSpec {
   name: string;
   workspace: string;
@@ -59,7 +61,7 @@ export async function runEvaluation(spec: EvaluationSpec, dependencies: Evaluati
       command: check.command,
       args: check.args,
       cwd: spec.workspace,
-      ...(check.timeoutMs === undefined ? {} : { timeoutMs: check.timeoutMs }),
+      timeoutMs: check.timeoutMs ?? DEFAULT_VERIFICATION_TIMEOUT_MS,
     });
     verification.push({
       command: [check.command, ...check.args].join(" "),

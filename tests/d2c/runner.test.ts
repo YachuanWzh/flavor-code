@@ -25,6 +25,8 @@ interface SpawnCall {
   args: readonly string[];
   cwd: string;
   env?: NodeJS.ProcessEnv;
+  shell?: boolean;
+  windowsHide?: boolean;
 }
 
 interface FakeChild {
@@ -69,7 +71,12 @@ function createFakeChild(): FakeChild {
 
 interface FakeSpawn {
   calls: SpawnCall[];
-  spawn: (command: string, args: readonly string[], options: { cwd: string; env?: NodeJS.ProcessEnv }) => ChildProcessWithoutNullStreams;
+  spawn: (command: string, args: readonly string[], options: {
+    cwd: string;
+    env?: NodeJS.ProcessEnv;
+    shell?: boolean;
+    windowsHide?: boolean;
+  }) => ChildProcessWithoutNullStreams;
 }
 
 function fakeSpawn(children: FakeChild[]): FakeSpawn {
@@ -77,7 +84,14 @@ function fakeSpawn(children: FakeChild[]): FakeSpawn {
   return {
     calls,
     spawn: (command, args, options) => {
-      calls.push({ command, args: [...args], cwd: options.cwd, ...(options.env === undefined ? {} : { env: options.env }) });
+      calls.push({
+        command,
+        args: [...args],
+        cwd: options.cwd,
+        ...(options.env === undefined ? {} : { env: options.env }),
+        ...(options.shell === undefined ? {} : { shell: options.shell }),
+        ...(options.windowsHide === undefined ? {} : { windowsHide: options.windowsHide }),
+      });
       const child = children[calls.length - 1] ?? createFakeChild();
       return child as unknown as ChildProcessWithoutNullStreams;
     },
@@ -199,10 +213,11 @@ describe("runFrontendProject", () => {
     expect(spawn.calls[0]?.command).toBe("node");
     expect(spawn.calls[0]?.args).toEqual([viteBin, "--host", "127.0.0.1", "--port", "43123", "--strictPort"]);
     expect(spawn.calls[0]?.cwd).toBe(projectDir);
+    expect(spawn.calls[0]?.windowsHide).toBe(true);
     expect(fetches.length).toBeGreaterThan(0);
     expect(fetches[0]).toBe("http://127.0.0.1:43123/");
 
-    await running.stop();
+    await Promise.all([running.stop(), running.stop()]);
     expect(server.signals).toContain("SIGTERM");
     await running.stop(); // idempotent
     expect(server.signals.filter((signal) => signal === "SIGTERM")).toHaveLength(1);
@@ -226,6 +241,7 @@ describe("runFrontendProject", () => {
     await until(() => spawn.calls.length === 1);
     expect(spawn.calls[0]?.command).toBe("npm");
     expect(spawn.calls[0]?.args).toEqual(["install", "--prefer-offline", "--no-audit", "--no-fund"]);
+    expect(spawn.calls[0]?.windowsHide).toBe(true);
 
     await installViteBin(projectDir);
     installer.emitExit(0);

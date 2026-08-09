@@ -17,6 +17,31 @@ const DEFAULT_VIEWPORT = { width: 1280, height: 800 };
 const MAX_CAPTURE_DIMENSION = 4096;
 const LOAD_TIMEOUT_MS = 30_000;
 const MAX_ELEMENTS = 2_000;
+const MAX_RENDER_FAILURE_CHARS = 8_192;
+const RENDER_ERROR_SETTLE_MS = 150;
+const MAX_CAPTURE_DIAGNOSTICS = 12;
+
+function cleanCaptureDiagnostic(value: string): string {
+  return value
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, 1_000);
+}
+
+function captureFailureMessage(
+  stage: string,
+  url: string,
+  cause: unknown,
+  diagnostics: readonly string[],
+): string {
+  const detail = cleanCaptureDiagnostic(cause instanceof Error ? cause.message : String(cause));
+  const recent = diagnostics.slice(-MAX_CAPTURE_DIAGNOSTICS);
+  return [
+    `D2C capture failed during ${stage} for ${url}: ${detail || "unknown renderer error"}`,
+    ...(recent.length === 0 ? [] : [`Renderer diagnostics:\n${recent.join("\n")}`]),
+  ].join("\n\n");
+}
 
 export function fitCaptureSize(width: number, height: number): { width: number; height: number } {
   const safeWidth = Number.isFinite(width) && width > 0 ? width : 1;
@@ -115,6 +140,40 @@ export const D2C_CAPTURE_DIAGNOSTICS_SCRIPT = `(() => {
     clipped: naturalWidth > window.innerWidth + 1 || naturalHeight > window.innerHeight + 1,
   };
 })()`;
+
+export const D2C_RENDER_HEALTH_SCRIPT = `(() => {
+  const readableText = (element) => {
+    const root = element.shadowRoot || element;
+    const nodes = root instanceof ShadowRoot
+      ? Array.from(root.children).filter((child) => !["STYLE", "SCRIPT"].includes(child.tagName))
+      : [root];
+    return nodes.map((node) => node.innerText || node.textContent || "").join("\\n").trim();
+  };
+  const vite = document.querySelector("vite-error-overlay");
+  if (vite) return { kind: "Vite compilation error", message: readableText(vite) };
+  const webpack = document.querySelector("iframe#webpack-dev-server-client-overlay");
+  if (webpack) {
+    let message = "Webpack development error overlay is visible";
+    try { message = webpack.contentDocument?.body?.innerText?.trim() || message; } catch {}
+    return { kind: "Webpack compilation error", message };
+  }
+  return null;
+})()`;
+
+/** Converts the untrusted render-health payload into a bounded tool error. */
+export function formatD2cRenderFailure(raw: unknown): string | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const record = raw as Record<string, unknown>;
+  if (typeof record.kind !== "string") return undefined;
+  const kind = record.kind.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 160);
+  if (kind.length === 0) return undefined;
+  const message = (typeof record.message === "string" ? record.message : "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, MAX_RENDER_FAILURE_CHARS);
+  return `D2C implementation could not render: ${kind}${message.length === 0 ? "" : `\n\n${message}`}`;
+}
 
 // Collects visible, styled elements for the DOM-level diff. Runs inside the
 // hidden capture window, so it must be self-contained and side-effect free.
@@ -237,16 +296,34 @@ function awaitWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T
   });
 }
 
+async function executeCaptureScript<T>(
+  window: BrowserWindow,
+  url: string,
+  stage: string,
+  script: string,
+  signal: AbortSignal,
+  diagnostics: readonly string[],
+): Promise<T> {
+  try {
+    return await awaitWithSignal(window.webContents.executeJavaScript(script) as Promise<T>, signal);
+  } catch (cause) {
+    if (signal.aborted) throw signal.reason ?? cause;
+    throw new Error(captureFailureMessage(stage, url, cause, diagnostics));
+  }
+}
+
 async function captureFullPage(
   window: BrowserWindow,
   width: number,
   height: number,
+  url: string,
   signal: AbortSignal,
+  diagnostics: readonly string[],
 ): Promise<Buffer> {
-  const viewport = await awaitWithSignal(window.webContents.executeJavaScript(`(() => ({
+  const viewport = await executeCaptureScript<{ width: number; height: number }>(window, url, "read viewport", `(() => ({
     width: window.innerWidth,
     height: window.innerHeight,
-  }))()`) as Promise<{ width: number; height: number }>, signal);
+  }))()`, signal, diagnostics);
   const viewportWidth = Math.max(1, Math.floor(finiteNumber(viewport.width)));
   const viewportHeight = Math.max(1, Math.floor(finiteNumber(viewport.height)));
   const tiles: D2cCaptureTile[] = [];
@@ -255,10 +332,10 @@ async function captureFullPage(
     for (const y of captureTileOffsets(height, viewportHeight)) {
       for (const x of captureTileOffsets(width, viewportWidth)) {
         signal.throwIfAborted();
-        const position = await awaitWithSignal(window.webContents.executeJavaScript(`new Promise((resolve) => {
+        const position = await executeCaptureScript<{ x: number; y: number }>(window, url, `scroll to tile ${x},${y}`, `new Promise((resolve) => {
           window.scrollTo(${x}, ${y});
           requestAnimationFrame(() => requestAnimationFrame(() => resolve({ x: window.scrollX, y: window.scrollY })));
-        })`) as Promise<{ x: number; y: number }>, signal);
+        })`, signal, diagnostics);
         const tileX = Math.max(0, Math.floor(finiteNumber(position.x)));
         const tileY = Math.max(0, Math.floor(finiteNumber(position.y)));
         const key = `${tileX}:${tileY}`;
@@ -315,6 +392,22 @@ export function createD2cCaptureService(): D2cCaptureService {
           partition: `d2c-capture-${randomUUID()}`,
         },
       });
+      const rendererDiagnostics: string[] = [];
+      const recordRendererDiagnostic = (message: string): void => {
+        const clean = cleanCaptureDiagnostic(message);
+        if (clean.length === 0) return;
+        rendererDiagnostics.push(clean);
+        if (rendererDiagnostics.length > MAX_CAPTURE_DIAGNOSTICS) rendererDiagnostics.shift();
+      };
+      const onConsoleMessage = (_event: Event, level: number, message: string, line: number, sourceId: string): void => {
+        if (level < 2) return;
+        recordRendererDiagnostic(`${level === 3 ? "error" : "warning"}: ${message}${sourceId ? ` (${sourceId}:${line})` : ""}`);
+      };
+      const onRenderProcessGone = (_event: Event, details: { reason: string; exitCode: number }): void => {
+        recordRendererDiagnostic(`renderer process ${details.reason} (exit ${details.exitCode})`);
+      };
+      window.webContents.on("console-message", onConsoleMessage);
+      window.webContents.on("render-process-gone", onRenderProcessGone);
       window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
       const guardNavigation = (event: Event, target: string): void => {
         if (!isAllowedCaptureNavigation(url, target)) event.preventDefault();
@@ -336,10 +429,9 @@ export function createD2cCaptureService(): D2cCaptureService {
         await awaitWithSignal(window.loadURL(url), captureSignal);
         let captureSize = requested;
         for (let attempt = 0; attempt < 2; attempt += 1) {
-          await awaitWithSignal(window.webContents.executeJavaScript(D2C_CAPTURE_PREPARATION_SCRIPT), captureSignal);
-          const measured = await awaitWithSignal(
-            window.webContents.executeJavaScript(MEASURE_SCRIPT) as Promise<{ width: number; height: number }>,
-            captureSignal,
+          await executeCaptureScript(window, url, "prepare page", D2C_CAPTURE_PREPARATION_SCRIPT, captureSignal, rendererDiagnostics);
+          const measured = await executeCaptureScript<{ width: number; height: number }>(
+            window, url, "measure page", MEASURE_SCRIPT, captureSignal, rendererDiagnostics,
           );
           const next = fitCaptureSize(
             Math.max(requested.width, finiteNumber(measured.width)),
@@ -349,13 +441,28 @@ export function createD2cCaptureService(): D2cCaptureService {
           captureSize = next;
           window.setContentSize(captureSize.width, captureSize.height);
         }
-        await awaitWithSignal(window.webContents.executeJavaScript(D2C_CAPTURE_PREPARATION_SCRIPT), captureSignal);
-        const raw = await awaitWithSignal(window.webContents.executeJavaScript(COLLECT_SCRIPT) as Promise<RawSnapshot>, captureSignal);
+        await executeCaptureScript(window, url, "finalize page", D2C_CAPTURE_PREPARATION_SCRIPT, captureSignal, rendererDiagnostics);
+        let rawRenderFailure = await executeCaptureScript<unknown>(
+          window, url, "check render health", D2C_RENDER_HEALTH_SCRIPT, captureSignal, rendererDiagnostics,
+        );
+        if (formatD2cRenderFailure(rawRenderFailure) === undefined && source.kind === "url") {
+          await executeCaptureScript(
+            window, url, "wait for render errors", `new Promise((resolve) => setTimeout(resolve, ${RENDER_ERROR_SETTLE_MS}))`,
+            captureSignal, rendererDiagnostics,
+          );
+          rawRenderFailure = await executeCaptureScript<unknown>(
+            window, url, "recheck render health", D2C_RENDER_HEALTH_SCRIPT, captureSignal, rendererDiagnostics,
+          );
+        }
+        const renderFailure = formatD2cRenderFailure(rawRenderFailure);
+        if (renderFailure !== undefined) throw new Error(renderFailure);
+        const raw = await executeCaptureScript<RawSnapshot>(
+          window, url, "collect DOM", COLLECT_SCRIPT, captureSignal, rendererDiagnostics,
+        );
         const collected = sanitizeSnapshot(raw);
         const snapshot = { ...collected, width: captureSize.width, height: captureSize.height };
-        const rawDiagnostics = await awaitWithSignal(
-          window.webContents.executeJavaScript(D2C_CAPTURE_DIAGNOSTICS_SCRIPT) as Promise<Partial<D2cCaptureDiagnostics>>,
-          captureSignal,
+        const rawDiagnostics = await executeCaptureScript<Partial<D2cCaptureDiagnostics>>(
+          window, url, "collect diagnostics", D2C_CAPTURE_DIAGNOSTICS_SCRIPT, captureSignal, rendererDiagnostics,
         );
         const naturalWidth = finiteNumber(rawDiagnostics.naturalWidth);
         const naturalHeight = finiteNumber(rawDiagnostics.naturalHeight);
@@ -368,11 +475,15 @@ export function createD2cCaptureService(): D2cCaptureService {
           naturalHeight,
           clipped: naturalWidth > captureSize.width + 1 || naturalHeight > captureSize.height + 1,
         };
-        const screenshotPng = await captureFullPage(window, captureSize.width, captureSize.height, captureSignal);
+        const screenshotPng = await captureFullPage(
+          window, captureSize.width, captureSize.height, url, captureSignal, rendererDiagnostics,
+        );
         return { ...snapshot, screenshotPng, diagnostics };
       } finally {
         captureSignal.removeEventListener("abort", destroyOnAbort);
         captureSession.removeListener("will-download", preventDownload);
+        window.webContents.removeListener("console-message", onConsoleMessage);
+        window.webContents.removeListener("render-process-gone", onRenderProcessGone);
         if (!window.isDestroyed()) window.destroy();
       }
     },

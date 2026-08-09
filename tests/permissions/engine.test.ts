@@ -58,6 +58,8 @@ describe("PermissionEngine", () => {
     expect(engine.decide({ agent: "main", tool: "Write", paths: [join(workspace, "src", "App.tsx")] }).decision).toBe("allow");
     expect(engine.decide({ agent: "main", tool: "Move", paths: [join(workspace, "a"), join(workspace, "b")] }).decision).toBe("allow");
     expect(engine.decide({ agent: "main", tool: "Shell", command: "npm install", cwd: workspace }).decision).toBe("allow");
+    expect(engine.decide({ agent: "main", tool: "Shell", command: "npm run build", cwd: workspace }).decision).toBe("allow");
+    expect(engine.decide({ agent: "main", tool: "Shell", command: "npm test", cwd: workspace }).decision).toBe("allow");
     expect(engine.decide({ agent: "main", tool: "mcp__docs__search" }).decision).toBe("allow");
     expect(engine.decide({ agent: "main", tool: "mcp__github__delete_file" }).decision).toBe("ask");
     expect(engine.decide({ agent: "main", tool: "CustomD2cTool" }).decision).toBe("allow");
@@ -81,6 +83,25 @@ describe("PermissionEngine", () => {
     expect(engine.decide({ agent: "main", tool: "Write", paths: [join(outside, "App.tsx")] }).decision).toBe("deny");
     expect(engine.decide({ agent: "main", tool: "Shell", command: "npm install", cwd: outside }).decision).toBe("deny");
     expect(engine.decide({ agent: "main", tool: "Shell", command: "rm -rf /", cwd: workspace }).decision).toBe("deny");
+  });
+
+  it("requires D2cCompare to own the preview-server lifecycle", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-d2c-preview-permissions-"));
+    const engine = new PermissionEngine({ workspace, mode: "auto", profile: "d2c" });
+    const commands = [
+      { command: "cmd /c start /b npm run dev > vite.log 2>&1" },
+      { command: "npm", args: ["run", "dev"] },
+      { command: "npm.cmd", args: ["start"] },
+      { command: "npx vite --host 127.0.0.1" },
+      { command: "pnpm preview" },
+      { command: "node node_modules/vite/bin/vite.js" },
+    ];
+    for (const command of commands) {
+      expect(engine.decide({ agent: "main", tool: "Shell", cwd: workspace, ...command }), command.command).toMatchObject({
+        decision: "deny",
+        reason: expect.stringContaining("D2cCompare"),
+      });
+    }
   });
 
   it("switches the D2C profile without changing the configured permission mode", () => {

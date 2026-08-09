@@ -9,6 +9,7 @@ import type { ToolResult } from "../tools/types.js";
 import type { AgentError, AgentEvent, AgentRunRequest } from "./types.js";
 
 const DEFAULT_MAX_ITERATIONS = 40;
+const D2C_MAX_ITERATION_EXTENSIONS = 10;
 const DEFAULT_MODEL_ATTEMPTS = 3;
 const FALLBACK_MODEL_ATTEMPTS = 2;
 const RETRY_BASE_DELAY_MS = 1_000;
@@ -47,6 +48,7 @@ export interface AgentLoopOptions {
 
 export class AgentLoop {
   readonly #options: Required<Pick<AgentLoopOptions, "maxIterations" | "softLimitFactor" | "extendIterations" | "maxExtensions" | "agent">> & Omit<AgentLoopOptions, "maxIterations" | "softLimitFactor" | "extendIterations" | "maxExtensions" | "agent">;
+  #iterationLimitMode: "standard" | "d2c" = "standard";
 
   constructor(options: AgentLoopOptions) {
     const envOverride = envMaxIterations();
@@ -69,6 +71,7 @@ export class AgentLoop {
   }
 
   get modelId(): string { return this.#options.modelId; }
+  get iterationLimitMode(): "standard" | "d2c" { return this.#iterationLimitMode; }
 
   setModel(modelId: string): void {
     this.#options.registry.get(modelId);
@@ -78,6 +81,11 @@ export class AgentLoop {
   setFallbackModel(modelId: string): void {
     this.#options.registry.get(modelId);
     this.#options.fallbackModelId = modelId;
+  }
+
+  /** D2C keeps a hard cap, but may automatically expand it up to ten times. */
+  setIterationLimitMode(mode: "standard" | "d2c"): void {
+    this.#iterationLimitMode = mode;
   }
 
   async *run(request: AgentRunRequest): AsyncIterable<AgentEvent> {
@@ -91,6 +99,10 @@ export class AgentLoop {
     let modelInvocation = 0;
 
     let maxIterations = this.#options.maxIterations;
+    const iterationLimitMode = this.#iterationLimitMode;
+    const maxExtensions = iterationLimitMode === "d2c"
+      ? D2C_MAX_ITERATION_EXTENSIONS
+      : this.#options.maxExtensions;
     let extensions = 0;
     let warned = false;
 
@@ -108,13 +120,17 @@ export class AgentLoop {
         const remaining = maxIterations - iteration;
         yield {
           type: "warning",
-          message: `Approaching iteration limit: ${iteration}/${maxIterations} rounds used. ${remaining} rounds remaining before automatic circuit breaker.`,
+          message: iterationLimitMode === "d2c"
+            ? `Approaching D2C base iteration limit: ${iteration}/${maxIterations} rounds used. ${remaining} rounds remain before automatic expansion (up to ${maxExtensions} expansions).`
+            : `Approaching iteration limit: ${iteration}/${maxIterations} rounds used. ${remaining} rounds remaining before automatic circuit breaker.`,
         };
       }
 
       // 方案4+方案3: hard limit with progress-aware auto-extension
       if (iteration >= maxIterations) {
-        if (this.#options.hasActiveProgress?.() && extensions < this.#options.maxExtensions) {
+        const canAutoExtend = extensions < maxExtensions
+          && (iterationLimitMode === "d2c" || this.#options.hasActiveProgress?.() === true);
+        if (canAutoExtend) {
           const previous = maxIterations;
           maxIterations += this.#options.extendIterations;
           extensions += 1;
@@ -126,7 +142,9 @@ export class AgentLoop {
           };
           yield {
             type: "warning",
-            message: `Iteration limit ${previous} reached but task progress is active. Auto-extending by ${this.#options.extendIterations} rounds (extension ${extensions}/${this.#options.maxExtensions}).`,
+            message: iterationLimitMode === "d2c"
+              ? `D2C iteration limit ${previous} reached. Auto-expanding by ${this.#options.extendIterations} rounds (expansion ${extensions}/${maxExtensions}).`
+              : `Iteration limit ${previous} reached but task progress is active. Auto-extending by ${this.#options.extendIterations} rounds (extension ${extensions}/${maxExtensions}).`,
           };
           continue;
         }

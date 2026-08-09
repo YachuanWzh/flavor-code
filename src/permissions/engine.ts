@@ -155,6 +155,12 @@ export class PermissionEngine {
     if (analysis.catastrophic) {
       return { decision: "deny", reason: "Explicitly forbidden system-level command" };
     }
+    if (isD2cManagedPreviewCommand(analysis.command)) {
+      return {
+        decision: "deny",
+        reason: "D2C preview lifecycle is managed by D2cCompare; pass the project directory directly instead of starting npm/Vite manually",
+      };
+    }
     if (assessD2cCommandPaths(analysis.command, cwd, this.#workspace) === "deny") {
       return { decision: "deny", reason: "D2C command arguments escape the workspace" };
     }
@@ -287,6 +293,28 @@ function isWithin(root: string, candidate: string): boolean {
 }
 
 interface ParsedCommand { executable: string; args: string[]; raw: string }
+
+function isD2cManagedPreviewCommand(command: ParsedCommand): boolean {
+  const executable = command.executable.replace(/\.cmd$/i, "");
+  const args = command.args.map((arg) => arg.toLowerCase());
+  if (executable === "npm") {
+    if (args[0] === "start") return true;
+    if (args[0] === "run" && ["dev", "start", "serve", "preview"].includes(args[1] ?? "")) return true;
+    if (args[0] === "exec" && args.some((arg) => arg === "vite")) return true;
+  }
+  if (["pnpm", "yarn", "bun"].includes(executable)) {
+    const script = args[0] === "run" ? args[1] : args[0];
+    if (["dev", "start", "serve", "preview"].includes(script ?? "")) return true;
+  }
+  if (executable === "npx" && args.some((arg) => arg === "vite")) return true;
+  if (executable === "vite") return true;
+  if (executable === "node" && args.some((arg) => /(?:^|[\\/])vite[\\/]bin[\\/]vite(?:\.js)?$/i.test(arg))) return true;
+
+  // `cmd /c start /b ...` is unwrapped by the parser, so inspect the retained
+  // inner command text as well as structured argv. This is the exact pattern
+  // that can leave npm.cmd running as `cmd /K` with inherited stdio handles.
+  return /(?:^|[\s;&|])(?:npm(?:\.cmd)?\s+(?:run\s+)?(?:dev|start|serve|preview)|(?:pnpm|yarn|bun)(?:\.cmd)?\s+(?:run\s+)?(?:dev|start|serve|preview)|npx(?:\.cmd)?\s+(?:[^\s]+\s+)*vite|npm(?:\.cmd)?\s+exec\s+(?:--\s+)?vite|vite(?:\.cmd)?|node(?:\.exe)?\s+[^\s]*vite[\\/]bin[\\/]vite(?:\.js)?)(?:\s|$)/i.test(command.raw);
+}
 
 interface CommandAnalysis {
   command: ParsedCommand;

@@ -317,6 +317,8 @@ describe("LocalHarness", () => {
     });
     harness.setPermissionProfile("d2c");
     const child = harness.createSubagent(node("d2c-child"));
+    expect(harness.main.loop.iterationLimitMode).toBe("d2c");
+    expect(child.loop.iterationLimitMode).toBe("d2c");
 
     await expect(child.runtime.execute(
       { name: "Write", input: { path: "generated.tsx" } }, { agent: "subagent" },
@@ -325,6 +327,9 @@ describe("LocalHarness", () => {
       { name: "Delete", input: { path: "generated.tsx" } }, { agent: "subagent" },
     )).resolves.toMatchObject({ ok: true });
     expect(approvals).toEqual(["subagent:Delete"]);
+    harness.setPermissionProfile("standard");
+    expect(harness.main.loop.iterationLimitMode).toBe("standard");
+    expect(child.loop.iterationLimitMode).toBe("standard");
     child.dispose();
     harness.dispose();
   });

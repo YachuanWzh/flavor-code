@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import type { D2cElementDiff, D2cRect, D2cUnmatchedElement } from "../../d2c/types.js";
 import type { D2cImportResult, D2cReportListItem, D2cReportView } from "../contracts.js";
-import { fitCanvas, focusCanvasRect, zoomCanvasAt, type CanvasTransform } from "./d2c-canvas.js";
+import { buildD2cAxisMeasurements, fitCanvas, focusCanvasRect, zoomCanvasAt, type CanvasTransform } from "./d2c-canvas.js";
 import type { D2cExecutionPhase, D2cFramework, D2cPendingTask, D2cProgressActivity } from "./d2c-progress.js";
 
 interface D2cViewerProps {
@@ -33,9 +33,11 @@ function buildTaskPrompt(
     `执行 D2C 任务“${task}”：Pixso 设计稿已导入 .flavor/d2c/${task}/design/（入口 ${entryHtml}，共 ${fileCount} 个文件）。`,
     `设计稿包含 ${pages.length} 个页面：${pagePlan}。请为每个页面生成同名 HTML 入口，保证 D2cCompare 可逐页访问。`,
     `请用 ${frameworkLabel} 像素级实现该设计稿，在 src/d2c-output/${task}/ 生成可运行的 Vite 项目。`,
+    "不要用 Shell 手动执行 npm run dev、npm start、vite、start /b 或其他常驻预览命令；直接把项目目录传给 D2cCompare，由它负责安装依赖、启动、探活和关闭服务器。",
     "完成后调用 D2cCompare 对比设计稿与运行中的实现。根据报告修复实现代码，不要修改设计稿；评测无效时先修复环境问题。",
-    "为控制耗时，最多调用 3 次 D2cCompare（首次评测 + 两轮集中修复）；每轮批量处理高影响内容与布局问题，达到 90 分后立即结束。",
+    "在 D2C 轮次预算内持续调用 D2cCompare 并迭代修复，直到达到 90 分且不存在阻断性内容问题；评测无效或构建失败时先修复环境和代码，再继续评测。系统在达到基础轮次上限时会自动扩容，最多 10 次。",
     "如果 D2cCompare 失败，优先使用错误中附带的 npm/Vite 进程输出修复项目；不要读取工作区外的 npm 源码或缓存日志。",
+    "同一个 D2cCompare 错误连续出现时禁止原样重试；必须先根据错误阶段、Renderer diagnostics 或 Process output 修改相关代码。无法修复时停止评测并汇报具体错误，不要继续启动预览进程。",
     "以报告的验收结论为准，文本、图片等内容错误不得用高像素分绕过，最后汇报总分、可信度和未解决问题。",
   ].join("\n");
 }
@@ -73,6 +75,16 @@ export async function importAndDispatchD2cTask(
 type D2cViewMode = "overlay" | "wipe" | "blink" | "design" | "implementation" | "heatmap";
 type IssueFilter = "all" | "blocking" | "content" | "geometry";
 
+export function d2cReportViewPolicy(status: "valid" | "warning" | "invalid" | undefined): {
+  defaultMode: D2cViewMode;
+  modes: readonly D2cViewMode[];
+  showComparison: boolean;
+} {
+  return status === "invalid"
+    ? { defaultMode: "implementation", modes: ["implementation", "design"], showComparison: false }
+    : { defaultMode: "overlay", modes: Object.keys(MODE_LABELS) as D2cViewMode[], showComparison: true };
+}
+
 const MODE_LABELS: Record<D2cViewMode, string> = {
   overlay: "叠加",
   wipe: "拉帘",
@@ -94,7 +106,6 @@ export function resultPresentation(input: {
     return {
       primary: "—",
       label: "评测未完成",
-      diagnostic: `已采集区域相似度 ${input.total.toFixed(1)}`,
       showConfidence: false,
     };
   }
@@ -153,6 +164,54 @@ function EvidenceCrop({ src, rect, canvas, label }: { src: string; rect: D2cRect
 
 function rectStyle(rect: D2cRect): React.CSSProperties {
   return { left: rect.x, top: rect.y, width: rect.width, height: rect.height };
+}
+
+function D2cPixelMeasurements({ design, implementation, canvas, scale }: {
+  design: D2cRect;
+  implementation: D2cRect;
+  canvas: { width: number; height: number };
+  scale: number;
+}): React.JSX.Element | null {
+  const measurements = buildD2cAxisMeasurements(design, implementation, canvas, scale);
+  if (measurements.length === 0) return null;
+
+  const safeScale = Math.max(0.01, scale);
+  const tick = 5 / safeScale;
+  const labelHeight = 18 / safeScale;
+  const labelPadding = 12 / safeScale;
+  const fontSize = 10 / safeScale;
+
+  return <svg className="d2c-measurement" viewBox={`0 0 ${canvas.width} ${canvas.height}`}
+    role="img" aria-label={measurements.map((item) => `${item.axis === "x" ? "横向" : "纵向"}偏移 ${item.label}`).join("，")}>
+    {measurements.map((measurement) => {
+      const horizontal = measurement.axis === "x";
+      const centerX = (measurement.start.x + measurement.end.x) / 2;
+      const centerY = (measurement.start.y + measurement.end.y) / 2;
+      const labelWidth = (measurement.label.length * 6.2) / safeScale + labelPadding;
+      const direction = measurement.delta > 0
+        ? horizontal ? "向右" : "向下"
+        : horizontal ? "向左" : "向上";
+      return <g key={measurement.axis} className="d2c-measurement-axis" data-axis={measurement.axis}>
+        <title>{`${horizontal ? "横向" : "纵向"}${direction}偏移 ${measurement.label}`}</title>
+        <line className="d2c-measurement-guide" x1={measurement.designGuide.start.x} y1={measurement.designGuide.start.y}
+          x2={measurement.designGuide.end.x} y2={measurement.designGuide.end.y} />
+        <line className="d2c-measurement-guide" x1={measurement.implementationGuide.start.x} y1={measurement.implementationGuide.start.y}
+          x2={measurement.implementationGuide.end.x} y2={measurement.implementationGuide.end.y} />
+        <line className="d2c-measurement-rule" x1={measurement.start.x} y1={measurement.start.y}
+          x2={measurement.end.x} y2={measurement.end.y} />
+        <line className="d2c-measurement-cap"
+          x1={measurement.start.x - (horizontal ? 0 : tick)} y1={measurement.start.y - (horizontal ? tick : 0)}
+          x2={measurement.start.x + (horizontal ? 0 : tick)} y2={measurement.start.y + (horizontal ? tick : 0)} />
+        <line className="d2c-measurement-cap"
+          x1={measurement.end.x - (horizontal ? 0 : tick)} y1={measurement.end.y - (horizontal ? tick : 0)}
+          x2={measurement.end.x + (horizontal ? 0 : tick)} y2={measurement.end.y + (horizontal ? tick : 0)} />
+        <g className="d2c-measurement-label" transform={`translate(${centerX} ${centerY})${horizontal ? "" : " rotate(-90)"}`}>
+          <rect x={-labelWidth / 2} y={-labelHeight / 2} width={labelWidth} height={labelHeight} rx={3 / safeScale} />
+          <text x={0} y={0} fontSize={fontSize}>{measurement.label}</text>
+        </g>
+      </g>;
+    })}
+  </svg>;
 }
 
 const EXECUTION_PHASES: Array<{ id: D2cExecutionPhase; label: string; detail: string }> = [
@@ -317,6 +376,7 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
       const next = await window.flavorDesktop.getD2cReport(item.task, item.reportId);
       if (request !== reportRequestRef.current) return;
       setBundle(next);
+      setMode(d2cReportViewPolicy(next.report.evaluation.status).defaultMode);
       setCreating(false);
       setSelectedIssue(undefined);
       setIssueLimit(INITIAL_ISSUE_LIMIT);
@@ -357,7 +417,7 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
   };
 
   const allIssues = useMemo<WorkbenchIssue[]>(() => {
-    if (bundle === undefined) return [];
+    if (bundle === undefined || bundle.report.evaluation.status === "invalid") return [];
     const changed = bundle.report.diffs.map((diff): WorkbenchIssue => ({
       kind: "changed", fingerprint: diff.fingerprint, label: diff.label, severity: diff.severity,
       impact: diff.impact, designRect: diff.designRect, implementationRect: diff.implRect,
@@ -418,6 +478,7 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
 
   const scores = bundle?.report.scores;
   const evaluation = bundle?.report.evaluation;
+  const availableModes = d2cReportViewPolicy(evaluation?.status).modes;
   const presentation = scores === undefined || evaluation === undefined ? undefined : resultPresentation({
     total: scores.total,
     status: evaluation.status,
@@ -519,7 +580,7 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
           </div>
           <div className="d2c-canvas-toolbar">
             <div className="d2c-mode-switch" role="tablist" aria-label="画布显示模式">
-              {(Object.keys(MODE_LABELS) as D2cViewMode[]).map((value) => <button key={value} role="tab" aria-selected={mode === value}
+              {availableModes.map((value) => <button key={value} role="tab" aria-selected={mode === value}
                 data-active={mode === value} onClick={() => setMode(value)}>{MODE_LABELS[value]}</button>)}
             </div>
             {mode === "overlay" && <label className="d2c-opacity d2c-opacity-overlay"><span>实现 {Math.round(implOpacity * 100)}%</span><input type="range" min={0} max={100}
@@ -549,7 +610,10 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
               else if (event.key === "0") actualSize();
               else if (event.key.toLowerCase() === "f") fit();
               else if (event.key.toLowerCase() === "b" && heldModeRef.current === undefined) { heldModeRef.current = mode; setMode("blink"); }
-              else if (/^[1-6]$/.test(event.key)) setMode((Object.keys(MODE_LABELS) as D2cViewMode[])[Number(event.key) - 1]!);
+              else if (/^[1-6]$/.test(event.key)) {
+                const nextMode = availableModes[Number(event.key) - 1];
+                if (nextMode !== undefined) setMode(nextMode);
+              }
             }}
             onKeyUp={(event) => { if (event.key.toLowerCase() === "b" && heldModeRef.current !== undefined) { setMode(heldModeRef.current); heldModeRef.current = undefined; } }}>
             <div className={`d2c-canvas-stage d2c-mode-${mode}`} ref={stageRef} style={{
@@ -560,6 +624,7 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
               <img className="d2c-layer d2c-layer-design" src={bundle.designPng} alt="设计稿截图" draggable={false} />
               <img className="d2c-layer d2c-layer-impl" src={bundle.implementationPng} alt="实现截图" draggable={false} />
               <img className="d2c-layer d2c-layer-heatmap" src={bundle.heatmapPng} alt="像素差异热力图" draggable={false} />
+              {evaluation.status === "invalid" && <div className="d2c-invalid-capture-badge">错误现场 · 不参与评分</div>}
               {mode === "wipe" && <button className="d2c-wipe-handle" aria-label={`拖动拉帘分界，当前 ${Math.round(wipePosition)}%`}
                 onPointerDown={(event) => { event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId); }}
                 onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) updateWipeFromPointer(event.clientX, false); }}
@@ -573,10 +638,9 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
               </div>
               {activeIssue?.designRect !== undefined && <div className="d2c-focus-box d2c-focus-design" style={rectStyle(activeIssue.designRect)}><span>设计</span></div>}
               {activeIssue?.implementationRect !== undefined && <div className="d2c-focus-box d2c-focus-implementation" style={rectStyle(activeIssue.implementationRect)}><span>实现</span></div>}
-              {activeIssue?.designRect !== undefined && activeIssue.implementationRect !== undefined && <svg className="d2c-measurement" viewBox={`0 0 ${canvas.width} ${canvas.height}`}>
-                <line x1={activeIssue.designRect.x + activeIssue.designRect.width / 2} y1={activeIssue.designRect.y + activeIssue.designRect.height / 2}
-                  x2={activeIssue.implementationRect.x + activeIssue.implementationRect.width / 2} y2={activeIssue.implementationRect.y + activeIssue.implementationRect.height / 2} />
-              </svg>}
+              {activeIssue?.designRect !== undefined && activeIssue.implementationRect !== undefined
+                && <D2cPixelMeasurements design={activeIssue.designRect} implementation={activeIssue.implementationRect}
+                  canvas={canvas} scale={transform.scale} />}
             </div>
             <aside className="d2c-difference-ruler" aria-label="垂直差异分布">
               {allIssues.slice(0, 500).map((issue) => {
@@ -594,19 +658,20 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
       {viewState === "report" && <aside className="d2c-inspector" aria-label="差异检查器">
         {bundle !== undefined && canvas !== undefined && scores !== undefined ? <>
           <section className="d2c-score-grid" aria-label="分项得分" data-status={bundle.report.evaluation.status}>
-            {bundle.report.evaluation.status === "invalid" && <p>诊断指标 · 仅代表已采集区域，不构成正式评分</p>}
-            {(["layout", "color", "typography", "content", "pixel"] as const).map((key) => scores[key] === undefined ? null : <div key={key}>
+            {bundle.report.evaluation.status === "invalid" && <p>实现页面渲染失败 · 未生成任何正式分数</p>}
+            {bundle.report.evaluation.status !== "invalid" && (["layout", "color", "typography", "content", "pixel"] as const).map((key) => scores[key] === undefined ? null : <div key={key}>
               <span>{{ layout: "布局", color: "色彩", typography: "字体", content: "内容", pixel: "像素" }[key]}</span><strong>{Math.round(scores[key]! * 100)}</strong>
               <i style={{ "--score": scores[key] } as React.CSSProperties} />
             </div>)}
           </section>
-          <div className="d2c-issue-heading"><div><h2>差异问题</h2><span>{filteredIssues.length} / {allIssues.length}</span></div>
-            <div className="d2c-issue-filters">{(["all", "blocking", "content", "geometry"] as const).map((value) => <button key={value}
+          <div className="d2c-issue-heading"><div><h2>{bundle.report.evaluation.status === "invalid" ? "错误诊断" : "差异问题"}</h2>
+            {bundle.report.evaluation.status !== "invalid" && <span>{filteredIssues.length} / {allIssues.length}</span>}</div>
+            {bundle.report.evaluation.status !== "invalid" && <div className="d2c-issue-filters">{(["all", "blocking", "content", "geometry"] as const).map((value) => <button key={value}
               data-active={issueFilter === value} onClick={() => { setIssueFilter(value); setIssueLimit(INITIAL_ISSUE_LIMIT); }}>
-              {{ all: "全部", blocking: "阻断", content: "内容", geometry: "几何" }[value]}</button>)}</div>
+              {{ all: "全部", blocking: "阻断", content: "内容", geometry: "几何" }[value]}</button>)}</div>}
           </div>
           {filteredIssues.length === 0 ? <p className="d2c-issue-empty">{bundle.report.evaluation.status === "invalid"
-            ? "已采集区域未发现差异；修复采集问题后才能形成正式结论。"
+            ? "当前截图仅用于定位渲染错误。修复项目并重新运行 D2C 后，才会生成差异清单。"
             : "当前筛选下没有差异。"}</p> : <ol className="d2c-issue-list">
             {filteredIssues.slice(0, issueLimit).map((issue) => <li key={issue.fingerprint} data-severity={issue.severity} data-selected={selectedIssue === issue.fingerprint}>
               <button className="d2c-issue-main" onClick={() => focusIssue(issue)} aria-pressed={selectedIssue === issue.fingerprint}>

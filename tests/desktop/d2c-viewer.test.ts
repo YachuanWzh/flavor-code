@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { D2cViewer, dispatchD2cTask, importAndDispatchD2cTask, resultPresentation } from "../../src/desktop/renderer/d2c-viewer.js";
+import { D2cViewer, d2cReportViewPolicy, dispatchD2cTask, importAndDispatchD2cTask, resultPresentation } from "../../src/desktop/renderer/d2c-viewer.js";
 import { applyD2cAgentProgress, createD2cPendingTask } from "../../src/desktop/renderer/d2c-progress.js";
 
 describe("dispatchD2cTask", () => {
@@ -48,12 +48,18 @@ describe("importAndDispatchD2cTask", () => {
 
     await expect(importAndDispatchD2cTask("homepage", "react", async () => imported, submit, launch)).resolves.toBe(true);
     expect(submit).toHaveBeenCalledOnce();
-    expect(submit.mock.calls[0]![0]).toContain("React");
-    expect(submit.mock.calls[0]![0]).toContain("index.html");
-    expect(submit.mock.calls[0]![0]).toContain("analytics.html");
-    expect(submit.mock.calls[0]![0]).toContain("同名 HTML 入口");
-    expect(submit.mock.calls[0]![0]).toContain("最多调用 3 次 D2cCompare");
-    expect(submit.mock.calls[0]![0]).toContain("不要读取工作区外的 npm 源码或缓存日志");
+    const prompt = submit.mock.calls[0]![0];
+    expect(prompt).toContain("React");
+    expect(prompt).toContain("index.html");
+    expect(prompt).toContain("analytics.html");
+    expect(prompt).toContain("同名 HTML 入口");
+    expect(prompt).toContain("自动扩容，最多 10 次");
+    expect(prompt).not.toContain("不限制修复轮次");
+    expect(prompt).not.toContain("最多调用 3 次 D2cCompare");
+    expect(prompt).toContain("不要读取工作区外的 npm 源码或缓存日志");
+    expect(prompt).toContain("不要用 Shell 手动执行 npm run dev");
+    expect(prompt).toContain("由它负责安装依赖、启动、探活和关闭服务器");
+    expect(prompt).toContain("同一个 D2cCompare 错误连续出现时禁止原样重试");
     expect(launch).toHaveBeenCalledWith("homepage", "react");
   });
 
@@ -67,9 +73,18 @@ describe("importAndDispatchD2cTask", () => {
 });
 
 describe("resultPresentation", () => {
+  it("shows invalid reports as implementation error evidence, never as a visual comparison", () => {
+    expect(d2cReportViewPolicy("invalid")).toEqual({
+      defaultMode: "implementation",
+      modes: ["implementation", "design"],
+      showComparison: false,
+    });
+    expect(d2cReportViewPolicy("valid")).toMatchObject({ defaultMode: "overlay", showComparison: true });
+  });
+
   it("never presents an invalid raw similarity as an official score", () => {
     expect(resultPresentation({ total: 100, status: "invalid", confidence: "low" })).toEqual({
-      primary: "—", label: "评测未完成", diagnostic: "已采集区域相似度 100.0", showConfidence: false,
+      primary: "—", label: "评测未完成", showConfidence: false,
     });
     expect(resultPresentation({ total: 96.8, status: "valid", confidence: "high" })).toEqual({
       primary: "96.8", label: "有效评分", showConfidence: true,

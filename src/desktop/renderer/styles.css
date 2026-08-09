@@ -1073,6 +1073,7 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .d2c-mode-heatmap .d2c-layer-heatmap { opacity: 1; }
 .d2c-mode-blink .d2c-layer-design { animation: d2c-blink-design 1.1s steps(1, end) infinite; }
 .d2c-mode-blink .d2c-layer-impl { animation: d2c-blink-impl 1.1s steps(1, end) infinite; }
+.d2c-invalid-capture-badge { position: absolute; z-index: 12; left: 14px; top: 14px; padding: 7px 10px; border: 1px solid rgba(255,255,255,.28); border-radius: 6px; color: #fff; background: rgba(167,42,44,.92); box-shadow: 0 5px 18px rgba(0,0,0,.3); font: 700 10px "Cascadia Code", Consolas, monospace; letter-spacing: .04em; }
 @keyframes d2c-blink-design { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
 @keyframes d2c-blink-impl { 0%, 49% { opacity: 0; } 50%, 100% { opacity: 1; } }
 .d2c-wipe-handle { position: absolute; z-index: 8; top: 0; bottom: 0; left: var(--d2c-wipe); width: 18px; padding: 0; border: 0; background: transparent; transform: translateX(-50%); cursor: ew-resize; }
@@ -1089,7 +1090,11 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .d2c-focus-implementation { border-color: var(--d2c-amber); border-style: dashed; }
 .d2c-focus-implementation > span { background: var(--d2c-amber); }
 .d2c-measurement { position: absolute; inset: 0; z-index: 5; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
-.d2c-measurement line { stroke: var(--d2c-red); stroke-width: 1.25; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+.d2c-measurement line { fill: none; stroke: var(--d2c-red); vector-effect: non-scaling-stroke; }
+.d2c-measurement-guide { stroke-width: 1; stroke-dasharray: 3 3; opacity: .62; }
+.d2c-measurement-rule, .d2c-measurement-cap { stroke-width: 1.25; }
+.d2c-measurement-label rect { fill: #b63238; stroke: rgba(255,255,255,.82); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.d2c-measurement-label text { fill: #fff; font-family: "Cascadia Code", Consolas, monospace; font-weight: 700; text-anchor: middle; dominant-baseline: central; letter-spacing: .02em; }
 .d2c-difference-ruler { position: absolute; z-index: 8; right: 8px; top: 14px; bottom: 28px; width: 12px; border-left: 1px solid #41505b; pointer-events: none; }
 .d2c-difference-ruler::before, .d2c-difference-ruler::after { position: absolute; right: 16px; color: #667680; font: 500 8px "Cascadia Code", Consolas, monospace; }
 .d2c-difference-ruler::before { content: "TOP"; top: -3px; }
@@ -1104,6 +1109,7 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .d2c-score-grid[data-status="invalid"] > div { background: #fafafa; }
 .d2c-score-grid[data-status="invalid"] strong { color: #8a9297; }
 .d2c-score-grid[data-status="invalid"] i { background: #a9b0b4; opacity: .65; }
+.d2c-score-grid[data-status="invalid"] ~ .d2c-issue-heading + .d2c-issue-empty { color: #a72a2c; }
 .d2c-score-grid > div { position: relative; display: grid; gap: 3px; padding: 8px 5px 9px; overflow: hidden; background: #fff; text-align: center; }
 .d2c-score-grid span { color: #7b8892; font-size: 8.5px; }
 .d2c-score-grid strong { color: #26323b; font: 700 14px "Cascadia Code", Consolas, monospace; }

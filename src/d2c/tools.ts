@@ -198,6 +198,14 @@ export function createD2cTools(workspace: string, options: D2cToolOptions = {}):
           const batchId = `${formatRunId(createdAt)}-${randomUUID().slice(0, 8)}`;
           const existing = new Set((await listReports(workspace, input.task)).map((item) => item.reportId));
           const reports: D2cReport[] = [];
+          const stagedPages: Array<{
+            index: number;
+            page: D2cDesignPage;
+            pageSource: D2cCaptureSource;
+            designSnapshot: CapturedPage;
+            implSnapshot: CapturedPage;
+            pixel: D2cPixelComparison;
+          }> = [];
           let reportSuffix = 1;
           const nextReportId = (): string => {
             const base = formatRunId(createdAt);
@@ -254,33 +262,39 @@ export function createD2cTools(workspace: string, options: D2cToolOptions = {}):
               throw error;
             }
             await progress("pixel-diff", "completed", `${pageContext} · 差异已计算`);
+            stagedPages.push({ index, page, pageSource, designSnapshot, implSnapshot, pixel });
+          }
 
+          // Do not publish a partial batch: every route must render and compare
+          // successfully before the first report becomes visible in the UI.
+          for (const staged of stagedPages) {
+            const pageContext = `页面 ${staged.index + 1}/${manifest.pages.length} · ${staged.page.label}`;
             let report: D2cReport;
             while (true) {
               report = buildReport({
                 task: input.task,
                 reportId: nextReportId(),
                 batchId,
-                page: { ...page, index, count: manifest.pages.length },
+                page: { ...staged.page, index: staged.index, count: manifest.pages.length },
                 createdAt,
                 design: {
-                  source: join(".flavor", "d2c", input.task, "design", page.html),
+                  source: join(".flavor", "d2c", input.task, "design", staged.page.html),
                   designHash: manifest.designHash,
-                  snapshot: { width: designSnapshot.width, height: designSnapshot.height, elements: designSnapshot.elements },
-                  capture: designSnapshot.diagnostics,
+                  snapshot: { width: staged.designSnapshot.width, height: staged.designSnapshot.height, elements: staged.designSnapshot.elements },
+                  capture: staged.designSnapshot.diagnostics,
                 },
                 implementation: {
-                  source: pageSource.kind === "url" ? pageSource.url : pageSource.path,
-                  snapshot: { width: implSnapshot.width, height: implSnapshot.height, elements: implSnapshot.elements },
-                  capture: implSnapshot.diagnostics,
+                  source: staged.pageSource.kind === "url" ? staged.pageSource.url : staged.pageSource.path,
+                  snapshot: { width: staged.implSnapshot.width, height: staged.implSnapshot.height, elements: staged.implSnapshot.elements },
+                  capture: staged.implSnapshot.diagnostics,
                 },
-                pixelMismatchRate: pixel.mismatchRate,
+                pixelMismatchRate: staged.pixel.mismatchRate,
               });
               try {
                 await writeReport(workspace, input.task, report, {
-                  designPng: designSnapshot.screenshotPng,
-                  implementationPng: implSnapshot.screenshotPng,
-                  heatmapPng: pixel.heatmapPng,
+                  designPng: staged.designSnapshot.screenshotPng,
+                  implementationPng: staged.implSnapshot.screenshotPng,
+                  heatmapPng: staged.pixel.heatmapPng,
                 });
                 break;
               } catch (cause) {

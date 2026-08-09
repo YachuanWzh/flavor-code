@@ -331,6 +331,30 @@ describe("AgentLoop", () => {
     expect(events.at(-1)).toEqual(expect.objectContaining({ type: "error", error: { code: "iteration_limit", message: expect.any(String) } }));
   });
 
+  it("auto-expands D2C iterations at most ten times before stopping", async () => {
+    const fixture = createLoop({
+      adapter: fakeAdapter(
+        Array.from({ length: 12 }, (_, index) => [
+          { type: "tool-call" as const, id: `call-${index}`, name: "echo", input: { value: "again" } },
+          { type: "done" as const, usage: { inputTokens: 1, outputTokens: 1 } },
+        ]),
+      ),
+      maxIterations: 2,
+      extendIterations: 1,
+    });
+    fixture.loop.setIterationLimitMode("d2c");
+
+    const events = await collect(fixture.loop.run({ prompt: "keep repairing" }));
+
+    expect(events.filter((event) => event.type === "limit_reached")).toHaveLength(10);
+    expect(events.filter((event) => event.type === "warning")
+      .some((event) => event.message.includes("expansion 10/10"))).toBe(true);
+    expect(events.at(-1)).toEqual({
+      type: "error",
+      error: { code: "iteration_limit", message: "Agent exceeded the 12 iteration limit" },
+    });
+  });
+
   it("turns an incomplete provider stream into a terminal typed error", async () => {
     vi.useFakeTimers();
     try {
@@ -818,6 +842,7 @@ function createLoop(options: {
   fallbackModelId?: string;
   execute?: (input: { value: string }, signal: AbortSignal) => Promise<unknown>;
   maxIterations?: number;
+  extendIterations?: number;
   recentTurns?: number;
   summarize?: () => Promise<string>;
   toolSummarize?: (input: { value: string }) => string | undefined;
@@ -857,6 +882,7 @@ function createLoop(options: {
     hooks,
     tools: tools.map((tool) => ({ name: tool.name, description: tool.description, inputSchema: { type: "object" } })),
     maxIterations: options.maxIterations ?? 4,
+    ...(options.extendIterations === undefined ? {} : { extendIterations: options.extendIterations }),
   };
   return { loop: new AgentLoop(loopOptions), runtime, context, hooks };
 }

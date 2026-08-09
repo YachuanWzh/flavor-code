@@ -6,9 +6,11 @@ import type { ToolDefinition } from "./types.js";
 import type { ExecutionEnvironment } from "../execution/types.js";
 
 export const DEFAULT_MAX_OUTPUT_BYTES = 1_048_576;
+export const DEFAULT_SHELL_TIMEOUT_MS = 10 * 60_000;
 const ELLIPSIS = Buffer.from("\u2026");
 const TERMINATION_GRACE_MS = 250;
 const TERMINATION_FAILURE_MS = 5_000;
+const STREAM_CLOSE_GRACE_MS = 500;
 
 const ShellInput = z.object({
   command: z.string().min(1),
@@ -17,7 +19,11 @@ const ShellInput = z.object({
   timeoutMs: z.coerce.number().int().positive().max(86_400_000).nullable().optional(),
 });
 
-export interface ShellToolOptions { maxOutputBytes?: number; executionEnvironment?: ExecutionEnvironment }
+export interface ShellToolOptions {
+  maxOutputBytes?: number;
+  defaultTimeoutMs?: number;
+  executionEnvironment?: ExecutionEnvironment;
+}
 export interface TruncationMetadata { truncated: boolean; originalBytes: number; limitBytes: number }
 export interface ShellResult {
   exitCode: number | null;
@@ -39,10 +45,14 @@ export function createShellTool(
 ): ShellTool {
   const root = resolve(workspace);
   const maxBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+  const defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_SHELL_TIMEOUT_MS;
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new Error("maxOutputBytes must be a positive integer");
+  if (!Number.isSafeInteger(defaultTimeoutMs) || defaultTimeoutMs <= 0 || defaultTimeoutMs > 86_400_000) {
+    throw new Error("defaultTimeoutMs must be a positive integer no greater than 86400000");
+  }
   return {
     name: "Shell",
-    description: "Run a command with an argument array inside the workspace",
+    description: "Run a bounded foreground command with an argument array inside the workspace",
     inputSchema: ShellInput,
     paths: (input) => [workingDirectory(root, input.cwd ?? undefined)],
     summarize: (input) => [input.command, ...input.args].join(" "),
@@ -53,12 +63,15 @@ export function createShellTool(
       cwd: workingDirectory(root, input.cwd ?? undefined),
     }),
     execute: async (input, signal) => {
-      if (options.executionEnvironment === undefined) return executeShell(root, input, signal, maxBytes);
+      const timeoutMs = input.timeoutMs ?? defaultTimeoutMs;
+      if (options.executionEnvironment === undefined) {
+        return executeShell(root, { ...input, timeoutMs }, signal, maxBytes);
+      }
       const result = await options.executionEnvironment.exec({
         command: input.command,
         args: input.args,
         cwd: workingDirectory(root, input.cwd ?? undefined),
-        ...(input.timeoutMs == null ? {} : { timeoutMs: input.timeoutMs }),
+        timeoutMs,
       }, signal);
       const stdout = new BoundedOutput(maxBytes);
       const stderr = new BoundedOutput(maxBytes);
@@ -106,25 +119,27 @@ export async function executeShell(
       detached: process.platform !== "win32",
     });
     let exitObserved = false;
+    let observedExitCode: number | null = null;
+    let observedSignal: NodeJS.Signals | null = null;
     let settled = false;
     let terminationReason: ShellResult["terminationReason"] = null;
     let termination: Promise<void> | undefined;
     let terminalTimer: NodeJS.Timeout | undefined;
+    let streamCloseTimer: NodeJS.Timeout | undefined;
     const terminate = (reason: Exclude<ShellResult["terminationReason"], null>) => {
-      if (
-        termination !== undefined ||
-        exitObserved ||
-        child.exitCode !== null ||
-        child.signalCode !== null
-      ) {
+      if (termination !== undefined || settled) return;
+      terminationReason = reason;
+      if (exitObserved || child.exitCode !== null || child.signalCode !== null) {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        void finishResolve(observedExitCode ?? child.exitCode, observedSignal ?? child.signalCode);
         return;
       }
-      terminationReason = reason;
       termination = terminateTree(child.pid);
       terminalTimer = setTimeout(() => finishReject(new Error(`Process did not close after ${reason} termination`)), TERMINATION_FAILURE_MS);
       terminalTimer.unref();
     };
-    const timeoutMs = input.timeoutMs ?? undefined;
+    const timeoutMs = input.timeoutMs ?? DEFAULT_SHELL_TIMEOUT_MS;
     let timer: NodeJS.Timeout | undefined;
     child.once("spawn", () => {
       if (timeoutMs === undefined || exitObserved || settled) return;
@@ -135,28 +150,43 @@ export async function executeShell(
     cancellation.addEventListener("abort", onCancel, { once: true });
     child.stdout.on("data", (chunk: Buffer) => stdout.add(chunk));
     child.stderr.on("data", (chunk: Buffer) => stderr.add(chunk));
-    child.once("exit", () => {
+    child.once("exit", (exitCode, exitSignal) => {
       exitObserved = true;
+      observedExitCode = exitCode;
+      observedSignal = exitSignal;
       if (timer !== undefined) clearTimeout(timer);
+      // A detached descendant can inherit stdout/stderr after the shell itself
+      // exits. Node waits for those streams before emitting `close`, which used
+      // to leave the tool card running forever. Preserve a short drain window,
+      // then release the parent-side streams and report the actual shell exit.
+      streamCloseTimer = setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        void finishResolve(observedExitCode, observedSignal);
+      }, STREAM_CLOSE_GRACE_MS);
+      streamCloseTimer.unref();
     });
     child.once("error", (error) => {
       finishReject(error);
     });
-    child.once("close", async (exitCode, signal) => {
-      if (termination !== undefined) await termination;
+    child.once("close", (exitCode, signal) => {
+      void finishResolve(exitCode, signal);
+    });
+    async function finishResolve(exitCode: number | null, exitSignal: NodeJS.Signals | null): Promise<void> {
       if (settled) return;
       settled = true;
       cleanup();
+      if (termination !== undefined) await termination;
       resolvePromise({
         exitCode,
-        signal,
+        signal: exitSignal,
         stdout: stdout.text(),
         stderr: stderr.text(),
         truncated: stdout.truncated || stderr.truncated,
         truncation: { stdout: stdout.metadata(), stderr: stderr.metadata() },
         terminationReason,
       });
-    });
+    }
     function finishReject(error: Error): void {
       if (settled) return;
       settled = true;
@@ -166,6 +196,7 @@ export async function executeShell(
     function cleanup(): void {
       if (timer !== undefined) clearTimeout(timer);
       if (terminalTimer !== undefined) clearTimeout(terminalTimer);
+      if (streamCloseTimer !== undefined) clearTimeout(streamCloseTimer);
       cancellation.removeEventListener("abort", onCancel);
     }
   });
@@ -233,8 +264,17 @@ async function terminateTree(pid: number | undefined): Promise<void> {
 
 function waitForProcess(child: ReturnType<typeof spawn>): Promise<void> {
   return new Promise((resolvePromise) => {
-    child.once("error", () => resolvePromise());
-    child.once("close", () => resolvePromise());
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolvePromise();
+    };
+    const timer = setTimeout(finish, TERMINATION_FAILURE_MS);
+    timer.unref();
+    child.once("error", finish);
+    child.once("close", finish);
   });
 }
 

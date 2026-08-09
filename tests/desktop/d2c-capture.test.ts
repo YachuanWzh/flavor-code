@@ -4,8 +4,10 @@ import { PNG } from "pngjs";
 import {
   D2C_CAPTURE_DIAGNOSTICS_SCRIPT,
   D2C_CAPTURE_PREPARATION_SCRIPT,
+  D2C_RENDER_HEALTH_SCRIPT,
   captureTileOffsets,
   fitCaptureSize,
+  formatD2cRenderFailure,
   isAllowedCaptureNavigation,
   stitchCaptureTiles,
 } from "../../src/desktop/d2c-capture.js";
@@ -33,6 +35,28 @@ describe("D2C capture helpers", () => {
     expect(D2C_CAPTURE_DIAGNOSTICS_SCRIPT).toContain("clipped");
   });
 
+  it("detects development-server error overlays before collecting or screenshotting", () => {
+    expect(D2C_RENDER_HEALTH_SCRIPT).toContain('querySelector("vite-error-overlay")');
+    expect(D2C_RENDER_HEALTH_SCRIPT).toContain("shadowRoot");
+    expect(D2C_RENDER_HEALTH_SCRIPT).toContain("webpack-dev-server-client-overlay");
+    expect(formatD2cRenderFailure({
+      kind: "Vite compilation error",
+      message: '[plugin:vite:import-analysis] Failed to resolve import "./styles.css"',
+    })).toContain('Failed to resolve import "./styles.css"');
+    expect(formatD2cRenderFailure(null)).toBeUndefined();
+  });
+
+  it("ships syntactically valid renderer scripts", () => {
+    for (const script of [
+      D2C_CAPTURE_PREPARATION_SCRIPT,
+      D2C_CAPTURE_DIAGNOSTICS_SCRIPT,
+      D2C_RENDER_HEALTH_SCRIPT,
+    ]) {
+      expect(() => new Function(script)).not.toThrow();
+    }
+    expect(D2C_RENDER_HEALTH_SCRIPT).toContain('join("\\n")');
+  });
+
   it("uses native window resizing and capturePage for long pages", async () => {
     const source = await import("node:fs/promises").then(({ readFile }) =>
       readFile(new URL("../../src/desktop/d2c-capture.ts", import.meta.url), "utf8"));
@@ -48,9 +72,12 @@ describe("D2C capture helpers", () => {
     const service = source.slice(source.indexOf("export function createD2cCaptureService"));
     const loadPage = service.indexOf("await awaitWithSignal(window.loadURL(url), captureSignal)");
     const resizeWindow = service.indexOf("window.setContentSize");
+    const renderHealth = service.indexOf("D2C_RENDER_HEALTH_SCRIPT");
     const capturePage = service.indexOf("await captureFullPage");
     expect(loadPage).toBeGreaterThan(-1);
     expect(loadPage).toBeLessThan(resizeWindow);
+    expect(resizeWindow).toBeLessThan(renderHealth);
+    expect(renderHealth).toBeLessThan(capturePage);
     expect(resizeWindow).toBeLessThan(capturePage);
   });
 

@@ -97,6 +97,8 @@ export class LocalHarness {
   setPermissionProfile(profile: PermissionProfile): void {
     this.#permissionProfile = profile;
     this.#mainPermissions.setProfile(profile);
+    this.main.loop.setIterationLimitMode(profile === "d2c" ? "d2c" : "standard");
+    for (const child of this.#children) child.loop.setIterationLimitMode(profile === "d2c" ? "d2c" : "standard");
   }
 
   replaceMainTools(definitions: readonly ToolDefinition<unknown>[]): void {
@@ -217,6 +219,7 @@ export class LocalHarness {
         ...(isMain && this.#options.hasActiveProgress !== undefined ? { hasActiveProgress: this.#options.hasActiveProgress } : {}),
         ...(isMain && this.#options.hallucinationGuard !== undefined ? { hallucinationGuard: this.#options.hallucinationGuard } : {}),
       });
+      loop.setIterationLimitMode(this.#permissionProfile === "d2c" ? "d2c" : "standard");
       return { get modelId() { return loop.modelId; }, context, runtime, tools, loop };
     } catch (error) {
       runtime.dispose();

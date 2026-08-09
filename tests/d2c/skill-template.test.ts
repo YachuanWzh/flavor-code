@@ -14,7 +14,10 @@ describe("d2cSkillContent", () => {
     const content = d2cSkillContent();
     expect(content).toContain("D2cImport");
     expect(content).toContain("D2cCompare");
-    expect(content).toContain("at most three comparisons");
+    expect(content).toContain("up to 10 expansions");
+    expect(content).toContain("Never retry the same `D2cCompare` failure unchanged");
+    expect(content).not.toContain("as many repair rounds as needed");
+    expect(content).not.toContain("at most three comparisons");
     expect(content).toMatch(/Vue/i);
     expect(content).toMatch(/React/i);
     expect(content).toMatch(/which framework/i);

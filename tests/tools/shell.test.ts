@@ -77,12 +77,22 @@ describe("Shell", () => {
     };
     const result = await createShellTool(process.cwd(), {
       maxOutputBytes: 10,
+      defaultTimeoutMs: 321,
       executionEnvironment,
     }).execute({ command: "node", args: [], cwd: null }, signal);
 
     expect(result.stdout).toBe("abcde…klmno");
     expect(result.truncated).toBe(true);
     expect(result.truncation.stdout).toMatchObject({ truncated: true, originalBytes: 15, limitBytes: 10 });
+    expect(executionEnvironment.exec).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 321 }), signal);
+  });
+
+  it("applies a configurable default timeout when the caller omits one", async () => {
+    const result = await createShellTool(process.cwd(), { defaultTimeoutMs: 30 }).execute({
+      command: node, args: ["-e", "setInterval(() => {}, 1000)"],
+    }, signal);
+
+    expect(result.terminationReason).toBe("timeout");
   });
 
   it("reports per-stream truncation without splitting UTF-8 code points", async () => {
@@ -110,15 +120,22 @@ describe("Shell", () => {
     expect(cancelled.terminationReason).toBe("cancelled");
   });
 
-  it("does not mark a timeout after the direct child has already exited", async () => {
+  it("releases inherited output handles shortly after the direct child exits", async () => {
     const script = [
       "const {spawn}=require('node:child_process')",
-      "spawn(process.execPath,['-e','setTimeout(()=>{},2000)'],{stdio:['ignore',1,2]}).unref()",
+      "const child=spawn(process.execPath,['-e','setTimeout(()=>{},10000)'],{stdio:['ignore',1,2]})",
+      "process.stdout.write(String(child.pid))",
+      "child.unref()",
     ].join(";");
-    const result = await createShellTool(process.cwd()).execute({
-      command: node, args: ["-e", script], timeoutMs: 750,
-    }, signal);
-    expect(result).toMatchObject({ exitCode: 0, signal: null, terminationReason: null });
+    const startedAt = Date.now();
+    const result = await createShellTool(process.cwd()).execute({ command: node, args: ["-e", script] }, signal);
+    const descendant = Number(result.stdout);
+    try {
+      expect(result).toMatchObject({ exitCode: 0, signal: null, terminationReason: null });
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+    } finally {
+      try { process.kill(descendant, "SIGKILL"); } catch { /* The inherited-stream close may already have ended it. */ }
+    }
   });
 
   it.skipIf(process.platform === "win32")("kills a TERM-resistant descendant after its parent exits", async () => {

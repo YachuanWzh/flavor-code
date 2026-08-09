@@ -19,6 +19,7 @@ export function execFileNoThrow(
       cwd: options.useCwd === false ? undefined : process.cwd(),
       env: options.env,
       encoding: "utf8",
+      windowsHide: true,
     }, (error, stdout, stderr) => {
       resolve({ stdout, stderr, code: typeof error?.code === "number" ? error.code : error ? 1 : 0,
         ...(error === null ? {} : { error: error.message }) });
