@@ -75,6 +75,21 @@ export async function importAndDispatchD2cTask(
 type D2cViewMode = "overlay" | "wipe" | "blink" | "design" | "implementation" | "heatmap";
 type IssueFilter = "all" | "blocking" | "content" | "geometry";
 
+const SCORE_ITEMS = [
+  { key: "layout", label: "布局" },
+  { key: "color", label: "色彩" },
+  { key: "typography", label: "字体" },
+  { key: "content", label: "内容" },
+  { key: "pixel", label: "像素" },
+] as const;
+
+const ISSUE_FILTER_LABELS: Record<IssueFilter, string> = {
+  all: "全部",
+  blocking: "阻断",
+  content: "内容",
+  geometry: "几何",
+};
+
 export function d2cReportViewPolicy(status: "valid" | "warning" | "invalid" | undefined): {
   defaultMode: D2cViewMode;
   modes: readonly D2cViewMode[];
@@ -143,6 +158,23 @@ function issueDetails(issue: WorkbenchIssue): string[] {
   if (diff.textIssue !== undefined) lines.push(`文本 “${diff.textIssue.expected}” → “${diff.textIssue.actual}”`);
   if (diff.imageIssue !== undefined) lines.push(`图片 ${diff.imageIssue.expected ? "应存在" : "应为空"} → ${diff.imageIssue.actual ? "实际存在" : "实际缺失"}`);
   return lines;
+}
+
+function issueMatchesFilter(issue: WorkbenchIssue, filter: IssueFilter): boolean {
+  if (filter === "blocking") return issue.severity === "major" || issue.impact >= 8;
+  if (filter === "content") return issue.kind === "missing" || issue.diff?.textIssue !== undefined || issue.diff?.imageIssue !== undefined;
+  if (filter === "geometry") {
+    return issue.diff !== undefined
+      && Math.max(Math.abs(issue.diff.dx), Math.abs(issue.diff.dy), Math.abs(issue.diff.dw), Math.abs(issue.diff.dh)) > 0;
+  }
+  return true;
+}
+
+function scoreLevel(score: number): "excellent" | "good" | "warning" | "critical" {
+  if (score >= 0.95) return "excellent";
+  if (score >= 0.9) return "good";
+  if (score >= 0.75) return "warning";
+  return "critical";
 }
 
 function EvidenceCrop({ src, rect, canvas, label }: { src: string; rect: D2cRect; canvas: { width: number; height: number }; label: string }): React.JSX.Element {
@@ -434,12 +466,16 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
     return [...changed, ...missing, ...extra].sort((left, right) => right.impact - left.impact || left.fingerprint.localeCompare(right.fingerprint));
   }, [bundle]);
 
-  const filteredIssues = useMemo(() => allIssues.filter((issue) => {
-    if (issueFilter === "blocking") return issue.severity === "major" || issue.impact >= 8;
-    if (issueFilter === "content") return issue.kind === "missing" || issue.diff?.textIssue !== undefined || issue.diff?.imageIssue !== undefined;
-    if (issueFilter === "geometry") return issue.diff !== undefined && Math.max(Math.abs(issue.diff.dx), Math.abs(issue.diff.dy), Math.abs(issue.diff.dw), Math.abs(issue.diff.dh)) > 0;
-    return true;
-  }), [allIssues, issueFilter]);
+  const issueCounts = useMemo<Record<IssueFilter, number>>(() => ({
+    all: allIssues.length,
+    blocking: allIssues.filter((issue) => issueMatchesFilter(issue, "blocking")).length,
+    content: allIssues.filter((issue) => issueMatchesFilter(issue, "content")).length,
+    geometry: allIssues.filter((issue) => issueMatchesFilter(issue, "geometry")).length,
+  }), [allIssues]);
+  const filteredIssues = useMemo(
+    () => allIssues.filter((issue) => issueMatchesFilter(issue, issueFilter)),
+    [allIssues, issueFilter],
+  );
   const activeIssue = allIssues.find((issue) => issue.fingerprint === selectedIssue);
   const annotations = allIssues.slice(0, ANNOTATION_LIMIT);
 
@@ -657,22 +693,43 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
 
       {viewState === "report" && <aside className="d2c-inspector" aria-label="差异检查器">
         {bundle !== undefined && canvas !== undefined && scores !== undefined ? <>
-          <section className="d2c-score-grid" aria-label="分项得分" data-status={bundle.report.evaluation.status}>
-            {bundle.report.evaluation.status === "invalid" && <p>实现页面渲染失败 · 未生成任何正式分数</p>}
-            {bundle.report.evaluation.status !== "invalid" && (["layout", "color", "typography", "content", "pixel"] as const).map((key) => scores[key] === undefined ? null : <div key={key}>
-              <span>{{ layout: "布局", color: "色彩", typography: "字体", content: "内容", pixel: "像素" }[key]}</span><strong>{Math.round(scores[key]! * 100)}</strong>
-              <i style={{ "--score": scores[key] } as React.CSSProperties} />
-            </div>)}
+          <section className="d2c-inspector-verdict" data-verdict={bundle.report.evaluation.verdict}>
+            <span className="d2c-verdict-mark" aria-hidden="true">{bundle.report.evaluation.verdict === "pass" ? "✓" : bundle.report.evaluation.verdict === "conditional" ? "!" : "×"}</span>
+            <div><p>{bundle.report.evaluation.status === "invalid" ? "EVALUATION INTERRUPTED" : "PAGE VERDICT"}</p>
+              <h2>{bundle.report.evaluation.verdict === "pass"
+                ? allIssues.length === 0 ? "本页已通过验收" : "已通过，仍可继续优化"
+                : bundle.report.evaluation.verdict === "conditional" ? "有差异需要确认"
+                  : bundle.report.evaluation.verdict === "invalid" ? "评测需要重新运行" : "本页尚未通过验收"}</h2>
+              <span>{bundle.report.evaluation.summary}</span></div>
+          </section>
+          <section className="d2c-score-card" aria-label="分项得分" data-status={bundle.report.evaluation.status}>
+            <header><div><p>QUALITY PROFILE</p><h2>五项质量</h2></div>
+              {bundle.report.evaluation.status !== "invalid" && <span>{SCORE_ITEMS.filter(({ key }) => (scores[key] ?? 0) >= 0.9).length} / 5 达标</span>}
+            </header>
+            {bundle.report.evaluation.status === "invalid" && <p className="d2c-score-invalid">实现页面渲染失败，当前截图仅用于诊断，不生成正式分数。</p>}
+            {bundle.report.evaluation.status !== "invalid" && <div className="d2c-score-list">{SCORE_ITEMS.map(({ key, label }) => scores[key] === undefined ? null : <div key={key} data-level={scoreLevel(scores[key]!)}>
+              <span>{label}</span><i><b style={{ "--score": scores[key] } as React.CSSProperties} /></i><strong>{Math.round(scores[key]! * 100)}</strong>
+            </div>)}</div>}
           </section>
           <div className="d2c-issue-heading"><div><h2>{bundle.report.evaluation.status === "invalid" ? "错误诊断" : "差异问题"}</h2>
             {bundle.report.evaluation.status !== "invalid" && <span>{filteredIssues.length} / {allIssues.length}</span>}</div>
             {bundle.report.evaluation.status !== "invalid" && <div className="d2c-issue-filters">{(["all", "blocking", "content", "geometry"] as const).map((value) => <button key={value}
-              data-active={issueFilter === value} onClick={() => { setIssueFilter(value); setIssueLimit(INITIAL_ISSUE_LIMIT); }}>
-              {{ all: "全部", blocking: "阻断", content: "内容", geometry: "几何" }[value]}</button>)}</div>}
+              type="button" aria-pressed={issueFilter === value} data-active={issueFilter === value}
+              onClick={() => { setIssueFilter(value); setIssueLimit(INITIAL_ISSUE_LIMIT); }}>
+              <span>{ISSUE_FILTER_LABELS[value]}</span><small>{issueCounts[value]}</small></button>)}</div>}
           </div>
-          {filteredIssues.length === 0 ? <p className="d2c-issue-empty">{bundle.report.evaluation.status === "invalid"
-            ? "当前截图仅用于定位渲染错误。修复项目并重新运行 D2C 后，才会生成差异清单。"
-            : "当前筛选下没有差异。"}</p> : <ol className="d2c-issue-list">
+          {filteredIssues.length === 0 ? <div className="d2c-issue-empty" data-kind={bundle.report.evaluation.status === "invalid" ? "invalid" : allIssues.length === 0 ? "clear" : "filtered"}>
+            <span className="d2c-empty-mark" aria-hidden="true">{bundle.report.evaluation.status === "invalid" ? "!" : allIssues.length === 0 ? "✓" : "⌁"}</span>
+            <strong>{bundle.report.evaluation.status === "invalid" ? "等待有效评测"
+              : allIssues.length === 0 ? "未发现可定位的差异" : "这个筛选下没有问题"}</strong>
+            <p>{bundle.report.evaluation.status === "invalid"
+              ? "修复项目并重新运行 D2C 后，这里会生成可定位的差异清单。"
+              : allIssues.length === 0 ? "布局、色彩、字体、内容与像素结果均已通过检查。" : "切换分类或显示全部问题，继续检查其他差异。"}</p>
+            {bundle.report.evaluation.status !== "invalid" && <div className="d2c-empty-stats"><span>阻断 <b>{issueCounts.blocking}</b></span><span>内容 <b>{issueCounts.content}</b></span><span>几何 <b>{issueCounts.geometry}</b></span></div>}
+            {bundle.report.evaluation.status !== "invalid" && (allIssues.length === 0
+              ? <button type="button" onClick={() => { setMode("overlay"); fit(); }}>查看叠加结果</button>
+              : <button type="button" onClick={() => { setIssueFilter("all"); setIssueLimit(INITIAL_ISSUE_LIMIT); }}>显示全部问题</button>)}
+          </div> : <ol className="d2c-issue-list">
             {filteredIssues.slice(0, issueLimit).map((issue) => <li key={issue.fingerprint} data-severity={issue.severity} data-selected={selectedIssue === issue.fingerprint}>
               <button className="d2c-issue-main" onClick={() => focusIssue(issue)} aria-pressed={selectedIssue === issue.fingerprint}>
                 <span className="d2c-impact">{issue.impact.toFixed(1)}</span><span><strong>{issue.label}</strong>{issueDetails(issue).map((line) => <small key={line}>{line}</small>)}</span>
