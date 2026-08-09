@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import type { PermissionMode } from "../config/schema.js";
-import { listReports, listTasks, readReport } from "../d2c/store.js";
+import { importDesign, listReports, listTasks, readReport } from "../d2c/store.js";
 import { createProductionRuntime, type ProductionRuntimeOptions } from "../production.js";
 import { SessionStore } from "../session/store.js";
 import {
@@ -22,7 +22,7 @@ import type { MemoryCandidate, MemoryEntry } from "../memory/types.js";
 import type { MemoryReviewItem } from "../memory/review.js";
 import { ProjectMcpConfigManager, type ManagedMcpServer, type ProjectMcpConfigManagerLike } from "../mcp/config-manager.js";
 import { DEFAULT_DESKTOP_MODELS, loadDesktopModels, saveDesktopModel } from "./model-config.js";
-import type { AddDesktopModelInput, D2cReportListItem, D2cReportView, DesktopEvent, DesktopMessageDelivery, DesktopModelOption, DesktopModelMutationResult, DesktopSessionSummary, DesktopSnapshot, McpServerDraft, SessionStartedPayload } from "./contracts.js";
+import type { AddDesktopModelInput, D2cImportResult, D2cReportListItem, D2cReportView, DesktopEvent, DesktopMessageDelivery, DesktopModelOption, DesktopModelMutationResult, DesktopSessionSummary, DesktopSnapshot, McpServerDraft, SessionStartedPayload } from "./contracts.js";
 
 function pngDataUrl(png: Uint8Array): string {
   return `data:image/png;base64,${Buffer.from(png).toString("base64")}`;
@@ -418,6 +418,14 @@ export class DesktopRuntimeController {
 
   async interrupt(): Promise<void> {
     this.#runtime?.session.interrupt();
+  }
+
+  /** Imports a Pixso export directory chosen by the user; same path as the D2cImport tool. */
+  async importD2cDesign(task: string, exportDir: string): Promise<D2cImportResult> {
+    const workspace = this.#workspace;
+    if (workspace === undefined) throw new Error("Open a project before importing a D2C design");
+    const manifest = await importDesign(workspace, task, exportDir);
+    return { task, entryHtml: manifest.entryHtml, files: manifest.files };
   }
 
   /** Lists stored D2C comparison reports across all tasks, newest first. */

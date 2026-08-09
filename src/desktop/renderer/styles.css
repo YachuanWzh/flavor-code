@@ -910,7 +910,20 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .d2c-score[data-grade="合格"] strong, .d2c-list-meta em[data-grade="合格"] { color: #b27b16; }
 .d2c-score[data-grade="需修复"] strong, .d2c-list-meta em[data-grade="需修复"] { color: #c4432e; }
 .d2c-workbench-body { display: grid; grid-template-columns: 268px minmax(0, 1fr); min-height: 0; }
-.d2c-catalog { display: grid; grid-template-rows: auto minmax(0, 1fr); border-right: 1px solid #dfe6ed; background: #fff; min-height: 0; }
+.d2c-catalog { display: grid; grid-template-rows: auto auto minmax(0, 1fr); border-right: 1px solid #dfe6ed; background: #fff; min-height: 0; }
+.d2c-launch { display: grid; gap: 8px; padding: 14px 16px; border-bottom: 1px solid #eef2f6; }
+.d2c-launch > strong { font-size: 12px; color: #3c4750; }
+.d2c-launch-input { padding: 7px 10px; border: 1px solid #dfe6ed; border-radius: 8px; font-size: 12px; color: #232a31; background: #fff; }
+.d2c-launch-input:focus { outline: none; border-color: #232a31; }
+.d2c-launch-framework { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.d2c-launch-framework button { padding: 6px 0; border: 1px solid #dfe6ed; border-radius: 8px; background: #fff; font-size: 12px; color: #4c5965; cursor: pointer; }
+.d2c-launch-framework button[data-active="true"] { border-color: #232a31; box-shadow: 0 0 0 1px #232a31; color: #232a31; font-weight: 600; }
+.d2c-launch-action { padding: 8px 0; border: 1px solid #dfe6ed; border-radius: 8px; background: #f7f9fb; font-size: 12px; color: #3c4750; cursor: pointer; }
+.d2c-launch-action:hover:not(:disabled) { border-color: #b9c6d2; }
+.d2c-launch-action:disabled { opacity: 0.45; cursor: not-allowed; }
+.d2c-launch-action[data-primary="true"] { background: #232a31; border-color: #232a31; color: #fff; font-weight: 600; }
+.d2c-launch-imported { margin: 0; padding: 7px 10px; border-radius: 8px; background: #f0f7f2; color: #178a50; font-size: 11px; }
+.d2c-launch small { color: #7a8794; font-size: 10px; line-height: 1.5; }
 .d2c-catalog-tools { display: flex; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid #eef2f6; }
 .d2c-catalog-tools span { color: #9aa7b3; }
 .d2c-catalog-tools strong { flex: 1; font-size: 12px; color: #3c4750; }

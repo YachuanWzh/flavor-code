@@ -182,6 +182,7 @@ export function DesktopApp(): React.JSX.Element {
     const unsubscribe = window.flavorDesktop.onEvent((event) => {
       if (event.type === "d2c-report") {
         setD2cRefreshKey((key) => key + 1);
+        setView("d2c");
         return;
       }
       handleEvent(event, activeSessionIdRef, setSnapshot, setTranscript, setError);
@@ -422,7 +423,7 @@ export function DesktopApp(): React.JSX.Element {
         <button className="rail-action" data-active={view === "skills"} onClick={() => { setView("skills"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">◇</span><span>技能</span></button>
         <button className="rail-action" data-active={view === "memory"} onClick={() => { setView("memory"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">⌁</span><span>长期记忆</span></button>
         <button className="rail-action" data-active={view === "mcp"} onClick={() => { setView("mcp"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">◎</span><span>MCP 服务</span></button>
-        <button className="rail-action" data-active={view === "d2c"} onClick={() => { setView("d2c"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">▤</span><span>D2C 对比</span></button>
+        <button className="rail-action" data-active={view === "d2c"} onClick={() => { setView("d2c"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">▤</span><span>D2C</span></button>
       </nav>
       <div className="sessions-scroll">
         <div className="rail-section-title">项目</div>
@@ -457,7 +458,8 @@ export function DesktopApp(): React.JSX.Element {
       {view === "skills" && snapshot.workspace !== undefined ? <SkillManagerView onClose={() => setView("conversation")} onError={setError} />
         : view === "memory" && snapshot.workspace !== undefined ? <MemoryManagerView onClose={() => setView("conversation")} onError={setError} />
           : view === "mcp" && snapshot.workspace !== undefined ? <McpManagerView onClose={() => setView("conversation")} onError={setError} />
-            : view === "d2c" && snapshot.workspace !== undefined ? <D2cViewer onClose={() => setView("conversation")} onError={setError} refreshKey={d2cRefreshKey} /> : <>
+            : view === "d2c" && snapshot.workspace !== undefined ? <D2cViewer onClose={() => setView("conversation")} onError={setError} refreshKey={d2cRefreshKey}
+                    onStartTask={async (prompt) => { await send(prompt, "prompt"); setView("conversation"); }} /> : <>
       <header className="workspace-header">
         <button className="mobile-rail-toggle" onClick={() => setRailOpen(true)} aria-label="打开项目栏">☰</button>
         <div className="workspace-breadcrumb">

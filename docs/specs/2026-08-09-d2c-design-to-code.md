@@ -35,20 +35,23 @@ MVP 不包含：
 
 ## Product behavior
 
-1. 用户把 Pixso 导出的 HTML 目录放进项目，并自行导入 D2C 工作流技能（SOP），
-   向 Agent 提出 D2C 任务。
-2. Agent 先调用 `D2cImport { task, exportDir }`：校验导出目录（必须含入口
-   HTML）、复制到 `.flavor/d2c/<task>/design/`、写 `manifest.json`。
-3. Agent 依据用户导入的技能指导询问目标框架（Vue 3 或 React），在工作区内
-   生成可运行的 Vite 项目目录（package.json 含 vite 依赖与框架入口结构）。
-4. Agent 调用 `D2cCompare { task, implementation }`：implementation 支持
-   前端项目目录（首选，自动装依赖+起 dev server）、已启动服务的 `http(s)://`
-   localhost URL、或本地 HTML 文件路径；工具完成两侧渲染快照、diff、评分，
-   关闭自启的 dev server，写报告并推送 `d2c-report` 桌面事件，
-   返回文本摘要（总分、等级、Top 差异）。对比逻辑与框架无关。
-5. 桌面端侧栏新增 D2C 入口：查看任务报告，叠加模式下设计稿在底、实现半透明在上，
-   标注层绘制偏移尺寸线（`[---3px---]`）与色值对照块（设计 #xxx → 实际 #yyy），
-   右侧问题列表按严重度排序，点击联动高亮。
+D2C 是端到端模块（非单纯对比工具）：导入设计稿 → 选择框架编码 → 自动展示对比。
+
+1. 用户打开桌面端侧栏的 D2C 视图，填写任务名并选择目标框架（Vue 3 或 React），
+   点击"导入设计稿"：主进程弹出目录选择对话框，选中 Pixso 导出的 HTML 目录后
+   校验并复制到 `.flavor/d2c/<task>/design/`、写 `manifest.json`（复用
+   `importDesign`，与 `D2cImport` 工具同一条路径）。
+2. 用户点击"开始实现"：渲染端组装任务 prompt（含 task、入口 HTML、所选框架）
+   经 `submit` 投递给当前会话，Agent 依据用户自行导入的 D2C 技能（SOP）
+   生成可运行的 Vite 项目并调用 `D2cCompare { task, implementation }`。
+3. `D2cCompare` 的 implementation 支持前端项目目录（首选，自动装依赖+起
+   dev server）、已启动服务的 `http(s)://` localhost URL、或本地 HTML 文件
+   路径；工具完成两侧渲染快照、diff、评分，关闭自启的 dev server，
+   写报告并推送 `d2c-report` 桌面事件。对比逻辑与框架无关。
+4. 渲染端收到 `d2c-report` 事件后自动切换到 D2C 视图并刷新：叠加模式下
+   设计稿在底、实现半透明在上，标注层绘制偏移尺寸线（`[---3px---]`）与
+   色值对照块（设计 #xxx → 实际 #yyy），右侧问题列表按严重度排序，
+   点击联动高亮。Agent 继续凭报告文本迭代修复直至达标。
 
 ## Architecture
 
@@ -119,19 +122,29 @@ diagnostic 机制报告）。`RuntimeFactoryOptions` 的 Pick 同步扩展。桌
 
 ### 桌面端 IPC
 
-- channels：`d2cListReports: "desktop:d2c-list-reports"`、
+- channels：`d2cImport: "desktop:d2c-import"`、
+  `d2cListReports: "desktop:d2c-list-reports"`、
   `d2cGetReport: "desktop:d2c-get-report"`。
-- contracts：`D2cReportRefSchema { task, reportId? }`；`FlavorDesktopApi`
-  增加 `listD2cReports()` / `getD2cReport(task, reportId?)`；`DesktopEvent`
-  增加 `{ type: "d2c-report", payload: { task, reportId, total, grade } }`。
+- contracts：`D2cImportInputSchema { task }`，返回 `{ task, entryHtml, files }`
+  或 `undefined`（用户取消选择）；`D2cGetReportInputSchema { task, reportId? }`；
+  `FlavorDesktopApi` 增加 `importD2cDesign(task)` / `listD2cReports()` /
+  `getD2cReport(task, reportId?)`；`DesktopEvent` 增加
+  `{ type: "d2c-report", payload: { task, reportId, total, grade } }`。
+- `d2cImport` 由主进程 handler 打开目录选择对话框（`openDirectory`），
+  选中后经 controller 复用 `importDesign` 完成导入；目录校验逻辑与工具一致。
 - 报告图片经主进程读取后以 data URL 返回，渲染进程不直接访问文件路径。
 
 ### 渲染端视图
 
-`app.tsx` view 联合类型增加 `"d2c"`，侧栏增加 D2C 入口；新组件
-`d2c-viewer.tsx`：报告列表 → 画布（底图设计稿、上层实现图 opacity 可调、
-SVG 标注层）+ 问题列表。标注：几何差异画设计稿矩形框与偏移尺寸线
-`[---{n}px---]`；颜色差异在区域旁渲染双色块与 `设计 #x → 实际 #y`。
+`app.tsx` view 联合类型增加 `"d2c"`，侧栏入口命名 "D2C"；收到 `d2c-report`
+事件时自动切换到 D2C 视图。`d2c-viewer.tsx` 包含：
+
+- 启动面板：任务名输入、框架选择（Vue 3 / React）、导入设计稿按钮（经
+  `importD2cDesign` 弹目录对话框）、"开始实现"按钮（组装 prompt 经 `onStartTask`
+  投递到会话并切回对话视图）。
+- 报告列表 → 画布（底图设计稿、上层实现图 opacity 可调、SVG 标注层）
+  + 问题列表。标注：几何差异画设计稿矩形框与偏移尺寸线
+  `[---{n}px---]`；颜色差异在区域旁渲染双色块与 `设计 #x → 实际 #y`。
 
 ### 目录结构
 
@@ -163,6 +176,7 @@ SVG 标注层）+ 问题列表。标注：几何差异画设计稿矩形框与�
 2a. runner 单测：URL 解析、缺依赖时执行 npm install、dev server 输出解析与
    探活、stop 杀进程、超时/无 URL 报错（全部用注入的 fake spawn/fetch，
    不真实启动进程）。
-3. contracts 单测：D2C 输入 schema 拒绝非法 task/reportId。
+3. contracts 单测：D2C 输入 schema 拒绝非法 task/reportId；channel 白名单含
+   三个 d2c 通道。
 4. `npm run typecheck`、`vitest run`、`npm run build`（含桌面端）全部通过。
 5. 现有文本/多模态请求不受影响：extraTools 为空时工具列表与现状一致。

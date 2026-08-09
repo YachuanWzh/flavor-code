@@ -10,6 +10,7 @@ import {
   AddDesktopModelInputSchema,
   AppMenuInputSchema,
   D2cGetReportInputSchema,
+  D2cImportInputSchema,
   DeleteSessionInputSchema,
   DeleteMemoryInputSchema,
   DESKTOP_CHANNELS,
@@ -221,6 +222,16 @@ function installIpcHandlers(): void {
   });
   ipcMain.handle(DESKTOP_CHANNELS.addModel, async (_event, value) => {
     return controller.addModel(AddDesktopModelInputSchema.parse(value));
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cImport, async (_event, value) => {
+    const { task } = D2cImportInputSchema.parse(value);
+    const choice = await dialog.showOpenDialog(mainWindow!, {
+      title: "选择 Pixso 导出的设计稿目录",
+      properties: ["openDirectory"],
+    });
+    const exportDir = choice.filePaths[0];
+    if (choice.canceled || exportDir === undefined) return undefined;
+    return controller.importD2cDesign(task, exportDir);
   });
   ipcMain.handle(DESKTOP_CHANNELS.d2cListReports, async () => controller.listD2cReports());
   ipcMain.handle(DESKTOP_CHANNELS.d2cGetReport, async (_event, value) => {

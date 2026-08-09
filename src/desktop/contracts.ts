@@ -118,6 +118,9 @@ export const SwitchDesktopModelInputSchema = z.object({
 
 const D2cTaskInput = z.string().trim().min(1).max(64)
   .regex(/^[a-z0-9][a-z0-9-]{0,63}$/, "Invalid D2C task name");
+export const D2cImportInputSchema = z.object({
+  task: D2cTaskInput,
+}).strict();
 export const D2cGetReportInputSchema = z.object({
   task: D2cTaskInput,
   reportId: z.string().trim().min(1).max(128).optional(),
@@ -192,6 +195,13 @@ export interface D2cReportListItem {
   grade: string;
 }
 
+/** Result of importing a Pixso export directory through the D2C view. */
+export interface D2cImportResult {
+  task: string;
+  entryHtml: string;
+  files: readonly string[];
+}
+
 /** Report plus screenshots encoded as PNG data URLs for renderer display. */
 export interface D2cReportView {
   report: D2cReport;
@@ -252,6 +262,8 @@ export interface FlavorDesktopApi {
   addModel(input: AddDesktopModelInput): Promise<DesktopModelMutationResult>;
   listD2cReports(): Promise<readonly D2cReportListItem[]>;
   getD2cReport(task: string, reportId?: string): Promise<D2cReportView>;
+  /** Opens a directory picker and imports the chosen Pixso export; undefined when cancelled. */
+  importD2cDesign(task: string): Promise<D2cImportResult | undefined>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
 }
 

@@ -1,13 +1,29 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { D2cElementDiff, D2cReport, D2cUnmatchedElement } from "../../d2c/types.js";
-import type { D2cReportListItem, D2cReportView } from "../contracts.js";
+import type { D2cImportResult, D2cReportListItem, D2cReportView } from "../contracts.js";
 
 interface D2cViewerProps {
   onClose(): void;
   onError(message: string): void;
   /** Increments whenever a fresh D2C report event arrives, triggering a reload. */
   refreshKey: number;
+  /** Sends the assembled D2C task prompt to the active conversation. */
+  onStartTask(prompt: string): Promise<void>;
+}
+
+type D2cFramework = "vue" | "react";
+
+const TASK_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+function buildTaskPrompt(task: string, entryHtml: string, fileCount: number, framework: D2cFramework): string {
+  const frameworkLabel = framework === "vue" ? "Vue 3" : "React";
+  return [
+    `执行 D2C 任务 "${task}"：Pixso 设计稿已导入 .flavor/d2c/${task}/design/（入口 ${entryHtml}，共 ${fileCount} 个文件）。`,
+    `请用 ${frameworkLabel} 像素级实现该设计稿：在 src/d2c-output/${task}/ 生成可运行的 Vite 项目，`,
+    `然后调用 D2cCompare，implementation 传该项目目录，对比设计稿与运行中的实现并评分。`,
+    `若总分低于 90，依据差异报告迭代修复实现代码（不要修改设计稿）并重新对比，直至达到 90 或用户接受，最后汇报总分与等级。`,
+  ].join("\n");
 }
 
 type D2cViewMode = "overlay" | "design" | "implementation" | "heatmap";
@@ -45,7 +61,7 @@ function OffsetTag({ diff }: { diff: D2cElementDiff }): React.JSX.Element | null
   </span>;
 }
 
-export function D2cViewer({ onClose, onError, refreshKey }: D2cViewerProps): React.JSX.Element {
+export function D2cViewer({ onClose, onError, refreshKey, onStartTask }: D2cViewerProps): React.JSX.Element {
   const [reports, setReports] = useState<readonly D2cReportListItem[]>([]);
   const [bundle, setBundle] = useState<D2cReportView>();
   const [loading, setLoading] = useState(true);
@@ -54,7 +70,29 @@ export function D2cViewer({ onClose, onError, refreshKey }: D2cViewerProps): Rea
   const [implOpacity, setImplOpacity] = useState(0.55);
   const [selectedDiff, setSelectedDiff] = useState<number>();
 
+  const [taskName, setTaskName] = useState("");
+  const [framework, setFramework] = useState<D2cFramework>("vue");
+  const [imported, setImported] = useState<D2cImportResult>();
+  const [launching, setLaunching] = useState(false);
+
   const report = (cause: unknown) => onError(cause instanceof Error ? cause.message : String(cause));
+
+  const taskValid = TASK_PATTERN.test(taskName);
+  const importDesign = async () => {
+    if (!taskValid) return;
+    try {
+      const result = await window.flavorDesktop.importD2cDesign(taskName);
+      if (result !== undefined) setImported(result);
+    } catch (cause) { report(cause); }
+  };
+  const startTask = async () => {
+    if (imported === undefined || launching) return;
+    setLaunching(true);
+    try {
+      await onStartTask(buildTaskPrompt(imported.task, imported.entryHtml, imported.files.length, framework));
+    } catch (cause) { report(cause); }
+    finally { setLaunching(false); }
+  };
 
   const loadReports = useCallback(async (autoSelect?: { task: string; reportId: string }) => {
     const entries = await window.flavorDesktop.listD2cReports();
@@ -102,11 +140,11 @@ export function D2cViewer({ onClose, onError, refreshKey }: D2cViewerProps): Rea
     height: Math.max(bundle.report.design.height, bundle.report.implementation.height, 1),
   };
 
-  return <section className="d2c-workbench" aria-label="设计对比">
+  return <section className="d2c-workbench" aria-label="D2C">
     <header className="d2c-workbench-header">
       <div>
         <button className="d2c-back" onClick={onClose} aria-label="返回对话">‹</button>
-        <div><p>Design to Code</p><h1>D2C 设计对比</h1></div>
+        <div><p>Design to Code</p><h1>D2C</h1></div>
       </div>
       {scores !== undefined && <div className="d2c-score" data-grade={scores.grade}>
         <strong>{scores.total.toFixed(1)}</strong><span>/ 100 · {scores.grade}</span>
@@ -115,12 +153,31 @@ export function D2cViewer({ onClose, onError, refreshKey }: D2cViewerProps): Rea
 
     <div className="d2c-workbench-body">
       <aside className="d2c-catalog">
+        <div className="d2c-launch" aria-label="新建 D2C 任务">
+          <strong>新建任务</strong>
+          <input className="d2c-launch-input" value={taskName} placeholder="任务名，如 homepage"
+            aria-label="D2C 任务名"
+            onChange={(event) => { setTaskName(event.target.value.trim().toLowerCase()); setImported(undefined); }} />
+          <div className="d2c-launch-framework" role="radiogroup" aria-label="目标框架">
+            <button role="radio" aria-checked={framework === "vue"} data-active={framework === "vue"}
+              onClick={() => setFramework("vue")}>Vue 3</button>
+            <button role="radio" aria-checked={framework === "react"} data-active={framework === "react"}
+              onClick={() => setFramework("react")}>React</button>
+          </div>
+          {imported === undefined
+            ? <button className="d2c-launch-action" disabled={!taskValid} onClick={() => void importDesign()}>导入设计稿…</button>
+            : <p className="d2c-launch-imported">✓ 已导入 {imported.files.length} 个文件，入口 {imported.entryHtml}</p>}
+          <button className="d2c-launch-action" data-primary={imported !== undefined}
+            disabled={imported === undefined || launching}
+            onClick={() => void startTask()}>{launching ? "正在派发…" : "开始实现"}</button>
+          {imported !== undefined && <small>派发后 Agent 将按你导入的 D2C 技能编码并对比，完成后自动在此展示结果。</small>}
+        </div>
         <div className="d2c-catalog-tools"><span>⌕</span><strong>对比报告</strong><button onClick={() => void loadReports()} aria-label="刷新报告列表">↻</button></div>
         <div className="d2c-list" aria-busy={loading}>
           {loading && <p className="d2c-list-empty">正在读取报告…</p>}
           {!loading && reports.length === 0 && <div className="d2c-list-empty">
             <strong>还没有对比报告</strong>
-            <span>在任务中使用 D2cImport 导入 Pixso 设计稿，再用 D2cCompare 对比实现页面。</span>
+            <span>在上方新建任务：导入设计稿、选择框架并开始实现，完成后对比结果会自动展示在这里。</span>
           </div>}
           {reports.map((item) => <button className="d2c-list-item" key={`${item.task}/${item.reportId}`}
             data-selected={bundle?.report.reportId === item.reportId && bundle.report.task === item.task}
@@ -134,7 +191,7 @@ export function D2cViewer({ onClose, onError, refreshKey }: D2cViewerProps): Rea
 
       <main className="d2c-canvas-area">
         {bundle === undefined || canvas === undefined ? <div className="d2c-empty">
-          <span>▤</span><h2>暂无可展示的对比</h2><p>运行一次 D2cCompare 后，这里会显示设计稿与实现的叠加对比。</p>
+          <span>▤</span><h2>暂无可展示的对比</h2><p>新建任务并开始实现后，Agent 完成对比时这里会自动展示设计稿与实现的叠加对比。</p>
         </div> : <>
           <div className="d2c-canvas-toolbar">
             <div className="d2c-mode-switch" role="tablist" aria-label="展示模式">

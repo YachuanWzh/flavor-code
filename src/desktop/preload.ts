@@ -43,6 +43,7 @@ const api: FlavorDesktopApi = {
   getD2cReport: (task, reportId) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cGetReport, {
     task, ...(reportId === undefined ? {} : { reportId }),
   }),
+  importD2cDesign: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cImport, { task }),
   onEvent(listener) {
     const handler = (_event: Electron.IpcRendererEvent, value: DesktopEvent) => listener(value);
     ipcRenderer.on(DESKTOP_CHANNELS.event, handler);

@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   AnswerQuestionsInputSchema,
   AppMenuInputSchema,
+  D2cGetReportInputSchema,
+  D2cImportInputSchema,
   DeleteSessionInputSchema,
   DeleteMemoryInputSchema,
   MemoryCandidateInputSchema,
@@ -86,5 +88,22 @@ describe("desktop IPC contracts", () => {
     expect(() => SaveMcpServerInputSchema.parse({
       draft: { name: "ftp", config: { url: "ftp://example.com/mcp" } },
     })).toThrow();
+  });
+});
+
+describe("D2C IPC contracts", () => {
+  it("accepts well-formed task and report references", () => {
+    expect(D2cImportInputSchema.parse({ task: "homepage" })).toEqual({ task: "homepage" });
+    expect(D2cGetReportInputSchema.parse({ task: "homepage" })).toEqual({ task: "homepage" });
+    expect(D2cGetReportInputSchema.parse({ task: "homepage", reportId: "run-20260809-100000" }))
+      .toEqual({ task: "homepage", reportId: "run-20260809-100000" });
+  });
+
+  it("rejects malformed task names and unknown fields", () => {
+    expect(() => D2cImportInputSchema.parse({ task: "Upper Case" })).toThrow();
+    expect(() => D2cImportInputSchema.parse({ task: "-leading-dash" })).toThrow();
+    expect(() => D2cImportInputSchema.parse({ task: "", exportDir: "x" })).toThrow();
+    expect(() => D2cImportInputSchema.parse({ task: "homepage", extra: 1 })).toThrow();
+    expect(() => D2cGetReportInputSchema.parse({ task: "homepage", reportId: "" })).toThrow();
   });
 });
