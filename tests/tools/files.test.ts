@@ -161,6 +161,33 @@ describe("file tools", () => {
       .rejects.toThrow(/must not be below startLine/);
   });
 
+  it("Read reaches a line range beyond a small maxBytes window", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "long.txt");
+    writeFileSync(path, Array.from({ length: 300 }, (_, i) => `line-${i + 1}`).join("\n"));
+
+    // maxBytes alone would only cover the first few lines, yet the range
+    // addresses whole-file line numbers and must stay reachable.
+    const result = await createReadTool(workspace).execute(
+      { path, maxBytes: 30, startLine: 274, endLine: 276 },
+      new AbortController().signal,
+    );
+
+    expect(result).toBe("[Lines 274-276 of 300]\n\nline-274\nline-275\nline-276");
+  });
+
+  it("Read still truncates range-less reads at maxBytes", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "long.txt");
+    writeFileSync(path, Array.from({ length: 300 }, (_, i) => `line-${i + 1}`).join("\n"));
+
+    const result = await createReadTool(workspace).execute({ path, maxBytes: 30 }, new AbortController().signal);
+
+    expect(result).toContain("[Truncated to 30 bytes");
+    expect(result).toContain("line-1");
+    expect(result).not.toContain("line-300");
+  });
+
   it("Read normalizes CRLF when extracting a line range", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
     const path = join(workspace, "crlf.txt");

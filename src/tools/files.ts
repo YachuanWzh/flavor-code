@@ -66,21 +66,29 @@ export function createReadTool(workspace: string, options: ReadToolOptions = {})
       if (startLine !== undefined && endLine !== undefined && endLine < startLine) {
         throw new Error(`endLine (${endLine}) must not be below startLine (${startLine})`);
       }
-      const contents = await readBounded(path, maxBytes, signal, openFile);
+      const rangeRequested = startLine !== undefined || endLine !== undefined;
+      // Line numbers address the whole file, so a requested range must stay
+      // reachable even when maxBytes is small — otherwise "lines 274-290"
+      // fails whenever the leading byte window holds fewer than 274 lines,
+      // and the caller cannot know how many bytes precede a given line.
+      // Range-less reads stay capped at maxBytes as before.
+      const windowBytes = rangeRequested
+        ? Math.max(maxBytes, Math.min(info.size, MAX_READ_BYTES))
+        : maxBytes;
+      const contents = await readBounded(path, windowBytes, signal, openFile);
       if (isBinary(contents)) throw new Error("Cannot read binary file as text");
       // Trim to a UTF-8 character boundary so the returned text never ends
-      // mid-character; the byte count may sit up to 3 bytes below maxBytes.
-      const textEnd = utf8SafeEnd(contents, maxBytes);
-      const truncated = contents.length > maxBytes;
+      // mid-character; the byte count may sit up to 3 bytes below windowBytes.
+      const textEnd = utf8SafeEnd(contents, windowBytes);
+      const truncated = contents.length > windowBytes;
       const text = contents.subarray(0, textEnd).toString("utf8").replaceAll("\r\n", "\n");
       const lines = text.split("\n");
       if (lines.at(-1) === "") lines.pop();
       const availableLines = lines.length;
-      const rangeRequested = startLine !== undefined || endLine !== undefined;
       const start = startLine ?? 1;
       const end = Math.min(endLine ?? availableLines, availableLines);
       if (rangeRequested && start > availableLines) {
-        throw new Error(`startLine (${start}) is beyond the ${availableLines} line${availableLines === 1 ? "" : "s"} available${truncated ? ` in this read (truncated at ${maxBytes} bytes)` : " in this file"}`);
+        throw new Error(`startLine (${start}) is beyond the ${availableLines} line${availableLines === 1 ? "" : "s"} available${truncated ? ` in this read (truncated at ${windowBytes} bytes)` : " in this file"}`);
       }
       if (rangeRequested && end < start) {
         throw new Error(`endLine (${endLine}) must not be below startLine (${start})`);
@@ -105,11 +113,11 @@ export function createReadTool(workspace: string, options: ReadToolOptions = {})
       }
 
       if (rangeRequested) {
-        const header = `[Lines ${start}-${end} of ${availableLines}${truncated ? ` visible in this read (truncated at ${maxBytes} bytes)` : ""}]`;
+        const header = `[Lines ${start}-${end} of ${availableLines}${truncated ? ` visible in this read (truncated at ${windowBytes} bytes)` : ""}]`;
         return `${header}\n\n${lines.slice(start - 1, end).join("\n")}`;
       }
       if (truncated) {
-        return `[Truncated to ${maxBytes} bytes. File is ${info.size} bytes total. Request a higher maxBytes or read a specific range with startLine/endLine.]\n\n${text}`;
+        return `[Truncated to ${windowBytes} bytes. File is ${info.size} bytes total. Request a higher maxBytes or read a specific range with startLine/endLine.]\n\n${text}`;
       }
       return text;
     },
