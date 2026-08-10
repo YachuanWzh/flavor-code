@@ -181,6 +181,87 @@ describe("MemoryStore", () => {
     expect((await memory.list()).map((entry) => entry.content)).toEqual(["Keep this"]);
   });
 
+  it("removes cold entries and their task files while keeping hot and normal entries", async () => {
+    const memory = await store();
+    const now = new Date("2026-08-10T12:00:00.000Z");
+    const old = new Date("2026-08-01T12:00:00.000Z");
+    const scores = { durability: 3, futureUtility: 3, authority: 3, nonDerivability: 2 };
+
+    await memory.rememberForTask("task-cold", {
+      type: "project", summary: "Old convention", content: "Use the legacy tool.",
+      topicKey: "project.legacy", keywords: ["legacy"], scores,
+    }, old);
+    await memory.rememberForTask("task-normal", {
+      type: "project", summary: "Fresh convention", content: "Use the current tool.",
+      topicKey: "project.fresh", keywords: ["current"], scores,
+    }, now);
+    // 创建时间久远但 72 小时内被召回过的条目不视为 cold。
+    await memory.rememberForTask("task-recently-recalled", {
+      type: "reference", summary: "Docs link", content: "Team runbook lives in the wiki.",
+      topicKey: "reference.runbook", keywords: ["runbook", "wiki"], scores,
+    }, old);
+    await memory.recall("runbook wiki", { taskId: "consumer-a", topK: 5, maxChars: 1_000, now: new Date("2026-08-10T10:00:00.000Z") });
+    // 超过十个不同任务在滚动七天内召回过的条目不视为 cold。
+    await memory.rememberForTask("task-hot", {
+      type: "feedback", summary: "Review style", content: "Always review diffs before merging.",
+      topicKey: "feedback.review", keywords: ["review", "diffs"], scores,
+    }, old);
+    for (let index = 0; index < 11; index += 1) {
+      await memory.recall("review diffs merging", { taskId: `hot-consumer-${index}`, topK: 5, maxChars: 1_000, now: new Date("2026-08-10T11:00:00.000Z") });
+    }
+
+    const result = await memory.forgetCold(now);
+
+    expect(result).toEqual({ removed: 1, filesRemoved: 1 });
+    const references = await memory.references();
+    expect(references.map((reference) => reference.taskId).sort()).toEqual(["task-hot", "task-normal", "task-recently-recalled"]);
+    const taskRoot = join(memory.workspace, ".flavor", "memory", "tasks");
+    await expect(readFile(join(taskRoot, "task-cold.md"), "utf8")).rejects.toThrow(/ENOENT/);
+    await expect(readFile(`${join(taskRoot, "task-cold.md")}.bak`, "utf8")).rejects.toThrow(/ENOENT/);
+    for (const taskId of ["task-normal", "task-recently-recalled", "task-hot"]) {
+      await expect(readFile(join(taskRoot, `${taskId}.md`), "utf8")).resolves.toBeTruthy();
+    }
+  });
+
+  it("removes only the cold entries from a shared task file", async () => {
+    const memory = await store();
+    const now = new Date("2026-08-10T12:00:00.000Z");
+    const old = new Date("2026-08-01T12:00:00.000Z");
+    const scores = { durability: 3, futureUtility: 3, authority: 3, nonDerivability: 2 };
+
+    await memory.rememberForTask("task-shared", {
+      type: "project", summary: "Old rule", content: "Use the legacy tool.",
+      topicKey: "project.legacy", keywords: ["legacy"], scores,
+    }, old);
+    await memory.rememberForTask("task-shared", {
+      type: "feedback", summary: "New rule", content: "Always verify builds.",
+      topicKey: "feedback.verify", keywords: ["verify"], scores,
+    }, now);
+
+    const result = await memory.forgetCold(now);
+
+    expect(result).toEqual({ removed: 1, filesRemoved: 0 });
+    const taskFile = await readFile(join(memory.workspace, ".flavor", "memory", "tasks", "task-shared.md"), "utf8");
+    expect(taskFile).not.toContain("Use the legacy tool.");
+    expect(taskFile).toContain("Always verify builds.");
+    expect((await memory.references()).map((reference) => reference.summary)).toEqual(["New rule"]);
+  });
+
+  it("reports zero and touches nothing when no entries are cold", async () => {
+    const memory = await store();
+    const now = new Date("2026-08-10T12:00:00.000Z");
+    await memory.rememberForTask("task-fresh", {
+      type: "project", summary: "Fresh convention", content: "Use the current tool.",
+      topicKey: "project.fresh", keywords: ["current"],
+      scores: { durability: 3, futureUtility: 3, authority: 3, nonDerivability: 2 },
+    }, now);
+
+    const result = await memory.forgetCold(now);
+
+    expect(result).toEqual({ removed: 0, filesRemoved: 0 });
+    expect((await memory.references()).map((reference) => reference.taskId)).toEqual(["task-fresh"]);
+  });
+
   it("persists and reloads the review-behavior state across sessions", async () => {
     const memory = await store();
 

@@ -147,7 +147,7 @@ OAuth PKCE 的运行时行为与配置约定见 [PKCE 规范](./docs/specs/pkce-
 | `/compact` | 手动压缩长会话上下文 |
 | `/checkpoint`、`/tree` | 保存现场、查看会话树 |
 | `/rewind`、`/unrevert`、`/fork` | 恢复或分叉会话 |
-| `/memory`、`/remember`、`/forget` | 管理长期记忆 |
+| `/memory`、`/remember`、`/forget`、`/forget-cold` | 管理长期记忆；`/forget-cold` 清空 cold 记忆及其文件 |
 | `/mcp` | 查看和管理 MCP 服务 |
 | `/loop <goal>` | 运行带验证的自治循环 |
 | `/goal <objective>` | 运行规划、执行、对抗审查流程 |

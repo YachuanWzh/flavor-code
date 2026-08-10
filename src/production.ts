@@ -1251,6 +1251,14 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       if (removed > 0) await refreshMemoryState();
       return removed === 0 ? "No matching memory found." : `Forgot ${removed} memory ${removed === 1 ? "entry" : "entries"}.`;
     },
+    forgetCold: async () => {
+      if (memoryStore === undefined) return "Long-term memory is disabled.";
+      const { removed, filesRemoved } = await memoryStore.forgetCold();
+      if (removed > 0) await refreshMemoryState();
+      return removed === 0
+        ? "No cold long-term memories to remove."
+        : `Forgot ${removed} cold memory ${removed === 1 ? "entry" : "entries"} and removed ${filesRemoved} task ${filesRemoved === 1 ? "file" : "files"}.`;
+    },
     finishTask: () => finalizeMemoryTask(true),
     pluginCommands: () => [...pluginCommands.keys()].sort(),
     runPluginCommand: async (name, args, signal) => {

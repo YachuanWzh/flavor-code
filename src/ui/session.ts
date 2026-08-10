@@ -84,6 +84,7 @@ export interface SessionServices {
   refreshMemory?(): Promise<void>;
   remember(type: MemoryType, text: string): Promise<string>;
   forget(query: string): Promise<string>;
+  forgetCold(): Promise<string>;
   finishTask(): Promise<string>;
   pluginCommands(): readonly string[];
   runPluginCommand(name: string, args: readonly string[], signal: AbortSignal): Promise<unknown>;
@@ -108,7 +109,7 @@ const HELP = [
   "/permissions <default|acceptEdits|plan|bypassPermissions|auto|bubble>",
   "/login                                  authenticate via OAuth PKCE",
   "/init  /config  /skills  /plugins  /hooks  /tasks",
-  "/memory  /remember [type] <text>  /forget <text-or-id>  /finish",
+  "/memory  /remember [type] <text>  /forget <text-or-id>  /forget-cold  /finish",
   "/checkpoint [label]  /tree  /rewind <node>  /unrevert  /fork <node>",
   "/compact  /clear  /help  /exit",
   "/loop <goal>                            run a verified autonomous loop",
@@ -300,6 +301,8 @@ export class FlavorSession {
       this.#notice(await this.#services.remember(command.type, command.text));
     } else if (command.name === "forget") {
       this.#notice(await this.#services.forget(command.query));
+    } else if (command.name === "forget-cold") {
+      this.#notice(await this.#services.forgetCold());
     } else if (command.name === "finish") {
       this.#notice(await this.#services.finishTask());
     } else if (command.name === "checkpoint") {

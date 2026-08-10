@@ -28,6 +28,7 @@ describe("parseSlashCommand", () => {
     ["/remember project Use pnpm for scripts", { name: "remember", type: "project", text: "Use pnpm for scripts" }],
     ["/remember Prefer Chinese responses", { name: "remember", type: "project", text: "Prefer Chinese responses" }],
     ["/forget obsolete convention", { name: "forget", query: "obsolete convention" }],
+    ["/forget-cold", { name: "forget-cold" }],
     ["/loop fix all tests", { name: "loop", goal: "fix all tests" }],
     ["/checkpoint before refactor", { name: "checkpoint", label: "before refactor" }],
     ["/checkpoint", { name: "checkpoint" }],

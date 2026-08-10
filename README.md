@@ -147,7 +147,7 @@ Common commands:
 | `/compact` | Manually compact long session context |
 | `/checkpoint`, `/tree` | Save state, view the session tree |
 | `/rewind`, `/unrevert`, `/fork` | Resume or fork sessions |
-| `/memory`, `/remember`, `/forget` | Manage long-term memory |
+| `/memory`, `/remember`, `/forget`, `/forget-cold` | Manage long-term memory; `/forget-cold` purges cold entries and their files |
 | `/mcp` | View and manage MCP servers |
 | `/loop <goal>` | Run an autonomous loop with verification |
 | `/goal <objective>` | Run the plan, execute, adversarial-review workflow |

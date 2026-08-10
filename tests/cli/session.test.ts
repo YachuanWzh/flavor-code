@@ -35,6 +35,7 @@ function services(events: string[], outputs: string[]): SessionServices {
     memory: async () => "memory contents",
     remember: async () => "remembered",
     forget: async () => "forgotten",
+    forgetCold: async () => "forgotten cold",
     finishTask: async () => "Task completed; no durable memory candidates.",
     pluginCommands: () => [], runPluginCommand: async () => undefined,
     output: (event) => outputs.push(event.type === "text" ? event.text : event.type === "notice" ? event.message : event.type),

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { resolve, join, relative, sep } from "node:path";
 
 import { readRecoverableFile, updateProtectedFile } from "../config/protected-file.js";
@@ -198,6 +198,52 @@ export class MemoryStore {
       return !matches;
     }) }));
     return removed;
+  }
+
+  /**
+   * Removes every cold memory entry and its backing content. A task file is
+   * deleted only when all of its entries were cold; otherwise only the cold
+   * entries are dropped from the shared file.
+   */
+  async forgetCold(now = new Date()): Promise<{ removed: number; filesRemoved: number }> {
+    let removedReferences: MemoryReference[] = [];
+    await this.#updateIndex((index) => {
+      removedReferences = index.references.filter((reference) => classifyMemoryHeat(reference, now) === "cold");
+      const removedIds = new Set(removedReferences.map((reference) => reference.id));
+      return { ...index, references: index.references.filter((reference) => !removedIds.has(reference.id)) };
+    });
+    if (removedReferences.length === 0) return { removed: 0, filesRemoved: 0 };
+
+    const byPath = new Map<string, MemoryReference[]>();
+    for (const reference of removedReferences) {
+      const group = byPath.get(reference.contentPath) ?? [];
+      group.push(reference);
+      byPath.set(reference.contentPath, group);
+    }
+    let filesRemoved = 0;
+    for (const [contentPath, references] of byPath) {
+      const removedIds = new Set(references.map((reference) => reference.id));
+      const path = this.#resolveContentPath(contentPath);
+      const recovered = await readRecoverableFile(path, decodeTask);
+      if (recovered === undefined) continue;
+      const remaining = recovered.value.items.filter((item) => !removedIds.has(item.id));
+      if (remaining.length === 0) {
+        await rm(path, { force: true });
+        await rm(`${path}.bak`, { force: true });
+        filesRemoved += 1;
+      } else {
+        await updateProtectedFile<MemoryTaskDocument>({
+          path,
+          decode: decodeTask,
+          encode: encodeTask,
+          update: (current) => {
+            const document = current ?? recovered.value;
+            return { ...document, items: document.items.filter((item) => !removedIds.has(item.id)) };
+          },
+        });
+      }
+    }
+    return { removed: removedReferences.length, filesRemoved };
   }
 
   async recall(query: string, options: { taskId: string; topK: number; maxChars: number; now?: Date }): Promise<{

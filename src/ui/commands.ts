@@ -3,7 +3,7 @@ export const MVP_COMMANDS = [
   "tasks", "finish", "compact", "clear", "help", "exit", "audit", "usage",
   "loop", "goal", "mcp",
   "ide",
-  "memory", "remember", "forget",
+  "memory", "remember", "forget", "forget-cold",
   "checkpoint", "tree", "rewind", "unrevert", "fork",
 ] as const;
 
@@ -31,6 +31,7 @@ export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string>
   memory: "Show long-term project memory",
   remember: "Add a long-term memory",
   forget: "Remove matching long-term memories",
+  "forget-cold": "Remove all cold long-term memories and their files",
   checkpoint: "Create a workspace and context checkpoint",
   tree: "Show the session history tree",
   rewind: "Restore a prior session node",
