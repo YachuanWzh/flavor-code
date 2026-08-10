@@ -21,6 +21,7 @@
     "dist/",
     "!dist/**/*.map",
     "README.md",
+    "README.zh-CN.md",
     "技术方案报告.md",
     "LICENSE"
   ],

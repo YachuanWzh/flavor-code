@@ -1,8 +1,10 @@
+<p align="center"><b><a href="./README.md">English</a></b> | <a href="./README.zh-CN.md">简体中文</a></p>
+
 <div align="center">
   <img src="./assets/icon-transparent-512.png" alt="Flavor Code Logo" width="168" />
   <h1>Flavor Code</h1>
-  <p><strong>本地优先、可审计、可恢复的 AI 编程助手</strong></p>
-  <p>在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。</p>
+  <p><strong>Local-first, auditable, resumable AI coding assistant</strong></p>
+  <p>Read code, edit files, run commands, and complete complex tasks in the terminal, Electron desktop, and VS Code.</p>
 
   <p>
     <a href="https://www.npmjs.com/package/flavor-code"><img alt="npm version" src="https://img.shields.io/npm/v/flavor-code?color=cb3837&logo=npm" /></a>
@@ -12,63 +14,63 @@
   </p>
 
   <p>
-    <a href="#快速开始">快速开始</a> ·
-    <a href="#核心能力">核心能力</a> ·
-    <a href="#使用入口">使用入口</a> ·
-    <a href="#权限与沙箱">安全</a> ·
-    <a href="#开发">参与开发</a>
+    <a href="#quick-start">Quick Start</a> ·
+    <a href="#features">Features</a> ·
+    <a href="#entry-points">Entry Points</a> ·
+    <a href="#permissions--sandbox">Security</a> ·
+    <a href="#development">Development</a>
   </p>
 </div>
 
 ---
 
-Flavor Code 接入 OpenAI、Anthropic 或兼容服务，在受控工作区内使用文件、搜索、Shell、MCP 和自定义工具。复杂任务可以拆成计划和并行子任务；会话、Diff、工具调用、checkpoint 与审计记录全部保存在本地，便于恢复、复查和继续工作。
+Flavor Code connects to OpenAI, Anthropic, or compatible services and works with file, search, Shell, MCP, and custom tools inside a controlled workspace. Complex tasks can be broken into plans and parallel sub-tasks; sessions, diffs, tool calls, checkpoints, and audit records are all stored locally so you can resume, review, and continue at any time.
 
-## 核心能力
+## Features
 
-| | 能力 | 你得到什么 |
+| | Capability | What you get |
 | --- | --- | --- |
-| 🖥️ | **一个运行时，三个入口** | CLI、Electron 与 VS Code 共享模型配置、会话和工具能力 |
-| 🧭 | **复杂任务可控推进** | 任务计划、子 Agent、steering、follow-up、`/loop` 和 `/goal` |
-| ⏪ | **结果可追溯、可恢复** | 完整时间线、checkpoint、rewind、trace、Diff 和失败审计 |
-| 🧠 | **本地长期上下文** | 记忆、Skill、插件和项目指南均保存在本机 |
-| 🛡️ | **明确的权限边界** | 分别控制读、写、Shell、网络和破坏性操作，也可使用 Docker |
+| 🖥️ | **One runtime, three entry points** | CLI, Electron, and VS Code share model configuration, sessions, and tooling |
+| 🧭 | **Controlled progress on complex tasks** | Task plans, sub-agents, steering, follow-ups, `/loop`, and `/goal` |
+| ⏪ | **Traceable, resumable results** | Full timeline, checkpoints, rewind, traces, diffs, and failure audits |
+| 🧠 | **Local long-term context** | Memory, Skills, plugins, and project guides stored on your machine |
+| 🛡️ | **Clear permission boundaries** | Independent control over read, write, Shell, network, and destructive actions; Docker supported |
 
-## 快速开始
+## Quick Start
 
 > [!IMPORTANT]
-> CLI 需要 Node.js 20 或更高版本。Windows 桌面端也可以直接从 [Releases](https://github.com/YachuanWzh/flavor-code/releases) 下载。
+> The CLI requires Node.js 20 or later. Windows desktop builds can also be downloaded directly from [Releases](https://github.com/YachuanWzh/flavor-code/releases).
 
-**1. 安装**
+**1. Install**
 
 ```bash
 npm install -g flavor-code
 ```
 
-**2. 在项目中启动**
+**2. Start in your project**
 
 ```bash
 cd your-project
 flavor
 ```
 
-**3. 初始化项目上下文**
+**3. Initialize project context**
 
-首次进入项目后运行 `/init`。Flavor 会分析语言、包管理器、源码目录和验证命令，并生成 `FLAVOR.md` 项目指南。
+Run `/init` the first time you enter a project. Flavor analyzes the language, package manager, source directories, and verification commands, then generates a `FLAVOR.md` project guide.
 
-也可以直接执行一次性任务：
+You can also run one-off tasks directly:
 
 ```bash
-flavor --print "分析这个项目并列出最值得修复的三个问题"
+flavor --print "Analyze this project and list the top three issues worth fixing"
 flavor --resume
-flavor --resume -p "继续完成剩余工作"
+flavor --resume -p "Continue the remaining work"
 ```
 
-非交互模式会拒绝需要人工审批的操作，不会悬挂等待输入。
+Non-interactive mode refuses actions that require human approval and never hangs waiting for input.
 
-## 配置模型
+## Configuring Models
 
-最快的方式是设置环境变量：
+The fastest way is to set environment variables:
 
 ```bash
 # macOS / Linux
@@ -78,12 +80,12 @@ export OPENAI_API_KEY="sk-..."
 $env:OPENAI_API_KEY = "sk-..."
 ```
 
-也可以把密钥放在项目根目录的 `.env`。
+You can also put the key in a `.env` file at the project root.
 
 <details>
-<summary><strong>使用 <code>.flavor/flavor.json</code> 配置多个 Provider</strong></summary>
+<summary><strong>Configure multiple providers with <code>.flavor/flavor.json</code></strong></summary>
 
-项目配置示例：
+Example project configuration:
 
 ```json
 {
@@ -105,81 +107,81 @@ $env:OPENAI_API_KEY = "sk-..."
 }
 ```
 
-配置按以下顺序合并，后者优先：
+Configuration is merged in the following order, with later sources taking precedence:
 
-1. 全局 `~/.flavor-code/flavor.json`
-2. 项目 `.flavor/flavor.json`
+1. Global `~/.flavor-code/flavor.json`
+2. Project `.flavor/flavor.json`
 3. `.env`
-4. 进程环境变量
+4. Process environment variables
 
-支持的常用 Provider 类型：
+Commonly supported provider types:
 
-- `openai`：OpenAI 官方接口
-- `anthropic`：Anthropic 官方接口
-- `openai-compatible`：兼容 OpenAI 协议的服务
+- `openai`: OpenAI's official API
+- `anthropic`: Anthropic's official API
+- `openai-compatible`: Services compatible with the OpenAI protocol
 
 </details>
 
-OAuth PKCE 的运行时行为与配置约定见 [PKCE 规范](./docs/specs/pkce-runtime-config.md)。完整配置字段以 [配置 Schema](./src/config/schema.ts) 为准。
+Runtime behavior and configuration conventions for OAuth PKCE are described in the [PKCE spec](./docs/specs/pkce-runtime-config.md). The [config schema](./src/config/schema.ts) is the source of truth for all fields.
 
-## 使用入口
+## Entry Points
 
-| 入口 | 适合场景 | 启动方式 |
+| Entry point | Best for | How to start |
 | --- | --- | --- |
-| **CLI** | 日常开发、远程环境、脚本与 CI | `flavor` |
-| **Electron** | 可视化会话、Diff、权限和资源管理 | `npm run desktop:start` |
-| **VS Code / Qoder** | 编辑器上下文、诊断修复和任务控制面 | `npm run ide:install` |
+| **CLI** | Daily development, remote environments, scripting, and CI | `flavor` |
+| **Electron** | Visual sessions, diffs, permissions, and resource management | `npm run desktop:start` |
+| **VS Code / Qoder** | Editor context, diagnostic fixes, and a task control plane | `npm run ide:install` |
 
 ### CLI
 
-直接运行 `flavor` 后输入自然语言即可。输入 `/` 会显示内置命令、插件命令和 Skill。
+Run `flavor` and type natural language. Typing `/` shows built-in commands, plugin commands, and Skills.
 
-常用命令：
+Common commands:
 
-| 命令 | 作用 |
+| Command | Purpose |
 | --- | --- |
-| `/init` | 生成或更新 `FLAVOR.md` |
-| `/model` | 查看或切换主/子 Agent 模型 |
-| `/permissions` | 切换权限模式 |
-| `/tasks` | 查看任务计划和子 Agent 状态 |
-| `/compact` | 手动压缩长会话上下文 |
-| `/checkpoint`、`/tree` | 保存现场、查看会话树 |
-| `/rewind`、`/unrevert`、`/fork` | 恢复或分叉会话 |
-| `/memory`、`/remember`、`/forget` | 管理长期记忆 |
-| `/mcp` | 查看和管理 MCP 服务 |
-| `/loop <goal>` | 运行带验证的自治循环 |
-| `/goal <objective>` | 运行规划、执行、对抗审查流程 |
-| `/audit` | 查看工具失败审计 |
+| `/init` | Generate or update `FLAVOR.md` |
+| `/model` | View or switch main/sub-agent models |
+| `/permissions` | Switch permission modes |
+| `/tasks` | View task plans and sub-agent status |
+| `/compact` | Manually compact long session context |
+| `/checkpoint`, `/tree` | Save state, view the session tree |
+| `/rewind`, `/unrevert`, `/fork` | Resume or fork sessions |
+| `/memory`, `/remember`, `/forget` | Manage long-term memory |
+| `/mcp` | View and manage MCP servers |
+| `/loop <goal>` | Run an autonomous loop with verification |
+| `/goal <objective>` | Run the plan, execute, adversarial-review workflow |
+| `/audit` | View tool failure audits |
 
-运行中可以提交 steering 或排队 follow-up；当前模型响应结束后，任务会在安全边界处接收新指令。
+You can submit steering or queue follow-ups while a run is in progress; once the current model response finishes, the task picks up new instructions at safe boundaries.
 
-### Electron 桌面端
+### Electron Desktop
 
 ```bash
-npm run desktop:dev      # 开发模式
-npm run desktop:start    # 构建并启动
-npm run desktop:pack     # Windows 免安装目录
-npm run desktop:dist     # Windows NSIS 安装包
+npm run desktop:dev      # dev mode
+npm run desktop:start    # build and start
+npm run desktop:pack     # Windows portable directory
+npm run desktop:dist     # Windows NSIS installer
 ```
 
-桌面端提供项目和会话切换、流式 Markdown、工具与 Diff 展示、权限确认、任务状态，以及 Skill、MCP、记忆和模型管理。
+The desktop app provides project and session switching, streaming Markdown, tool and diff views, permission confirmations, task status, and management of Skills, MCP, memory, and models.
 
 ### VS Code / Qoder
 
 ```bash
-npm run vscode:install   # 安装到 VS Code
-npm run qoder:install    # 安装到 Qoder
-npm run ide:install      # 自动选择已安装的 IDE
+npm run vscode:install   # install into VS Code
+npm run qoder:install    # install into Qoder
+npm run ide:install      # auto-select the installed IDE
 ```
 
-扩展包含 `@flavor` Chat Participant、Mission Control、Changes & Health、Time Machine、诊断修复、CodeLens、checkpoint 和 rewind。若 `flavor` 不在 `PATH`，请设置 `flavorCode.executable`。
+The extension includes the `@flavor` Chat Participant, Mission Control, Changes & Health, Time Machine, diagnostic fixes, CodeLens, checkpoints, and rewind. If `flavor` is not on your `PATH`, set `flavorCode.executable`.
 
-## MCP、Skill 与插件
+## MCP, Skills & Plugins
 
-Flavor 可以连接 stdio 或 Streamable HTTP MCP 服务。项目配置示例：
+Flavor can connect to stdio or Streamable HTTP MCP servers. Example project configuration:
 
 <details>
-<summary><strong>MCP 配置与 CLI 示例</strong></summary>
+<summary><strong>MCP configuration and CLI examples</strong></summary>
 
 ```json
 {
@@ -194,7 +196,7 @@ Flavor 可以连接 stdio 或 Streamable HTTP MCP 服务。项目配置示例：
 }
 ```
 
-MCP 配置也可以通过 CLI 管理：
+MCP configuration can also be managed from the CLI:
 
 ```bash
 flavor mcp list
@@ -204,51 +206,51 @@ flavor mcp disable docs
 
 </details>
 
-Skill 是带有 YAML 头信息的 `SKILL.md`，放在 `.flavor/skills/<name>/` 或 `~/.flavor-code/skills/<name>/`。Flavor 会按任务渐进加载，也支持通过 `/<skill-name>` 显式调用。
+A Skill is a `SKILL.md` with YAML frontmatter, placed in `.flavor/skills/<name>/` or `~/.flavor-code/skills/<name>/`. Flavor loads skills progressively based on the task, and you can invoke one explicitly with `/<skill-name>`.
 
-插件放在 `.flavor/plugins/`，可以注册命令、工具、Hook、Skill 根目录和模型适配器。
+Plugins live in `.flavor/plugins/` and can register commands, tools, hooks, Skill roots, and model adapters.
 
 > [!WARNING]
-> 插件和 Agent 自注册工具是进程内执行的 JavaScript，不是安全沙箱。只安装、启用和批准你信任的代码。
+> Plugins and agent self-registered tools are in-process JavaScript, not a security sandbox. Only install, enable, and approve code you trust.
 
-## 会话、记忆与执行记录
+## Sessions, Memory & Execution Records
 
-项目运行数据集中在 `.flavor/`：
+Project runtime data lives under `.flavor/`:
 
 ```text
 .flavor/
-├── flavor.json       # 项目配置
-├── sessions/         # 会话时间线
-├── session-assets/   # 图片附件
-├── session-trees/    # 会话分支
-├── checkpoints/      # 工作区快照
-├── memory/           # 长期记忆
-├── traces/           # 可选执行 trace
-├── audit.jsonl       # 工具失败审计
-├── skills/           # 项目 Skill
-└── plugins/          # 项目插件
+├── flavor.json       # Project config
+├── sessions/         # Session timelines
+├── session-assets/   # Image attachments
+├── session-trees/    # Session branches
+├── checkpoints/      # Workspace snapshots
+├── memory/           # Long-term memory
+├── traces/           # Optional execution traces
+├── audit.jsonl       # Tool failure audits
+├── skills/           # Project skills
+└── plugins/          # Project plugins
 ```
 
-长期记忆会区分用户偏好、行为反馈、项目约定和外部引用。自动提取只保存高置信候选，并提供确认、忽略和删除入口；密钥、Token、原始工具输出和模型猜测会被拒绝。
+Long-term memory distinguishes user preferences, behavioral feedback, project conventions, and external references. Automatic extraction only keeps high-confidence candidates and provides confirm, ignore, and delete actions; secrets, tokens, raw tool output, and model guesses are rejected.
 
-图片提示支持 PNG、JPEG 和 WebP，单图最大 5 MiB、每次最多 5 张。桌面端支持选择或拖放；CLI 剪贴板图片目前支持 Windows 和 macOS。
+Image prompts support PNG, JPEG, and WebP, with a 5 MiB per-image maximum and up to 5 images per prompt. The desktop app supports picking or drag-and-drop; CLI clipboard images currently work on Windows and macOS.
 
-## 权限与沙箱
+## Permissions & Sandbox
 
-| 模式 | 行为 |
+| Mode | Behavior |
 | --- | --- |
-| `default` | 读操作自动放行，写、Shell、网络和破坏性操作按需确认 |
-| `acceptEdits` | 工作区写入和例行验证自动放行 |
-| `plan` | 只读规划，不允许修改和执行 |
-| `bypassPermissions` | 主 Agent 在硬安全检查后尽量自动执行 |
-| `auto` | 使用分类器判断，无法确定时回到人工确认 |
-| `bubble` | 将不确定操作冒泡给主会话审批 |
+| `default` | Reads are auto-approved; writes, Shell, network, and destructive actions are confirmed on demand |
+| `acceptEdits` | Workspace writes and routine verification are auto-approved |
+| `plan` | Read-only planning; no modifications or execution |
+| `bypassPermissions` | The main agent executes as much as possible after hard safety checks |
+| `auto` | A classifier decides, falling back to human approval when uncertain |
+| `bubble` | Uncertain operations bubble up to the main session for approval |
 
 > [!CAUTION]
-> 本地 Shell 仍然以当前用户身份运行。处理不可信项目时建议启用 Docker。
+> Local Shell still runs as your current user. Consider enabling Docker when working with untrusted projects.
 
 <details>
-<summary><strong>Docker 执行环境示例</strong></summary>
+<summary><strong>Docker execution environment example</strong></summary>
 
 ```json
 {
@@ -262,14 +264,14 @@ Skill 是带有 YAML 头信息的 `SKILL.md`，放在 `.flavor/skills/<name>/` �
 }
 ```
 
-Docker 不可用时任务会失败，不会静默回退到本机。配置文件中的敏感字段与 OAuth Token 使用本机配置密钥进行 AES-256-GCM 认证加密。
+If Docker is unavailable, tasks fail rather than silently falling back to the host. Sensitive fields in config files and OAuth tokens are encrypted at rest with AES-256-GCM using a local configuration key.
 
 </details>
 
-## SDK、RPC 与评测
+## SDK, RPC & Evaluation
 
 <details>
-<summary><strong>Node.js SDK 示例</strong></summary>
+<summary><strong>Node.js SDK example</strong></summary>
 
 ```ts
 import { createFlavorRuntime } from "flavor-code/sdk";
@@ -281,27 +283,27 @@ const runtime = await createFlavorRuntime({
 });
 
 await runtime.session.start();
-await runtime.session.submit("修复失败的测试");
+await runtime.session.submit("fix the failing tests");
 await runtime.dispose();
 ```
 
 </details>
 
-其他 IDE 或语言可以通过 JSONL RPC 接入：
+Other IDEs or languages can integrate over JSONL RPC:
 
 ```bash
 flavor --mode rpc --workspace . --trace .flavor/traces/run.jsonl
 ```
 
-评测运行：
+Run evaluations:
 
 ```bash
 flavor eval eval.json --output report.json
 ```
 
-RPC、trace、replay、eval、会话树与 Docker 的设计约束见 [控制面规范](./docs/specs/2026-07-29-control-plane-sandbox-vscode.md)。
+Design constraints for RPC, traces, replay, eval, session trees, and Docker are in the [control-plane spec](./docs/specs/2026-07-29-control-plane-sandbox-vscode.md).
 
-## 开发
+## Development
 
 ```bash
 npm ci
@@ -312,13 +314,13 @@ npm run build
 npm run smoke:install
 ```
 
-- TypeScript strict，目标 ES2022，Node.js 20+
-- Vitest 单元与集成测试
-- tsup 构建 CLI、SDK、Electron 主进程和 VS Code 扩展
-- Vite 构建 Electron renderer
-- CI 覆盖 Windows/macOS 与 Node 20/24
+- TypeScript strict, targeting ES2022, Node.js 20+
+- Vitest for unit and integration tests
+- tsup builds the CLI, SDK, Electron main process, and VS Code extension
+- Vite builds the Electron renderer
+- CI covers Windows/macOS with Node 20/24
 
-发布构建默认不生成或打包 source map。需要本地调试构建时显式开启：
+Release builds do not generate or package source maps by default. For a local debugging build, enable them explicitly:
 
 ```bash
 # macOS / Linux
@@ -329,25 +331,25 @@ $env:FLAVOR_SOURCEMAP = "1"
 npm run build
 ```
 
-## 文档
+## Documentation
 
-- [技术方案报告](./技术方案报告.md)：整体架构、Agent 循环、上下文、权限、插件和安全模型
-- [运行时可靠性规范](./docs/specs/2026-07-26-runtime-reliability.md)
-- [控制面、沙箱与 VS Code 规范](./docs/specs/2026-07-29-control-plane-sandbox-vscode.md)
-- [多模态图片规范](./docs/specs/2026-07-30-multimodal-image-attachments.md)
-- [VS Code 后续规划](./docs/specs/2026-08-01-flavor-code-vscode-next.md)
+- [Technical Design Report](./技术方案报告.md): overall architecture, agent loop, context, permissions, plugins, and security model
+- [Runtime reliability spec](./docs/specs/2026-07-26-runtime-reliability.md)
+- [Control plane, sandbox & VS Code spec](./docs/specs/2026-07-29-control-plane-sandbox-vscode.md)
+- [Multimodal image attachments spec](./docs/specs/2026-07-30-multimodal-image-attachments.md)
+- [VS Code next steps](./docs/specs/2026-08-01-flavor-code-vscode-next.md)
 
-## 安全提示
+## Security Notes
 
-- 审查模型生成的代码和命令，尤其是依赖安装、脚本和删除操作。
-- 不要把 `.flavor/sessions/`、trace 或长期记忆当作秘密仓库。
-- 使用最小权限 API Key，不要提交 `.env`。
-- Skill 内容可能影响模型行为；插件和自注册工具还拥有进程内 Node.js 权限。
-- 建议在版本控制下工作，并在高风险任务前创建 checkpoint。
+- Review model-generated code and commands, especially dependency installs, scripts, and deletions.
+- Do not treat `.flavor/sessions/`, traces, or long-term memory as secret stores.
+- Use least-privilege API keys and never commit `.env`.
+- Skill content can influence model behavior; plugins and self-registered tools also have in-process Node.js permissions.
+- Work under version control and create checkpoints before high-risk tasks.
 
-## 参与贡献
+## Contributing
 
-欢迎提交 Issue 和 Pull Request。提交前请至少运行：
+Issues and Pull Requests are welcome. Please at least run the following before submitting:
 
 ```bash
 npm test
@@ -356,7 +358,7 @@ npm run vscode:typecheck
 npm run build
 ```
 
-架构改动建议先阅读 [技术方案报告](./技术方案报告.md) 和相关 [设计规范](./docs/specs/)。
+For architecture changes, read the [Technical Design Report](./技术方案报告.md) and the relevant [design specs](./docs/specs/) first.
 
 ## License
 
