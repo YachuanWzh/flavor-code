@@ -3,6 +3,15 @@ import { describe, expect, it, vi } from "vitest";
 import { DesktopRuntimeController, type RuntimeLike } from "../../src/desktop/runtime-controller.js";
 import type { SessionOutput } from "../../src/ui/session.js";
 
+// The controller normalizes paths through path.resolve(), so tests must feed
+// it absolute paths that are native to the current platform; a Windows-style
+// path on a POSIX runner would be resolved relative to cwd and break the
+// callback assertions.
+const isWindows = process.platform === "win32";
+const workDir = isWindows ? "C:\\work" : "/work";
+const workDemoDir = isWindows ? "C:\\work\\demo" : "/work/demo";
+const demoHome = isWindows ? "C:\\Users\\demo" : "/home/demo";
+
 function fakeRuntime(output: (event: SessionOutput) => void, sessionId = "session-live"): RuntimeLike {
   let mainModel = "openai:gpt-5";
   return {
@@ -52,13 +61,13 @@ describe("DesktopRuntimeController", () => {
       name: "screen.png",
     }]);
     const controller = new DesktopRuntimeController({
-      home: "C:\\Users\\demo",
+      home: demoHome,
       createRuntime: async () => runtime,
       listSessions: async () => [],
       storeAttachments,
       emit: () => undefined,
     });
-    await controller.openWorkspace("C:\\work");
+    await controller.openWorkspace(workDir);
     await controller.startSession();
 
     await controller.submit("", "prompt", [{
@@ -67,7 +76,7 @@ describe("DesktopRuntimeController", () => {
       dataBase64: "iVBORw0KGgo=",
     }]);
 
-    expect(storeAttachments).toHaveBeenCalledWith("C:\\work", "session-live", [
+    expect(storeAttachments).toHaveBeenCalledWith(workDir, "session-live", [
       expect.objectContaining({ name: "screen.png" }),
     ]);
     expect(runtime.session.submit).toHaveBeenCalledWith({
@@ -91,18 +100,18 @@ describe("DesktopRuntimeController", () => {
     };
     const loadMcpManager = vi.fn(() => mcp);
     const controller = new DesktopRuntimeController({
-      home: "C:\\Users\\demo", listSessions: async () => [], loadMcpManager, emit: () => undefined,
+      home: demoHome, listSessions: async () => [], loadMcpManager, emit: () => undefined,
     });
 
     await expect(controller.listMcpServers()).rejects.toThrow(/open a project/i);
-    await controller.openWorkspace("C:\\work");
+    await controller.openWorkspace(workDir);
     expect(await controller.listMcpServers()).toEqual([local]);
     await controller.saveMcpServer(undefined, { name: "local", config: { command: "node" } });
     await controller.saveMcpServer("local", { name: "renamed", config: { command: "bun" } });
     await controller.setMcpServerEnabled("renamed", false);
     await controller.deleteMcpServer("renamed");
 
-    expect(loadMcpManager).toHaveBeenCalledWith("C:\\work");
+    expect(loadMcpManager).toHaveBeenCalledWith(workDir);
     expect(mcp.create).toHaveBeenCalledWith("local", { command: "node" });
     expect(mcp.update).toHaveBeenCalledWith("local", "renamed", { command: "bun" });
     expect(mcp.setEnabled).toHaveBeenCalledWith("renamed", false);
@@ -121,17 +130,17 @@ describe("DesktopRuntimeController", () => {
     const loadMemoryManager = vi.fn(async () => memory);
     const runtime = fakeRuntime(() => undefined);
     const controller = new DesktopRuntimeController({
-      home: "C:\\Users\\demo", listSessions: async () => [], loadMemoryManager,
+      home: demoHome, listSessions: async () => [], loadMemoryManager,
       createRuntime: async () => runtime, emit: () => undefined,
     });
 
-    await controller.openWorkspace("C:\\work");
+    await controller.openWorkspace(workDir);
     await controller.startSession();
     expect(await controller.listMemory()).toEqual(expect.objectContaining({ entries: [existing] }));
     expect(await controller.createMemory({ type: "project", content: "Use npm." })).toEqual(existing);
     expect(await controller.updateMemory(existing.id, { type: "project", content: "Use pnpm." })).toEqual(updated);
     expect(await controller.deleteMemory(updated.id)).toBe(true);
-    expect(loadMemoryManager).toHaveBeenCalledWith("C:\\work", "C:\\Users\\demo");
+    expect(loadMemoryManager).toHaveBeenCalledWith(workDir, demoHome);
     expect(runtime.services.refreshMemory).toHaveBeenCalledTimes(3);
   });
 
@@ -144,19 +153,19 @@ describe("DesktopRuntimeController", () => {
       return runtime;
     });
     const controller = new DesktopRuntimeController({
-      home: "C:\\Users\\demo",
+      home: demoHome,
       createRuntime,
       listSessions: vi.fn(async () => [{ sessionId: "session-old", createdAt: "2026-07-18T00:00:00Z", updatedAt: "2026-07-19T00:00:00Z", mainModel: "openai:gpt-5" }]),
       emit: (event) => events.push(event),
     });
 
-    const opened = await controller.openWorkspace("C:\\work\\demo");
+    const opened = await controller.openWorkspace(workDemoDir);
     const started = await controller.startSession("session-old");
     await controller.submit("hello");
 
-    expect(opened.workspace).toBe("C:\\work\\demo");
+    expect(opened.workspace).toBe(workDemoDir);
     expect(opened.sessions).toHaveLength(1);
-    expect(createRuntime).toHaveBeenCalledWith(expect.objectContaining({ workspace: "C:\\work\\demo", resumeSession: "session-old" }));
+    expect(createRuntime).toHaveBeenCalledWith(expect.objectContaining({ workspace: workDemoDir, resumeSession: "session-old" }));
     expect(started.restoredTranscript.completed).toEqual([expect.objectContaining({ prompt: "earlier" })]);
     expect(events).toContainEqual({
       type: "session-output",
@@ -280,20 +289,20 @@ describe("DesktopRuntimeController", () => {
     let sessions = [{ sessionId: "session-live", createdAt: "2026-07-19T00:00:00Z", updatedAt: "2026-07-19T00:00:00Z", mainModel: "openai:gpt-5" }];
     const deleteSession = vi.fn(async () => { sessions = []; });
     const controller = new DesktopRuntimeController({
-      home: "C:\\Users\\demo",
+      home: demoHome,
       createRuntime: async () => runtime,
       listSessions: async () => sessions,
       deleteSession,
       emit: () => undefined,
     });
-    await controller.openWorkspace("C:\\work");
+    await controller.openWorkspace(workDir);
     await controller.startSession("session-live");
 
     const snapshot = await controller.deleteSession("session-live");
 
     expect(runtime.session.close).toHaveBeenCalledOnce();
     expect(runtime.dispose).toHaveBeenCalledOnce();
-    expect(deleteSession).toHaveBeenCalledWith("C:\\work", "session-live");
+    expect(deleteSession).toHaveBeenCalledWith(workDir, "session-live");
     expect(snapshot.activeSession).toBeUndefined();
     expect(snapshot.sessions).toEqual([]);
   });
