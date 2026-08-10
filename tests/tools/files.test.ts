@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -321,6 +321,26 @@ describe("file tools", () => {
     });
     expect(getToolPresentation(output)?.lines).toContainEqual({ kind: "removed", oldLine: 4, text: "old" });
     expect(getToolPresentation(output)?.lines).toContainEqual({ kind: "added", newLine: 4, text: "new" });
+  });
+
+  it("Edit echoes the caller-supplied path when the workspace sits behind an aliased path component", async () => {
+    // CI runners expose temp dirs through aliases (8.3 short names on Windows,
+    // /var -> /private/var on macOS); presentations must not leak the realpath
+    // form or the model sees a path different from the one it supplied.
+    const root = mkdtempSync(join(tmpdir(), "flavor-files-alias-"));
+    const base = join(root, "base"); mkdirSync(base);
+    symlinkSync(base, join(root, "alias"), process.platform === "win32" ? "junction" : "dir");
+    const workspace = join(root, "alias", "workspace"); mkdirSync(workspace);
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "old\n");
+
+    const output = await createEditTool(workspace).execute(
+      { path, oldText: "old", newText: "new" },
+      new AbortController().signal,
+    );
+
+    expect(getToolPresentation(output)).toMatchObject({ operation: "update", path });
+    expect(readFileSync(path, "utf8")).toBe("new\n");
   });
 
   it("normalizes paths and prevents symlink escape", async () => {

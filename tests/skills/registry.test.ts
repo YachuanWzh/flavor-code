@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, open as fsOpen, rename, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -158,7 +159,10 @@ describe("SkillRegistry", () => {
     await expect(registry.resolveResource(matched, "assets/outside.md")).rejects.toThrow(/symlink|escape/i);
     await expect(registry.resolveResource(matched, "references/unmentioned.md")).rejects.toThrow(/referenced/i);
     await expect(registry.resolveResource(matched, "references/checklist.md")).rejects.toThrow(/permission/i);
-    expect(authorizeResource).toHaveBeenCalledWith(join(directory, "references", "checklist.md"), matched);
+    // The authorizer sees the canonical physical path of the opened resource;
+    // normalize the expectation because tmpdir itself can carry an alias
+    // (/private/var on macOS, 8.3 short names on Windows runners).
+    expect(authorizeResource).toHaveBeenCalledWith(realpathSync(join(directory, "references", "checklist.md")), matched);
   });
 
   it("enforces metadata, body, and resource size limits without executing scripts", async () => {

@@ -165,6 +165,11 @@ export function createEditTool(workspace: string, options: FileMutationOptions =
     paths: (input) => [guard.lexical(input.path)],
     execute: async (input, signal) => {
       abortIfNeeded(signal);
+      // Physical paths guard against symlink escapes during I/O, but outputs
+      // echo the lexical form so results match what the caller supplied (the
+      // physical form can differ, e.g. /private/var on macOS or 8.3 short
+      // names on Windows).
+      const displayPath = guard.lexical(input.path);
       const path = await guard.existing(input.path);
       const contents = await readText(path);
       const hasCRLF = contents.includes("\r\n");
@@ -180,11 +185,11 @@ export function createEditTool(workspace: string, options: FileMutationOptions =
       }
       const updatedLF = contentsLF.slice(0, first) + newTextLF + contentsLF.slice(first + oldTextLF.length);
       const updated = hasCRLF ? updatedLF.replace(/\n/g, "\r\n") : updatedLF;
-      await options.beforeCommit?.({ path, before: contents, after: updated, kind: "update" }, signal);
+      await options.beforeCommit?.({ path: displayPath, before: contents, after: updated, kind: "update" }, signal);
       await atomicWrite(path, updated, signal);
       return withToolPresentation(
-        { path, replacements: 1 },
-        buildFileChangePresentation(path, contents, updated, "update"),
+        { path: displayPath, replacements: 1 },
+        buildFileChangePresentation(displayPath, contents, updated, "update"),
       );
     },
   };
