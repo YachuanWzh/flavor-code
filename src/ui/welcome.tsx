@@ -1,6 +1,7 @@
 import React from "react";
 
 import { Box, Text } from "../claude-ink/index.js";
+import { packageVersion } from "../utils/version.js";
 
 export interface WelcomeCardProps {
   model: string;
@@ -38,6 +39,7 @@ export function WelcomeCard({ model, serviceName, workspaceName, columns }: Welc
         {serviceName === undefined ? null : <Text color="cyan" wrap="truncate-end">{serviceName}</Text>}
         <Text dimColor wrap="truncate-end">{model}</Text>
         <Text dimColor wrap="truncate-end">{workspaceName}</Text>
+        <Text dimColor wrap="truncate-end">{"v"}{packageVersion()}</Text>
       </Box>
       <Box flexGrow={1} flexDirection="column" paddingLeft={1}>
         <Text bold color="yellowBright">Tips for getting started</Text>
@@ -54,7 +56,7 @@ export function WelcomeCard({ model, serviceName, workspaceName, columns }: Welc
     </Box> : <Box width="100%" flexDirection="column">
       <Text bold color={FLAVOR_ACCENT}>◆ Flavor Code</Text>
       <Text>Welcome back!</Text>
-      <Text dimColor wrap="truncate-end">{model}{" · "}{workspaceName}</Text>
+      <Text dimColor wrap="truncate-end">{model}{" · "}{workspaceName}{" · v"}{packageVersion()}</Text>
       <Text><Text color="cyan">/init</Text>{" setup · "}<Text color="cyan">/help</Text>{" commands"}</Text>
     </Box>}
   </Box>;

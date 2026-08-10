@@ -13,6 +13,7 @@ import type { MentionCompletion } from "../../src/ui/mention-completion.js";
 import { createTranscriptState, transcriptReducer, type TranscriptTurn } from "../../src/ui/transcript.js";
 import { TaskProgressPanel, type TaskBlock } from "../../src/ui/task-progress.js";
 import { WelcomeCard } from "../../src/ui/welcome.js";
+import { packageVersion } from "../../src/utils/version.js";
 
 const turn = (id: number, prompt: string, assistantText: string): TranscriptTurn => ({
   id,
@@ -177,6 +178,7 @@ describe("TerminalLayout", () => {
     expect(empty).toContain("Welcome back!");
     expect(empty).toContain("Tips for getting started");
     expect(empty).toContain("/init");
+    expect(empty).toContain(`v${packageVersion()}`);
     expect(active).not.toContain("Welcome back!");
     expect(active).toContain("flavor · anthropic:deepseek-v4-pro · flavor-code");
   });
@@ -194,6 +196,7 @@ describe("TerminalLayout", () => {
     />, { columns: 48 }));
 
     expect(output).toContain("Flavor Code");
+    expect(output).toContain(`v${packageVersion()}`);
     expect(output).not.toContain("Tips for getting started");
     expect(Math.max(...output.split("\n").map((line) => [...line].length))).toBeLessThanOrEqual(48);
   });
