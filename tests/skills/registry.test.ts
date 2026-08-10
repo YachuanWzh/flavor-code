@@ -103,6 +103,25 @@ describe("SkillRegistry", () => {
     ]));
   });
 
+  it("discovers skills when the configured root sits behind a symlinked path component", async () => {
+    // CI runners resolve tmpdir paths differently than their realpath form
+    // (/var -> /private/var on macOS, 8.3 short names on Windows); discovery
+    // must compare physical paths on both sides of the containment check.
+    const f = await fixture();
+    const baseParent = join(f.root, "base"); await mkdir(baseParent);
+    const realRoot = join(baseParent, "skills"); await mkdir(realRoot);
+    await symlink(baseParent, join(f.root, "alias"), process.platform === "win32" ? "junction" : "dir");
+    await skill(realRoot, "testing", "name: testing\ndescription: Global testing");
+
+    const registry = new SkillRegistry({ globalRoots: [join(f.root, "alias", "skills")] });
+    const discovered = await registry.discover();
+
+    expect(discovered).toEqual([
+      expect.objectContaining({ name: "testing", source: "global" }),
+    ]);
+    expect(registry.diagnostics).toEqual([]);
+  });
+
   it("rejects duplicate project names across roots without shadowing global metadata", async () => {
     const f = await fixture();
     const secondProjectRoot = join(f.root, "project-two"); await mkdir(secondProjectRoot);

@@ -104,6 +104,22 @@ describe("PermissionEngine", () => {
     expect(engine.decide({ agent: "main", tool: "Write", paths: [join(link, "x")] }).decision).toBe("deny");
   });
 
+  it("classifies lexical paths correctly when the workspace sits behind a symlinked path component", () => {
+    // CI runners expose temp dirs through aliased components (/var -> /private/var
+    // on macOS, 8.3 short names on Windows); decisions must stay consistent when
+    // the engine resolves the workspace physically but receives lexical paths.
+    const root = mkdtempSync(join(tmpdir(), "flavor-aliased-permissions-"));
+    const base = join(root, "base"); mkdirSync(base);
+    const physicalWorkspace = join(base, "workspace"); mkdirSync(physicalWorkspace);
+    symlinkSync(base, join(root, "alias"), process.platform === "win32" ? "junction" : "dir");
+    const aliasedWorkspace = join(root, "alias", "workspace");
+    const engine = new PermissionEngine({ workspace: aliasedWorkspace, mode: "acceptEdits" });
+
+    expect(engine.decide({ agent: "main", tool: "Write", paths: [join(aliasedWorkspace, "x")] }).decision).toBe("allow");
+    expect(engine.decide({ agent: "main", tool: "Write", paths: [`${aliasedWorkspace}${sep}..${sep}..${sep}x`] }).decision).toBe("deny");
+    expect(engine.decide({ agent: "subagent", tool: "Write", paths: [join(aliasedWorkspace, "x")] }).decision).toBe("allow");
+  });
+
   it("classifies routine, network, and forbidden shell commands", () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-workspace-"));
     const engine = new PermissionEngine({ workspace, mode: "acceptEdits" });

@@ -264,9 +264,15 @@ export class SkillRegistry {
     for (const configuredRoot of roots) {
       const root = resolve(configuredRoot);
       let entries;
+      // Containment checks compare physical paths on both sides: the configured
+      // root may sit behind a symlink (/var -> /private/var on macOS) or an
+      // 8.3 short name (runner temp dirs on Windows), so lexical roots would
+      // reject every legitimate skill directory.
+      let physicalRoot = root;
       try {
         const rootInfo = await lstat(root);
         if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) throw new Error("Skill root must be a real directory");
+        physicalRoot = await realpath(root);
         entries = await readdir(root, { withFileTypes: true });
       } catch (error) {
         if (isMissing(error)) continue;
@@ -279,11 +285,11 @@ export class SkillRegistry {
         try {
           if (entry.isSymbolicLink()) throw new Error("Symlinked skill directories are not allowed");
           if (!entry.isDirectory()) continue;
-          const physicalRoot = await realpath(skillRoot);
-          if (!isWithin(root, physicalRoot)) throw new Error("Skill directory escapes its registry root");
+          const physicalSkillRoot = await realpath(skillRoot);
+          if (!isWithin(physicalRoot, physicalSkillRoot)) throw new Error("Skill directory escapes its registry root");
           const skillFile = resolve(skillRoot, "SKILL.md");
           const parsed = await readFrontmatterFile(
-            skillFile, physicalRoot, this.#options.maxMetadataBytes, this.#options.openFile,
+            skillFile, physicalSkillRoot, this.#options.maxMetadataBytes, this.#options.openFile,
           );
           if (!SKILL_NAME.test(parsed.name)) throw new Error(`Invalid skill name: ${parsed.name}`);
           if (entry.name !== parsed.name) throw new Error("Skill folder must exactly match frontmatter name");
@@ -292,7 +298,7 @@ export class SkillRegistry {
               name: parsed.name,
               description: parsed.description,
               source,
-              root: physicalRoot,
+              root: physicalSkillRoot,
               disableModelInvocation: parsed.disableModelInvocation,
             }),
             skillFile,

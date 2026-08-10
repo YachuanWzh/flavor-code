@@ -7,6 +7,8 @@ import { describe, expect, it } from "vitest";
 const workspace = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 describe("desktop development launcher", () => {
+  // Cold-starting the Vite and Electron CLIs through Node is slow on CI
+  // runners (fresh node_modules, antivirus scans); allow ample headroom.
   it("runs local Vite and Electron JavaScript CLIs through Node", async () => {
     const launcher = await import("../../scripts/desktop-dev.mjs");
     const commands = launcher.createDesktopDevCommands({ cwd: workspace, nodePath: process.execPath, platform: "win32" });
@@ -31,7 +33,7 @@ describe("desktop development launcher", () => {
       expect(probe.error).toBeUndefined();
       expect(probe.status).toBe(0);
     }
-  });
+  }, 60_000);
 
   it("keeps the Electron sandbox enabled outside Windows development", async () => {
     const launcher = await import("../../scripts/desktop-dev.mjs");

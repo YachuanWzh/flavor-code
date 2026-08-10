@@ -50,11 +50,17 @@ export function isDestructiveTool(name: string): boolean {
 }
 
 export class PermissionEngine {
+  readonly #lexicalWorkspace: string;
   readonly #workspace: string;
   #mode: PermissionMode;
 
   constructor(options: PermissionEngineOptions) {
     const root = resolve(options.workspace);
+    // Lexical and physical forms are both needed: traversal detection compares
+    // user-supplied lexical paths, while containment checks must compare
+    // realpath-resolved paths on both sides (/var -> /private/var on macOS,
+    // 8.3 short names in Windows runner temp dirs).
+    this.#lexicalWorkspace = root;
     this.#workspace = existsSync(root) ? realpathSync.native(root) : root;
     this.#mode = canonicalMode(options.mode ?? "default");
   }
@@ -76,14 +82,14 @@ export class PermissionEngine {
       return { decision: "deny", reason: `${request.tool} requires source and destination paths` };
     }
     for (const path of paths) {
-      const classification = classifyPath(this.#workspace, path);
+      const classification = classifyPath(this.#lexicalWorkspace, this.#workspace, path);
       if (classification.escape) return { decision: "deny", reason: classification.reason ?? "Path escapes the workspace" };
       if (request.agent === "subagent" && !classification.inside) {
         return { decision: "deny", reason: "Subagents are restricted to the workspace" };
       }
     }
 
-    const inside = paths.every((path) => classifyPath(this.#workspace, path).inside);
+    const inside = paths.every((path) => classifyPath(this.#lexicalWorkspace, this.#workspace, path).inside);
     if (this.#mode === "plan") {
       return READ_TOOLS.has(request.tool)
         ? { decision: "allow" }
@@ -117,11 +123,11 @@ export class PermissionEngine {
       : analyzeArgumentCommand(request.command ?? "", request.args);
     if (request.agent === "subagent") {
       if (request.cwd === undefined) return { decision: "ask", reason: "Subagent shell commands require an explicit workspace cwd" };
-      const cwd = classifyPath(this.#workspace, request.cwd);
+      const cwd = classifyPath(this.#lexicalWorkspace, this.#workspace, request.cwd);
       if (cwd.escape || !cwd.inside) return { decision: "deny", reason: "Subagent shell cwd must remain in the workspace" };
       if (analysis.destructive) return { decision: "deny", reason: "Destructive commands are forbidden for subagents" };
       if (analysis.wrapped || analysis.opaque || !isRoutineCommand(analysis.command)) return { decision: "ask", reason: "Subagent shell command requires main-Agent approval" };
-      const argumentDecision = assessRoutineArguments(analysis.command, request.cwd, this.#workspace);
+      const argumentDecision = assessRoutineArguments(analysis.command, request.cwd, this.#lexicalWorkspace, this.#workspace);
       if (argumentDecision !== "allow") {
         return argumentDecision === "deny"
           ? { decision: "deny", reason: "Subagent command arguments escape the workspace" }
@@ -137,12 +143,12 @@ export class PermissionEngine {
     if (analysis.wrapped || analysis.opaque) return ask(this.#mode, "Shell wrapper requires approval");
     if (this.#mode === "bypassPermissions") return { decision: "allow" };
     if ((this.#mode === "acceptEdits" || this.#mode === "auto") && isRoutineCommand(analysis.command)) {
-      const cwd = request.cwd ?? this.#workspace;
-      const cwdClassification = classifyPath(this.#workspace, cwd);
+      const cwd = request.cwd ?? this.#lexicalWorkspace;
+      const cwdClassification = classifyPath(this.#lexicalWorkspace, this.#workspace, cwd);
       if (cwdClassification.escape || !cwdClassification.inside) {
         return { decision: "deny", reason: "Routine command cwd must remain in the workspace" };
       }
-      const argumentDecision = assessRoutineArguments(analysis.command, cwd, this.#workspace);
+      const argumentDecision = assessRoutineArguments(analysis.command, cwd, this.#lexicalWorkspace, this.#workspace);
       if (argumentDecision === "deny") return { decision: "deny", reason: "Routine command arguments escape the workspace" };
       if (argumentDecision === "ask") return ask(this.#mode, "Ambiguous routine command arguments require approval");
       return { decision: "allow" };
@@ -188,17 +194,17 @@ function analyzeArgumentCommand(executable: string, args: readonly string[]): Co
 
 interface ClassifiedPath { inside: boolean; escape: boolean; reason?: string }
 
-function classifyPath(workspace: string, input: string): ClassifiedPath {
-  const candidate = resolve(workspace, input);
-  const lexicalInside = isWithin(workspace, candidate);
+function classifyPath(lexicalWorkspace: string, physicalWorkspace: string, input: string): ClassifiedPath {
+  const candidate = resolve(lexicalWorkspace, input);
+  const lexicalInside = isWithin(lexicalWorkspace, candidate);
   const traversal = input.split(/[\\/]+/).includes("..");
-  const startsInWorkspace = pathStartsWith(workspace, input);
+  const startsInWorkspace = pathStartsWith(lexicalWorkspace, input);
   if ((!isAbsolute(input) || startsInWorkspace) && traversal && !lexicalInside) {
     return { inside: false, escape: true, reason: "Path traversal escapes the workspace" };
   }
 
   const physical = resolvePhysical(candidate);
-  const physicalInside = isWithin(workspace, physical);
+  const physicalInside = isWithin(physicalWorkspace, physical);
   if (lexicalInside && !physicalInside) return { inside: false, escape: true, reason: "Symlink escapes the workspace" };
   return { inside: physicalInside, escape: false };
 }
@@ -306,7 +312,7 @@ function isRoutineCommand(command: ParsedCommand): boolean {
 
 type ArgumentDecision = "allow" | "ask" | "deny";
 
-function assessRoutineArguments(command: ParsedCommand, cwd: string, workspace: string): ArgumentDecision {
+function assessRoutineArguments(command: ParsedCommand, cwd: string, lexicalWorkspace: string, physicalWorkspace: string): ArgumentDecision {
   const args = routineArguments(command);
   if (args === undefined) return "ask";
   const pathOptions = new Set([
@@ -321,7 +327,7 @@ function assessRoutineArguments(command: ParsedCommand, cwd: string, workspace: 
       const option = equals[1]?.toLowerCase() ?? "";
       const value = equals[2] ?? "";
       if (!pathOptions.has(option)) return "ask";
-      const decision = assessArgumentPath(value, cwd, workspace);
+      const decision = assessArgumentPath(value, cwd, lexicalWorkspace, physicalWorkspace);
       if (decision !== "allow") return decision;
       continue;
     }
@@ -329,14 +335,14 @@ function assessRoutineArguments(command: ParsedCommand, cwd: string, workspace: 
     if (option !== undefined && pathOptions.has(option)) {
       const value = args[index + 1];
       if (value === undefined || value.startsWith("-")) return "ask";
-      const decision = assessArgumentPath(value, cwd, workspace);
+      const decision = assessArgumentPath(value, cwd, lexicalWorkspace, physicalWorkspace);
       if (decision !== "allow") return decision;
       index += 1;
       continue;
     }
     if (arg.startsWith("-")) continue;
     if (looksLikePath(arg)) {
-      const decision = assessArgumentPath(arg, cwd, workspace);
+      const decision = assessArgumentPath(arg, cwd, lexicalWorkspace, physicalWorkspace);
       if (decision !== "allow") return decision;
       continue;
     }
@@ -356,10 +362,10 @@ function routineArguments(command: ParsedCommand): readonly string[] | undefined
   return undefined;
 }
 
-function assessArgumentPath(value: string, cwd: string, workspace: string): ArgumentDecision {
+function assessArgumentPath(value: string, cwd: string, lexicalWorkspace: string, physicalWorkspace: string): ArgumentDecision {
   if (value.length === 0) return "ask";
   const resolved = resolve(cwd, value);
-  const classification = classifyPath(workspace, resolved);
+  const classification = classifyPath(lexicalWorkspace, physicalWorkspace, resolved);
   return classification.escape || !classification.inside ? "deny" : "allow";
 }
 
