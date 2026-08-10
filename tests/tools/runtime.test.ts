@@ -483,6 +483,48 @@ describe("ToolRuntime", () => {
     expect(approvals).toBe(2);
   });
 
+  it("stops relaying PermissionRequest after a hook allow-all decision", async () => {
+    const f = fixture("ask");
+    let hookAsks = 0;
+    f.hooks.on("PermissionRequest", () => {
+      hookAsks += 1;
+      return { decision: "allow", additionalContext: "codeisland:allow-all" };
+    });
+    const runtime = new ToolRuntime({ tools: [f.tool], hooks: f.hooks, permissions: f.permissions });
+
+    // First call: relayed to the hook listener (e.g. the island bridge).
+    await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: true });
+    expect(hookAsks).toBe(1);
+
+    // Second call, same category: allow-all took effect — the request must not
+    // be relayed to the hook listener again (no repeated confirmation card).
+    await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "y") } }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: true });
+    expect(hookAsks).toBe(1);
+  });
+
+  it("stops relaying PermissionRequest after a hook allow-all decision", async () => {
+    const f = fixture("ask");
+    let hookAsks = 0;
+    f.hooks.on("PermissionRequest", () => {
+      hookAsks += 1;
+      return { decision: "allow", additionalContext: "codeisland:allow-all" };
+    });
+    const runtime = new ToolRuntime({ tools: [f.tool], hooks: f.hooks, permissions: f.permissions });
+
+    // First call: relayed to the hook listener (e.g. the island bridge).
+    await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "x") } }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: true });
+    expect(hookAsks).toBe(1);
+
+    // Second call, same category: allow-all took effect — the request must not
+    // be relayed to the hook listener again (no repeated confirmation card).
+    await expect(runtime.execute({ name: "Test", input: { path: join(f.workspace, "y") } }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: true });
+    expect(hookAsks).toBe(1);
+  });
+
   describe("hint()", () => {
     it("returns the tool's summarize output when provided", () => {
       const f = fixture();

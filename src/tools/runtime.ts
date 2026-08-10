@@ -219,7 +219,12 @@ export class ToolRuntime {
           // Classifier unavailability is fail-safe: retain the normal approval request.
         }
       }
-      if (pre.decision === "ask" || permission.decision === "ask") {
+      // A category the user already "allowed all" this session skips the
+      // whole approval round-trip — including the PermissionRequest hook
+      // relay, so a connected approval UI is not re-prompted for every
+      // same-type call.
+      const sessionAllowed = this.#alwaysAllowed.has(getToolCategory(tool.name));
+      if (!sessionAllowed && (pre.decision === "ask" || permission.decision === "ask")) {
         const reason = [pre.reason, permission.reason].filter((value): value is string => value !== undefined).join("\n") || "Approval required";
         const requestDecision = await this.#hooks.emit({
           version: 1,
@@ -247,11 +252,11 @@ export class ToolRuntime {
         } else if (signal.aborted) {
           throw signal.reason;
         } else {
-          // Check if this tool's category has been always-allowed for this session.
+          // No hook handler approved: fall back to the interactive callback.
+          // (The session-always-allowed case never reaches this block — it is
+          // short-circuited before the PermissionRequest hook is emitted.)
           const category = getToolCategory(tool.name);
-          if (this.#alwaysAllowed.has(category)) {
-            // Skip the approval callback — already authorized for this tool type.
-          } else if (this.#approve === undefined) {
+          if (this.#approve === undefined) {
             return this.#fail(tool.name, input, context.agent, "permission_denied", reason);
           } else {
             const decision = await this.#approve({ ...request, reason }, signal);
