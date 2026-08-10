@@ -115,6 +115,8 @@ export interface DesktopRuntimeControllerOptions {
   runD2cPreview?(projectDir: string, options: { workspace: string }): Promise<RunningProject>;
   runD2cMockServer?(projectDir: string): Promise<D2cRunningMock>;
   runD2cInteractionTests?(manifest: D2cInteractionManifest, baseUrl: string, mockUrl: string): Promise<D2cInteractionRun>;
+  /** Checks whether the managed Express mock still answers; defaults to a /_d2c/health probe. */
+  probeD2cMock?(mockUrl: string): Promise<boolean>;
   emit(event: DesktopEvent): void;
 }
 
@@ -130,6 +132,7 @@ export class DesktopRuntimeController {
   readonly #storeAttachments: NonNullable<DesktopRuntimeControllerOptions["storeAttachments"]>;
   readonly #runD2cPreview: NonNullable<DesktopRuntimeControllerOptions["runD2cPreview"]>;
   readonly #runD2cMockServer: NonNullable<DesktopRuntimeControllerOptions["runD2cMockServer"]>;
+  readonly #probeD2cMock: NonNullable<DesktopRuntimeControllerOptions["probeD2cMock"]>;
   readonly #executeD2cInteractionTests: DesktopRuntimeControllerOptions["runD2cInteractionTests"];
   readonly #emit: (event: DesktopEvent) => void;
   #workspace: string | undefined;
@@ -142,6 +145,8 @@ export class DesktopRuntimeController {
   #busy = false;
   readonly #d2cMocks = new Map<string, D2cRunningMock>();
   readonly #d2cPreviews = new Map<string, RunningProject>();
+  /** Mock URL each preview observed at startup; Vite only reads .env.local on boot. */
+  readonly #d2cPreviewMockUrls = new Map<string, string>();
 
   constructor(options: DesktopRuntimeControllerOptions) {
     this.#home = resolve(options.home ?? homedir());
@@ -173,6 +178,12 @@ export class DesktopRuntimeController {
         new SessionAssetStore({ workspace }).store(sessionId, attachments));
     this.#runD2cPreview = options.runD2cPreview ?? runFrontendProject;
     this.#runD2cMockServer = options.runD2cMockServer ?? runD2cMockServer;
+    this.#probeD2cMock = options.probeD2cMock ?? (async (mockUrl) => {
+      try {
+        const response = await fetch(`${mockUrl}/_d2c/health`, { signal: AbortSignal.timeout(3_000) });
+        return response.ok;
+      } catch { return false; }
+    });
     this.#executeD2cInteractionTests = options.runD2cInteractionTests;
     this.#emit = options.emit;
   }
@@ -565,6 +576,11 @@ export class DesktopRuntimeController {
     if (workflow === undefined || !reviewProgress(workflow).complete || workflow.stage === "visual-review") {
       throw new Error("Complete visual review before importing OpenAPI");
     }
+    const moduleManifest = join(d2cOutputDirectory(workspace, task), "d2c.modules.json");
+    const moduleManifestInfo = await stat(moduleManifest).catch(() => undefined);
+    if (moduleManifestInfo === undefined || !moduleManifestInfo.isFile()) {
+      throw new Error("D2C implementation must write d2c.modules.json before API mapping; ask the agent to split the project into modules first");
+    }
     const info = await stat(sourcePath);
     if (!info.isFile() || info.size > 8 * 1024 * 1024) throw new Error("OpenAPI JSON must be a file no larger than 8 MiB");
     const raw = await readFile(sourcePath, "utf8");
@@ -673,9 +689,10 @@ export class DesktopRuntimeController {
     if (workspace === undefined) throw new Error("Open a project before starting a D2C preview");
     const workflow = await readWorkflow(workspace, task);
     if (workflow?.integrationFiles === undefined) throw new Error("Generate D2C integration code before starting the preview");
-    await this.startD2cMock(task);
+    const mockStatus = await this.startD2cMock(task);
     const running = await this.#runD2cPreview(d2cOutputDirectory(workspace, task), { workspace });
     this.#d2cPreviews.set(task, running);
+    if (mockStatus.url !== undefined) this.#d2cPreviewMockUrls.set(task, mockStatus.url);
     const interaction = workflow.interaction ?? { manualDecision: "pending" as const, updatedAt: new Date().toISOString() };
     await writeWorkflow(workspace, { ...workflow, revision: workflow.revision + 1, stage: "interaction-review", interaction, updatedAt: new Date().toISOString() });
     return { running: true, url: running.url, ...this.#mockUrl(task) };
@@ -683,7 +700,7 @@ export class DesktopRuntimeController {
 
   async stopD2cPreview(task: string): Promise<D2cPreviewStatus> {
     const running = this.#d2cPreviews.get(task);
-    if (running !== undefined) { this.#d2cPreviews.delete(task); await running.stop(); }
+    if (running !== undefined) { this.#d2cPreviews.delete(task); this.#d2cPreviewMockUrls.delete(task); await running.stop(); }
     return { running: false, ...this.#mockUrl(task) };
   }
 
@@ -702,14 +719,44 @@ export class DesktopRuntimeController {
     if (this.#executeD2cInteractionTests === undefined) throw new Error("D2C interaction runner is unavailable");
     const workflow = await readWorkflow(workspace, task);
     if (workflow === undefined) throw new Error("D2C workflow is unavailable");
+    const mappings = workflow.mappings as D2cApiMapping[] | undefined;
+    if (mappings === undefined || !mappings.some((mapping) => mapping.status === "confirmed" || mapping.status === "auto")) {
+      throw new Error("No API binding is confirmed; confirm module bindings in the integration view before running automated acceptance");
+    }
+    await this.#syncD2cRuntimeForAcceptance(task);
+    const readyPreview = this.#d2cPreviews.get(task);
+    const readyMock = this.#d2cMocks.get(task);
+    if (readyPreview === undefined || readyMock === undefined) throw new Error("D2C preview or mock server is unavailable after synchronization");
     const manifestPath = join(taskDir(workspace, task), "design", "interaction-manifest.json");
     const manifest = parseInteractionManifest(await readFile(manifestPath, "utf8"));
-    const result = await this.#executeD2cInteractionTests(manifest, preview.url, mock.url);
+    const result = await this.#executeD2cInteractionTests(manifest, readyPreview.url, readyMock.url);
     const dir = integrationDirectory(workspace, task);
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "interaction-results.json"), `${JSON.stringify(result, null, 2)}\n`);
     const next = await writeWorkflow(workspace, applyInteractionRun(workflow, result));
     return { workflow: next, result };
+  }
+
+  /** Restarts a dead mock and any preview whose baked-in VITE_API_BASE_URL no longer matches it. */
+  async #syncD2cRuntimeForAcceptance(task: string): Promise<void> {
+    const mock = this.#d2cMocks.get(task);
+    if (mock === undefined) return;
+    const healthy = await this.#probeD2cMock(mock.url);
+    if (healthy && this.#d2cPreviewMockUrls.get(task) === mock.url) return;
+    if (!healthy) {
+      this.#d2cMocks.delete(task);
+      await mock.stop().catch(() => undefined);
+      await this.startD2cMock(task);
+    }
+    const currentMock = this.#d2cMocks.get(task);
+    const preview = this.#d2cPreviews.get(task);
+    // Vite reads .env.local only at startup; restart the preview so its API base matches the live mock.
+    if (preview !== undefined && currentMock !== undefined && this.#d2cPreviewMockUrls.get(task) !== currentMock.url) {
+      this.#d2cPreviews.delete(task);
+      this.#d2cPreviewMockUrls.delete(task);
+      await preview.stop().catch(() => undefined);
+      await this.startD2cPreview(task);
+    }
   }
 
   async setD2cManualAcceptance(task: string, accepted: boolean): Promise<D2cWorkflow> {
@@ -781,6 +828,7 @@ export class DesktopRuntimeController {
   async #stopAllD2cPreviews(): Promise<void> {
     const running = [...this.#d2cPreviews.values()];
     this.#d2cPreviews.clear();
+    this.#d2cPreviewMockUrls.clear();
     await Promise.all(running.map((item) => item.stop().catch(() => undefined)));
   }
 
