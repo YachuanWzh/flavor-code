@@ -53,9 +53,12 @@ describe("importAndDispatchD2cTask", () => {
     expect(prompt).toContain("index.html");
     expect(prompt).toContain("analytics.html");
     expect(prompt).toContain("同名 HTML 入口");
-    expect(prompt).toContain("自动扩容，最多 10 次");
-    expect(prompt).not.toContain("不限制修复轮次");
-    expect(prompt).not.toContain("最多调用 3 次 D2cCompare");
+    expect(prompt).toContain("首次有效报告生成后立即停止");
+    expect(prompt).toContain("等待用户在 D2C 审阅面板逐条通过或退回");
+    expect(prompt).toContain("d2c.modules.json");
+    expect(prompt).toContain("data-d2c-module");
+    expect(prompt).toContain("data-d2c-source");
+    expect(prompt).not.toContain("持续调用 D2cCompare 并迭代修复");
     expect(prompt).toContain("不要读取工作区外的 npm 源码或缓存日志");
     expect(prompt).toContain("不要用 Shell 手动执行 npm run dev");
     expect(prompt).toContain("由它负责安装依赖、启动、探活和关闭服务器");
@@ -89,5 +92,38 @@ describe("resultPresentation", () => {
     expect(resultPresentation({ total: 96.8, status: "valid", confidence: "high" })).toEqual({
       primary: "96.8", label: "有效评分", showConfidence: true,
     });
+  });
+
+  it("lets uncertain mappings confirm the suggested operation or select any operation", async () => {
+    const source = await import("node:fs/promises").then(({ readFile }) =>
+      readFile(new URL("../../src/desktop/renderer/d2c-viewer.tsx", import.meta.url), "utf8"));
+    expect(source).toContain("integration.document.operations.map");
+    expect(source).toContain("确认此映射");
+  });
+
+  it("keeps the review inspector available in narrow workbench containers", async () => {
+    const css = await import("node:fs/promises").then(({ readFile }) =>
+      readFile(new URL("../../src/desktop/renderer/styles.css", import.meta.url), "utf8"));
+    const narrow = css.slice(css.indexOf("@container (max-width: 680px)"));
+    expect(narrow).toContain("grid-template-rows: minmax(240px, 1fr) minmax(300px, 46%)");
+    expect(narrow).toContain(".d2c-v2 .d2c-inspector { display: block");
+    expect(narrow).not.toContain(".d2c-v2 .d2c-inspector { display: none");
+  });
+
+  it("makes the running project the primary interactive canvas with safe manual controls", async () => {
+    const source = await import("node:fs/promises").then(({ readFile }) =>
+      readFile(new URL("../../src/desktop/renderer/d2c-viewer.tsx", import.meta.url), "utf8"));
+    expect(source).toContain("<iframe key={previewReloadKey}");
+    expect(source).toContain('sandbox="allow-scripts allow-forms allow-modals allow-same-origin"');
+    expect(source).toContain("openD2cPreview");
+    expect(source).toContain("确认人工验收通过");
+  });
+
+  it("exposes automated scenario results and observed API traffic", async () => {
+    const source = await import("node:fs/promises").then(({ readFile }) =>
+      readFile(new URL("../../src/desktop/renderer/d2c-viewer.tsx", import.meta.url), "utf8"));
+    expect(source).toContain("runD2cInteractionTests");
+    expect(source).toContain("interactionRun.apiRequestCount");
+    expect(source).toContain("scenario.failure");
   });
 });

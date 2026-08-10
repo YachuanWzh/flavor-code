@@ -9,6 +9,7 @@ import {
   fitCaptureSize,
   formatD2cRenderFailure,
   isAllowedCaptureNavigation,
+  sanitizeD2cModuleSourceFiles,
   stitchCaptureTiles,
 } from "../../src/desktop/d2c-capture.js";
 
@@ -64,6 +65,19 @@ describe("D2C capture helpers", () => {
     expect(source).toContain("window.webContents.capturePage");
     expect(source).not.toContain("webContents.debugger");
     expect(source).not.toContain("Page.captureScreenshot");
+  });
+
+  it("captures stable generated module boundaries for targeted repair", async () => {
+    const source = await import("node:fs/promises").then(({ readFile }) =>
+      readFile(new URL("../../src/desktop/d2c-capture.ts", import.meta.url), "utf8"));
+    expect(source).toContain("data-d2c-module");
+    expect(source).toContain("data-d2c-source");
+    expect(source).toContain("moduleSourceFiles");
+  });
+
+  it("drops absolute and traversal module source paths from captured pages", () => {
+    expect(sanitizeD2cModuleSourceFiles(["src/Card.vue", "../secret", "..\\secret", "C:\\secret", "/etc/passwd", 4]))
+      .toEqual(["src/Card.vue"]);
   });
 
   it("loads the page before resizing and capturing it", async () => {

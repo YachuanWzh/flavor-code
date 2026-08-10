@@ -111,6 +111,15 @@ describe("diffPages", () => {
     expect(result.diffs[0]).toMatchObject({ designSelector: "main > h1", implementationSelector: "#app > h1" });
   });
 
+  it("preserves implementation module metadata as a repair boundary", () => {
+    const design = page([element({ text: "Title", rect: { x: 0, y: 0, width: 100, height: 30 } })]);
+    const implementation = page([element({ text: "Title", rect: { x: 8, y: 0, width: 100, height: 30 },
+      moduleId: "hero", moduleSourceFiles: ["src/components/Hero.jsx", "src/components/hero.css"] })]);
+    expect(diffPages(design, implementation).diffs[0]).toMatchObject({
+      moduleId: "hero", moduleSourceFiles: ["src/components/Hero.jsx", "src/components/hero.css"],
+    });
+  });
+
   it("normalizes raw colors before comparing", () => {
     nextId = 1;
     const design = page([element({ rect: { x: 0, y: 0, width: 10, height: 10 }, styles: { color: "rgb(255,0,0)" } })]);

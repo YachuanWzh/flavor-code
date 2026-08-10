@@ -122,6 +122,8 @@ function unmatched(
     text: element.text,
     hasImage: element.hasImage,
     ...(element.selector === undefined ? {} : { selector: element.selector }),
+    ...(element.moduleId === undefined ? {} : { moduleId: element.moduleId }),
+    ...(element.moduleSourceFiles === undefined ? {} : { moduleSourceFiles: element.moduleSourceFiles }),
     fingerprint: issueFingerprint(kind, element),
     impact: impactFor(element, page, severity, contentBlocking),
     severity,
@@ -178,6 +180,8 @@ export function diffPages(
       impact: impactFor(expected, design, severity, contentBlocking),
       ...(expected.selector === undefined ? {} : { designSelector: expected.selector }),
       ...(actual.selector === undefined ? {} : { implementationSelector: actual.selector }),
+      ...(actual.moduleId === undefined ? {} : { moduleId: actual.moduleId }),
+      ...(actual.moduleSourceFiles === undefined ? {} : { moduleSourceFiles: actual.moduleSourceFiles }),
     });
   }
   diffs.sort((left, right) => {

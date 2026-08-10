@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFile } from "node:fs/promises";
 
 import { DESKTOP_CHANNELS } from "../../src/desktop/contracts.js";
 import { isSafeExternalUrl, isTrustedNavigation, normalizePersistedWorkspace } from "../../src/desktop/security.js";
@@ -22,12 +23,30 @@ describe("desktop security helpers", () => {
   it("keeps the preload channel surface explicit", () => {
     expect(Object.values(DESKTOP_CHANNELS).sort()).toEqual([
       "desktop:add-model", "desktop:answer-questions", "desktop:app-icon", "desktop:bootstrap", "desktop:choose-workspace", "desktop:create-memory", "desktop:create-skill",
-      "desktop:d2c-get-report", "desktop:d2c-import", "desktop:d2c-list-reports",
+      "desktop:d2c-confirm-mapping", "desktop:d2c-generate-integration", "desktop:d2c-get-integration", "desktop:d2c-get-mock-status",
+      "desktop:d2c-get-preview-status", "desktop:d2c-get-report", "desktop:d2c-import", "desktop:d2c-import-openapi", "desktop:d2c-list-reports",
+      "desktop:d2c-open-preview", "desktop:d2c-run-interaction-tests", "desktop:d2c-set-manual-acceptance", "desktop:d2c-start-mock",
+      "desktop:d2c-start-preview", "desktop:d2c-stop-mock", "desktop:d2c-stop-preview", "desktop:d2c-update-review",
       "desktop:delete-mcp-server", "desktop:delete-memory", "desktop:delete-session", "desktop:delete-skill", "desktop:event", "desktop:finish-task", "desktop:get-skill", "desktop:interrupt",
       "desktop:list-files", "desktop:list-mcp-servers", "desktop:list-memory", "desktop:list-skills",
       "desktop:open-workspace", "desktop:resolve-approval", "desktop:resolve-memory-review", "desktop:save-mcp-server", "desktop:set-mcp-server-enabled", "desktop:set-skill-enabled", "desktop:show-app-menu",
       "desktop:start-session", "desktop:submit", "desktop:switch-model", "desktop:update-memory", "desktop:update-skill",
     ].sort());
+  });
+
+  it("allows embedded D2C frames only from loopback origins", async () => {
+    const html = await readFile(new URL("../../src/desktop/renderer/index.html", import.meta.url), "utf8");
+    expect(html).toContain("frame-src http://127.0.0.1:* http://localhost:*");
+    expect(html).not.toMatch(/frame-src[^\"]*https:/);
+  });
+
+  it("opens only the controller-owned loopback preview, never a renderer-provided URL", async () => {
+    const main = await readFile(new URL("../../src/desktop/main.ts", import.meta.url), "utf8");
+    const handler = main.slice(main.indexOf("DESKTOP_CHANNELS.d2cOpenPreview"), main.indexOf("DESKTOP_CHANNELS.d2cRunInteractionTests"));
+    expect(handler).toContain("controller.getD2cPreviewStatus");
+    expect(handler).toContain("isLoopbackPreviewUrl(status.url)");
+    expect(handler).toContain("shell.openExternal(status.url)");
+    expect(handler).not.toContain("value.url");
   });
 
   it("allows the first navigation only when it targets the configured renderer", () => {

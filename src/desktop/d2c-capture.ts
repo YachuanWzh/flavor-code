@@ -217,6 +217,10 @@ const COLLECT_SCRIPT = `(() => {
     const hasBorder = parseFloat(style.borderTopWidth) > 0 || parseFloat(style.borderRightWidth) > 0
       || parseFloat(style.borderBottomWidth) > 0 || parseFloat(style.borderLeftWidth) > 0;
     if (text === "" && !hasImage && !hasBorder && style.backgroundColor === "rgba(0, 0, 0, 0)") continue;
+    const moduleBoundary = element.closest("[data-d2c-module]");
+    const moduleId = moduleBoundary?.getAttribute("data-d2c-module")?.trim();
+    const moduleSourceFiles = (moduleBoundary?.getAttribute("data-d2c-source") || "")
+      .split(",").map((item) => item.trim()).filter(Boolean).slice(0, 64);
     elements.push({
       id: id++,
       tag,
@@ -231,6 +235,8 @@ const COLLECT_SCRIPT = `(() => {
       },
       hasImage,
       selector: selectorFor(element),
+      ...(moduleId ? { moduleId } : {}),
+      ...(moduleSourceFiles.length > 0 ? { moduleSourceFiles } : {}),
     });
   }
   return {
@@ -248,6 +254,15 @@ interface RawSnapshot {
 
 function finiteNumber(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+export function sanitizeD2cModuleSourceFiles(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => {
+    if (typeof item !== "string" || item.length === 0 || item.length > 2_048 || item.includes("\0")) return false;
+    if (/^(?:[A-Za-z]:[\\/]|[\\/])/.test(item)) return false;
+    return !item.replaceAll("\\", "/").split("/").includes("..");
+  }).slice(0, 64);
 }
 
 /** Validates the shape returned by the injected collection script. */
@@ -278,6 +293,11 @@ function sanitizeSnapshot(raw: RawSnapshot): { width: number; height: number; el
         },
         hasImage: entry.hasImage === true,
         ...(typeof entry.selector === "string" && entry.selector.length <= 512 ? { selector: entry.selector } : {}),
+        ...(typeof entry.moduleId === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(entry.moduleId)
+          ? { moduleId: entry.moduleId } : {}),
+        ...(Array.isArray(entry.moduleSourceFiles)
+          ? { moduleSourceFiles: sanitizeD2cModuleSourceFiles(entry.moduleSourceFiles) }
+          : {}),
       });
     }
   }

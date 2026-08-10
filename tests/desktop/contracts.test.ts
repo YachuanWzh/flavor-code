@@ -5,6 +5,10 @@ import {
   AppMenuInputSchema,
   D2cGetReportInputSchema,
   D2cImportInputSchema,
+  D2cReviewInputSchema,
+  D2cConfirmMappingInputSchema,
+  D2cTaskActionInputSchema,
+  D2cManualAcceptanceInputSchema,
   DeleteSessionInputSchema,
   DeleteMemoryInputSchema,
   MemoryCandidateInputSchema,
@@ -101,6 +105,13 @@ describe("D2C IPC contracts", () => {
     expect(D2cGetReportInputSchema.parse({ task: "homepage" })).toEqual({ task: "homepage" });
     expect(D2cGetReportInputSchema.parse({ task: "homepage", reportId: "run-20260809-100000" }))
       .toEqual({ task: "homepage", reportId: "run-20260809-100000" });
+    expect(D2cReviewInputSchema.parse({ task: "homepage", reportId: "run-20260809-100000",
+      fingerprints: ["issue-card"], decision: "needs-fix", instruction: "收紧间距" }))
+      .toEqual({ task: "homepage", reportId: "run-20260809-100000", fingerprints: ["issue-card"], decision: "needs-fix", instruction: "收紧间距" });
+    expect(D2cConfirmMappingInputSchema.parse({ task: "homepage", moduleId: "stats", operationKey: "GET /metrics" }))
+      .toEqual({ task: "homepage", moduleId: "stats", operationKey: "GET /metrics" });
+    expect(D2cTaskActionInputSchema.parse({ task: "homepage" })).toEqual({ task: "homepage" });
+    expect(D2cManualAcceptanceInputSchema.parse({ task: "homepage", accepted: true })).toEqual({ task: "homepage", accepted: true });
   });
 
   it("rejects malformed task names and unknown fields", () => {
@@ -111,5 +122,10 @@ describe("D2C IPC contracts", () => {
     expect(() => D2cGetReportInputSchema.parse({ task: "homepage", reportId: "" })).toThrow();
     expect(() => D2cGetReportInputSchema.parse({ task: "homepage", reportId: "../escape" })).toThrow();
     expect(() => D2cGetReportInputSchema.parse({ task: "homepage", reportId: "run-not-a-date" })).toThrow();
+    expect(() => D2cReviewInputSchema.parse({ task: "homepage", reportId: "run-20260809-100000", fingerprints: [], decision: "accepted" })).toThrow();
+    expect(() => D2cReviewInputSchema.parse({ task: "homepage", reportId: "run-20260809-100000", fingerprints: ["../escape"], decision: "accepted" })).toThrow();
+    expect(() => D2cConfirmMappingInputSchema.parse({ task: "homepage", moduleId: "../x", operationKey: "GET /x" })).toThrow();
+    expect(() => D2cManualAcceptanceInputSchema.parse({ task: "homepage", accepted: "yes" })).toThrow();
+    expect(() => D2cManualAcceptanceInputSchema.parse({ task: "homepage", accepted: true, url: "https://evil.test" })).toThrow();
   });
 });

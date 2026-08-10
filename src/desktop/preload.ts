@@ -45,6 +45,22 @@ const api: FlavorDesktopApi = {
     task, ...(reportId === undefined ? {} : { reportId }),
   }),
   importD2cDesign: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cImport, { task }),
+  updateD2cReview: (task, reportId, fingerprints, decision, instruction) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cUpdateReview, {
+    task, reportId, fingerprints, decision, ...(instruction === undefined ? {} : { instruction }),
+  }),
+  importD2cOpenApi: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cImportOpenApi, { task }),
+  getD2cIntegration: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cGetIntegration, { task }),
+  confirmD2cMapping: (task, moduleId, operationKey) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cConfirmMapping, { task, moduleId, operationKey }),
+  generateD2cIntegration: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cGenerateIntegration, { task }),
+  startD2cMock: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cStartMock, { task }),
+  stopD2cMock: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cStopMock, { task }),
+  getD2cMockStatus: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cGetMockStatus, { task }),
+  startD2cPreview: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cStartPreview, { task }),
+  stopD2cPreview: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cStopPreview, { task }),
+  getD2cPreviewStatus: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cGetPreviewStatus, { task }),
+  openD2cPreview: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cOpenPreview, { task }),
+  runD2cInteractionTests: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cRunInteractionTests, { task }),
+  setD2cManualAcceptance: (task, accepted) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cSetManualAcceptance, { task, accepted }),
   onEvent(listener) {
     const handler = (_event: Electron.IpcRendererEvent, value: DesktopEvent) => listener(value);
     ipcRenderer.on(DESKTOP_CHANNELS.event, handler);

@@ -1,7 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { D2cElementDiff, D2cRect, D2cUnmatchedElement } from "../../d2c/types.js";
-import type { D2cImportResult, D2cReportListItem, D2cReportView } from "../contracts.js";
+import type { D2cReviewDecision } from "../../d2c/workflow.js";
+import { buildD2cRepairPrompt, reviewProgress } from "../../d2c/workflow-shared.js";
+import type { D2cApiMapping } from "../../d2c/openapi.js";
+import type { D2cInteractionRun } from "../../d2c/interaction.js";
+import type { D2cImportResult, D2cIntegrationView, D2cMockStatus, D2cPreviewStatus, D2cReportListItem, D2cReportView } from "../contracts.js";
 import { buildD2cAxisMeasurements, fitCanvas, focusCanvasRect, zoomCanvasAt, type CanvasTransform } from "./d2c-canvas.js";
 import type { D2cExecutionPhase, D2cFramework, D2cPendingTask, D2cProgressActivity } from "./d2c-progress.js";
 
@@ -33,12 +37,13 @@ function buildTaskPrompt(
     `执行 D2C 任务“${task}”：Pixso 设计稿已导入 .flavor/d2c/${task}/design/（入口 ${entryHtml}，共 ${fileCount} 个文件）。`,
     `设计稿包含 ${pages.length} 个页面：${pagePlan}。请为每个页面生成同名 HTML 入口，保证 D2cCompare 可逐页访问。`,
     `请用 ${frameworkLabel} 像素级实现该设计稿，在 src/d2c-output/${task}/ 生成可运行的 Vite 项目。`,
+    "必须按页面语义拆分可独立修改的子模块；每个模块根节点添加 data-d2c-module 和 data-d2c-source（逗号分隔源码文件），并在项目根目录写 d2c.modules.json，记录 schema:1 以及各模块 id、label、sourceFiles、keywords、dataNeeds、actions。",
     "不要用 Shell 手动执行 npm run dev、npm start、vite、start /b 或其他常驻预览命令；直接把项目目录传给 D2cCompare，由它负责安装依赖、启动、探活和关闭服务器。",
-    "完成后调用 D2cCompare 对比设计稿与运行中的实现。根据报告修复实现代码，不要修改设计稿；评测无效时先修复环境问题。",
-    "在 D2C 轮次预算内持续调用 D2cCompare 并迭代修复，直到达到 90 分且不存在阻断性内容问题；评测无效或构建失败时先修复环境和代码，再继续评测。系统在达到基础轮次上限时会自动扩容，最多 10 次。",
+    "完成后调用一次 D2cCompare 对比设计稿与运行中的实现。首次有效报告生成后立即停止，不要自动修复任何视觉差异，等待用户在 D2C 审阅面板逐条通过或退回。",
+    "只有评测本身 invalid 或构建失败时才修复环境并重试；不得把视觉差异当作环境错误自动修改。",
     "如果 D2cCompare 失败，优先使用错误中附带的 npm/Vite 进程输出修复项目；不要读取工作区外的 npm 源码或缓存日志。",
     "同一个 D2cCompare 错误连续出现时禁止原样重试；必须先根据错误阶段、Renderer diagnostics 或 Process output 修改相关代码。无法修复时停止评测并汇报具体错误，不要继续启动预览进程。",
-    "以报告的验收结论为准，文本、图片等内容错误不得用高像素分绕过，最后汇报总分、可信度和未解决问题。",
+    "以报告的验收结论为准，最后只汇报总分、可信度和待用户审阅的问题，不要进入接口联调。",
   ].join("\n");
 }
 
@@ -352,6 +357,17 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
   const [taskName, setTaskName] = useState("");
   const [framework, setFramework] = useState<D2cFramework>("vue");
   const [launching, setLaunching] = useState(false);
+  const [inspectorTab, setInspectorTab] = useState<"review" | "integration">("review");
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewInstruction, setReviewInstruction] = useState("");
+  const [integration, setIntegration] = useState<D2cIntegrationView>();
+  const [integrationBusy, setIntegrationBusy] = useState(false);
+  const [mockStatus, setMockStatus] = useState<D2cMockStatus>({ running: false });
+  const [previewStatus, setPreviewStatus] = useState<D2cPreviewStatus>({ running: false });
+  const [interactionRun, setInteractionRun] = useState<D2cInteractionRun>();
+  const [interactionBusy, setInteractionBusy] = useState(false);
+  const [previewReloadKey, setPreviewReloadKey] = useState(0);
+  const automatedAfterAgentRef = useRef<string | undefined>(undefined);
   const [transform, setTransform] = useState<CanvasTransform>({ scale: 1, x: 0, y: 0 });
 
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -411,7 +427,9 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
       setMode(d2cReportViewPolicy(next.report.evaluation.status).defaultMode);
       setCreating(false);
       setSelectedIssue(undefined);
+      setReviewInstruction("");
       setIssueLimit(INITIAL_ISSUE_LIMIT);
+      if (next.workflow.stage === "visual-review") setInspectorTab("review");
     } finally {
       if (request === reportRequestRef.current) setLoadingReport(false);
     }
@@ -481,6 +499,8 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
 
   const focusIssue = (issue: WorkbenchIssue): void => {
     setSelectedIssue(issue.fingerprint);
+    setReviewInstruction(bundle?.workflow.reviews.find((item) => item.fingerprint === issue.fingerprint
+      && item.pageId === (bundle.report.page?.id ?? "index"))?.instruction ?? "");
     const rect = issue.designRect ?? issue.implementationRect;
     if (rect === undefined || canvas === undefined || viewportRef.current === null) return;
     const bounds = viewportRef.current.getBoundingClientRect();
@@ -512,6 +532,149 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
     void navigator.clipboard.writeText(value).catch(reportError);
   };
 
+  const mutateReview = async (fingerprints: readonly string[], decision: D2cReviewDecision, instruction?: string): Promise<void> => {
+    if (bundle === undefined || fingerprints.length === 0 || reviewBusy || disabled) return;
+    setReviewBusy(true);
+    try {
+      const workflow = await window.flavorDesktop.updateD2cReview(
+        bundle.report.task, bundle.report.reportId, fingerprints, decision, instruction,
+      );
+      setBundle((current) => current === undefined ? current : { ...current, workflow });
+      if (decision === "accepted" && reviewProgress(workflow).complete) setInspectorTab("integration");
+      if (decision === "needs-fix") {
+        const prompt = buildD2cRepairPrompt(bundle.report, fingerprints, instruction);
+        const submitted = await onStartTask(prompt);
+        if (submitted) onLaunch(bundle.report.task, workflow.framework);
+      }
+    } catch (cause) { reportError(cause); }
+    finally { setReviewBusy(false); }
+  };
+
+  const loadIntegration = async (): Promise<void> => {
+    if (bundle === undefined || integrationBusy) return;
+    setIntegrationBusy(true);
+    try {
+      const [view, status, preview] = await Promise.all([
+        window.flavorDesktop.getD2cIntegration(bundle.report.task),
+        window.flavorDesktop.getD2cMockStatus(bundle.report.task),
+        window.flavorDesktop.getD2cPreviewStatus(bundle.report.task),
+      ]);
+      setIntegration(view);
+      setMockStatus(status);
+      setPreviewStatus(preview);
+      setInteractionRun(view?.workflow.interaction?.automated);
+    } catch (cause) { reportError(cause); }
+    finally { setIntegrationBusy(false); }
+  };
+
+  const openIntegration = (): void => {
+    if (bundle === undefined || !reviewProgress(bundle.workflow).complete || bundle.report.evaluation.status === "invalid") return;
+    setInspectorTab("integration");
+    void loadIntegration();
+  };
+
+  const importOpenApi = async (): Promise<void> => {
+    if (bundle === undefined || integrationBusy) return;
+    setIntegrationBusy(true);
+    try {
+      const next = await window.flavorDesktop.importD2cOpenApi(bundle.report.task);
+      if (next !== undefined) { setIntegration(next); setBundle((current) => current === undefined ? current : { ...current, workflow: next.workflow }); }
+    } catch (cause) { reportError(cause); }
+    finally { setIntegrationBusy(false); }
+  };
+
+  const confirmMapping = async (mapping: D2cApiMapping, operationKey: string): Promise<void> => {
+    if (bundle === undefined || integrationBusy) return;
+    setIntegrationBusy(true);
+    try {
+      const next = await window.flavorDesktop.confirmD2cMapping(bundle.report.task, mapping.moduleId, operationKey);
+      setIntegration(next);
+      setBundle((current) => current === undefined ? current : { ...current, workflow: next.workflow });
+    } catch (cause) { reportError(cause); }
+    finally { setIntegrationBusy(false); }
+  };
+
+  const generateIntegration = async (): Promise<void> => {
+    if (bundle === undefined || integrationBusy || integration?.mappings.some((item) => item.status === "needs-confirmation")) return;
+    setIntegrationBusy(true);
+    try {
+      const generated = await window.flavorDesktop.generateD2cIntegration(bundle.report.task);
+      setIntegration(generated);
+      setBundle((current) => current === undefined ? current : { ...current, workflow: generated.workflow });
+      const status = await window.flavorDesktop.startD2cPreview(bundle.report.task);
+      setPreviewStatus(status);
+      setMockStatus({ running: status.mockUrl !== undefined, ...(status.mockUrl === undefined ? {} : { url: status.mockUrl }) });
+      const submitted = await onStartTask(`${generated.prompt}\nFlavor Code 已保持交互预览 ${status.url ?? "本地动态端口"} 与 Express Mock ${status.mockUrl ?? "本地动态端口"} 运行，.env.local 已配置 VITE_API_BASE_URL。`);
+      if (submitted) onLaunch(bundle.report.task, generated.workflow.framework);
+    } catch (cause) { reportError(cause); }
+    finally { setIntegrationBusy(false); }
+  };
+
+  const toggleMock = async (): Promise<void> => {
+    if (bundle === undefined || integrationBusy) return;
+    setIntegrationBusy(true);
+    try {
+      setMockStatus(mockStatus.running
+        ? await window.flavorDesktop.stopD2cMock(bundle.report.task)
+        : await window.flavorDesktop.startD2cMock(bundle.report.task));
+    } catch (cause) { reportError(cause); }
+    finally { setIntegrationBusy(false); }
+  };
+
+  const startPreview = async (): Promise<void> => {
+    if (bundle === undefined || interactionBusy) return;
+    setInteractionBusy(true);
+    try {
+      const status = await window.flavorDesktop.startD2cPreview(bundle.report.task);
+      setPreviewStatus(status);
+      setMockStatus({ running: status.mockUrl !== undefined, ...(status.mockUrl === undefined ? {} : { url: status.mockUrl }) });
+    } catch (cause) { reportError(cause); }
+    finally { setInteractionBusy(false); }
+  };
+
+  const stopPreview = async (): Promise<void> => {
+    if (bundle === undefined || interactionBusy) return;
+    setInteractionBusy(true);
+    try { setPreviewStatus(await window.flavorDesktop.stopD2cPreview(bundle.report.task)); }
+    catch (cause) { reportError(cause); }
+    finally { setInteractionBusy(false); }
+  };
+
+  const runInteractionTests = async (): Promise<void> => {
+    if (bundle === undefined || !previewStatus.running || interactionBusy) return;
+    setInteractionBusy(true);
+    try {
+      const status = await window.flavorDesktop.runD2cInteractionTests(bundle.report.task);
+      setInteractionRun(status.result);
+      setBundle((current) => current === undefined ? current : { ...current, workflow: status.workflow });
+      setIntegration((current) => current === undefined ? current : { ...current, workflow: status.workflow });
+    } catch (cause) { reportError(cause); }
+    finally { setInteractionBusy(false); }
+  };
+
+  const setManualAcceptance = async (accepted: boolean): Promise<void> => {
+    if (bundle === undefined || interactionBusy) return;
+    setInteractionBusy(true);
+    try {
+      const workflow = await window.flavorDesktop.setD2cManualAcceptance(bundle.report.task, accepted);
+      setBundle((current) => current === undefined ? current : { ...current, workflow });
+      setIntegration((current) => current === undefined ? current : { ...current, workflow });
+    } catch (cause) { reportError(cause); }
+    finally { setInteractionBusy(false); }
+  };
+
+  useEffect(() => {
+    const task = bundle?.report.task;
+    if (pending !== undefined && previewStatus.running && task === pending.task) {
+      automatedAfterAgentRef.current = task;
+      return;
+    }
+    if (pending === undefined && task !== undefined && automatedAfterAgentRef.current === task) {
+      automatedAfterAgentRef.current = undefined;
+      void runInteractionTests();
+    }
+  }, [pending, previewStatus.running, bundle?.report.task]);
+
   const scores = bundle?.report.scores;
   const evaluation = bundle?.report.evaluation;
   const availableModes = d2cReportViewPolicy(evaluation?.status).modes;
@@ -526,6 +689,9 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
   );
   const pageReports = bundle?.relatedPages ?? [];
   const selectedRect = activeIssue?.designRect ?? activeIssue?.implementationRect;
+  const reviewState = bundle === undefined ? undefined : reviewProgress(bundle.workflow);
+  const reviewFor = (fingerprint: string) => bundle?.workflow.reviews.find((item) => item.fingerprint === fingerprint
+    && item.pageId === (bundle.report.page?.id ?? "index"));
   const viewState = pending !== undefined ? "pending" : creating || bundle === undefined ? "create" : "report";
 
   return <section className="d2c-workbench d2c-v2" aria-label="D2C" data-state={viewState}>
@@ -599,6 +765,17 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
         </section>
       </main> : viewState === "pending" && pending !== undefined
         ? <D2cProgressView pending={pending} onOpenLog={onClose} onInterrupt={onInterrupt} />
+        : inspectorTab === "integration" && previewStatus.running && previewStatus.url !== undefined
+          ? <main className="d2c-live-preview" aria-label="Interactive integration preview">
+            <header className="d2c-live-toolbar">
+              <span className="d2c-live-state"><i /> LIVE</span>
+              <code title={previewStatus.url}>{previewStatus.url}</code>
+              <button type="button" onClick={() => setPreviewReloadKey((value) => value + 1)}>Refresh</button>
+              <button type="button" onClick={() => void window.flavorDesktop.openD2cPreview(bundle!.report.task)}>Open in browser</button>
+            </header>
+            <iframe key={previewReloadKey} src={previewStatus.url} title="D2C interactive preview"
+              sandbox="allow-scripts allow-forms allow-modals allow-same-origin" referrerPolicy="no-referrer" />
+          </main>
         : <main className="d2c-canvas-area" data-pages={pageReports.length > 1 ? "multiple" : "single"}>
         {bundle !== undefined && canvas !== undefined && scores !== undefined && evaluation !== undefined && <>
           {pageReports.length > 1 && <nav className="d2c-page-rail" aria-label="页面评测结果">
@@ -702,6 +879,14 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
                   : bundle.report.evaluation.verdict === "invalid" ? "评测需要重新运行" : "本页尚未通过验收"}</h2>
               <span>{bundle.report.evaluation.summary}</span></div>
           </section>
+          <nav className="d2c-stage-tabs" aria-label="D2C 阶段">
+            <button type="button" data-active={inspectorTab === "review"} aria-pressed={inspectorTab === "review"}
+              onClick={() => setInspectorTab("review")}><span>01</span>视觉审阅</button>
+            <button type="button" data-active={inspectorTab === "integration"} aria-pressed={inspectorTab === "integration"}
+              disabled={reviewState === undefined || !reviewState.complete || bundle.report.evaluation.status === "invalid"}
+              title={reviewState?.complete ? "进入接口联调" : "全部差异通过后解锁"} onClick={openIntegration}><span>02</span>接口联调</button>
+          </nav>
+          {inspectorTab === "review" ? <>
           <section className="d2c-score-card" aria-label="分项得分" data-status={bundle.report.evaluation.status}>
             <header><div><p>QUALITY PROFILE</p><h2>五项质量</h2></div>
               {bundle.report.evaluation.status !== "invalid" && <span>{SCORE_ITEMS.filter(({ key }) => (scores[key] ?? 0) >= 0.9).length} / 5 达标</span>}
@@ -711,6 +896,21 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
               <span>{label}</span><i><b style={{ "--score": scores[key] } as React.CSSProperties} /></i><strong>{Math.round(scores[key]! * 100)}</strong>
             </div>)}</div>}
           </section>
+          {bundle.report.evaluation.status !== "invalid" && reviewState !== undefined && <section className="d2c-review-console" data-complete={reviewState.complete}>
+            <header><div><p>REVIEW QUEUE</p><h2>{reviewState.complete ? "视觉审阅已完成" : "等待你的验收"}</h2></div>
+              <strong>{reviewState.accepted}<span> / {reviewState.total}</span></strong></header>
+            <div className="d2c-review-meter" aria-label={`已通过 ${reviewState.accepted}，待审 ${reviewState.pending}，退回 ${reviewState.needsFix}`}>
+              <i style={{ "--accepted": reviewState.total === 0 ? 1 : reviewState.accepted / reviewState.total } as React.CSSProperties} />
+              <span>待审 <b>{reviewState.pending}</b></span><span>通过 <b>{reviewState.accepted}</b></span><span>退回 <b>{reviewState.needsFix}</b></span>
+            </div>
+            <div className="d2c-review-bulk">
+              {!reviewState.complete && <button type="button" disabled={reviewBusy || disabled || allIssues.length === 0}
+                onClick={() => void mutateReview(allIssues.map((item) => item.fingerprint), "accepted")}>全部通过</button>}
+              {!reviewState.complete && <button type="button" className="d2c-review-reject" disabled={reviewBusy || disabled || allIssues.length === 0}
+                onClick={() => void mutateReview(allIssues.map((item) => item.fingerprint), "needs-fix", "集中修复所有退回差异，仍需严格限制在各自模块文件内。")}>全部退回并修复</button>}
+              {reviewState.complete && <button type="button" className="d2c-review-next" onClick={openIntegration}>进入接口联调 <span>→</span></button>}
+            </div>
+          </section>}
           <div className="d2c-issue-heading"><div><h2>{bundle.report.evaluation.status === "invalid" ? "错误诊断" : "差异问题"}</h2>
             {bundle.report.evaluation.status !== "invalid" && <span>{filteredIssues.length} / {allIssues.length}</span>}</div>
             {bundle.report.evaluation.status !== "invalid" && <div className="d2c-issue-filters">{(["all", "blocking", "content", "geometry"] as const).map((value) => <button key={value}
@@ -730,9 +930,9 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
               ? <button type="button" onClick={() => { setMode("overlay"); fit(); }}>查看叠加结果</button>
               : <button type="button" onClick={() => { setIssueFilter("all"); setIssueLimit(INITIAL_ISSUE_LIMIT); }}>显示全部问题</button>)}
           </div> : <ol className="d2c-issue-list">
-            {filteredIssues.slice(0, issueLimit).map((issue) => <li key={issue.fingerprint} data-severity={issue.severity} data-selected={selectedIssue === issue.fingerprint}>
+            {filteredIssues.slice(0, issueLimit).map((issue) => { const review = reviewFor(issue.fingerprint); return <li key={issue.fingerprint} data-severity={issue.severity} data-selected={selectedIssue === issue.fingerprint} data-review={review?.decision ?? "pending"}>
               <button className="d2c-issue-main" onClick={() => focusIssue(issue)} aria-pressed={selectedIssue === issue.fingerprint}>
-                <span className="d2c-impact">{issue.impact.toFixed(1)}</span><span><strong>{issue.label}</strong>{issueDetails(issue).map((line) => <small key={line}>{line}</small>)}</span>
+                <span className="d2c-impact">{review?.decision === "accepted" ? "✓" : review?.decision === "needs-fix" ? "↻" : issue.impact.toFixed(1)}</span><span><strong>{issue.label}</strong>{issueDetails(issue).map((line) => <small key={line}>{line}</small>)}</span>
               </button>
               {selectedIssue === issue.fingerprint && <div className="d2c-evidence">
                 <div className="d2c-evidence-pair">
@@ -743,10 +943,75 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
                   {issue.selector !== undefined && <button onClick={() => copyText(issue.selector!)}>复制选择器</button>}
                   <button onClick={() => copyText(`${issue.label}\n${issueDetails(issue).join("\n")}\n位置：${JSON.stringify(selectedRect)}`)}>复制修复线索</button>
                 </div>
+                <label className="d2c-review-instruction"><span>补充修改要求</span><textarea rows={2} value={reviewInstruction}
+                  placeholder="例如：保持卡片高度，只调整内部间距" onChange={(event) => setReviewInstruction(event.target.value)} /></label>
+                <div className="d2c-review-actions">
+                  <button type="button" className="d2c-accept" disabled={reviewBusy || disabled || review?.decision === "accepted"}
+                    onClick={() => void mutateReview([issue.fingerprint], "accepted")}>✓ 通过</button>
+                  <button type="button" className="d2c-fix" disabled={reviewBusy || disabled}
+                    onClick={() => void mutateReview([issue.fingerprint], "needs-fix", reviewInstruction || undefined)}>↻ 退回并让 AI 修复</button>
+                </div>
               </div>}
-            </li>)}
+            </li>; })}
           </ol>}
           {filteredIssues.length > issueLimit && <button className="d2c-show-more" onClick={() => setIssueLimit((value) => value + INITIAL_ISSUE_LIMIT)}>再显示 {Math.min(INITIAL_ISSUE_LIMIT, filteredIssues.length - issueLimit)} 条</button>}
+          </> : <section className="d2c-integration-panel" aria-label="接口联调">
+            <header><p>API INTEGRATION</p><h2>{integration === undefined ? "导入接口描述" : integration.document.title}</h2>
+              <span>{integration === undefined ? "上传 Swagger / OpenAPI JSON，自动匹配页面模块和接口出入参。" : `${integration.document.version}${integration.document.baseUrl ? ` · ${integration.document.baseUrl}` : ""}`}</span></header>
+            {integration === undefined ? <div className="d2c-api-import">
+              <span aria-hidden="true">{"{}"}</span><strong>Swagger JSON</strong><p>支持 Swagger 2.0、OpenAPI 3.0/3.1 和文档内引用。</p>
+              <button type="button" disabled={integrationBusy} onClick={() => void importOpenApi()}>{integrationBusy ? "正在解析…" : "选择 swagger.json"}</button>
+            </div> : <>
+              <div className="d2c-api-summary"><span>模块 <b>{integration.mappings.length}</b></span><span>自动匹配 <b>{integration.mappings.filter((item) => item.status === "auto").length}</b></span>
+                <span>待确认 <b>{integration.mappings.filter((item) => item.status === "needs-confirmation").length}</b></span></div>
+              <ol className="d2c-mapping-list">{integration.mappings.map((mapping) => <li key={mapping.moduleId} data-status={mapping.status}>
+                <header><span>{mapping.moduleLabel}</span><small>{mapping.status === "auto" ? "自动匹配" : mapping.status === "confirmed" ? "已确认" : "需要确认"}</small></header>
+                 <select aria-label={`${mapping.moduleLabel} 接口`} value={mapping.operationKey} disabled={integrationBusy}
+                   onChange={(event) => void confirmMapping(mapping, event.target.value)}>
+                   {integration.document.operations.map((operation) => <option key={operation.id} value={operation.id}>{operation.operationId} · {operation.id}</option>)}
+                 </select>
+                 {mapping.status === "needs-confirmation" && <button type="button" className="d2c-confirm-mapping" disabled={integrationBusy}
+                   onClick={() => void confirmMapping(mapping, mapping.operationKey)}>确认此映射</button>}
+                 <div><span>请求 {mapping.parameters.length + mapping.requestFields.length} 字段</span><span>响应 {mapping.responseFields.length} 字段</span><b>{Math.round(mapping.confidence * 100)}%</b></div>
+              </li>)}</ol>
+              <section className="d2c-mock-control" data-running={mockStatus.running}>
+                <div><i /><span><strong>{mockStatus.running ? "Express Mock 运行中" : "Express Mock 未启动"}</strong><small>{mockStatus.url ?? "生成联调代码后可启动"}</small></span></div>
+                {bundle.workflow.integrationFiles !== undefined && <button type="button" disabled={integrationBusy || previewStatus.running}
+                  title={previewStatus.running ? "请先停止交互页面" : undefined} onClick={() => void toggleMock()}>{mockStatus.running ? "停止" : "启动"}</button>}
+              </section>
+              <section className="d2c-preview-control" data-running={previewStatus.running}>
+                <header><div><p>INTERACTIVE ACCEPTANCE</p><h3>{previewStatus.running ? "可交互页面运行中" : "等待启动可交互页面"}</h3></div><i /></header>
+                <code>{previewStatus.url ?? "Vite preview not started"}</code>
+                <div className="d2c-preview-actions">
+                  <button type="button" disabled={interactionBusy || bundle.workflow.integrationFiles === undefined}
+                    onClick={() => void (previewStatus.running ? stopPreview() : startPreview())}>{previewStatus.running ? "停止页面" : "启动页面"}</button>
+                  <button type="button" disabled={interactionBusy || !previewStatus.running}
+                    onClick={() => void runInteractionTests()}>{interactionBusy ? "执行中…" : "运行自动验收"}</button>
+                  {previewStatus.running && <button type="button" onClick={() => void window.flavorDesktop.openD2cPreview(bundle.report.task)}>浏览器打开</button>}
+                </div>
+                {interactionRun !== undefined && <div className="d2c-test-results" data-passed={interactionRun.passed}>
+                  <strong>{interactionRun.passed ? "自动验收通过" : `${interactionRun.failures} 条自动验收失败`}</strong>
+                  <span>{interactionRun.total} scenarios · {interactionRun.apiRequestCount} API requests</span>
+                  <ol>{interactionRun.scenarios.map((scenario) => <li key={scenario.id} data-passed={scenario.passed}>
+                    <span>{scenario.passed ? "✓" : "×"} {scenario.id}</span><small>{scenario.apiRequestCount} API · {scenario.durationMs}ms</small>
+                    {scenario.failure !== undefined && <p>{scenario.failure}</p>}
+                  </li>)}</ol>
+                </div>}
+                <div className="d2c-manual-acceptance">
+                  <span><strong>人工验收</strong><small>请直接在左侧页面完成点击、输入和提交流程</small></span>
+                  <button type="button" disabled={interactionBusy || !previewStatus.running}
+                    data-accepted={bundle.workflow.interaction?.manualDecision === "accepted"}
+                    onClick={() => void setManualAcceptance(bundle.workflow.interaction?.manualDecision !== "accepted")}>
+                    {bundle.workflow.interaction?.manualDecision === "accepted" ? "已通过（撤回）" : "确认人工验收通过"}
+                  </button>
+                </div>
+                {bundle.workflow.stage === "completed" && <p className="d2c-acceptance-complete">✓ 自动与人工验收均已完成</p>}
+              </section>
+              <button type="button" className="d2c-generate-integration" disabled={integrationBusy || integration.mappings.some((item) => item.status === "needs-confirmation")}
+                onClick={() => void generateIntegration()}>{integrationBusy ? "正在准备联调…" : bundle.workflow.integrationFiles === undefined ? "生成代码并开始联调" : "重新生成并开始联调"}<span>→</span></button>
+              {integration.mappings.some((item) => item.status === "needs-confirmation") && <p className="d2c-api-hint">确认所有标记为“需要确认”的接口后即可生成。</p>}
+            </>}
+          </section>}
         </> : <div className="d2c-inspector-empty"><strong>问题检查器</strong><span>选择报告后，可按影响度逐项定位和取证。</span></div>}
       </aside>}
     </div>

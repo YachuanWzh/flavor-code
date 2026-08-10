@@ -1,9 +1,18 @@
+import { createHash } from "node:crypto";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 import type { PermissionMode } from "../config/schema.js";
 import { assertPngDimensions } from "../d2c/pixel.js";
-import { importDesign, listReports, listTasks, readManifest, readReport } from "../d2c/store.js";
+import { importDesign, listReports, listTasks, readManifest, readReport, taskDir } from "../d2c/store.js";
+import { applyInteractionRun, applyManualInteractionDecision, applyReviewDecision, createWorkflow, readWorkflow, reconcileWorkflow, reviewProgress, writeWorkflow, type D2cWorkflow } from "../d2c/workflow.js";
+import { parseInteractionManifest, type D2cInteractionManifest, type D2cInteractionRun } from "../d2c/interaction.js";
+import { runFrontendProject, type RunningProject } from "../d2c/runner.js";
+import { confirmApiMapping, matchModulesToOperations, parseOpenApiDocument, type D2cApiMapping, type D2cOpenApiDocument } from "../d2c/openapi.js";
+import { d2cOutputDirectory, readD2cModules } from "../d2c/modules.js";
+import { generateIntegrationArtifacts } from "../d2c/integration.js";
+import { runD2cMockServer, type D2cRunningMock } from "../d2c/mock-runner.js";
 import { createProductionRuntime, type ProductionRuntimeOptions } from "../production.js";
 import { SessionStore } from "../session/store.js";
 import {
@@ -24,12 +33,25 @@ import type { MemoryCandidate, MemoryEntry } from "../memory/types.js";
 import type { MemoryReviewItem } from "../memory/review.js";
 import { ProjectMcpConfigManager, type ManagedMcpServer, type ProjectMcpConfigManagerLike } from "../mcp/config-manager.js";
 import { DEFAULT_DESKTOP_MODELS, loadDesktopModels, saveDesktopModel } from "./model-config.js";
-import type { AddDesktopModelInput, D2cImportResult, D2cReportListItem, D2cReportView, DesktopEvent, DesktopMessageDelivery, DesktopModelOption, DesktopModelMutationResult, DesktopPermissionProfile, DesktopSessionSummary, DesktopSnapshot, McpServerDraft, SessionStartedPayload } from "./contracts.js";
+import type { AddDesktopModelInput, D2cImportResult, D2cIntegrationGenerationResult, D2cIntegrationView, D2cInteractionStatus, D2cMockStatus, D2cPreviewStatus, D2cReportListItem, D2cReportView, DesktopEvent, DesktopMessageDelivery, DesktopModelOption, DesktopModelMutationResult, DesktopPermissionProfile, DesktopSessionSummary, DesktopSnapshot, McpServerDraft, SessionStartedPayload } from "./contracts.js";
 
 function pngDataUrl(png: Uint8Array): string {
   const buffer = Buffer.from(png);
   assertPngDimensions(buffer);
   return `data:image/png;base64,${buffer.toString("base64")}`;
+}
+
+async function detectD2cFramework(workspace: string, task: string): Promise<"vue" | "react"> {
+  try {
+    const pkg = JSON.parse(await readFile(join(d2cOutputDirectory(workspace, task), "package.json"), "utf8")) as {
+      dependencies?: Record<string, unknown>;
+    };
+    return pkg.dependencies?.react === undefined ? "vue" : "react";
+  } catch { return "vue"; }
+}
+
+function integrationDirectory(workspace: string, task: string): string {
+  return join(workspace, ".flavor", "d2c", task, "integration");
 }
 
 export interface RuntimeLike {
@@ -90,6 +112,9 @@ export interface DesktopRuntimeControllerOptions {
     sessionId: string,
     attachments: readonly ImageAttachmentInput[],
   ): Promise<MultimodalSessionInput["content"]>;
+  runD2cPreview?(projectDir: string, options: { workspace: string }): Promise<RunningProject>;
+  runD2cMockServer?(projectDir: string): Promise<D2cRunningMock>;
+  runD2cInteractionTests?(manifest: D2cInteractionManifest, baseUrl: string, mockUrl: string): Promise<D2cInteractionRun>;
   emit(event: DesktopEvent): void;
 }
 
@@ -103,6 +128,9 @@ export class DesktopRuntimeController {
   readonly #loadMemoryManager: NonNullable<DesktopRuntimeControllerOptions["loadMemoryManager"]>;
   readonly #loadMcpManager: NonNullable<DesktopRuntimeControllerOptions["loadMcpManager"]>;
   readonly #storeAttachments: NonNullable<DesktopRuntimeControllerOptions["storeAttachments"]>;
+  readonly #runD2cPreview: NonNullable<DesktopRuntimeControllerOptions["runD2cPreview"]>;
+  readonly #runD2cMockServer: NonNullable<DesktopRuntimeControllerOptions["runD2cMockServer"]>;
+  readonly #executeD2cInteractionTests: DesktopRuntimeControllerOptions["runD2cInteractionTests"];
   readonly #emit: (event: DesktopEvent) => void;
   #workspace: string | undefined;
   #sessions: readonly DesktopSessionSummary[] = [];
@@ -112,6 +140,8 @@ export class DesktopRuntimeController {
   #mcpManager: ProjectMcpConfigManagerLike | undefined;
   #models: readonly DesktopModelOption[] = DEFAULT_DESKTOP_MODELS;
   #busy = false;
+  readonly #d2cMocks = new Map<string, D2cRunningMock>();
+  readonly #d2cPreviews = new Map<string, RunningProject>();
 
   constructor(options: DesktopRuntimeControllerOptions) {
     this.#home = resolve(options.home ?? homedir());
@@ -141,6 +171,9 @@ export class DesktopRuntimeController {
     this.#storeAttachments = options.storeAttachments
       ?? ((workspace, sessionId, attachments) =>
         new SessionAssetStore({ workspace }).store(sessionId, attachments));
+    this.#runD2cPreview = options.runD2cPreview ?? runFrontendProject;
+    this.#runD2cMockServer = options.runD2cMockServer ?? runD2cMockServer;
+    this.#executeD2cInteractionTests = options.runD2cInteractionTests;
     this.#emit = options.emit;
   }
 
@@ -170,7 +203,11 @@ export class DesktopRuntimeController {
 
   async openWorkspace(path: string): Promise<DesktopSnapshot> {
     const workspace = resolve(path);
-    if (workspace !== this.#workspace) await this.#disposeRuntime();
+    if (workspace !== this.#workspace) {
+      await this.#disposeRuntime();
+      await this.#stopAllD2cPreviews();
+      await this.#stopAllD2cMocks();
+    }
     this.#workspace = workspace;
     this.#skillManager = new SkillManager({ workspace, home: this.#home });
     this.#memoryManager = await this.#loadMemoryManager(workspace, this.#home);
@@ -482,6 +519,17 @@ export class DesktopRuntimeController {
     const relatedPages = bundle.report.batchId === undefined ? [] : (await listReports(workspace, task))
       .filter((item) => item.batchId === bundle.report.batchId)
       .map((item) => ({ task, ...item }));
+    let workflow = await readWorkflow(workspace, task);
+    if (workflow === undefined) workflow = createWorkflow(bundle.report, await detectD2cFramework(workspace, task));
+    else if (workflow.activeReportId !== bundle.report.reportId) workflow = reconcileWorkflow(workflow, bundle.report);
+    if (relatedPages.length > 1) {
+      for (const page of relatedPages) {
+        if (page.reportId === bundle.report.reportId) continue;
+        workflow = reconcileWorkflow(workflow, (await readReport(workspace, task, page.reportId)).report);
+      }
+      workflow = reconcileWorkflow(workflow, bundle.report);
+    }
+    workflow = await writeWorkflow(workspace, workflow);
     return {
       report: bundle.report,
       designOutdated: bundle.report.design.designHash !== undefined
@@ -490,7 +538,187 @@ export class DesktopRuntimeController {
       implementationPng: pngDataUrl(bundle.implementationPng),
       heatmapPng: pngDataUrl(bundle.heatmapPng),
       relatedPages,
+      workflow,
     };
+  }
+
+  async updateD2cReview(
+    task: string,
+    reportId: string,
+    fingerprints: readonly string[],
+    decision: "pending" | "accepted" | "needs-fix",
+    instruction?: string,
+  ): Promise<D2cWorkflow> {
+    const workspace = this.#workspace;
+    if (workspace === undefined) throw new Error("Open a project before reviewing D2C issues");
+    const report = (await readReport(workspace, task, reportId)).report;
+    let workflow = await readWorkflow(workspace, task);
+    if (workflow === undefined) workflow = createWorkflow(report, await detectD2cFramework(workspace, task));
+    if (workflow.activeReportId !== reportId) workflow = reconcileWorkflow(workflow, report);
+    return writeWorkflow(workspace, applyReviewDecision(workflow, { fingerprints, decision, ...(instruction === undefined ? {} : { instruction }) }, report));
+  }
+
+  async importD2cOpenApi(task: string, sourcePath: string): Promise<D2cIntegrationView> {
+    const workspace = this.#workspace;
+    if (workspace === undefined) throw new Error("Open a project before importing OpenAPI");
+    const workflow = await readWorkflow(workspace, task);
+    if (workflow === undefined || !reviewProgress(workflow).complete || workflow.stage === "visual-review") {
+      throw new Error("Complete visual review before importing OpenAPI");
+    }
+    const info = await stat(sourcePath);
+    if (!info.isFile() || info.size > 8 * 1024 * 1024) throw new Error("OpenAPI JSON must be a file no larger than 8 MiB");
+    const raw = await readFile(sourcePath, "utf8");
+    const document = parseOpenApiDocument(raw);
+    const modules = await readD2cModules(workspace, task);
+    const mappings = matchModulesToOperations(modules, document.operations);
+    const dir = integrationDirectory(workspace, task);
+    await mkdir(dir, { recursive: true });
+    const hash = createHash("sha256").update(raw).digest("hex");
+    await Promise.all([
+      writeFile(join(dir, "swagger.json"), raw),
+      writeFile(join(dir, "openapi.normalized.json"), `${JSON.stringify(document, null, 2)}\n`),
+    ]);
+    const next: D2cWorkflow = {
+      ...workflow, revision: workflow.revision + 1, stage: "api-mapping", mappings,
+      openapi: { sourceName: basename(sourcePath), importedAt: new Date().toISOString(), hash,
+        version: document.version, title: document.title, ...(document.baseUrl === undefined ? {} : { baseUrl: document.baseUrl }) },
+      updatedAt: new Date().toISOString(),
+    };
+    return { workflow: await writeWorkflow(workspace, next), document, mappings };
+  }
+
+  async getD2cIntegration(task: string): Promise<D2cIntegrationView | undefined> {
+    const workspace = this.#workspace;
+    if (workspace === undefined) return undefined;
+    const workflow = await readWorkflow(workspace, task);
+    if (workflow?.openapi === undefined || workflow.mappings === undefined) return undefined;
+    const document = JSON.parse(await readFile(join(integrationDirectory(workspace, task), "openapi.normalized.json"), "utf8")) as D2cOpenApiDocument;
+    return { workflow, document, mappings: workflow.mappings as D2cApiMapping[] };
+  }
+
+  async confirmD2cMapping(task: string, moduleId: string, operationKey: string): Promise<D2cIntegrationView> {
+    const workspace = this.#workspace;
+    if (workspace === undefined) throw new Error("Open a project before confirming API mappings");
+    const view = await this.getD2cIntegration(task);
+    if (view === undefined) throw new Error("Import OpenAPI before confirming mappings");
+    if (!view.mappings.some((item) => item.moduleId === moduleId)) throw new Error(`Unknown D2C module: ${moduleId}`);
+    const mappings = view.mappings.map((item) => item.moduleId === moduleId ? confirmApiMapping(item, operationKey, view.document.operations) : item);
+    const workflow = await writeWorkflow(workspace, { ...view.workflow, revision: view.workflow.revision + 1, mappings, updatedAt: new Date().toISOString() });
+    return { workflow, document: view.document, mappings };
+  }
+
+  async generateD2cIntegration(task: string): Promise<D2cIntegrationGenerationResult> {
+    const workspace = this.#workspace;
+    if (workspace === undefined) throw new Error("Open a project before generating integration code");
+    const view = await this.getD2cIntegration(task);
+    if (view === undefined) throw new Error("Import OpenAPI before generating integration code");
+    const project = d2cOutputDirectory(workspace, task);
+    const generated = await generateIntegrationArtifacts(project, view.document, view.mappings);
+    const now = new Date().toISOString();
+    const workflow = await writeWorkflow(workspace, { ...view.workflow, revision: view.workflow.revision + 1,
+      stage: "integrating", integrationFiles: generated.files,
+      interaction: { manualDecision: "pending", updatedAt: now }, updatedAt: now });
+    const prompt = [
+      `继续 D2C 任务“${task}”的接口联调。视觉审阅已全部通过。`,
+      `OpenAPI 绑定计划位于 src/d2c-output/${task}/src/api/d2c-bindings.json，Axios client 已生成。`,
+      ...view.mappings.map((mapping) => `- 模块 ${mapping.moduleId} → ${mapping.operationId}（${mapping.operationKey}）`),
+      `只在 src/d2c-output/${task}/ 内完成模块数据加载、表单提交和响应 ViewModel 适配；统一使用 src/api/http.js，不得直接散落 axios 调用。`,
+      "先使用 npm run mock 对接生成的 Express mock，运行构建和可用的测试；遇到不确定字段映射时使用 AskUserQuestion，不得猜测。完成后汇报实际调用、构建与测试结果。",
+      "Acceptance requirements: keep the Vite page runnable and interactive; every data-bearing module must use the generated Axios client for initial loading and user actions.",
+      "Implement loading, empty, success, validation and API-error states without replacing server behavior with local-only fixtures or decorative toasts.",
+      "Use design/interaction-manifest.json as the executable behavior contract when it exists. Preserve its selectors, exercise every scenario, and ensure required scenarios produce observable XHR/fetch traffic.",
+      "Do not start or stop long-running dev servers yourself; Flavor Code owns the preview and Express mock lifecycles and Vite hot reload will pick up source changes.",
+      "Run the project build and available unit tests before reporting completion. Only edit within the generated D2C project.",
+    ].join("\n");
+    return { workflow, document: view.document, mappings: view.mappings, files: generated.files, prompt };
+  }
+
+  async startD2cMock(task: string): Promise<D2cMockStatus> {
+    const existing = this.#d2cMocks.get(task);
+    if (existing !== undefined) return { running: true, url: existing.url, output: existing.output() };
+    const workspace = this.#workspace;
+    if (workspace === undefined) throw new Error("Open a project before starting a D2C mock server");
+    const project = d2cOutputDirectory(workspace, task);
+    const running = await this.#runD2cMockServer(project);
+    this.#d2cMocks.set(task, running);
+    try {
+      const environmentPath = join(project, ".env.local");
+      const existingEnvironment = await readFile(environmentPath, "utf8").catch(() => "");
+      const environment = `${existingEnvironment.split(/\r?\n/).filter((line) => !/^\s*VITE_API_BASE_URL\s*=/.test(line)).join("\n").trim()}\nVITE_API_BASE_URL=${running.url}\n`.replace(/^\n/, "");
+      await writeFile(environmentPath, environment);
+      return { running: true, url: running.url, output: running.output() };
+    } catch (error) {
+      this.#d2cMocks.delete(task);
+      await running.stop();
+      throw error;
+    }
+  }
+
+  async stopD2cMock(task: string): Promise<D2cMockStatus> {
+    if (this.#d2cPreviews.has(task)) throw new Error("Stop the D2C preview before stopping its mock server");
+    const running = this.#d2cMocks.get(task);
+    if (running !== undefined) { this.#d2cMocks.delete(task); await running.stop(); }
+    return { running: false };
+  }
+
+  getD2cMockStatus(task: string): D2cMockStatus {
+    const running = this.#d2cMocks.get(task);
+    return running === undefined ? { running: false } : { running: true, url: running.url, output: running.output() };
+  }
+
+  async startD2cPreview(task: string): Promise<D2cPreviewStatus> {
+    const existing = this.#d2cPreviews.get(task);
+    if (existing !== undefined) return { running: true, url: existing.url, ...this.#mockUrl(task) };
+    const workspace = this.#workspace;
+    if (workspace === undefined) throw new Error("Open a project before starting a D2C preview");
+    const workflow = await readWorkflow(workspace, task);
+    if (workflow?.integrationFiles === undefined) throw new Error("Generate D2C integration code before starting the preview");
+    await this.startD2cMock(task);
+    const running = await this.#runD2cPreview(d2cOutputDirectory(workspace, task), { workspace });
+    this.#d2cPreviews.set(task, running);
+    const interaction = workflow.interaction ?? { manualDecision: "pending" as const, updatedAt: new Date().toISOString() };
+    await writeWorkflow(workspace, { ...workflow, revision: workflow.revision + 1, stage: "interaction-review", interaction, updatedAt: new Date().toISOString() });
+    return { running: true, url: running.url, ...this.#mockUrl(task) };
+  }
+
+  async stopD2cPreview(task: string): Promise<D2cPreviewStatus> {
+    const running = this.#d2cPreviews.get(task);
+    if (running !== undefined) { this.#d2cPreviews.delete(task); await running.stop(); }
+    return { running: false, ...this.#mockUrl(task) };
+  }
+
+  getD2cPreviewStatus(task: string): D2cPreviewStatus {
+    const running = this.#d2cPreviews.get(task);
+    return running === undefined ? { running: false, ...this.#mockUrl(task) } : { running: true, url: running.url, ...this.#mockUrl(task) };
+  }
+
+  async runD2cInteractionTests(task: string): Promise<D2cInteractionStatus> {
+    const workspace = this.#workspace;
+    if (workspace === undefined) throw new Error("Open a project before running D2C interaction tests");
+    const preview = this.#d2cPreviews.get(task);
+    if (preview === undefined) throw new Error("Start the interactive D2C preview before running tests");
+    const mock = this.#d2cMocks.get(task);
+    if (mock === undefined) throw new Error("Start the D2C Express mock before running tests");
+    if (this.#executeD2cInteractionTests === undefined) throw new Error("D2C interaction runner is unavailable");
+    const workflow = await readWorkflow(workspace, task);
+    if (workflow === undefined) throw new Error("D2C workflow is unavailable");
+    const manifestPath = join(taskDir(workspace, task), "design", "interaction-manifest.json");
+    const manifest = parseInteractionManifest(await readFile(manifestPath, "utf8"));
+    const result = await this.#executeD2cInteractionTests(manifest, preview.url, mock.url);
+    const dir = integrationDirectory(workspace, task);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "interaction-results.json"), `${JSON.stringify(result, null, 2)}\n`);
+    const next = await writeWorkflow(workspace, applyInteractionRun(workflow, result));
+    return { workflow: next, result };
+  }
+
+  async setD2cManualAcceptance(task: string, accepted: boolean): Promise<D2cWorkflow> {
+    const workspace = this.#workspace;
+    if (workspace === undefined) throw new Error("Open a project before accepting a D2C interaction preview");
+    if (accepted && !this.#d2cPreviews.has(task)) throw new Error("Start and inspect the interactive preview before accepting it");
+    const workflow = await readWorkflow(workspace, task);
+    if (workflow === undefined) throw new Error("D2C workflow is unavailable");
+    return writeWorkflow(workspace, applyManualInteractionDecision(workflow, accepted));
   }
 
   resolveApproval(decision: "allow" | "deny" | "always"): void {
@@ -511,6 +739,8 @@ export class DesktopRuntimeController {
 
   async dispose(): Promise<void> {
     await this.#disposeRuntime();
+    await this.#stopAllD2cPreviews();
+    await this.#stopAllD2cMocks();
   }
 
   #publishSnapshot(): DesktopSnapshot {
@@ -535,6 +765,23 @@ export class DesktopRuntimeController {
     if (runtime === undefined) return;
     await runtime.session.close();
     await runtime.dispose();
+  }
+
+  async #stopAllD2cMocks(): Promise<void> {
+    const running = [...this.#d2cMocks.values()];
+    this.#d2cMocks.clear();
+    await Promise.all(running.map((item) => item.stop().catch(() => undefined)));
+  }
+
+  #mockUrl(task: string): { mockUrl?: string } {
+    const url = this.#d2cMocks.get(task)?.url;
+    return url === undefined ? {} : { mockUrl: url };
+  }
+
+  async #stopAllD2cPreviews(): Promise<void> {
+    const running = [...this.#d2cPreviews.values()];
+    this.#d2cPreviews.clear();
+    await Promise.all(running.map((item) => item.stop().catch(() => undefined)));
   }
 
   #requireSkillManager(): SkillManager {

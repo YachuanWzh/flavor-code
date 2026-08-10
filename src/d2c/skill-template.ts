@@ -8,7 +8,7 @@ export const D2C_SKILL_NAME = "d2c-pixso";
 export function d2cSkillContent(): string {
   return `---
 name: ${D2C_SKILL_NAME}
-description: Convert a Pixso design export (HTML) into a pixel-faithful Vue or React implementation, run the generated project, then verify visual fidelity with the D2C diff engine and repair deviations until the similarity score passes.
+description: Convert a Pixso design export into a modular Vue or React implementation, produce one visual comparison, then pause for human review before targeted repair and API integration.
 ---
 
 # Pixso Design to Code (D2C)
@@ -24,6 +24,8 @@ Use this skill when the user wants to turn an imported Pixso design into fronten
    - The project must start with plain \`npm install\` + \`npm run dev\`; do not rely on global CLIs or manual steps.
    - Reproduce the design with the same box sizes, spacing and colors; prefer the same font family, size and weight for every text element.
    - Do not introduce CSS frameworks or preprocessors beyond the template below.
+   - Split the page into semantic components that can be repaired independently. Every component root must include \`data-d2c-module="<id>"\` and \`data-d2c-source="<comma-separated workspace-relative files>"\`.
+   - Write \`d2c.modules.json\` with \`schema: 1\` and a \`modules\` array containing each module's \`id\`, \`label\`, \`sourceFiles\`, and useful \`keywords\`, \`dataNeeds\`, and \`actions\`.
 
    Vue 3 template:
    - \`package.json\` with dependencies \`vue\` and devDependencies \`vite\`, \`@vitejs/plugin-vue\`; script \`dev: vite\`.
@@ -34,15 +36,16 @@ Use this skill when the user wants to turn an imported Pixso design into fronten
    - \`package.json\` with dependencies \`react\`, \`react-dom\` and devDependencies \`vite\`, \`@vitejs/plugin-react\`; script \`dev: vite\`.
    - \`vite.config.js\` using \`@vitejs/plugin-react\`; \`index.html\` loading \`/src/main.jsx\`.
    - \`src/main.jsx\` rendering \`<App />\`; \`src/App.jsx\` as a function component with a plain CSS file that reproduces the design.
-5. **Verify with D2C diff.** Call the \`D2cCompare\` tool with the same task name and the **project directory** as the implementation. The tool installs dependencies if needed, starts the dev server, renders the running page against the design, and shuts the server down again. It returns a similarity score plus a structured list of offsets, color deviations, font mismatches, missing and extra elements.
-6. **Repair loop.** Batch the highest-impact content and geometry fixes from each report, then re-run \`D2cCompare\`. Continue within the D2C iteration budget until the total reaches 90 (grade 优秀 or better) with no blocking content issue. Invalid evaluations and build failures must be repaired and retried. The runtime automatically expands the base iteration limit when needed, up to 10 expansions. Never modify the design.
-7. **Report.** Summarize the final score, grade and any remaining accepted deviations to the user.
+5. **Verify once with D2C diff.** Call the \`D2cCompare\` tool with the same task name and the **project directory** as the implementation. The tool installs dependencies if needed, starts the dev server, renders the running page against the design, and shuts the server down again.
+6. **Pause for human review.** After the first valid report is created, stop immediately. Do not repair visual differences on your own. The user accepts or rejects each issue in the D2C review panel.
+7. **Targeted repair only when requested.** A review action supplies exact issue fingerprints, module ids, source-file allowlists and optional user instructions. Modify only those module files, run one whole-page \`D2cCompare\` to catch regressions, then stop immediately for human review again. Invalid evaluations and build failures may be repaired and retried because no usable review evidence exists. Never modify the design.
+8. **API integration after acceptance.** Do not begin Swagger/OpenAPI integration until the review panel reports every current issue accepted. Use the generated Axios client and confirmed binding plan; ask the user about any uncertain mapping instead of guessing.
 
 ## Notes
 
 - The design export is the single source of truth. Never edit files under \`.flavor/d2c/<task>/design/\`.
 - Comparison needs the desktop app to render pages; \`D2cCompare\` is unavailable in a plain terminal session.
-- Keep each repair cycle focused, but batch related high-impact fixes before re-comparing instead of running one comparison per issue.
+- Human review decisions are authoritative and persisted separately from immutable comparison reports.
 - Never retry the same \`D2cCompare\` failure unchanged. First repair the project using the reported capture stage, Renderer diagnostics or Process output. If it cannot be repaired, stop and report the concrete error instead of launching another preview process.
 `;
 }

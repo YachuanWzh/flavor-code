@@ -2,6 +2,9 @@ import { z } from "zod";
 
 import type { AgentEvent } from "../agent/types.js";
 import type { D2cProgressEvent, D2cReport } from "../d2c/types.js";
+import type { D2cWorkflow } from "../d2c/workflow.js";
+import type { D2cInteractionRun } from "../d2c/interaction.js";
+import type { D2cApiMapping, D2cOpenApiDocument } from "../d2c/openapi.js";
 import { McpServerConfigSchema, McpServerNameSchema, type PermissionMode } from "../config/schema.js";
 import type { TranscriptState } from "../ui/transcript.js";
 import type { Question } from "../tools/ask-user-question.js";
@@ -131,6 +134,23 @@ export const D2cGetReportInputSchema = z.object({
   task: D2cTaskInput,
   reportId: z.string().trim().regex(/^run-\d{8}-\d{6}(?:-[2-9]\d*)?$/, "Invalid D2C report id").optional(),
 }).strict();
+const D2cReportInput = z.string().trim().regex(/^run-\d{8}-\d{6}(?:-[2-9]\d*)?$/, "Invalid D2C report id");
+const D2cFingerprintInput = z.string().trim().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, "Invalid D2C issue fingerprint");
+const D2cModuleInput = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, "Invalid D2C module id");
+export const D2cReviewInputSchema = z.object({
+  task: D2cTaskInput,
+  reportId: D2cReportInput,
+  fingerprints: z.array(D2cFingerprintInput).min(1).max(10_000),
+  decision: z.enum(["pending", "accepted", "needs-fix"]),
+  instruction: z.string().trim().min(1).max(10_000).optional(),
+}).strict();
+export const D2cTaskActionInputSchema = z.object({ task: D2cTaskInput }).strict();
+export const D2cManualAcceptanceInputSchema = z.object({ task: D2cTaskInput, accepted: z.boolean() }).strict();
+export const D2cConfirmMappingInputSchema = z.object({
+  task: D2cTaskInput,
+  moduleId: D2cModuleInput,
+  operationKey: z.string().trim().min(3).max(2_048).refine((value) => !/[\u0000-\u001f]/.test(value), "Invalid operation key"),
+}).strict();
 
 export type AddDesktopModelInput = z.infer<typeof AddDesktopModelInputSchema>;
 export type McpServerDraft = z.input<typeof SaveMcpServerInputSchema>["draft"];
@@ -225,6 +245,35 @@ export interface D2cReportView {
   heatmapPng: string;
   /** Other page reports from the same comparison batch; PNGs load on selection. */
   relatedPages: readonly D2cReportListItem[];
+  workflow: D2cWorkflow;
+}
+
+export interface D2cIntegrationView {
+  workflow: D2cWorkflow;
+  document: D2cOpenApiDocument;
+  mappings: readonly D2cApiMapping[];
+}
+
+export interface D2cIntegrationGenerationResult extends D2cIntegrationView {
+  files: readonly string[];
+  prompt: string;
+}
+
+export interface D2cMockStatus {
+  running: boolean;
+  url?: string;
+  output?: string;
+}
+
+export interface D2cPreviewStatus {
+  running: boolean;
+  url?: string;
+  mockUrl?: string;
+}
+
+export interface D2cInteractionStatus {
+  workflow: D2cWorkflow;
+  result?: D2cInteractionRun;
 }
 
 export interface D2cReportEventPayload {
@@ -284,6 +333,20 @@ export interface FlavorDesktopApi {
   getD2cReport(task: string, reportId?: string): Promise<D2cReportView>;
   /** Opens a directory picker and imports the chosen Pixso export; undefined when cancelled. */
   importD2cDesign(task: string): Promise<D2cImportResult | undefined>;
+  updateD2cReview(task: string, reportId: string, fingerprints: readonly string[], decision: "pending" | "accepted" | "needs-fix", instruction?: string): Promise<D2cWorkflow>;
+  importD2cOpenApi(task: string): Promise<D2cIntegrationView | undefined>;
+  getD2cIntegration(task: string): Promise<D2cIntegrationView | undefined>;
+  confirmD2cMapping(task: string, moduleId: string, operationKey: string): Promise<D2cIntegrationView>;
+  generateD2cIntegration(task: string): Promise<D2cIntegrationGenerationResult>;
+  startD2cMock(task: string): Promise<D2cMockStatus>;
+  stopD2cMock(task: string): Promise<D2cMockStatus>;
+  getD2cMockStatus(task: string): Promise<D2cMockStatus>;
+  startD2cPreview(task: string): Promise<D2cPreviewStatus>;
+  stopD2cPreview(task: string): Promise<D2cPreviewStatus>;
+  getD2cPreviewStatus(task: string): Promise<D2cPreviewStatus>;
+  openD2cPreview(task: string): Promise<void>;
+  runD2cInteractionTests(task: string): Promise<D2cInteractionStatus>;
+  setD2cManualAcceptance(task: string, accepted: boolean): Promise<D2cWorkflow>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
 }
 

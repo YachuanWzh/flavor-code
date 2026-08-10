@@ -26,6 +26,10 @@ export interface D2cElementSnapshot {
   hasImage: boolean;
   /** Stable CSS-like locator captured from the rendered document. */
   selector?: string;
+  /** Stable generated component boundary used for targeted repair. */
+  moduleId?: string;
+  /** Workspace-relative files that implement the component boundary. */
+  moduleSourceFiles?: string[];
 }
 
 export interface D2cPageSnapshot {
@@ -90,6 +94,8 @@ export interface D2cElementDiff {
   impact: number;
   designSelector?: string;
   implementationSelector?: string;
+  moduleId?: string;
+  moduleSourceFiles?: string[];
 }
 
 export interface D2cUnmatchedElement {
@@ -102,6 +108,8 @@ export interface D2cUnmatchedElement {
   fingerprint: string;
   impact: number;
   severity: D2cSeverity;
+  moduleId?: string;
+  moduleSourceFiles?: string[];
 }
 
 export interface D2cMatchedPair {

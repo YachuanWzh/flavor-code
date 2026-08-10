@@ -124,7 +124,7 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
-async function terminateProcessTree(child: ChildProcessWithoutNullStreams, force: boolean): Promise<void> {
+export async function terminateProcessTree(child: ChildProcessWithoutNullStreams, force: boolean): Promise<void> {
   if (process.platform !== "win32" || child.pid === undefined) {
     child.kill(force ? "SIGKILL" : "SIGTERM");
     return;
