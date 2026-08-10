@@ -37,6 +37,8 @@ export interface D2cInteractionDriver {
   action(step: D2cInteractionActionStep): Promise<void>;
   assertion(step: D2cInteractionExpectStep): Promise<{ passed: boolean; actual?: string }>;
   settle?(): Promise<void>;
+  /** Optional host-side diagnostics (network/console errors) surfaced alongside a failure. */
+  diagnostics?(): string | undefined;
   apiRequestCount(): number;
   close(): Promise<void>;
 }
@@ -118,6 +120,8 @@ export async function runInteractionManifest(
         }
       } catch (error) {
         failure = error instanceof Error ? error.message : String(error);
+        const diagnostics = driver?.diagnostics?.();
+        if (diagnostics !== undefined) failure = `${failure} | ${diagnostics}`;
         apiRequestCount = driver?.apiRequestCount() ?? 0;
       } finally {
         await driver?.close().catch(() => undefined);

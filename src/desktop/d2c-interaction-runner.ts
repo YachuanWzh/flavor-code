@@ -12,6 +12,7 @@ import {
 } from "../d2c/interaction.js";
 
 const ASSERTION_TIMEOUT_MS = 3_000;
+const MAX_DIAGNOSTIC_ENTRIES = 8;
 
 function actionScript(step: D2cInteractionActionStep): string {
   const encoded = JSON.stringify(step);
@@ -59,9 +60,21 @@ export async function runElectronD2cInteractionTests(manifest: D2cInteractionMan
         partition: `d2c-interaction-${randomUUID()}` },
     });
     let requests = 0;
+    let networkErrors: string[] = [];
+    let consoleErrors: string[] = [];
+    const noteNetworkError = (entry: string): void => {
+      if (networkErrors.length < MAX_DIAGNOSTIC_ENTRIES && !networkErrors.includes(entry)) networkErrors.push(entry);
+    };
     window.webContents.session.webRequest.onCompleted({ urls: ["http://127.0.0.1:*/*", "http://localhost:*/*"] }, (details) => {
       // Electron classifies both XMLHttpRequest and Fetch API traffic as `xhr` here.
       if (details.resourceType === "xhr" && details.statusCode < 500 && new URL(details.url).origin === mockOrigin) requests += 1;
+      if (details.resourceType === "xhr" && details.error !== "net::OK") noteNetworkError(`${details.method} ${details.url} failed (${details.error})`);
+    });
+    window.webContents.session.webRequest.onErrorOccurred({ urls: ["http://127.0.0.1:*/*", "http://localhost:*/*"] }, (details) => {
+      if (details.resourceType === "xhr" || details.resourceType === "mainFrame") noteNetworkError(`${details.method} ${details.url} failed (${details.error})`);
+    });
+    window.webContents.on("console-message", (_event, _level, message) => {
+      if (consoleErrors.length < MAX_DIAGNOSTIC_ENTRIES) consoleErrors.push(String(message).slice(0, 200));
     });
     window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     window.webContents.on("will-attach-webview", (event) => event.preventDefault());
@@ -72,12 +85,19 @@ export async function runElectronD2cInteractionTests(manifest: D2cInteractionMan
       load: async (url: string) => {
         if (!isLoopbackPreviewUrl(url) || new URL(url).origin !== origin) throw new Error("Interaction page navigation escaped preview origin");
         requests = 0;
+        networkErrors = [];
+        consoleErrors = [];
         await window.loadURL(url);
       },
       action: async (step: D2cInteractionActionStep) => { await window.webContents.executeJavaScript(actionScript(step), true); },
       assertion: async (step: D2cInteractionExpectStep) => pollAssertion(window, step),
       settle: async () => { await new Promise((resolvePromise) => setTimeout(resolvePromise, 150)); },
       apiRequestCount: () => requests,
+      // Surface the underlying network/console failures so a zero-request scenario is diagnosable.
+      diagnostics: () => {
+        const entries = [...networkErrors, ...consoleErrors.map((item) => `console: ${item}`)];
+        return entries.length > 0 ? entries.join("; ") : undefined;
+      },
       close: async () => { if (!window.isDestroyed()) window.destroy(); },
     };
   });

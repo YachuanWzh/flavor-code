@@ -8,6 +8,8 @@ import { terminateProcessTree } from "./runner.js";
 export interface D2cRunningMock {
   url: string;
   output(): string;
+  /** True once the mock process has exited on its own (crash) or was stopped. */
+  exited(): boolean;
   stop(): Promise<void>;
 }
 
@@ -109,8 +111,11 @@ export async function runD2cMockServer(projectDir: string, options: RunD2cMockOp
   if (options.installDependencies !== false) await install(projectDir, options.signal);
   const selectedPort = await port();
   const url = `http://127.0.0.1:${selectedPort}`;
+  // ELECTRON_RUN_AS_NODE makes the packaged Electron executable behave as plain Node;
+  // without it the mock would boot a full Chromium process and die with GPU crashes.
   const child = spawn(process.execPath, [serverPath], {
-    cwd: projectDir, windowsHide: true, env: { ...process.env, D2C_MOCK_PORT: String(selectedPort) },
+    cwd: projectDir, windowsHide: true,
+    env: { ...process.env, D2C_MOCK_PORT: String(selectedPort), ELECTRON_RUN_AS_NODE: "1" },
   });
   let output = "";
   let exited = false;
@@ -134,6 +139,7 @@ export async function runD2cMockServer(projectDir: string, options: RunD2cMockOp
   return {
     url,
     output: () => output,
+    exited: () => exited,
     stop: () => stopped ??= (async () => {
       if (exited) return;
       await terminateProcessTree(child, false);

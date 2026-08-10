@@ -71,7 +71,7 @@ describe("desktop D2C workflow controller", () => {
       home: workspace, listSessions: async () => [], loadModels: async () => [],
       loadMemoryManager: async () => ({ snapshot: async () => ({ enabled: false, path: join(workspace, ".flavor", "memory", "MEMORY.md"), entries: [] }), remember: async () => { throw new Error("unused"); }, update: async () => { throw new Error("unused"); }, delete: async () => false }),
       loadMcpManager: () => ({ path: "", list: async () => [], create: async () => { throw new Error("unused"); }, update: async () => { throw new Error("unused"); }, delete: async () => undefined, setEnabled: async () => { throw new Error("unused"); } }),
-      runD2cMockServer: async () => ({ url: "http://127.0.0.1:4300", output: () => "ready", stop: async () => undefined }),
+      runD2cMockServer: async () => ({ url: "http://127.0.0.1:4300", output: () => "ready", exited: () => false, stop: async () => undefined }),
       runD2cPreview: async () => ({ url: "http://127.0.0.1:4400/", stop: async () => undefined }),
       probeD2cMock: async () => true,
       runD2cInteractionTests: async (_manifest, baseUrl) => ({
@@ -158,7 +158,7 @@ describe("desktop D2C workflow controller", () => {
       runD2cMockServer: async () => {
         mockGeneration += 1;
         const url = `http://127.0.0.1:${4300 + mockGeneration}`;
-        return { url, output: () => "ready", stop: async () => { stoppedMocks.push(url); } };
+        return { url, output: () => "ready", exited: () => false, stop: async () => { stoppedMocks.push(url); } };
       },
       runD2cPreview: async () => {
         previewStarts += 1;
@@ -199,6 +199,42 @@ describe("desktop D2C workflow controller", () => {
     expect(observedMockUrls).toEqual(["http://127.0.0.1:4302", "http://127.0.0.1:4302"]);
     await controller.dispose();
   });
+
+  it("annotates failures with the mock's final output when the mock dies during the run", async () => {
+    const { workspace, report } = await seedWorkspace();
+    const project = join(workspace, "src", "d2c-output", "dashboard");
+    await writeFile(join(project, "d2c.modules.json"), JSON.stringify({ schema: 1, modules: [{ id: "stats", label: "统计", sourceFiles: ["src/Stats.jsx"], keywords: ["metrics"] }] }));
+    let mockCrashed = false;
+    const controller = createController({
+      home: workspace,
+      runD2cMockServer: async () => ({ url: "http://127.0.0.1:4300", output: () => "Error: listen EADDRINUSE", exited: () => mockCrashed, stop: async () => undefined }),
+      runD2cInteractionTests: async (_manifest, baseUrl) => ({
+        schema: 1, runAt: "2026-08-10T03:00:00.000Z", baseUrl, passed: false, total: 1, failures: 1, apiRequestCount: 0,
+        scenarios: [{ id: "loads-api-data", pageUrl: baseUrl, passed: false, durationMs: 10, apiRequestCount: 0,
+          failure: "No API request was observed; the page is still behaving as a static implementation" }],
+      }),
+    });
+    await controller.openWorkspace(workspace);
+    await controller.updateD2cReview("dashboard", report.reportId, [report.diffs[0]!.fingerprint], "accepted");
+    const spec = join(workspace, "swagger.json");
+    await writeSpec(spec);
+    const imported = await controller.importD2cOpenApi("dashboard", spec);
+    const selected = imported.mappings[0]!;
+    if (selected.status === "needs-confirmation") await controller.confirmD2cMapping("dashboard", selected.moduleId, selected.operationKey);
+    await controller.generateD2cIntegration("dashboard");
+    await controller.startD2cPreview("dashboard");
+
+    // Healthy mock: failures pass through untouched.
+    const plain = await controller.runD2cInteractionTests("dashboard");
+    expect(plain.result?.scenarios[0]?.failure).not.toMatch(/exited/i);
+
+    // The mock crashes mid-run: every failure is annotated and its output persisted.
+    mockCrashed = true;
+    const annotated = await controller.runD2cInteractionTests("dashboard");
+    expect(annotated.result?.scenarios[0]?.failure).toMatch(/EADDRINUSE/);
+    expect(await readFile(join(project, "mock-server.log"), "utf8")).toContain("EADDRINUSE");
+    await controller.dispose();
+  });
 });
 
 function createController(overrides: Partial<DesktopRuntimeControllerOptions> & { home: string }): DesktopRuntimeController {
@@ -207,7 +243,7 @@ function createController(overrides: Partial<DesktopRuntimeControllerOptions> & 
     listSessions: async () => [], loadModels: async () => [],
     loadMemoryManager: async () => ({ snapshot: async () => ({ enabled: false, path: join(workspace, ".flavor", "memory", "MEMORY.md"), entries: [] }), remember: async () => { throw new Error("unused"); }, update: async () => { throw new Error("unused"); }, delete: async () => false }),
     loadMcpManager: () => ({ path: "", list: async () => [], create: async () => { throw new Error("unused"); }, update: async () => { throw new Error("unused"); }, delete: async () => undefined, setEnabled: async () => { throw new Error("unused"); } }),
-    runD2cMockServer: async () => ({ url: "http://127.0.0.1:4300", output: () => "ready", stop: async () => undefined }),
+    runD2cMockServer: async () => ({ url: "http://127.0.0.1:4300", output: () => "ready", exited: () => false, stop: async () => undefined }),
     runD2cPreview: async () => ({ url: "http://127.0.0.1:4400/", stop: async () => undefined }),
     probeD2cMock: async () => true,
     emit: () => undefined,

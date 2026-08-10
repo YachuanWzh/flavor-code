@@ -24,6 +24,18 @@ describe("D2C module manifest", () => {
     ]);
   });
 
+  it("tolerates extra root metadata written by agents", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-d2c-modules-")); dirs.push(workspace);
+    const project = join(workspace, "src", "d2c-output", "dashboard");
+    await mkdir(project, { recursive: true });
+    await writeFile(join(project, "d2c.modules.json"), JSON.stringify({ schema: 1, project: "dashboard", product: "控制台", modules: [{
+      id: "stats", label: "统计卡片", sourceFiles: ["src/components/Stats.vue"],
+    }] }));
+    await expect(readD2cModules(workspace, "dashboard")).resolves.toEqual([
+      { id: "stats", label: "统计卡片", sourceFiles: ["src/components/Stats.vue"] },
+    ]);
+  });
+
   it("rejects source paths that escape the generated project", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-d2c-modules-")); dirs.push(workspace);
     const project = join(workspace, "src", "d2c-output", "dashboard");

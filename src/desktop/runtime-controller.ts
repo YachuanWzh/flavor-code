@@ -729,12 +729,30 @@ export class DesktopRuntimeController {
     if (readyPreview === undefined || readyMock === undefined) throw new Error("D2C preview or mock server is unavailable after synchronization");
     const manifestPath = join(taskDir(workspace, task), "design", "interaction-manifest.json");
     const manifest = parseInteractionManifest(await readFile(manifestPath, "utf8"));
-    const result = await this.#executeD2cInteractionTests(manifest, readyPreview.url, readyMock.url);
+    const result = await this.annotateD2cMockFailure(await this.#executeD2cInteractionTests(manifest, readyPreview.url, readyMock.url), task);
     const dir = integrationDirectory(workspace, task);
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "interaction-results.json"), `${JSON.stringify(result, null, 2)}\n`);
     const next = await writeWorkflow(workspace, applyInteractionRun(workflow, result));
     return { workflow: next, result };
+  }
+
+  /** When the mock died during the run, persist its final output and mark every failed scenario with it. */
+  async annotateD2cMockFailure(result: D2cInteractionRun, task: string): Promise<D2cInteractionRun> {
+    const workspace = this.#workspace;
+    if (workspace === undefined) return result;
+    const mock = this.#d2cMocks.get(task);
+    if (mock === undefined || !mock.exited() || result.failures === 0) return result;
+    const output = mock.output().trim();
+    try {
+      const dir = join(d2cOutputDirectory(workspace, task), "mock-server.log");
+      await writeFile(dir, `${output}\n`);
+    } catch { /* diagnostics must never break acceptance */ }
+    const note = `Mock server exited during the run; final output: ${output.slice(-600) || "<empty>"}`;
+    return {
+      ...result,
+      scenarios: result.scenarios.map((scenario) => scenario.passed ? scenario : { ...scenario, failure: `${scenario.failure ?? "Scenario failed"} | ${note}` }),
+    };
   }
 
   /** Restarts a dead mock and any preview whose baked-in VITE_API_BASE_URL no longer matches it. */

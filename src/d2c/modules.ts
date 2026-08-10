@@ -13,7 +13,8 @@ const ModuleSchema = z.object({
   dataNeeds: z.array(z.string().trim().min(1).max(100)).max(100).optional(),
   actions: z.array(z.string().trim().min(1).max(100)).max(100).optional(),
 }).strict();
-const ManifestSchema = z.object({ schema: z.literal(1), modules: z.array(ModuleSchema).min(1).max(500) }).strict();
+// Agent-written manifests may carry extra metadata (e.g. project/product); only the module contract is validated.
+const ManifestSchema = z.object({ schema: z.literal(1), modules: z.array(ModuleSchema).min(1).max(500) }).passthrough();
 
 function safeSource(path: string): boolean {
   if (isAbsolute(path) || posix.isAbsolute(path) || win32.isAbsolute(path) || path.includes("\0")) return false;
