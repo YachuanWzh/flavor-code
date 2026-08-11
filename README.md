@@ -18,7 +18,8 @@
     <a href="#features">Features</a> ·
     <a href="#entry-points">Entry Points</a> ·
     <a href="#permissions--sandbox">Security</a> ·
-    <a href="#development">Development</a>
+    <a href="#development">Development</a> ·
+    <a href="./CHANGELOG.md">Changelog</a>
   </p>
 </div>
 
