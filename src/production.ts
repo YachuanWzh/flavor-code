@@ -176,9 +176,19 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const home = resolve(options.home ?? homedir());
   const environment = options.environment ?? process.env;
   const ide = new FlavorIdeClient({ workspace, home, environment });
+  // IDE discovery, git detection, and MCP connections overlap with configuration
+  // loading instead of serializing startup; each is settled at its point of use.
+  const ideReady = ide.initialize();
+  const gitRepository = detectGitRepository(workspace);
   const loaded = await loadConfig({ cwd: workspace, home, environment });
-  await ide.initialize();
   const config = loaded.config;
+  const mcpReady = connectMcpServers({
+    servers: config.mcpServers,
+    workspace,
+    clientFactory: options.mcpClientFactory ?? connectSdkMcpClient,
+  });
+  mcpReady.catch(() => undefined); // The failure surfaces at the wiring point below.
+  let mcpDiscarded = false;
   const sessionStore = new SessionStore({ workspace, maxSessions: config.maxSessions });
   const memoryStore = config.memory.enabled ? new MemoryStore({
     workspace,
@@ -410,12 +420,6 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   await pluginHost.loadAll();
   let sleepScheduler: ProjectSleepScheduler | undefined;
   try {
-  mcpManager = await connectMcpServers({
-    servers: config.mcpServers,
-    workspace,
-    clientFactory: options.mcpClientFactory ?? connectSdkMcpClient,
-  });
-  diagnostics.push(...mcpManager.diagnostics);
   const syncMcpTools = (): void => {
     for (const tool of mcpTools) remove(tools, tool);
     mcpTools.length = 0;
@@ -430,14 +434,24 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     }
     if (harnessCreated) harness.replaceMainTools(tools);
   };
-  syncMcpTools();
+  // MCP connections keep running in the background so the first prompt is not
+  // blocked; tools are injected as soon as the manager is ready.
+  void mcpReady.then((manager) => {
+    if (mcpDiscarded) { void manager.close().catch(() => undefined); return; }
+    mcpManager = manager;
+    diagnostics.push(...manager.diagnostics);
+    syncMcpTools();
+  }, (error) => {
+    diagnostics.push(`MCP servers could not start: ${message(error)}`);
+  });
   const skills = new SkillRegistry({
     globalRoots: [join(home, ".flavor-code", "skills")],
     projectRoots: [join(workspace, ".flavor", "skills"), ...pluginSkillRoots],
     authorizeResource: async () => true,
     disabledNames: config.skills.disabled,
   });
-  await skills.discover();
+  const skillsReady = skills.discover();
+  skillsReady.catch(() => undefined); // Re-surfaced at the await before harness creation.
   tools.push(createSkillResourceTool(skills));
   const flavor = await optionalText(join(workspace, "FLAVOR.md"));
   let memoryContext: string | undefined;
@@ -466,6 +480,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   // Tag usage.jsonl with this session; the file is overwritten per session.
   setUsageSession(sessionId);
   ideSessionId = sessionId;
+  await ideReady;
   await ide.startSession(sessionId);
   let createdAt = recovered?.createdAt ?? new Date().toISOString();
   let memoryLifecycle: NonNullable<SessionDocument["memory"]> = recovered?.memory
@@ -593,7 +608,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     platform: process.platform,
     osVersion: `${osVersion()} ${osRelease()}`,
     shell: environment.ComSpec ?? environment.SHELL ?? "unknown",
-    isGitRepository: await detectGitRepository(workspace),
+    isGitRepository: await gitRepository,
   });
   const createContext = (
     agent: "main" | "subagent",
@@ -661,6 +676,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     showWarnings: config.hallucination.showWarnings,
     evaluationTimeoutMs: config.hallucination.evaluationTimeoutMs,
   });
+  await skillsReady;
   harness = new LocalHarness({
     registry, hooks, workspace, mainModelId: mainModel, subagentModelId: childModel,
     hallucinationGuard,
@@ -1064,7 +1080,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     runGoal: (goal, signal) => persistEach(runGoalSession(goalOrchestrator, goal, signal), persist),
     mcp: async (command, signal) => {
       signal.throwIfAborted();
-      const manager = mcpManager!;
+      const manager = await mcpReady;
       if (command.action === "status") return redactSecrets(formatMcpStatus(manager), secrets);
       if (command.action === "tools") return redactSecrets(formatMcpTools(manager, command.target), secrets);
       if (command.action === "reconnect") {
@@ -1376,6 +1392,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     async dispose() {
       if (disposed) return;
       disposed = true;
+      mcpDiscarded = true;
       await sleepScheduler?.dispose();
       await memoryCoordinator?.flush();
       await persist();
@@ -1388,6 +1405,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     },
   };
   } catch (primaryError) {
+    mcpDiscarded = true;
     memoryReviews.dispose();
     try {
       if (ideSessionId !== undefined) await ide.endSession(ideSessionId);

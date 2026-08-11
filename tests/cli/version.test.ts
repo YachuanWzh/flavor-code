@@ -16,7 +16,7 @@ describe("flavor CLI", () => {
     const manifest = JSON.parse(await readFile("package.json", "utf8")) as { version: string };
     expect(program.name()).toBe("flavor");
     expect(program.version()).toBe(manifest.version);
-    expect(manifest.version).toBe("1.2.4");
+    expect(program.version()).toMatch(/^\d+\.\d+\.\d+/u);
     expect(program.options.find((option) => option.long === "--resume")?.optional).toBe(true);
   });
 
@@ -25,8 +25,9 @@ describe("flavor CLI", () => {
   // builds before testing; locally the check is skipped until `npm run build`
   // has produced dist/cli.js.
   it.skipIf(!existsSync(bundledCli))("prints the package version when executed", async () => {
+    const manifest = JSON.parse(await readFile("package.json", "utf8")) as { version: string };
     const { stdout } = await execFileAsync(process.execPath, [bundledCli, "--version"]);
 
-    expect(stdout.trim()).toBe("1.2.4");
+    expect(stdout.trim()).toBe(manifest.version);
   }, 15_000);
 });
