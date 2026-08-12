@@ -4,6 +4,8 @@ import type { AgentEvent } from "../agent/types.js";
 import type { D2cProgressEvent, D2cReport } from "../d2c/types.js";
 import type { D2cWorkflow } from "../d2c/workflow.js";
 import type { D2cInteractionRun } from "../d2c/interaction.js";
+import type { D2cAutonomousInteractionPlan } from "../d2c/interaction-review.js";
+import type { CreateD2cProductPlanInput, D2cProductPlanView, D2cProductStage } from "../d2c/product.js";
 import type { D2cApiMapping, D2cOpenApiDocument } from "../d2c/openapi.js";
 import { D2cJudgeConfigInputSchema, type D2cJudgeConfig, type D2cJudgeConfigView, type D2cQualityJudgment } from "../d2c/judge.js";
 import { McpServerConfigSchema, McpServerNameSchema, type PermissionMode } from "../config/schema.js";
@@ -131,6 +133,21 @@ const D2cTaskInput = z.string().trim().min(1).max(64)
 export const D2cImportInputSchema = z.object({
   task: D2cTaskInput,
 }).strict();
+export const D2cCreateProductInputSchema = z.object({
+  task: D2cTaskInput,
+  framework: z.enum(["vue", "react"]),
+  requirement: z.string().trim().min(2).max(50_000),
+}).strict();
+export const D2cProductDecisionInputSchema = z.object({
+  task: D2cTaskInput,
+  stage: z.enum(["prd", "design"]),
+  accepted: z.boolean(),
+  feedback: z.string().trim().min(1).max(10_000).optional(),
+}).strict().superRefine((value, context) => {
+  if (!value.accepted && value.feedback === undefined) {
+    context.addIssue({ code: "custom", path: ["feedback"], message: "Feedback is required when rejecting an artifact" });
+  }
+});
 export const D2cGetReportInputSchema = z.object({
   task: D2cTaskInput,
   reportId: z.string().trim().regex(/^run-\d{8}-\d{6}(?:-[2-9]\d*)?$/, "Invalid D2C report id").optional(),
@@ -240,6 +257,8 @@ export interface D2cImportResult {
 /** Report plus screenshots encoded as PNG data URLs for renderer display. */
 export interface D2cReportView {
   report: D2cReport;
+  /** Requirement deliveries own their API contract; design imports may attach an existing one. */
+  deliveryOrigin: "requirement" | "design";
   /** True when the task design was re-imported after this report was created. */
   designOutdated: boolean;
   designPng: string;
@@ -276,6 +295,30 @@ export interface D2cPreviewStatus {
 export interface D2cInteractionStatus {
   workflow: D2cWorkflow;
   result?: D2cInteractionRun;
+  review?: {
+    mode: "autonomous" | "contract" | "contract-fallback";
+    model?: string;
+    summary?: string;
+    warning?: string;
+    plannedScenarios: number;
+    pageAnalyses?: D2cAutonomousInteractionPlan["pageAnalyses"];
+  };
+}
+
+export interface D2cProductGenerationResult {
+  view: D2cProductPlanView;
+  prompt: string;
+}
+
+export interface D2cProductDecisionResult {
+  view: D2cProductPlanView;
+  prompt?: string;
+  imported?: D2cImportResult;
+}
+
+export interface D2cProductPreviewStatus {
+  running: boolean;
+  url?: string;
 }
 
 export interface D2cQualityJudgeStatus {
@@ -340,6 +383,13 @@ export interface FlavorDesktopApi {
   getD2cReport(task: string, reportId?: string): Promise<D2cReportView>;
   /** Opens a directory picker and imports the chosen Pixso export; undefined when cancelled. */
   importD2cDesign(task: string): Promise<D2cImportResult | undefined>;
+  createD2cProduct(input: CreateD2cProductPlanInput): Promise<D2cProductGenerationResult>;
+  getD2cProduct(task: string): Promise<D2cProductPlanView | undefined>;
+  decideD2cProduct(task: string, stage: D2cProductStage, accepted: boolean, feedback?: string): Promise<D2cProductDecisionResult>;
+  startD2cProductPreview(task: string): Promise<D2cProductPreviewStatus>;
+  stopD2cProductPreview(task: string): Promise<D2cProductPreviewStatus>;
+  getD2cProductPreviewStatus(task: string): Promise<D2cProductPreviewStatus>;
+  openD2cProductPreview(task: string): Promise<void>;
   updateD2cReview(task: string, reportId: string, fingerprints: readonly string[], decision: "pending" | "accepted" | "needs-fix", instruction?: string): Promise<D2cWorkflow>;
   importD2cOpenApi(task: string): Promise<D2cIntegrationView | undefined>;
   getD2cIntegration(task: string): Promise<D2cIntegrationView | undefined>;

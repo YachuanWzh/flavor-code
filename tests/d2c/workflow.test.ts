@@ -150,6 +150,13 @@ describe("D2C review workflow", () => {
     expect(failed.stage).toBe("interaction-review");
     expect(failed.quality).toBeUndefined();
     expect(applyManualInteractionDecision(failed, false).interaction?.manualDecision).toBe("pending");
+    const diagnostic = applyQualityJudgment(failed, {
+      schema: 1, runAt: "2026-08-10T02:01:00.000Z", model: "vision", visualScore: 70,
+      interactionScore: 30, staticVisualScore: 91, deterministicInteractionPassed: false,
+      overallScore: 50, threshold: 80, verdict: "fail", confidence: "high", summary: "交互失败", strengths: [], issues: [],
+    });
+    expect(diagnostic.quality).toMatchObject({ verdict: "fail", deterministicInteractionPassed: false });
+    expect(diagnostic.stage).toBe("interaction-review");
   });
 
   it("invalidates an old quality judgment when visual or interaction evidence changes", () => {

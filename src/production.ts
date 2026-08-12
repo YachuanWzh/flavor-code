@@ -772,7 +772,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     const prompt = String(event.payload.prompt);
     const reassessInterruptedPlan = interruptedTaskPlanNeedsReassessment && !prompt.startsWith("/");
     timelineState = transcriptReducer(timelineState, { type: "submit", prompt });
-    automaticMemoryTask = !prompt.startsWith("/");
+    // D2C/E2E prompts are internal artifact-generation jobs. Their often-large PRD and
+    // prototype transcripts are already persisted with the task and must not hold the
+    // foreground submission open for automatic long-term-memory extraction.
+    automaticMemoryTask = !prompt.startsWith("/") && harness.permissionProfile !== "d2c";
     if (automaticMemoryTask) memoryReviews.dismissAll();
     if (!prompt.startsWith("/") && memoryLifecycle.status === "completed") {
       memoryLifecycle = {

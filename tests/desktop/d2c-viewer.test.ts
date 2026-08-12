@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { D2cViewer, d2cReportViewPolicy, dispatchD2cTask, importAndDispatchD2cTask, resultPresentation } from "../../src/desktop/renderer/d2c-viewer.js";
+import { D2cViewer, d2cReportViewPolicy, dispatchD2cTask, importAndDispatchD2cTask, resultPresentation, shouldDeferD2cProductReview, shouldStartD2cProductPreview } from "../../src/desktop/renderer/d2c-viewer.js";
 import { applyD2cAgentProgress, createD2cPendingTask } from "../../src/desktop/renderer/d2c-progress.js";
 
 describe("dispatchD2cTask", () => {
@@ -113,10 +113,16 @@ describe("resultPresentation", () => {
   it("makes the running project the primary interactive canvas with safe manual controls", async () => {
     const source = await import("node:fs/promises").then(({ readFile }) =>
       readFile(new URL("../../src/desktop/renderer/d2c-viewer.tsx", import.meta.url), "utf8"));
-    expect(source).toContain("<iframe key={previewReloadKey}");
+    expect(source).toContain("<InteractiveDesktopPreview");
+    expect(source).toContain("width={PRODUCT_PREVIEW_VIEWPORT.width}");
+    expect(source).toContain("height={PRODUCT_PREVIEW_VIEWPORT.height}");
+    expect(source).toContain("d2c-live-desktop");
     expect(source).toContain('sandbox="allow-scripts allow-forms allow-modals allow-same-origin"');
     expect(source).toContain("openD2cPreview");
     expect(source).toContain("确认人工验收通过");
+    expect(source).toContain("自动与人工验收未通过时，评分只用于诊断");
+    expect(source).toContain('disabled={judgeBusy || !previewStatus.running || bundle.workflow.interaction?.automated === undefined}');
+    expect(source).toContain("验收失败也可以评分诊断");
   });
 
   it("exposes automated scenario results and observed API traffic", async () => {
@@ -137,5 +143,56 @@ describe("resultPresentation", () => {
     expect(source).toContain("视觉质量");
     expect(source).toContain("交互质量");
     expect(source).toContain("综合得分");
+  });
+
+  it("adds requirement, PRD and interactive design gates without removing the existing Pixso entry", async () => {
+    const source = await import("node:fs/promises").then(({ readFile }) =>
+      readFile(new URL("../../src/desktop/renderer/d2c-viewer.tsx", import.meta.url), "utf8"));
+    expect(source).toContain("createD2cProduct");
+    expect(source).toContain("确认 PRD，生成交互稿");
+    expect(source).toContain("确认设计，进入 D2C 视觉还原");
+    expect(source).toContain("交互契约未通过预检");
+    expect(source).toContain("自动修复清单");
+    expect(source).toContain("productView.validationError");
+    expect(source).toContain("正在可视化回放");
+    expect(source).toContain("请观察左侧页面");
+    expect(source).toContain("多模态模型正在观察并规划用户旅程");
+    expect(source).toContain("自主审阅已执行");
+    expect(source).toContain("自主规划失败，已执行设计契约");
+    expect(source).toContain("interactionReview.warning");
+    expect(source).toContain("d2c-product-preview");
+    expect(source.match(/sandbox="allow-scripts allow-forms allow-modals allow-same-origin"/g)).toHaveLength(2);
+    expect(source).toContain("导入 HTML，从 D2C 视觉还原开始");
+  });
+
+  it("renders prototypes in a scaled desktop viewport instead of collapsing the page into a narrow iframe", async () => {
+    const source = await import("node:fs/promises").then(({ readFile }) =>
+      readFile(new URL("../../src/desktop/renderer/d2c-viewer.tsx", import.meta.url), "utf8"));
+    expect(source).toContain("PRODUCT_PREVIEW_VIEWPORT");
+    expect(source).toContain("new ResizeObserver");
+    expect(source).toContain("d2c-product-preview-canvas");
+    expect(source).toContain("1280 × 800");
+    expect(source).toContain("d2c-start-screen-product");
+  });
+});
+
+describe("E2E product artifact presentation gate", () => {
+  it("keeps newly written PRD and prototype artifacts in generating state while the owning session is busy", () => {
+    expect(shouldDeferD2cProductReview(undefined, "prd-review", true)).toBe(true);
+    expect(shouldDeferD2cProductReview("prd-generating", "prd-review", true)).toBe(true);
+    expect(shouldDeferD2cProductReview("design-generating", "design-review", true)).toBe(true);
+  });
+
+  it("reveals review artifacts after the session ends and does not hide an already visible review", () => {
+    expect(shouldDeferD2cProductReview("design-generating", "design-review", false)).toBe(false);
+    expect(shouldDeferD2cProductReview("design-review", "design-review", true)).toBe(false);
+    expect(shouldDeferD2cProductReview("design-review", "ready-for-d2c", true)).toBe(false);
+  });
+
+  it("starts the preview server only after the session ends", () => {
+    expect(shouldStartD2cProductPreview("design-review", true, false)).toBe(false);
+    expect(shouldStartD2cProductPreview("design-review", false, false)).toBe(true);
+    expect(shouldStartD2cProductPreview("design-generating", false, false)).toBe(false);
+    expect(shouldStartD2cProductPreview("design-review", false, true)).toBe(false);
   });
 });

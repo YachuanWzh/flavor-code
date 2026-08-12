@@ -11,6 +11,8 @@ import {
   AppMenuInputSchema,
   D2cGetReportInputSchema,
   D2cImportInputSchema,
+  D2cCreateProductInputSchema,
+  D2cProductDecisionInputSchema,
   D2cReviewInputSchema,
   D2cManualAcceptanceInputSchema,
   D2cJudgeConfigInputSchema,
@@ -39,6 +41,7 @@ import {
 import { createD2cCaptureService } from "./d2c-capture.js";
 import { isLoopbackPreviewUrl } from "../d2c/interaction.js";
 import { buildD2cJudgePrompt, finalizeD2cQualityJudgment } from "../d2c/judge.js";
+import { buildD2cAutonomousPlanPrompt } from "../d2c/interaction-review.js";
 import { createEmbeddedD2cAutomation, type D2cEmbeddedHost } from "./d2c-embedded-runner.js";
 import { createD2cJudgeClient } from "./d2c-judge-client.js";
 import { createD2cJudgeConfigStore } from "./d2c-judge-config.js";
@@ -99,6 +102,7 @@ function judgeImage(png: Buffer): Buffer {
 const controller = new DesktopRuntimeController({
   emit: emitDesktopEvent,
   runD2cInteractionTests: (manifest, baseUrl, mockUrl) => d2cEmbedded.run(manifest, baseUrl, mockUrl),
+  observeD2cPages: (manifest, baseUrl) => d2cEmbedded.observe(manifest, baseUrl),
   captureD2cPreview: (url) => d2cEmbedded.capture(url),
   d2cJudge: {
     config: () => judgeStore().view(),
@@ -111,6 +115,15 @@ const controller = new DesktopRuntimeController({
         designPng: judgeImage(designPng), implementationPng: judgeImage(implementationPng),
       });
       return finalizeD2cQualityJudgment({ assessment, report, interaction, model: config.model, passThreshold: config.passThreshold });
+    },
+    planInteractions: async (input) => {
+      const config = await judgeStore().load();
+      if (config === undefined) throw new Error("Configure a multimodal D2C judge model before autonomous interaction review");
+      return d2cJudgeClient.planInteractions(config, {
+        prompt: buildD2cAutonomousPlanPrompt(input),
+        screenshots: input.observations.map((page) => judgeImage(page.screenshot)),
+        observedPages: input.observations.map((page) => page.url),
+      });
     },
   },
   createRuntime: async (runtimeOptions) => createProductionRuntime({
@@ -277,6 +290,30 @@ function installIpcHandlers(): void {
     const exportDir = choice.filePaths[0];
     if (choice.canceled || exportDir === undefined) return undefined;
     return controller.importD2cDesign(task, exportDir);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cCreateProduct, async (_event, value) => {
+    return controller.createD2cProduct(D2cCreateProductInputSchema.parse(value));
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cGetProduct, async (_event, value) => {
+    return controller.getD2cProduct(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cDecideProduct, async (_event, value) => {
+    const input = D2cProductDecisionInputSchema.parse(value);
+    return controller.decideD2cProduct(input.task, input.stage, input.accepted, input.feedback);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cStartProductPreview, async (_event, value) => {
+    return controller.startD2cProductPreview(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cStopProductPreview, async (_event, value) => {
+    return controller.stopD2cProductPreview(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cGetProductPreviewStatus, async (_event, value) => {
+    return controller.getD2cProductPreviewStatus(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cOpenProductPreview, async (_event, value) => {
+    const status = controller.getD2cProductPreviewStatus(D2cTaskActionInputSchema.parse(value).task);
+    if (status.url === undefined || !isLoopbackPreviewUrl(status.url)) throw new Error("D2C product preview is not running on loopback");
+    await shell.openExternal(status.url);
   });
   ipcMain.handle(DESKTOP_CHANNELS.d2cListReports, async () => controller.listD2cReports());
   ipcMain.handle(DESKTOP_CHANNELS.d2cGetReport, async (_event, value) => {

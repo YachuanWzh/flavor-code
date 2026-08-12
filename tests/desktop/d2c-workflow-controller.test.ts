@@ -3,9 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { PNG } from "pngjs";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildReport } from "../../src/d2c/report.js";
+import { parseInteractionManifest } from "../../src/d2c/interaction.js";
 import { importDesign, writeReport } from "../../src/d2c/store.js";
 import { writeWorkflow } from "../../src/d2c/workflow.js";
 import { DesktopRuntimeController, type DesktopRuntimeControllerOptions } from "../../src/desktop/runtime-controller.js";
@@ -63,6 +64,55 @@ function writeSpec(target: string): Promise<void> {
 }
 
 describe("desktop D2C workflow controller", () => {
+  it("moves a coarse requirement through PRD and prototype gates before reusing design import", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-d2c-product-controller-")); dirs.push(workspace);
+    const previewRoots: string[] = [];
+    const controller = createController({
+      home: workspace,
+      runD2cProductPreview: async (root) => {
+        previewRoots.push(root);
+        return { url: "http://127.0.0.1:4500/", stop: async () => undefined };
+      },
+    });
+    await controller.openWorkspace(workspace);
+
+    const created = await controller.createD2cProduct({ task: "merchant-console", framework: "react", requirement: "做一个经营分析后台" });
+    expect(created.view.plan.phase).toBe("prd-generating");
+    expect(created.prompt).toContain("product/prd.md");
+    const product = join(workspace, ".flavor", "d2c", "merchant-console", "product");
+    await writeFile(join(product, "prd.md"), "# 经营分析后台\n\n## 验收标准\n- 展示今日交易额\n");
+    expect((await controller.getD2cProduct("merchant-console"))?.plan.phase).toBe("prd-review");
+
+    const prdAccepted = await controller.decideD2cProduct("merchant-console", "prd", true);
+    expect(prdAccepted.view.plan.phase).toBe("design-generating");
+    expect(prdAccepted.prompt).toContain("interaction-manifest.json");
+    await writeFile(join(product, "prototype", "index.html"), "<!doctype html><main>经营分析</main>");
+    await writeFile(join(product, "prototype", "interaction-manifest.json"), JSON.stringify({
+      schemaVersion: 1, product: "merchant-console", deterministic: true, notes: "model-authored metadata",
+      pages: [{ url: "index.html", title: "经营台", scenarios: [{ id: "loads", title: "加载首页", steps: [
+        { action: "wait", ms: 50 }, { expect: "visible", selector: "main" },
+        { expect: "url", selector: "body", value: "index.html" },
+      ] }] }],
+    }));
+    expect((await controller.getD2cProduct("merchant-console"))?.plan.phase).toBe("design-review");
+    expect(await controller.startD2cProductPreview("merchant-console")).toEqual({ running: true, url: "http://127.0.0.1:4500/" });
+    expect(previewRoots[0]).toBe(join(product, "prototype"));
+
+    const designAccepted = await controller.decideD2cProduct("merchant-console", "design", true);
+    expect(designAccepted.view.plan.phase).toBe("ready-for-d2c");
+    expect(designAccepted.imported).toMatchObject({ task: "merchant-console", entryHtml: "index.html" });
+    const normalizedSource = JSON.parse(await readFile(join(product, "prototype", "interaction-manifest.json"), "utf8"));
+    expect(normalizedSource.notes).toBeUndefined();
+    expect(normalizedSource.pages[0].title).toBeUndefined();
+    expect(normalizedSource.pages[0].scenarios[0].title).toBeUndefined();
+    expect(await readFile(join(workspace, ".flavor", "d2c", "merchant-console", "design", "index.html"), "utf8"))
+      .toContain("经营分析");
+    await expect(controller.decideD2cProduct("merchant-console", "design", true)).resolves.toMatchObject({
+      view: { plan: { phase: "ready-for-d2c" } }, imported: { entryHtml: "index.html" },
+    });
+    await controller.dispose();
+  });
+
   it("persists review, imports OpenAPI, confirms mappings and generates usable integration files", async () => {
     const { workspace, report } = await seedWorkspace();
     const project = join(workspace, "src", "d2c-output", "dashboard");
@@ -112,6 +162,7 @@ describe("desktop D2C workflow controller", () => {
     const automated = await controller.runD2cInteractionTests("dashboard");
     expect(automated.workflow.stage).toBe("interaction-review");
     expect(automated.result?.apiRequestCount).toBe(1);
+    expect(automated.review).toMatchObject({ mode: "contract", plannedScenarios: 1 });
     const completed = await controller.setD2cManualAcceptance("dashboard", true);
     expect(completed.stage).toBe("quality-judge");
     const judged = await controller.runD2cQualityJudge("dashboard");
@@ -130,6 +181,113 @@ describe("desktop D2C workflow controller", () => {
     const spec = join(workspace, "swagger.json");
     await writeSpec(spec);
     await expect(controller.importD2cOpenApi("dashboard", spec)).rejects.toThrow(/d2c\.modules\.json/);
+    await controller.dispose();
+  });
+
+  it("auto-prepares OpenAPI for a requirement-origin delivery without asking for a file", async () => {
+    const { workspace, report } = await seedWorkspace();
+    const project = join(workspace, "src", "d2c-output", "dashboard");
+    await writeFile(join(project, "d2c.modules.json"), JSON.stringify({ schema: 1, modules: [{
+      id: "stats", label: "统计", sourceFiles: ["src/Stats.jsx"], keywords: ["metrics"], dataNeeds: ["total"], actions: ["load"],
+    }] }));
+    const controller = createController({ home: workspace });
+    await controller.openWorkspace(workspace);
+    await controller.createD2cProduct({ task: "dashboard", framework: "vue", requirement: "做一个经营指标后台" });
+    const reportView = await controller.getD2cReport("dashboard", report.reportId);
+    expect(reportView.deliveryOrigin).toBe("requirement");
+    await controller.updateD2cReview("dashboard", report.reportId, [report.diffs[0]!.fingerprint], "accepted");
+
+    const integration = await controller.getD2cIntegration("dashboard");
+    expect(integration?.document.title).toBe("dashboard API");
+    expect(integration?.mappings).toEqual([expect.objectContaining({ moduleId: "stats", status: "confirmed" })]);
+    expect(await readFile(join(workspace, ".flavor", "d2c", "dashboard", "integration", "swagger.json"), "utf8"))
+      .toContain('"openapi": "3.1.0"');
+    const generated = await controller.generateD2cIntegration("dashboard");
+    expect(generated.files).toContain("server/main.py");
+    expect(await readFile(join(project, "server", "main.py"), "utf8")).toContain("FastAPI");
+    await controller.dispose();
+  });
+
+  it("uses multimodal observations to extend the approved contract before deterministic playback", async () => {
+    const { workspace, report } = await seedWorkspace();
+    const project = join(workspace, "src", "d2c-output", "dashboard");
+    await writeFile(join(project, "d2c.modules.json"), JSON.stringify({ schema: 1, modules: [{ id: "stats", label: "统计", sourceFiles: ["src/Stats.jsx"], keywords: ["metrics"] }] }));
+    let executedScenarios: string[] = [];
+    const controller = createController({
+      home: workspace,
+      observeD2cPages: async () => [{ url: "index.html", title: "Dashboard", viewport: { width: 1280, height: 800 }, headings: ["概览"], bodyText: "打开菜单",
+        elements: [{ selector: "#menu", tag: "button", text: "菜单", visible: true, disabled: false }], screenshot: png() }],
+      runD2cInteractionTests: async (manifest, baseUrl) => {
+        executedScenarios = manifest.pages.flatMap((page) => page.scenarios.map((scenario) => scenario.id));
+        return { schema: 1, runAt: "2026-08-12T00:00:00.000Z", baseUrl, passed: true, total: executedScenarios.length, failures: 0, apiRequestCount: 1,
+          scenarios: executedScenarios.map((id) => ({ id, pageUrl: baseUrl, passed: true, durationMs: 10, apiRequestCount: 1 })) };
+      },
+      d2cJudge: {
+        config: async () => ({ configured: true, protocol: "openai-compatible", baseURL: "https://judge.example.com/v1", model: "vision", passThreshold: 80 }),
+        saveConfig: async () => ({ configured: true }), evaluate: async () => { throw new Error("unused"); },
+        planInteractions: async () => ({ schema: 1, model: "vision", plannedAt: "2026-08-12T00:00:00.000Z", summary: "补充深层菜单",
+          pageAnalyses: [{ url: "index.html", pageType: "大屏", goals: ["下钻"], risks: [] }],
+          manifest: parseInteractionManifest(JSON.stringify({ schemaVersion: 1, product: "dashboard", deterministic: true,
+            pages: [{ url: "index.html", requireApi: false, scenarios: [{ id: "open-drilldown", requireApi: false, steps: [
+              { action: "click", selector: "#menu" }, { expect: "visible", selector: "#submenu" },
+            ] }] }],
+          })) }),
+      },
+    });
+    await controller.openWorkspace(workspace);
+    await controller.updateD2cReview("dashboard", report.reportId, [report.diffs[0]!.fingerprint], "accepted");
+    const spec = join(workspace, "swagger.json"); await writeSpec(spec);
+    const imported = await controller.importD2cOpenApi("dashboard", spec); const selected = imported.mappings[0]!;
+    if (selected.status === "needs-confirmation") await controller.confirmD2cMapping("dashboard", selected.moduleId, selected.operationKey);
+    await controller.generateD2cIntegration("dashboard"); await controller.startD2cPreview("dashboard");
+    const status = await controller.runD2cInteractionTests("dashboard");
+    expect(executedScenarios).toEqual(["loads-api-data", "open-drilldown"]);
+    expect(status.review).toMatchObject({ mode: "autonomous", model: "vision", plannedScenarios: 2 });
+    expect(JSON.parse(await readFile(join(workspace, ".flavor", "d2c", "dashboard", "integration", "autonomous-interaction-plan.json"), "utf8")))
+      .toMatchObject({ summary: "补充深层菜单" });
+    await controller.dispose();
+  });
+
+  it("keeps deterministic acceptance running when autonomous planning has a transient network failure", async () => {
+    const { workspace, report } = await seedWorkspace();
+    const project = join(workspace, "src", "d2c-output", "dashboard");
+    await writeFile(join(project, "d2c.modules.json"), JSON.stringify({ schema: 1, modules: [{ id: "stats", label: "统计", sourceFiles: ["src/Stats.jsx"], keywords: ["metrics"] }] }));
+    const execute = vi.fn(async (_manifest, baseUrl: string) => ({
+      schema: 1 as const, runAt: "2026-08-12T00:00:00.000Z", baseUrl, passed: false, total: 1, failures: 1, apiRequestCount: 1,
+      scenarios: [{ id: "loads-api-data", pageUrl: baseUrl, passed: false, durationMs: 10, apiRequestCount: 1, failure: "assertion failed" }],
+    }));
+    const controller = createController({
+      home: workspace,
+      observeD2cPages: async () => [{ url: "index.html", title: "Dashboard", viewport: { width: 1280, height: 800 }, headings: ["概览"], bodyText: "统计",
+        elements: [], screenshot: png() }],
+      captureD2cPreview: async () => png(),
+      runD2cInteractionTests: execute,
+      d2cJudge: {
+        config: async () => ({ configured: true, protocol: "openai-compatible", baseURL: "https://judge.example.com/v1", model: "vision", passThreshold: 80 }),
+        saveConfig: async () => ({ configured: true }), evaluate: async ({ report: current, interaction }) => ({
+          schema: 1, runAt: "2026-08-12T00:02:00.000Z", model: "vision", visualScore: 90, interactionScore: 20,
+          staticVisualScore: current.scores.total, deterministicInteractionPassed: interaction.passed,
+          overallScore: 55, threshold: 80, verdict: "fail", confidence: "high", summary: "交互失败", strengths: [], issues: [],
+        }),
+        planInteractions: async () => { throw new TypeError("fetch failed"); },
+      },
+    });
+    await controller.openWorkspace(workspace);
+    await controller.updateD2cReview("dashboard", report.reportId, [report.diffs[0]!.fingerprint], "accepted");
+    const spec = join(workspace, "swagger.json"); await writeSpec(spec);
+    const imported = await controller.importD2cOpenApi("dashboard", spec); const selected = imported.mappings[0]!;
+    if (selected.status === "needs-confirmation") await controller.confirmD2cMapping("dashboard", selected.moduleId, selected.operationKey);
+    await controller.generateD2cIntegration("dashboard"); await controller.startD2cPreview("dashboard");
+
+    const status = await controller.runD2cInteractionTests("dashboard");
+    expect(execute).toHaveBeenCalledOnce();
+    expect(status.result).toMatchObject({ passed: false });
+    expect(status.review).toMatchObject({ mode: "contract-fallback", plannedScenarios: 1, warning: expect.stringContaining("fetch failed") });
+    expect(JSON.parse(await readFile(join(workspace, ".flavor", "d2c", "dashboard", "integration", "autonomous-interaction-diagnostic.json"), "utf8")))
+      .toMatchObject({ stage: "planning", fallback: "approved-contract", error: "fetch failed" });
+    const diagnosticScore = await controller.runD2cQualityJudge("dashboard");
+    expect(diagnosticScore.judgment).toMatchObject({ verdict: "fail", deterministicInteractionPassed: false });
+    expect(diagnosticScore.workflow.stage).toBe("interaction-review");
     await controller.dispose();
   });
 

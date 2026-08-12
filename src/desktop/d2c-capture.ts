@@ -20,6 +20,7 @@ const MAX_ELEMENTS = 2_000;
 const MAX_RENDER_FAILURE_CHARS = 8_192;
 const RENDER_ERROR_SETTLE_MS = 150;
 const MAX_CAPTURE_DIAGNOSTICS = 12;
+const PAGE_READY_TIMEOUT_MS = 8_000;
 
 function cleanCaptureDiagnostic(value: string): string {
   return value
@@ -120,6 +121,21 @@ export const D2C_CAPTURE_PREPARATION_SCRIPT = `(() => {
     : new Promise((resolve) => { image.addEventListener("load", resolve, { once: true }); image.addEventListener("error", resolve, { once: true }); }));
   return Promise.all([fonts, ...images]).then(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 })()`;
+
+export const D2C_CAPTURE_READINESS_SCRIPT = `new Promise((resolve, reject) => {
+  const started = Date.now(); let stableSince = 0;
+  const visible = (element) => { const style = getComputedStyle(element); const rect = element.getBoundingClientRect(); return !element.hidden && style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0; };
+  const check = () => {
+    const loading = Array.from(document.querySelectorAll('[aria-busy="true"],.skeleton,.loading,[data-loading="true"]')).filter(visible);
+    if (loading.length === 0) {
+      if (stableSince === 0) stableSince = Date.now();
+      if (Date.now() - stableSince >= 180) { resolve(true); return; }
+    } else stableSince = 0;
+    if (Date.now() - started >= ${PAGE_READY_TIMEOUT_MS}) { reject(new Error("D2C page did not become ready: visible loading or skeleton state remained after ${PAGE_READY_TIMEOUT_MS}ms")); return; }
+    setTimeout(check, 60);
+  };
+  check();
+})`;
 
 const MEASURE_SCRIPT = `(() => ({
   width: Math.max(document.documentElement.scrollWidth, document.body?.scrollWidth ?? 0, window.innerWidth),
@@ -447,6 +463,7 @@ export function createD2cCaptureService(): D2cCaptureService {
       captureSignal.addEventListener("abort", destroyOnAbort, { once: true });
       try {
         await awaitWithSignal(window.loadURL(url), captureSignal);
+        await executeCaptureScript(window, url, "wait for page readiness", D2C_CAPTURE_READINESS_SCRIPT, captureSignal, rendererDiagnostics);
         let captureSize = requested;
         for (let attempt = 0; attempt < 2; attempt += 1) {
           await executeCaptureScript(window, url, "prepare page", D2C_CAPTURE_PREPARATION_SCRIPT, captureSignal, rendererDiagnostics);
@@ -499,6 +516,11 @@ export function createD2cCaptureService(): D2cCaptureService {
           window, captureSize.width, captureSize.height, url, captureSignal, rendererDiagnostics,
         );
         return { ...snapshot, screenshotPng, diagnostics };
+      } catch (cause) {
+        if (timeoutSignal.aborted && signal?.aborted !== true) {
+          throw new Error(captureFailureMessage(`overall capture timeout (${LOAD_TIMEOUT_MS}ms)`, url, cause, rendererDiagnostics));
+        }
+        throw cause;
       } finally {
         captureSignal.removeEventListener("abort", destroyOnAbort);
         captureSession.removeListener("will-download", preventDownload);

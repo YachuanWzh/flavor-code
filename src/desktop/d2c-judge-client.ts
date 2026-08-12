@@ -1,4 +1,5 @@
 import { parseD2cJudgeModelResponse, type D2cJudgeConfig, type D2cJudgeModelAssessment } from "../d2c/judge.js";
+import { parseD2cAutonomousPlanResponse, type D2cAutonomousInteractionPlan } from "../d2c/interaction-review.js";
 
 export interface D2cJudgeClientInput {
   prompt: string;
@@ -8,6 +9,11 @@ export interface D2cJudgeClientInput {
 
 export interface D2cJudgeClient {
   evaluate(config: D2cJudgeConfig, input: D2cJudgeClientInput): Promise<D2cJudgeModelAssessment>;
+  planInteractions(config: D2cJudgeConfig, input: {
+    prompt: string;
+    screenshots: readonly Buffer[];
+    observedPages: readonly string[];
+  }): Promise<D2cAutonomousInteractionPlan>;
 }
 
 type Fetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
@@ -33,6 +39,22 @@ function redact(value: string, apiKey: string): string {
   return value.replaceAll(apiKey, "[redacted]").replace(/(Bearer|x-api-key)\s+[^\s,;]+/gi, "$1 [redacted]");
 }
 
+function causeDetail(value: unknown): string {
+  if (!(value instanceof Error)) return String(value);
+  const nested = value.cause;
+  if (nested instanceof Error) return `${value.message}: ${nested.message}`;
+  if (typeof nested === "object" && nested !== null) {
+    const code = "code" in nested ? String(nested.code) : undefined;
+    const message = "message" in nested ? String(nested.message) : undefined;
+    if (code !== undefined || message !== undefined) return `${value.message}: ${[code, message].filter(Boolean).join(" ")}`;
+  }
+  return value.message;
+}
+
+function isAbort(value: unknown): boolean {
+  return value instanceof Error && (value.name === "AbortError" || value.name === "TimeoutError");
+}
+
 function responseText(protocol: D2cJudgeConfig["protocol"], value: unknown): string {
   if (typeof value !== "object" || value === null) throw new Error("D2C Judge returned an invalid response");
   const record = value as Record<string, unknown>;
@@ -50,46 +72,67 @@ function responseText(protocol: D2cJudgeConfig["protocol"], value: unknown): str
   throw new Error("D2C Judge response did not contain text output");
 }
 
-export function createD2cJudgeClient(fetcher: Fetch = globalThis.fetch): D2cJudgeClient {
-  return {
-    async evaluate(config, input) {
-      const openAi = config.protocol === "openai-compatible";
-      const body = openAi ? {
-        model: config.model,
-        temperature: 0,
-        response_format: { type: "json_object" },
-        messages: [{ role: "user", content: [
-          { type: "text", text: input.prompt },
-          { type: "image_url", image_url: { url: dataUrl(input.designPng), detail: "high" } },
-          { type: "image_url", image_url: { url: dataUrl(input.implementationPng), detail: "high" } },
-        ] }],
-      } : {
-        model: config.model,
-        max_tokens: 4_096,
-        temperature: 0,
-        messages: [{ role: "user", content: [
-          { type: "text", text: input.prompt },
-          { type: "image", source: { type: "base64", media_type: "image/png", data: input.designPng.toString("base64") } },
-          { type: "image", source: { type: "base64", media_type: "image/png", data: input.implementationPng.toString("base64") } },
-        ] }],
-      };
-      const response = await fetcher(endpoint(config.baseURL, config.protocol), {
-        method: "POST",
-        headers: openAi
-          ? { "content-type": "application/json", Authorization: `Bearer ${config.apiKey}` }
-          : { "content-type": "application/json", "x-api-key": config.apiKey, "anthropic-version": "2023-06-01" },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(120_000),
-      });
+export function createD2cJudgeClient(
+  fetcher: Fetch = globalThis.fetch,
+  retryDelay: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+): D2cJudgeClient {
+  const request = async (config: D2cJudgeConfig, prompt: string, images: readonly Buffer[], maxTokens: number): Promise<string> => {
+    const openAi = config.protocol === "openai-compatible";
+    const imageContent = openAi
+      ? images.map((image) => ({ type: "image_url", image_url: { url: dataUrl(image), detail: "high" } }))
+      : images.map((image) => ({ type: "image", source: { type: "base64", media_type: "image/png", data: image.toString("base64") } }));
+    const body = openAi ? {
+      model: config.model,
+      max_tokens: maxTokens,
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [{ role: "user", content: [{ type: "text", text: prompt }, ...imageContent] }],
+    } : {
+      model: config.model,
+      max_tokens: maxTokens,
+      temperature: 0,
+      messages: [{ role: "user", content: [{ type: "text", text: prompt }, ...imageContent] }],
+    };
+    const target = endpoint(config.baseURL, config.protocol);
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      let response: Response;
+      try {
+        response = await fetcher(target, {
+          method: "POST",
+          headers: openAi
+            ? { "content-type": "application/json", Authorization: `Bearer ${config.apiKey}` }
+            : { "content-type": "application/json", "x-api-key": config.apiKey, "anthropic-version": "2023-06-01" },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(180_000),
+        });
+      } catch (cause) {
+        if (attempt === 1 && !isAbort(cause)) { await retryDelay(300); continue; }
+        throw new Error(`D2C Judge network request failed at ${target}: ${redact(causeDetail(cause), config.apiKey)}`);
+      }
       const raw = await response.text();
       let parsed: unknown;
       try { parsed = JSON.parse(raw); }
       catch { parsed = undefined; }
       if (!response.ok) {
+        if (attempt === 1 && (response.status === 408 || response.status === 429 || response.status >= 500)) {
+          await retryDelay(300); continue;
+        }
         const detail = errorMessage(parsed);
         throw new Error(`D2C Judge request failed (${response.status})${detail === undefined ? "" : `: ${redact(detail, config.apiKey)}`}`);
       }
-      return parseD2cJudgeModelResponse(responseText(config.protocol, parsed));
+      return responseText(config.protocol, parsed);
+    }
+    throw new Error("D2C Judge request exhausted retries");
+  };
+  return {
+    async evaluate(config, input) {
+      return parseD2cJudgeModelResponse(await request(config, input.prompt, [input.designPng, input.implementationPng], 4_096));
+    },
+    async planInteractions(config, input) {
+      const screenshots = input.screenshots.slice(0, 12);
+      if (screenshots.length === 0) throw new Error("D2C autonomous reviewer requires at least one page screenshot");
+      const raw = await request(config, input.prompt, screenshots, 16_384);
+      return parseD2cAutonomousPlanResponse(raw, { model: config.model, observedPages: input.observedPages });
     },
   };
 }

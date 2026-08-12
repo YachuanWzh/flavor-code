@@ -45,6 +45,15 @@ const api: FlavorDesktopApi = {
     task, ...(reportId === undefined ? {} : { reportId }),
   }),
   importD2cDesign: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cImport, { task }),
+  createD2cProduct: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cCreateProduct, input),
+  getD2cProduct: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cGetProduct, { task }),
+  decideD2cProduct: (task, stage, accepted, feedback) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cDecideProduct, {
+    task, stage, accepted, ...(feedback === undefined ? {} : { feedback }),
+  }),
+  startD2cProductPreview: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cStartProductPreview, { task }),
+  stopD2cProductPreview: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cStopProductPreview, { task }),
+  getD2cProductPreviewStatus: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cGetProductPreviewStatus, { task }),
+  openD2cProductPreview: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cOpenProductPreview, { task }),
   updateD2cReview: (task, reportId, fingerprints, decision, instruction) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cUpdateReview, {
     task, reportId, fingerprints, decision, ...(instruction === undefined ? {} : { instruction }),
   }),

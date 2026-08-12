@@ -58,10 +58,22 @@ function mockModule(document: D2cOpenApiDocument): string {
     + "for (const signal of [\"SIGINT\", \"SIGTERM\"]) process.on(signal, () => server.close(() => process.exit(0)));\n";
 }
 
+function pythonServerModule(document: D2cOpenApiDocument): string {
+  const routes = document.operations.map((operation) => ({
+    path: operation.path,
+    method: operation.method,
+    name: identifier(operation.operationId),
+    sample: operation.responseExample ?? sampleForSchema(operation.responseSchema),
+    statusCode: operation.statusCode,
+  }));
+  return `import json\n\nfrom fastapi import FastAPI, Request\nfrom fastapi.middleware.cors import CORSMiddleware\n\napp = FastAPI(title=${JSON.stringify(document.title)}, version=${JSON.stringify(document.version)})\napp.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])\n\ndef make_handler(payload):\n    async def handler(request: Request, **path_parameters):\n        return payload\n    return handler\n\nROUTES = json.loads(r'''${JSON.stringify(routes)}''')\nfor route in ROUTES:\n    app.add_api_route(route["path"], make_handler(route["sample"]), methods=[route["method"]], name=route["name"], status_code=route["statusCode"])\n\n@app.get("/_e2e/health")\nasync def health():\n    return {"ok": True}\n`;
+}
+
 export async function generateIntegrationArtifacts(
   projectDir: string,
   document: D2cOpenApiDocument,
   mappings: readonly D2cApiMapping[],
+  options: { pythonServer?: boolean } = {},
 ): Promise<{ files: string[] }> {
   if (mappings.some((mapping) => mapping.status === "needs-confirmation")) throw new Error("Confirm every uncertain OpenAPI mapping before generating integration code");
   const packagePath = join(projectDir, "package.json");
@@ -75,14 +87,22 @@ export async function generateIntegrationArtifacts(
     .filter((operation): operation is D2cApiOperation => operation !== undefined);
   const apiDir = join(projectDir, "src", "api");
   const mockDir = join(projectDir, "mock");
-  await Promise.all([mkdir(apiDir, { recursive: true }), mkdir(mockDir, { recursive: true })]);
+  const serverDir = join(projectDir, "server");
+  await Promise.all([mkdir(apiDir, { recursive: true }), mkdir(mockDir, { recursive: true }),
+    ...(options.pythonServer ? [mkdir(serverDir, { recursive: true })] : [])]);
   const files = ["src/api/http.js", "src/api/d2c-api.js", "src/api/d2c-bindings.json", "mock/server.mjs", "package.json"];
+  if (options.pythonServer) files.push("server/main.py", "server/requirements.txt", "server/README.md");
   await Promise.all([
     writeFile(join(apiDir, "http.js"), `import axios from "axios";\n\nexport const http = axios.create({ baseURL: import.meta.env.VITE_API_BASE_URL || ${JSON.stringify(document.baseUrl ?? "")}, timeout: 15000 });\n\nhttp.interceptors.response.use((response) => response, (error) => Promise.reject({ name: "ApiError", status: error.response?.status, message: error.response?.data?.message || error.message, cause: error }));\n`),
     writeFile(join(apiDir, "d2c-api.js"), apiModule(selected)),
     writeFile(join(apiDir, "d2c-bindings.json"), `${JSON.stringify({ schema: 1, generatedAt: new Date().toISOString(), mappings }, null, 2)}\n`),
     writeFile(join(mockDir, "server.mjs"), mockModule({ ...document, operations: selected })),
     writeFile(packagePath, `${JSON.stringify({ ...pkg, scripts, dependencies }, null, 2)}\n`),
+    ...(options.pythonServer ? [
+      writeFile(join(serverDir, "main.py"), pythonServerModule({ ...document, operations: selected })),
+      writeFile(join(serverDir, "requirements.txt"), "fastapi>=0.116,<1\nuvicorn[standard]>=0.35,<1\n"),
+      writeFile(join(serverDir, "README.md"), "# Python API service\n\nRun with `python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000` from this directory.\n"),
+    ] : []),
   ]);
   return { files };
 }

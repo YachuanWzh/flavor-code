@@ -5,10 +5,13 @@ import type { D2cReviewDecision } from "../../d2c/workflow.js";
 import { buildD2cRepairPrompt, reviewProgress } from "../../d2c/workflow-shared.js";
 import type { D2cApiMapping } from "../../d2c/openapi.js";
 import type { D2cInteractionRun } from "../../d2c/interaction.js";
+import type { D2cProductPhase, D2cProductPlanView } from "../../d2c/product.js";
 import type { D2cJudgeConfig, D2cJudgeConfigView } from "../../d2c/judge.js";
-import type { D2cImportResult, D2cIntegrationView, D2cMockStatus, D2cPreviewStatus, D2cReportListItem, D2cReportView } from "../contracts.js";
+import type { D2cImportResult, D2cIntegrationView, D2cMockStatus, D2cPreviewStatus, D2cProductPreviewStatus, D2cReportListItem, D2cReportView } from "../contracts.js";
+import type { D2cInteractionStatus } from "../contracts.js";
 import { buildD2cAxisMeasurements, fitCanvas, focusCanvasRect, zoomCanvasAt, type CanvasTransform } from "./d2c-canvas.js";
 import type { D2cExecutionPhase, D2cFramework, D2cPendingTask, D2cProgressActivity } from "./d2c-progress.js";
+import { MarkdownContent } from "./markdown.js";
 
 interface D2cViewerProps {
   onClose(): void;
@@ -24,6 +27,24 @@ interface D2cViewerProps {
 const TASK_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const ANNOTATION_LIMIT = 240;
 const INITIAL_ISSUE_LIMIT = 120;
+const PRODUCT_PREVIEW_VIEWPORT = { width: 1280, height: 800 } as const;
+
+export function shouldDeferD2cProductReview(
+  currentPhase: D2cProductPhase | undefined,
+  nextPhase: D2cProductPhase,
+  sessionBusy: boolean,
+): boolean {
+  if (!sessionBusy || currentPhase === nextPhase) return false;
+  return nextPhase === "prd-review" || nextPhase === "design-review";
+}
+
+export function shouldStartD2cProductPreview(
+  phase: D2cProductPhase | undefined,
+  sessionBusy: boolean,
+  previewRunning: boolean,
+): boolean {
+  return phase === "design-review" && !sessionBusy && !previewRunning;
+}
 
 function buildTaskPrompt(
   task: string,
@@ -31,8 +52,9 @@ function buildTaskPrompt(
   fileCount: number,
   pages: D2cImportResult["pages"],
   framework: D2cFramework,
+  frontendTechnology?: string,
 ): string {
-  const frameworkLabel = framework === "vue" ? "Vue 3" : "React";
+  const frameworkLabel = frontendTechnology ?? (framework === "vue" ? "Vue 3" : "React");
   const pagePlan = pages.map((page, index) => `${index + 1}. ${page.label} → ${page.html}`).join("；");
   return [
     `执行 D2C 任务“${task}”：Pixso 设计稿已导入 .flavor/d2c/${task}/design/（入口 ${entryHtml}，共 ${fileCount} 个文件）。`,
@@ -200,6 +222,69 @@ function EvidenceCrop({ src, rect, canvas, label }: { src: string; rect: D2cRect
   </figure>;
 }
 
+function ProductPrototypePreview({ url, onStart }: { url: string | undefined; onStart(): void }): React.JSX.Element {
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(0.5);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (canvas === null) return;
+    const updateScale = (width: number): void => {
+      setScale(Math.min(1, Math.max(0.1, width / PRODUCT_PREVIEW_VIEWPORT.width)));
+    };
+    updateScale(canvas.clientWidth);
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width;
+      if (width !== undefined && width > 0) updateScale(width);
+    });
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, []);
+
+  const scaledHeight = Math.round(PRODUCT_PREVIEW_VIEWPORT.height * scale);
+  return <figure className="d2c-product-preview" data-running={url !== undefined}>
+    <figcaption>
+      <span><i aria-hidden="true" />DESKTOP PREVIEW</span>
+      <code>1280 × 800</code>
+      <em>适应宽度 · {Math.round(scale * 100)}%</em>
+    </figcaption>
+    <div className="d2c-product-preview-canvas" ref={canvasRef} style={url === undefined ? undefined : { height: scaledHeight }}>
+      {url !== undefined ? <iframe src={url} title="D2C product prototype"
+        width={PRODUCT_PREVIEW_VIEWPORT.width} height={PRODUCT_PREVIEW_VIEWPORT.height}
+        style={{ transform: `scale(${scale})` }} sandbox="allow-scripts allow-forms allow-modals allow-same-origin"
+        referrerPolicy="no-referrer" />
+        : <button type="button" onClick={onStart}>启动原型预览</button>}
+    </div>
+  </figure>;
+}
+
+function InteractiveDesktopPreview({ url, reloadKey, task }: { url: string; reloadKey: number; task: string }): React.JSX.Element {
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(0.5);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (canvas === null) return;
+    const update = (): void => setScale(Math.min(1, Math.max(0.1,
+      Math.min(canvas.clientWidth / PRODUCT_PREVIEW_VIEWPORT.width, canvas.clientHeight / PRODUCT_PREVIEW_VIEWPORT.height))));
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, []);
+  return <div className="d2c-live-canvas" ref={canvasRef}>
+    <div className="d2c-live-desktop" style={{
+      width: PRODUCT_PREVIEW_VIEWPORT.width * scale,
+      height: PRODUCT_PREVIEW_VIEWPORT.height * scale,
+    }}>
+      <iframe key={reloadKey} src={url} title="D2C interactive preview"
+        width={PRODUCT_PREVIEW_VIEWPORT.width} height={PRODUCT_PREVIEW_VIEWPORT.height}
+        style={{ transform: `scale(${scale})` }} sandbox="allow-scripts allow-forms allow-modals allow-same-origin"
+        referrerPolicy="no-referrer" data-task={task} />
+    </div>
+    <span className="d2c-live-viewport">1280 × 800 · {Math.round(scale * 100)}%</span>
+  </div>;
+}
+
 function rectStyle(rect: D2cRect): React.CSSProperties {
   return { left: rect.x, top: rect.y, width: rect.width, height: rect.height };
 }
@@ -343,7 +428,7 @@ function D2cProgressView({ pending, onOpenLog, onInterrupt }: {
   </main>;
 }
 
-export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTask, pending, onLaunch, disabled = false }: D2cViewerProps): React.JSX.Element {
+export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTask, pending, onLaunch, disabled = false }: D2cViewerProps): React.JSX.Element {
   const [reports, setReports] = useState<readonly D2cReportListItem[]>([]);
   const [bundle, setBundle] = useState<D2cReportView>();
   const [loading, setLoading] = useState(true);
@@ -358,6 +443,16 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
   const [taskName, setTaskName] = useState("");
   const [framework, setFramework] = useState<D2cFramework>("vue");
   const [launching, setLaunching] = useState(false);
+  const [entryMode, setEntryMode] = useState<"requirement" | "design">("requirement");
+  const [requirement, setRequirement] = useState("");
+  const [productView, setProductView] = useState<D2cProductPlanView>();
+  const [productPreview, setProductPreview] = useState<D2cProductPreviewStatus>({ running: false });
+  const [productFeedback, setProductFeedback] = useState("");
+  const [productBusy, setProductBusy] = useState(false);
+  const disabledRef = useRef(disabled);
+  const productPhaseRef = useRef<D2cProductPhase | undefined>(productView?.plan.phase);
+  disabledRef.current = disabled;
+  productPhaseRef.current = productView?.plan.phase;
   const [inspectorTab, setInspectorTab] = useState<"review" | "integration">("review");
   const [reviewBusy, setReviewBusy] = useState(false);
   const [reviewInstruction, setReviewInstruction] = useState("");
@@ -366,7 +461,9 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
   const [mockStatus, setMockStatus] = useState<D2cMockStatus>({ running: false });
   const [previewStatus, setPreviewStatus] = useState<D2cPreviewStatus>({ running: false });
   const [interactionRun, setInteractionRun] = useState<D2cInteractionRun>();
+  const [interactionReview, setInteractionReview] = useState<D2cInteractionStatus["review"]>();
   const [interactionBusy, setInteractionBusy] = useState(false);
+  const [interactionPlayback, setInteractionPlayback] = useState(false);
   const [judgeConfig, setJudgeConfig] = useState<D2cJudgeConfigView>({ configured: false });
   const [judgeBusy, setJudgeBusy] = useState(false);
   const [judgeEditing, setJudgeEditing] = useState(false);
@@ -457,6 +554,23 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; reportRequestRef.current += 1; };
   }, [refreshKey, loadReports]);
+
+  const repairProductManifest = async (): Promise<void> => {
+    if (productView?.validationError?.stage !== "design" || productBusy || disabled) return;
+    setProductBusy(true);
+    try {
+      const task = productView.plan.task;
+      const submitted = await onStartTask([
+        `修复 E2E 任务“${task}”的交互清单。`,
+        `只允许修改 .flavor/d2c/${task}/product/prototype/interaction-manifest.json，不要重新生成 PRD、原型 HTML、资源或 OpenAPI。`,
+        `当前预检错误：${productView.validationError.message}`,
+        "先读取现有原型与清单，保留全部页面、场景和业务意图，将每个步骤转换为 Flavor Code 支持的严格 action/expect 协议。",
+        "完成后必须自行重新读取 JSON，确认可解析且没有额外字段，再汇报修复数量。",
+      ].join("\n"));
+      if (submitted) await refreshProduct(task);
+    } catch (cause) { reportError(cause); }
+    finally { setProductBusy(false); }
+  };
 
   const startD2c = async (): Promise<void> => {
     if (!taskValid || launching || disabled) return;
@@ -656,13 +770,17 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
   const runInteractionTests = async (): Promise<void> => {
     if (bundle === undefined || !previewStatus.running || interactionBusy) return;
     setInteractionBusy(true);
+    setInteractionPlayback(true);
+    setInteractionRun(undefined);
+    setInteractionReview(undefined);
     try {
       const status = await window.flavorDesktop.runD2cInteractionTests(bundle.report.task);
       setInteractionRun(status.result);
+      setInteractionReview(status.review);
       setBundle((current) => current === undefined ? current : { ...current, workflow: status.workflow });
       setIntegration((current) => current === undefined ? current : { ...current, workflow: status.workflow });
     } catch (cause) { reportError(cause); }
-    finally { setInteractionBusy(false); }
+    finally { setInteractionPlayback(false); setInteractionBusy(false); }
   };
 
   const setManualAcceptance = async (accepted: boolean): Promise<void> => {
@@ -674,6 +792,90 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
       setIntegration((current) => current === undefined ? current : { ...current, workflow });
     } catch (cause) { reportError(cause); }
     finally { setInteractionBusy(false); }
+  };
+
+  const ensureProductPreview = useCallback(async (task: string): Promise<void> => {
+    const status = await window.flavorDesktop.startD2cProductPreview(task);
+    setProductPreview(status);
+  }, []);
+
+  const refreshProduct = useCallback(async (task: string): Promise<D2cProductPlanView | undefined> => {
+    const next = await window.flavorDesktop.getD2cProduct(task);
+    if (next !== undefined && !shouldDeferD2cProductReview(
+      productPhaseRef.current, next.plan.phase, disabledRef.current,
+    )) setProductView(next);
+    return next;
+  }, []);
+
+  useEffect(() => {
+    if (productView === undefined) return;
+    const generating = productView.plan.phase === "prd-generating" || productView.plan.phase === "design-generating";
+    if (!generating) return;
+    void refreshProduct(productView.plan.task).catch(reportError);
+    const timer = setInterval(() => { void refreshProduct(productView.plan.task).catch(reportError); }, disabled ? 1_500 : 600);
+    return () => clearInterval(timer);
+  }, [disabled, productView?.plan.phase, productView?.plan.task, refreshProduct]);
+
+  useEffect(() => {
+    const task = productView?.plan.task;
+    if (task === undefined || !shouldStartD2cProductPreview(productView?.plan.phase, disabled, productPreview.running)) return;
+    let active = true;
+    void window.flavorDesktop.startD2cProductPreview(task).then((status) => {
+      if (active) setProductPreview(status);
+    }).catch(reportError);
+    return () => { active = false; };
+  }, [disabled, productPreview.running, productView?.plan.phase, productView?.plan.task]);
+
+  useEffect(() => {
+    if (productView !== undefined || !taskValid || entryMode !== "requirement") return;
+    const timer = setTimeout(() => {
+      void window.flavorDesktop.getD2cProduct(taskName).then((next) => {
+        if (next !== undefined && !shouldDeferD2cProductReview(
+          productPhaseRef.current, next.plan.phase, disabledRef.current,
+        )) {
+          setProductView(next);
+          setFramework(next.plan.framework);
+        }
+      }).catch(reportError);
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [disabled, entryMode, productView, taskName, taskValid]);
+
+  const startProduct = async (): Promise<void> => {
+    if (!taskValid || requirement.trim().length < 2 || productBusy || disabled) return;
+    setProductBusy(true);
+    try {
+      const result = await window.flavorDesktop.createD2cProduct({ task: taskName, framework: "vue", requirement });
+      setProductView(result.view);
+      setProductFeedback("");
+      await onStartTask(result.prompt);
+    } catch (cause) { reportError(cause); }
+    finally { setProductBusy(false); }
+  };
+
+  const decideProduct = async (stage: "prd" | "design", accepted: boolean): Promise<void> => {
+    if (productView === undefined || productBusy || disabled) return;
+    if (!accepted && productFeedback.trim().length === 0) return;
+    setProductBusy(true);
+    try {
+      const result = await window.flavorDesktop.decideD2cProduct(
+        productView.plan.task, stage, accepted, accepted ? undefined : productFeedback,
+      );
+      setProductView(result.view);
+      setProductFeedback("");
+      if (result.prompt !== undefined) await onStartTask(result.prompt);
+      if (result.imported !== undefined) {
+        await dispatchD2cTask(
+          buildTaskPrompt(result.imported.task, result.imported.entryHtml, result.imported.files.length, result.imported.pages,
+            result.view.plan.framework, result.view.plan.technology?.frontend),
+          result.imported.task,
+          result.view.plan.framework,
+          onStartTask,
+          onLaunch,
+        );
+      }
+    } catch (cause) { reportError(cause); }
+    finally { setProductBusy(false); }
   };
 
   const saveJudgeConfig = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
@@ -731,11 +933,11 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
     && item.pageId === (bundle.report.page?.id ?? "index"));
   const viewState = pending !== undefined ? "pending" : creating || bundle === undefined ? "create" : "report";
 
-  return <section className="d2c-workbench d2c-v2" aria-label="D2C" data-state={viewState}>
+  return <section className="d2c-workbench d2c-v2" aria-label="E2E 端到端交付" data-state={viewState}>
     <header className="d2c-workbench-header">
       <div className="d2c-title-group">
         <button className="d2c-back" onClick={onClose} aria-label="返回对话">←</button>
-        <div><p>DESIGN TO CODE</p><h1>D2C</h1></div>
+        <div className="e2e-title-copy"><p>END-TO-END DELIVERY</p><div className="e2e-title-row"><h1>E2E</h1><span>D2C · 视觉还原</span></div></div>
       </div>
       {viewState === "report" && scores !== undefined && evaluation !== undefined && presentation !== undefined && <div className="d2c-result-summary" data-verdict={evaluation.verdict}>
         <div><strong>{presentation.primary}</strong>{evaluation.status !== "invalid" && <span>/ 100</span>}</div>
@@ -748,7 +950,7 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
 
     <div className="d2c-workbench-body">
       {viewState === "report" && <aside className="d2c-catalog" aria-label="报告列表">
-        <button className="d2c-new-task" onClick={() => setCreating(true)}><span>＋</span> 新建 D2C</button>
+        <button className="d2c-new-task" onClick={() => setCreating(true)}><span>＋</span> 新建 E2E</button>
         <div className="d2c-catalog-tools"><strong>评测批次</strong><span>{catalogReports.length}</span><button onClick={() => void loadReports()} aria-label="刷新报告列表">↻</button></div>
         <div className="d2c-list" aria-busy={loading}>
           {loading && <p className="d2c-list-empty">正在读取报告…</p>}
@@ -762,16 +964,20 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
         </div>
       </aside>}
 
-      {viewState === "create" ? <main className="d2c-start-screen">
+      {viewState === "create" ? <main className={`d2c-start-screen${productView === undefined ? "" : " d2c-start-screen-product"}`}>
         <section className="d2c-start-intro">
-          <p className="d2c-start-kicker">PIXSO HTML → RUNNABLE UI</p>
-          <h2>把设计稿直接变成<br />可运行的前端代码</h2>
-          <p>导入 Pixso 导出的 HTML，D2C 会生成所选技术栈的项目，并自动运行像素与内容评测。</p>
-          <div className="d2c-pipeline" aria-label="D2C 流程">
-            <span><b>HTML</b><small>设计输入</small></span><i>→</i>
-            <span><b>{framework === "vue" ? "Vue 3" : "React"}</b><small>代码生成</small></span><i>→</i>
-            <span><b>REPORT</b><small>自动评测</small></span>
-          </div>
+          <p className="d2c-start-kicker">INTENT → EVIDENCE → SHIPPABLE UI</p>
+          <h2>让一个想法沿着<br />可确认的轨道成为产品</h2>
+          <p>从粗需求出发，先确认 PRD，再确认可交互设计；每一次确认都会成为后续生成、联调和验收的真实基线。</p>
+          <ol className="e2e-pipeline" aria-label="E2E 从需求到成果物流程">
+            <li><b>01</b><span><strong>需求</strong><small>粗需求输入</small></span></li>
+            <li><b>02</b><span><strong>PRD</strong><small>产品定义</small></span></li>
+            <li><b>03</b><span><strong>交互设计</strong><small>原型确认</small></span></li>
+            <li data-module="d2c"><b>04</b><span><strong>D2C</strong><small>视觉还原</small></span></li>
+            <li><b>05</b><span><strong>API 联调</strong><small>Swagger</small></span></li>
+            <li><b>06</b><span><strong>自主验收</strong><small>多模态测试</small></span></li>
+            <li><b>07</b><span><strong>成果交付</strong><small>评分与工件</small></span></li>
+          </ol>
           {catalogReports.length > 0 && <div className="d2c-start-reports">
             <header><strong>最近结果</strong><span>{catalogReports.length} 个批次</span></header>
             {catalogReports.slice(0, 3).map((item) => <button key={`${item.task}/${item.reportId}`} onClick={() => void loadBundle(item)}>
@@ -779,26 +985,95 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
             </button>)}
           </div>}
         </section>
-        <section className="d2c-start-card" aria-label="创建 D2C 任务">
-          <header><span>NEW D2C</span><h2>创建任务</h2><p>只需设置任务名和代码技术栈。</p></header>
+        <section className={`d2c-start-card${productView === undefined ? "" : " d2c-start-card-product"}`} aria-label="创建 E2E 任务">
+          <header><span>NEW DELIVERY</span><h2>{productView === undefined ? "选择起点" : productView.plan.task}</h2>
+            <p>{productView === undefined ? "从需求开始，或沿用已有设计稿。" : "关键工件需要你的确认，AI 不会越过阶段门。"}</p></header>
+          {productView === undefined && <div className="d2c-entry-switch" role="tablist" aria-label="E2E 输入方式">
+            <button type="button" role="tab" aria-selected={entryMode === "requirement"} data-active={entryMode === "requirement"}
+              onClick={() => setEntryMode("requirement")}><strong>从需求开始</strong><small>自动生成 PRD 与交互稿</small></button>
+            <button type="button" role="tab" aria-selected={entryMode === "design"} data-active={entryMode === "design"}
+              onClick={() => setEntryMode("design")}><strong>已有设计稿</strong><small>导入 Pixso HTML</small></button>
+          </div>}
+          {productView !== undefined && <ol className="d2c-delivery-rail" aria-label="需求到交付进度">
+            <li data-state={productView.plan.phase === "prd-generating" ? "active" : "done"}><span>01</span><div><strong>产品定义</strong><small>PRD</small></div></li>
+            <li data-state={productView.plan.phase === "design-generating" || productView.plan.phase === "design-review" ? "active"
+              : productView.plan.phase === "ready-for-d2c" ? "done" : "waiting"}><span>02</span><div><strong>体验基线</strong><small>交互原型</small></div></li>
+            <li data-state={productView.plan.phase === "ready-for-d2c" ? "active" : "waiting"} data-module="d2c"><span>03</span><div><strong>D2C 视觉还原</strong><small>进入实现</small></div></li>
+          </ol>}
+          {productView === undefined && <>
           <label className="d2c-start-field"><span>任务名</span>
-            <input value={taskName} placeholder="例如 homepage" aria-label="D2C 任务名" autoFocus
+            <input value={taskName} placeholder="例如 homepage" aria-label="E2E 任务名" autoFocus
               onChange={(event) => setTaskName(event.target.value.trim().toLowerCase())} />
             <small data-error={taskName !== "" && !taskValid}>{taskName !== "" && !taskValid ? "仅支持小写字母、数字和连字符" : "将用于输出目录和评测报告标识"}</small>
           </label>
-          <fieldset className="d2c-stack-picker"><legend>技术栈</legend>
+          {entryMode === "design" && <fieldset className="d2c-stack-picker"><legend>技术栈</legend>
             {(["vue", "react"] as const).map((value) => <button type="button" key={value} role="radio" aria-checked={framework === value}
               data-active={framework === value} onClick={() => setFramework(value)}>
               <span className="d2c-stack-mark">{value === "vue" ? "V" : "R"}</span>
               <span><strong>{value === "vue" ? "Vue 3" : "React"}</strong><small>{value === "vue" ? "Composition API · Vite" : "Hooks · Vite"}</small></span>
               <i>{framework === value ? "✓" : ""}</i>
             </button>)}
-          </fieldset>
-          <button className="d2c-start-primary" disabled={!taskValid || launching || disabled} onClick={() => void startD2c()}>
-            <span>{launching ? "正在选择并导入…" : "导入 HTML 并开始 D2C"}</span><b aria-hidden="true">→</b>
-          </button>
-          <p className="d2c-start-note"><span>⌁</span> 选择 Pixso HTML 文件夹后会立即开始生成，无需再次确认。</p>
-          {disabled && <p className="d2c-start-warning">当前会话正在执行其他任务，完成或中断后可开始 D2C。</p>}
+          </fieldset>}
+          {entryMode === "requirement" ? <>
+            <label className="d2c-start-field d2c-requirement-field"><span>用几句话描述需求</span>
+              <textarea value={requirement} rows={5} maxLength={50_000}
+                placeholder="例如：给连锁门店店长做一个经营台，打开后能快速发现异常门店，并下钻查看订单和退款原因。"
+                onChange={(event) => setRequirement(event.target.value)} />
+              <small>不需要写成 PRD；目标用户、要解决的问题和最重要的动作最有帮助。</small>
+            </label>
+            <div className="d2c-default-stack" aria-label="默认技术方案">
+              <span>DEFAULT STACK</span>
+              <strong>Vue 3 + Python</strong>
+              <small>需求中明确写明技术栈时自动覆盖</small>
+            </div>
+            <button className="d2c-start-primary" disabled={!taskValid || requirement.trim().length < 2 || productBusy || disabled}
+              onClick={() => void startProduct()}><span>{productBusy ? "正在建立产品上下文…" : "生成 PRD"}</span><b aria-hidden="true">→</b></button>
+            <p className="d2c-start-note"><span>⌁</span> PRD 和交互稿会分别等待确认，不会直接进入编码。</p>
+          </> : <>
+            <button className="d2c-start-primary" disabled={!taskValid || launching || disabled} onClick={() => void startD2c()}>
+              <span>{launching ? "正在选择并导入…" : "导入 HTML，从 D2C 视觉还原开始"}</span><b aria-hidden="true">→</b>
+            </button>
+            <p className="d2c-start-note"><span>⌁</span> 选择 Pixso HTML 文件夹后会立即开始生成，无需再次确认。</p>
+          </>}
+          </>}
+          {productView?.plan.phase === "prd-generating" && <div className="d2c-artifact-wait" aria-live="polite">
+            <i /><div><strong>正在把粗需求整理成 PRD</strong><span>AI 会先建立范围、状态与验收标准；完成后这里自动刷新。</span></div>
+            <button type="button" onClick={() => void refreshProduct(productView.plan.task)}>刷新</button>
+          </div>}
+          {productView?.plan.phase === "prd-review" && <div className="d2c-artifact-review">
+            <header><span>PRODUCT REQUIREMENT</span><h3>确认产品定义</h3><p>这份 PRD 将约束后续视觉、交互和代码生成。</p></header>
+            <div className="d2c-prd-document">{productView.prdMarkdown !== undefined && <MarkdownContent text={productView.prdMarkdown} />}</div>
+            <label><span>退回意见</span><textarea rows={3} value={productFeedback} placeholder="例如：补充退款失败后的恢复路径"
+              onChange={(event) => setProductFeedback(event.target.value)} /></label>
+            <div className="d2c-artifact-actions"><button type="button" disabled={productBusy || disabled || productFeedback.trim().length === 0}
+              onClick={() => void decideProduct("prd", false)}>退回修改</button>
+              <button type="button" className="primary" disabled={productBusy || disabled} onClick={() => void decideProduct("prd", true)}>确认 PRD，生成交互稿</button></div>
+          </div>}
+          {productView?.plan.phase === "design-generating" && <div className="d2c-artifact-wait"
+            data-invalid={productView.validationError?.stage === "design"} aria-live="polite">
+            <i /><div>{productView.validationError?.stage === "design" ? <>
+              <strong>交互契约未通过预检</strong><span>{productView.validationError.message}</span>
+            </> : <><strong>正在生成可交互体验基线</strong><span>视觉、关键状态和行为契约会一起落盘。</span></>}</div>
+            {productView.validationError?.stage === "design"
+              ? <button type="button" disabled={productBusy || disabled} onClick={() => void repairProductManifest()}>自动修复清单</button>
+              : <button type="button" onClick={() => void refreshProduct(productView.plan.task)}>刷新</button>}
+          </div>}
+          {productView?.plan.phase === "design-review" && <div className="d2c-artifact-review d2c-design-review">
+            <header><span>INTERACTIVE PROTOTYPE</span><h3>直接体验，再决定是否开发</h3><p>点击、输入并检查主流程和异常状态；确认后它会成为 E2E 中 D2C 视觉还原的设计基线。</p></header>
+            <ProductPrototypePreview url={productPreview.url} onStart={() => void ensureProductPreview(productView.plan.task)} />
+            <div className="d2c-prototype-tools"><span>{productPreview.running ? "● LOOPBACK PREVIEW" : "PREVIEW STOPPED"}</span>
+              {productPreview.running && <button type="button" onClick={() => void window.flavorDesktop.openD2cProductPreview(productView.plan.task)}>浏览器打开</button>}</div>
+            <label><span>退回意见</span><textarea rows={3} value={productFeedback} placeholder="例如：筛选结果缺少空状态，趋势图悬停信息不够明确"
+              onChange={(event) => setProductFeedback(event.target.value)} /></label>
+            <div className="d2c-artifact-actions"><button type="button" disabled={productBusy || disabled || productFeedback.trim().length === 0}
+              onClick={() => void decideProduct("design", false)}>退回修改</button>
+              <button type="button" className="primary" disabled={productBusy || disabled} onClick={() => void decideProduct("design", true)}>确认设计，进入 D2C 视觉还原</button></div>
+          </div>}
+          {productView?.plan.phase === "ready-for-d2c" && <div className="d2c-artifact-wait" data-ready="true">
+            <i /><div><strong>设计基线已确认</strong><span>如果生成任务未启动或应用曾关闭，可从这里安全地继续 D2C 视觉还原。</span></div>
+            <button type="button" disabled={productBusy || disabled} onClick={() => void decideProduct("design", true)}>继续视觉还原 →</button>
+          </div>}
+          {disabled && <p className="d2c-start-warning">当前会话正在执行其他任务，完成或中断后可开始 E2E。</p>}
         </section>
       </main> : viewState === "pending" && pending !== undefined
         ? <D2cProgressView pending={pending} onOpenLog={onClose} onInterrupt={onInterrupt} />
@@ -810,8 +1085,7 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
               <button type="button" onClick={() => setPreviewReloadKey((value) => value + 1)}>Refresh</button>
               <button type="button" onClick={() => void window.flavorDesktop.openD2cPreview(bundle!.report.task)}>Open in browser</button>
             </header>
-            <iframe key={previewReloadKey} src={previewStatus.url} title="D2C interactive preview"
-              sandbox="allow-scripts allow-forms allow-modals allow-same-origin" referrerPolicy="no-referrer" />
+            <InteractiveDesktopPreview url={previewStatus.url} reloadKey={previewReloadKey} task={bundle!.report.task} />
           </main>
         : <main className="d2c-canvas-area" data-pages={pageReports.length > 1 ? "multiple" : "single"}>
         {bundle !== undefined && canvas !== undefined && scores !== undefined && evaluation !== undefined && <>
@@ -916,12 +1190,12 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
                   : bundle.report.evaluation.verdict === "invalid" ? "评测需要重新运行" : "本页尚未通过验收"}</h2>
               <span>{bundle.report.evaluation.summary}</span></div>
           </section>
-          <nav className="d2c-stage-tabs" aria-label="D2C 阶段">
+          <nav className="d2c-stage-tabs" aria-label="E2E 交付阶段">
             <button type="button" data-active={inspectorTab === "review"} aria-pressed={inspectorTab === "review"}
-              onClick={() => setInspectorTab("review")}><span>01</span>视觉审阅</button>
+              onClick={() => setInspectorTab("review")}><span>04</span>D2C 视觉还原</button>
             <button type="button" data-active={inspectorTab === "integration"} aria-pressed={inspectorTab === "integration"}
               disabled={reviewState === undefined || !reviewState.complete || bundle.report.evaluation.status === "invalid"}
-              title={reviewState?.complete ? "进入接口联调" : "全部差异通过后解锁"} onClick={openIntegration}><span>02</span>接口联调</button>
+              title={reviewState?.complete ? "进入接口联调" : "全部差异通过后解锁"} onClick={openIntegration}><span>05—07</span>联调、验收与交付</button>
           </nav>
           {inspectorTab === "review" ? <>
           <section className="d2c-score-card" aria-label="分项得分" data-status={bundle.report.evaluation.status}>
@@ -960,7 +1234,7 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
             <strong>{bundle.report.evaluation.status === "invalid" ? "等待有效评测"
               : allIssues.length === 0 ? "未发现可定位的差异" : "这个筛选下没有问题"}</strong>
             <p>{bundle.report.evaluation.status === "invalid"
-              ? "修复项目并重新运行 D2C 后，这里会生成可定位的差异清单。"
+              ? "修复项目并重新运行 E2E 中的 D2C 视觉还原后，这里会生成可定位的差异清单。"
               : allIssues.length === 0 ? "布局、色彩、字体、内容与像素结果均已通过检查。" : "切换分类或显示全部问题，继续检查其他差异。"}</p>
             {bundle.report.evaluation.status !== "invalid" && <div className="d2c-empty-stats"><span>阻断 <b>{issueCounts.blocking}</b></span><span>内容 <b>{issueCounts.content}</b></span><span>几何 <b>{issueCounts.geometry}</b></span></div>}
             {bundle.report.evaluation.status !== "invalid" && (allIssues.length === 0
@@ -993,11 +1267,18 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
           </ol>}
           {filteredIssues.length > issueLimit && <button className="d2c-show-more" onClick={() => setIssueLimit((value) => value + INITIAL_ISSUE_LIMIT)}>再显示 {Math.min(INITIAL_ISSUE_LIMIT, filteredIssues.length - issueLimit)} 条</button>}
           </> : <section className="d2c-integration-panel" aria-label="接口联调">
-            <header><p>API INTEGRATION</p><h2>{integration === undefined ? "导入接口描述" : integration.document.title}</h2>
-              <span>{integration === undefined ? "上传 Swagger / OpenAPI JSON，自动匹配页面模块和接口出入参。" : `${integration.document.version}${integration.document.baseUrl ? ` · ${integration.document.baseUrl}` : ""}`}</span></header>
-            {integration === undefined ? <div className="d2c-api-import">
-              <span aria-hidden="true">{"{}"}</span><strong>Swagger JSON</strong><p>支持 Swagger 2.0、OpenAPI 3.0/3.1 和文档内引用。</p>
-              <button type="button" disabled={integrationBusy} onClick={() => void importOpenApi()}>{integrationBusy ? "正在解析…" : "选择 swagger.json"}</button>
+            <header><p>API INTEGRATION</p><h2>{integration === undefined
+              ? bundle.deliveryOrigin === "requirement" ? "自动准备接口契约" : "导入接口描述"
+              : integration.document.title}</h2>
+              <span>{integration === undefined
+                ? bundle.deliveryOrigin === "requirement" ? "根据已确认 PRD 与实现模块生成 OpenAPI，无需手动上传。" : "上传 Swagger / OpenAPI JSON，自动匹配页面模块和接口出入参。"
+                : `${integration.document.version}${integration.document.baseUrl ? ` · ${integration.document.baseUrl}` : ""}`}</span></header>
+            {integration === undefined ? <div className="d2c-api-import" data-origin={bundle.deliveryOrigin}>
+              <span aria-hidden="true">{"{}"}</span><strong>{bundle.deliveryOrigin === "requirement" ? "正在根据 PRD 与模块准备 OpenAPI 契约" : "Swagger JSON"}</strong>
+              <p>{bundle.deliveryOrigin === "requirement" ? "契约会自动生成并映射到当前实现；也可接入已有后端契约覆盖默认结果。" : "支持 Swagger 2.0、OpenAPI 3.0/3.1 和文档内引用。"}</p>
+              <button type="button" disabled={integrationBusy} onClick={() => void importOpenApi()}>{integrationBusy
+                ? bundle.deliveryOrigin === "requirement" ? "自动准备中…" : "正在解析…"
+                : bundle.deliveryOrigin === "requirement" ? "接入已有 Swagger / OpenAPI" : "选择 swagger.json"}</button>
             </div> : <>
               <div className="d2c-api-summary"><span>模块 <b>{integration.mappings.length}</b></span><span>自动匹配 <b>{integration.mappings.filter((item) => item.status === "auto").length}</b></span>
                 <span>待确认 <b>{integration.mappings.filter((item) => item.status === "needs-confirmation").length}</b></span></div>
@@ -1012,7 +1293,7 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
                  <div><span>请求 {mapping.parameters.length + mapping.requestFields.length} 字段</span><span>响应 {mapping.responseFields.length} 字段</span><b>{Math.round(mapping.confidence * 100)}%</b></div>
               </li>)}</ol>
               <section className="d2c-mock-control" data-running={mockStatus.running}>
-                <div><i /><span><strong>{mockStatus.running ? "Express Mock 运行中" : "Express Mock 未启动"}</strong><small>{mockStatus.url ?? "生成联调代码后可启动"}</small></span></div>
+                <div><i /><span><strong>{mockStatus.running ? "本地契约 Mock 运行中" : "本地契约 Mock 未启动"}</strong><small>{mockStatus.url ?? "生成联调代码后可启动"}</small></span></div>
                 {bundle.workflow.integrationFiles !== undefined && <button type="button" disabled={integrationBusy || previewStatus.running}
                   title={previewStatus.running ? "请先停止交互页面" : undefined} onClick={() => void toggleMock()}>{mockStatus.running ? "停止" : "启动"}</button>}
               </section>
@@ -1023,9 +1304,21 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
                   <button type="button" disabled={interactionBusy || bundle.workflow.integrationFiles === undefined}
                     onClick={() => void (previewStatus.running ? stopPreview() : startPreview())}>{previewStatus.running ? "停止页面" : "启动页面"}</button>
                   <button type="button" disabled={interactionBusy || !previewStatus.running}
-                    onClick={() => void runInteractionTests()}>{interactionBusy ? "执行中…" : "运行自动验收"}</button>
+                    onClick={() => void runInteractionTests()}>{interactionPlayback ? "可视回放中…" : interactionBusy ? "处理中…" : "运行自动验收"}</button>
                   {previewStatus.running && <button type="button" onClick={() => void window.flavorDesktop.openD2cPreview(bundle.report.task)}>浏览器打开</button>}
                 </div>
+                {interactionPlayback && <div className="d2c-playback-notice" role="status" aria-live="polite">
+                  <i aria-hidden="true" /><span><strong>正在可视化回放</strong>
+                    <small>{judgeConfig.configured ? "多模态模型正在观察并规划用户旅程；随后青色指针会完成点击、输入、导航和检查。"
+                      : "请观察左侧页面：青色指针会依次完成设计契约中的定位、点击、输入和检查。配置多模态模型后可启用自主审阅。"}</small></span>
+                </div>}
+                {interactionReview !== undefined && <div className="d2c-review-plan" data-mode={interactionReview.mode}>
+                  <strong>{interactionReview.mode === "autonomous" ? "自主审阅已执行"
+                    : interactionReview.mode === "contract-fallback" ? "自主规划失败，已执行设计契约" : "设计契约已执行"}</strong>
+                  <span>{interactionReview.plannedScenarios} 条用户旅程{interactionReview.model ? ` · ${interactionReview.model}` : ""}</span>
+                  {interactionReview.summary && <p>{interactionReview.summary}</p>}
+                  {interactionReview.warning && <p role="alert">{interactionReview.warning}</p>}
+                </div>}
                 {interactionRun !== undefined && <div className="d2c-test-results" data-passed={interactionRun.passed}>
                   <strong>{interactionRun.passed ? "自动验收通过" : `${interactionRun.failures} 条自动验收失败`}</strong>
                   <span>{interactionRun.total} scenarios · {interactionRun.apiRequestCount} API requests</span>
@@ -1062,9 +1355,7 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
                   </form> : <>
                     <div className="d2c-judge-model"><span>{judgeConfig.model}</span><small>{judgeConfig.baseURL} · 阈值 {judgeConfig.passThreshold}</small>
                       <button type="button" onClick={() => setJudgeEditing(true)}>修改配置</button></div>
-                    {bundle.workflow.quality === undefined ? <p>{bundle.workflow.interaction?.automated?.passed === true && bundle.workflow.interaction.manualDecision === "accepted"
-                      ? "将综合设计稿、当前联调页面、静态评分与交互证据进行最终评审。"
-                      : "先完成自动交互测试和人工验收，再运行最终评审。"}</p> : <div className="d2c-quality-result">
+                    {bundle.workflow.quality === undefined ? <p>可随时评测当前版本；自动与人工验收未通过时，评分只用于诊断，不会放行最终交付。</p> : <div className="d2c-quality-result">
                       <div><span>视觉质量 <b>{bundle.workflow.quality.visualScore}</b></span><span>交互质量 <b>{bundle.workflow.quality.interactionScore}</b></span>
                         <span>综合得分 <b>{bundle.workflow.quality.overallScore}</b></span></div>
                       <strong>{bundle.workflow.quality.verdict === "pass" ? "质量门通过" : "质量门未通过"}</strong>
@@ -1072,8 +1363,8 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
                       {bundle.workflow.quality.issues.length > 0 && <ol>{bundle.workflow.quality.issues.map((issue, index) => <li key={`${issue.category}-${index}`} data-severity={issue.severity}>
                         <span>{issue.description}</span><small>{issue.recommendation}</small></li>)}</ol>}
                     </div>}
-                    <button type="button" className="d2c-run-judge" disabled={judgeBusy || !previewStatus.running
-                      || bundle.workflow.interaction?.automated?.passed !== true || bundle.workflow.interaction.manualDecision !== "accepted"}
+                    <button type="button" className="d2c-run-judge" disabled={judgeBusy || !previewStatus.running || bundle.workflow.interaction?.automated === undefined}
+                      title={bundle.workflow.interaction?.automated === undefined ? "至少运行一次自动验收后可评分；验收失败也可以评分诊断" : undefined}
                       onClick={() => void runQualityJudge()}>{judgeBusy ? "AI 评审中…" : bundle.workflow.quality === undefined ? "运行 AI 质量评审" : "重新运行 AI 质量评审"}</button>
                   </>}
                 </section>
@@ -1089,3 +1380,6 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
     </div>
   </section>;
 }
+
+/** @deprecated Electron uses E2eViewer; retained for tests and downstream renderer imports. */
+export const D2cViewer = E2eViewer;

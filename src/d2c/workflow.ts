@@ -230,9 +230,7 @@ export function applyManualInteractionDecision(workflow: D2cWorkflow, accepted: 
 }
 
 export function applyQualityJudgment(workflow: D2cWorkflow, quality: D2cQualityJudgment): D2cWorkflow {
-  if (workflow.interaction?.automated?.passed !== true || workflow.interaction.manualDecision !== "accepted") {
-    throw new Error("Complete automated and manual D2C interaction acceptance before running the quality judge");
-  }
+  if (workflow.interaction?.automated === undefined) throw new Error("Run D2C automated interaction acceptance before running the quality judge");
   const parsed = QualityJudgmentSchema.parse(quality) as D2cQualityJudgment;
   const now = new Date().toISOString();
   return { ...workflow, revision: workflow.revision + 1, quality: parsed,

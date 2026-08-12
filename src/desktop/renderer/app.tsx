@@ -36,7 +36,7 @@ import type { FileChangePresentation, FileDiffLine } from "../../tools/types.js"
 import { SkillManagerView } from "./skill-manager.js";
 import { MemoryManagerView } from "./memory-manager.js";
 import { McpManagerView } from "./mcp-manager.js";
-import { D2cViewer } from "./d2c-viewer.js";
+import { E2eViewer } from "./e2e-viewer.js";
 import {
   applyD2cAgentProgress,
   applyD2cEngineProgress,
@@ -101,7 +101,7 @@ export function DesktopApp(): React.JSX.Element {
   const [dismissedMentionInput, setDismissedMentionInput] = useState<string>();
   const [mentionSpan, setMentionSpan] = useState<{ start: number; end: number }>();
   const [cursorPos, setCursorPos] = useState(0);
-  const [view, setView] = useState<"conversation" | "skills" | "memory" | "mcp" | "d2c">("conversation");
+  const [view, setView] = useState<"conversation" | "skills" | "memory" | "mcp" | "e2e">("conversation");
   const [d2cRefreshKey, setD2cRefreshKey] = useState(0);
   const [d2cPending, setD2cPending] = useState<D2cPendingTask>();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -191,7 +191,7 @@ export function DesktopApp(): React.JSX.Element {
       if (event.type === "d2c-report") {
         setD2cRefreshKey((key) => key + 1);
         setD2cPending((current) => current !== undefined && current.task === event.payload.task ? undefined : current);
-        setView("d2c");
+        setView("e2e");
         return;
       }
       if (event.type === "d2c-progress") {
@@ -453,7 +453,7 @@ export function DesktopApp(): React.JSX.Element {
         <button className="rail-action" data-active={view === "skills"} onClick={() => { setView("skills"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">◇</span><span>技能</span></button>
         <button className="rail-action" data-active={view === "memory"} onClick={() => { setView("memory"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">⌁</span><span>长期记忆</span></button>
         <button className="rail-action" data-active={view === "mcp"} onClick={() => { setView("mcp"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">◎</span><span>MCP 服务</span></button>
-        <button className="rail-action" data-active={view === "d2c"} onClick={() => { setView("d2c"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">▤</span><span>D2C</span></button>
+        <button className="rail-action" data-active={view === "e2e"} onClick={() => { setView("e2e"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">▤</span><span>E2E</span></button>
       </nav>
       <div className="sessions-scroll">
         <div className="rail-section-title">项目</div>
@@ -494,7 +494,7 @@ export function DesktopApp(): React.JSX.Element {
       {view === "skills" && snapshot.workspace !== undefined ? <SkillManagerView onClose={() => setView("conversation")} onError={setError} />
         : view === "memory" && snapshot.workspace !== undefined ? <MemoryManagerView onClose={() => setView("conversation")} onError={setError} />
           : view === "mcp" && snapshot.workspace !== undefined ? <McpManagerView onClose={() => setView("conversation")} onError={setError} />
-            : view === "d2c" && snapshot.workspace !== undefined ? <D2cViewer onClose={() => setView("conversation")} onInterrupt={() => void window.flavorDesktop.interrupt()} onError={setError} refreshKey={d2cRefreshKey}
+            : view === "e2e" && snapshot.workspace !== undefined ? <E2eViewer onClose={() => setView("conversation")} onInterrupt={() => void window.flavorDesktop.interrupt()} onError={setError} refreshKey={d2cRefreshKey}
                     pending={d2cPending}
                     disabled={busy}
                     onLaunch={(task, framework) => setD2cPending(createD2cPendingTask(task, framework))}

@@ -5,6 +5,8 @@ import {
   AppMenuInputSchema,
   D2cGetReportInputSchema,
   D2cImportInputSchema,
+  D2cCreateProductInputSchema,
+  D2cProductDecisionInputSchema,
   D2cReviewInputSchema,
   D2cConfirmMappingInputSchema,
   D2cTaskActionInputSchema,
@@ -103,6 +105,10 @@ describe("desktop IPC contracts", () => {
 describe("D2C IPC contracts", () => {
   it("accepts well-formed task and report references", () => {
     expect(D2cImportInputSchema.parse({ task: "homepage" })).toEqual({ task: "homepage" });
+    expect(D2cCreateProductInputSchema.parse({ task: "homepage", framework: "react", requirement: "做一个经营看板" }))
+      .toEqual({ task: "homepage", framework: "react", requirement: "做一个经营看板" });
+    expect(D2cProductDecisionInputSchema.parse({ task: "homepage", stage: "prd", accepted: false, feedback: "补充退款流程" }))
+      .toEqual({ task: "homepage", stage: "prd", accepted: false, feedback: "补充退款流程" });
     expect(D2cGetReportInputSchema.parse({ task: "homepage" })).toEqual({ task: "homepage" });
     expect(D2cGetReportInputSchema.parse({ task: "homepage", reportId: "run-20260809-100000" }))
       .toEqual({ task: "homepage", reportId: "run-20260809-100000" });
@@ -119,6 +125,8 @@ describe("D2C IPC contracts", () => {
 
   it("rejects malformed task names and unknown fields", () => {
     expect(() => D2cImportInputSchema.parse({ task: "Upper Case" })).toThrow();
+    expect(() => D2cCreateProductInputSchema.parse({ task: "homepage", framework: "react", requirement: "" })).toThrow();
+    expect(() => D2cProductDecisionInputSchema.parse({ task: "homepage", stage: "prd", accepted: false })).toThrow();
     expect(() => D2cImportInputSchema.parse({ task: "-leading-dash" })).toThrow();
     expect(() => D2cImportInputSchema.parse({ task: "", exportDir: "x" })).toThrow();
     expect(() => D2cImportInputSchema.parse({ task: "homepage", extra: 1 })).toThrow();

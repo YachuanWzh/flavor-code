@@ -4,6 +4,7 @@ import { PNG } from "pngjs";
 import {
   D2C_CAPTURE_DIAGNOSTICS_SCRIPT,
   D2C_CAPTURE_PREPARATION_SCRIPT,
+  D2C_CAPTURE_READINESS_SCRIPT,
   D2C_RENDER_HEALTH_SCRIPT,
   captureTileOffsets,
   fitCaptureSize,
@@ -29,6 +30,12 @@ describe("D2C capture helpers", () => {
     expect(D2C_CAPTURE_PREPARATION_SCRIPT).toContain("scrollbar-width:none");
   });
 
+  it("waits for visible loading states to settle instead of scoring a skeleton screen", () => {
+    expect(D2C_CAPTURE_READINESS_SCRIPT).toContain('[aria-busy="true"]');
+    expect(D2C_CAPTURE_READINESS_SCRIPT).toContain(".skeleton");
+    expect(D2C_CAPTURE_READINESS_SCRIPT).toContain("D2C page did not become ready");
+  });
+
   it("records the diagnostics needed to judge whether a comparison is trustworthy", () => {
     expect(D2C_CAPTURE_DIAGNOSTICS_SCRIPT).toContain("devicePixelRatio");
     expect(D2C_CAPTURE_DIAGNOSTICS_SCRIPT).toContain("fontsReady");
@@ -50,6 +57,7 @@ describe("D2C capture helpers", () => {
   it("ships syntactically valid renderer scripts", () => {
     for (const script of [
       D2C_CAPTURE_PREPARATION_SCRIPT,
+      D2C_CAPTURE_READINESS_SCRIPT,
       D2C_CAPTURE_DIAGNOSTICS_SCRIPT,
       D2C_RENDER_HEALTH_SCRIPT,
     ]) {
@@ -65,6 +73,7 @@ describe("D2C capture helpers", () => {
     expect(source).toContain("window.webContents.capturePage");
     expect(source).not.toContain("webContents.debugger");
     expect(source).not.toContain("Page.captureScreenshot");
+    expect(source).toContain("overall capture timeout");
   });
 
   it("captures stable generated module boundaries for targeted repair", async () => {

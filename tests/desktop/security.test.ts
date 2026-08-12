@@ -25,6 +25,7 @@ describe("desktop security helpers", () => {
       "desktop:add-model", "desktop:answer-questions", "desktop:app-icon", "desktop:bootstrap", "desktop:choose-workspace", "desktop:create-memory", "desktop:create-skill",
       "desktop:d2c-confirm-mapping", "desktop:d2c-generate-integration", "desktop:d2c-get-integration", "desktop:d2c-get-mock-status",
       "desktop:d2c-get-preview-status", "desktop:d2c-get-report", "desktop:d2c-import", "desktop:d2c-import-openapi", "desktop:d2c-list-reports",
+      "desktop:d2c-create-product", "desktop:d2c-decide-product", "desktop:d2c-get-product", "desktop:d2c-get-product-preview-status", "desktop:d2c-open-product-preview", "desktop:d2c-start-product-preview", "desktop:d2c-stop-product-preview",
       "desktop:d2c-get-judge-config", "desktop:d2c-open-preview", "desktop:d2c-run-interaction-tests", "desktop:d2c-run-quality-judge", "desktop:d2c-save-judge-config", "desktop:d2c-set-manual-acceptance", "desktop:d2c-start-mock",
       "desktop:d2c-start-preview", "desktop:d2c-stop-mock", "desktop:d2c-stop-preview", "desktop:d2c-update-review",
       "desktop:delete-mcp-server", "desktop:delete-memory", "desktop:delete-session", "desktop:delete-skill", "desktop:event", "desktop:finish-task", "desktop:get-skill", "desktop:interrupt",

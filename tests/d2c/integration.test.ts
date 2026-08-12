@@ -40,6 +40,15 @@ describe("D2C integration generation", () => {
     expect(pkg.dependencies).toMatchObject({ vue: "^3.0.0", axios: expect.any(String), express: expect.any(String) });
   });
 
+  it("adds a FastAPI service artifact for requirement-origin Python deliveries", async () => {
+    const project = await mkdtemp(join(tmpdir(), "flavor-d2c-integration-")); dirs.push(project);
+    await writeFile(join(project, "package.json"), "{}");
+    const result = await generateIntegrationArtifacts(project, document, mappings, { pythonServer: true });
+    expect(result.files).toContain("server/main.py");
+    expect(await readFile(join(project, "server", "main.py"), "utf8")).toContain("FastAPI");
+    expect(await readFile(join(project, "server", "requirements.txt"), "utf8")).toContain("uvicorn");
+  });
+
   it("refuses unresolved mappings and paths without package.json", async () => {
     const project = await mkdtemp(join(tmpdir(), "flavor-d2c-integration-")); dirs.push(project);
     await expect(generateIntegrationArtifacts(project, document, mappings)).rejects.toThrow(/package\.json/i);
