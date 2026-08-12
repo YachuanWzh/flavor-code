@@ -126,4 +126,16 @@ describe("resultPresentation", () => {
     expect(source).toContain("interactionRun.apiRequestCount");
     expect(source).toContain("scenario.failure");
   });
+
+  it("exposes an independent multimodal judge configuration and final quality gate", async () => {
+    const source = await import("node:fs/promises").then(({ readFile }) =>
+      readFile(new URL("../../src/desktop/renderer/d2c-viewer.tsx", import.meta.url), "utf8"));
+    expect(source).toContain("getD2cJudgeConfig");
+    expect(source).toContain("saveD2cJudgeConfig");
+    expect(source).toContain("runD2cQualityJudge");
+    expect(source).toContain("最终质量门");
+    expect(source).toContain("视觉质量");
+    expect(source).toContain("交互质量");
+    expect(source).toContain("综合得分");
+  });
 });

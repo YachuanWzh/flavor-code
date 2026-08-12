@@ -6,13 +6,15 @@ import { basename, join, resolve } from "node:path";
 import type { PermissionMode } from "../config/schema.js";
 import { assertPngDimensions } from "../d2c/pixel.js";
 import { importDesign, listReports, listTasks, readManifest, readReport, taskDir } from "../d2c/store.js";
-import { applyInteractionRun, applyManualInteractionDecision, applyReviewDecision, createWorkflow, readWorkflow, reconcileWorkflow, reviewProgress, writeWorkflow, type D2cWorkflow } from "../d2c/workflow.js";
+import { applyInteractionRun, applyManualInteractionDecision, applyQualityJudgment, applyReviewDecision, createWorkflow, readWorkflow, reconcileWorkflow, reviewProgress, writeWorkflow, type D2cWorkflow } from "../d2c/workflow.js";
 import { parseInteractionManifest, type D2cInteractionManifest, type D2cInteractionRun } from "../d2c/interaction.js";
 import { runFrontendProject, type RunningProject } from "../d2c/runner.js";
 import { confirmApiMapping, matchModulesToOperations, parseOpenApiDocument, type D2cApiMapping, type D2cOpenApiDocument } from "../d2c/openapi.js";
 import { d2cOutputDirectory, readD2cModules } from "../d2c/modules.js";
 import { generateIntegrationArtifacts } from "../d2c/integration.js";
 import { runD2cMockServer, type D2cRunningMock } from "../d2c/mock-runner.js";
+import type { D2cJudgeConfig, D2cJudgeConfigView, D2cQualityJudgment } from "../d2c/judge.js";
+import type { D2cReport } from "../d2c/types.js";
 import { createProductionRuntime, type ProductionRuntimeOptions } from "../production.js";
 import { SessionStore } from "../session/store.js";
 import {
@@ -33,7 +35,7 @@ import type { MemoryCandidate, MemoryEntry } from "../memory/types.js";
 import type { MemoryReviewItem } from "../memory/review.js";
 import { ProjectMcpConfigManager, type ManagedMcpServer, type ProjectMcpConfigManagerLike } from "../mcp/config-manager.js";
 import { DEFAULT_DESKTOP_MODELS, loadDesktopModels, saveDesktopModel } from "./model-config.js";
-import type { AddDesktopModelInput, D2cImportResult, D2cIntegrationGenerationResult, D2cIntegrationView, D2cInteractionStatus, D2cMockStatus, D2cPreviewStatus, D2cReportListItem, D2cReportView, DesktopEvent, DesktopMessageDelivery, DesktopModelOption, DesktopModelMutationResult, DesktopPermissionProfile, DesktopSessionSummary, DesktopSnapshot, McpServerDraft, SessionStartedPayload } from "./contracts.js";
+import type { AddDesktopModelInput, D2cImportResult, D2cIntegrationGenerationResult, D2cIntegrationView, D2cInteractionStatus, D2cMockStatus, D2cPreviewStatus, D2cQualityJudgeStatus, D2cReportListItem, D2cReportView, DesktopEvent, DesktopMessageDelivery, DesktopModelOption, DesktopModelMutationResult, DesktopPermissionProfile, DesktopSessionSummary, DesktopSnapshot, McpServerDraft, SessionStartedPayload } from "./contracts.js";
 
 function pngDataUrl(png: Uint8Array): string {
   const buffer = Buffer.from(png);
@@ -98,6 +100,17 @@ export interface RuntimeLike {
 export interface RuntimeFactoryOptions extends Pick<ProductionRuntimeOptions,
   "workspace" | "home" | "output" | "onApprovalChange" | "approvalPolicy" | "resumeSession" | "extraTools"> {}
 
+export interface D2cJudgeService {
+  config(): Promise<D2cJudgeConfigView>;
+  saveConfig(input: D2cJudgeConfig): Promise<D2cJudgeConfigView>;
+  evaluate(input: {
+    report: D2cReport;
+    interaction: D2cInteractionRun;
+    designPng: Buffer;
+    implementationPng: Buffer;
+  }): Promise<D2cQualityJudgment>;
+}
+
 export interface DesktopRuntimeControllerOptions {
   home?: string;
   createRuntime?(options: RuntimeFactoryOptions): Promise<RuntimeLike>;
@@ -115,6 +128,8 @@ export interface DesktopRuntimeControllerOptions {
   runD2cPreview?(projectDir: string, options: { workspace: string }): Promise<RunningProject>;
   runD2cMockServer?(projectDir: string): Promise<D2cRunningMock>;
   runD2cInteractionTests?(manifest: D2cInteractionManifest, baseUrl: string, mockUrl: string): Promise<D2cInteractionRun>;
+  captureD2cPreview?(url: string): Promise<Buffer>;
+  d2cJudge?: D2cJudgeService;
   /** Checks whether the managed Express mock still answers; defaults to a /_d2c/health probe. */
   probeD2cMock?(mockUrl: string): Promise<boolean>;
   emit(event: DesktopEvent): void;
@@ -134,6 +149,8 @@ export class DesktopRuntimeController {
   readonly #runD2cMockServer: NonNullable<DesktopRuntimeControllerOptions["runD2cMockServer"]>;
   readonly #probeD2cMock: NonNullable<DesktopRuntimeControllerOptions["probeD2cMock"]>;
   readonly #executeD2cInteractionTests: DesktopRuntimeControllerOptions["runD2cInteractionTests"];
+  readonly #captureD2cPreview: DesktopRuntimeControllerOptions["captureD2cPreview"];
+  readonly #d2cJudge: DesktopRuntimeControllerOptions["d2cJudge"];
   readonly #emit: (event: DesktopEvent) => void;
   #workspace: string | undefined;
   #sessions: readonly DesktopSessionSummary[] = [];
@@ -185,6 +202,8 @@ export class DesktopRuntimeController {
       } catch { return false; }
     });
     this.#executeD2cInteractionTests = options.runD2cInteractionTests;
+    this.#captureD2cPreview = options.captureD2cPreview;
+    this.#d2cJudge = options.d2cJudge;
     this.#emit = options.emit;
   }
 
@@ -631,7 +650,8 @@ export class DesktopRuntimeController {
     const project = d2cOutputDirectory(workspace, task);
     const generated = await generateIntegrationArtifacts(project, view.document, view.mappings);
     const now = new Date().toISOString();
-    const workflow = await writeWorkflow(workspace, { ...view.workflow, revision: view.workflow.revision + 1,
+    const { quality: _quality, ...workflowBase } = view.workflow;
+    const workflow = await writeWorkflow(workspace, { ...workflowBase, revision: view.workflow.revision + 1,
       stage: "integrating", integrationFiles: generated.files,
       interaction: { manualDecision: "pending", updatedAt: now }, updatedAt: now });
     const prompt = [
@@ -784,6 +804,46 @@ export class DesktopRuntimeController {
     const workflow = await readWorkflow(workspace, task);
     if (workflow === undefined) throw new Error("D2C workflow is unavailable");
     return writeWorkflow(workspace, applyManualInteractionDecision(workflow, accepted));
+  }
+
+  async getD2cJudgeConfig(): Promise<D2cJudgeConfigView> {
+    return this.#d2cJudge?.config() ?? { configured: false };
+  }
+
+  async saveD2cJudgeConfig(input: D2cJudgeConfig): Promise<D2cJudgeConfigView> {
+    if (this.#d2cJudge === undefined) throw new Error("D2C multimodal judge is unavailable");
+    return this.#d2cJudge.saveConfig(input);
+  }
+
+  async runD2cQualityJudge(task: string): Promise<D2cQualityJudgeStatus> {
+    const workspace = this.#workspace;
+    if (workspace === undefined) throw new Error("Open a project before running the D2C quality judge");
+    if (this.#d2cJudge === undefined || this.#captureD2cPreview === undefined) {
+      throw new Error("D2C multimodal judge is unavailable");
+    }
+    const configured = await this.#d2cJudge.config();
+    if (!configured.configured) throw new Error("Configure a multimodal D2C judge model before running the quality gate");
+    const workflow = await readWorkflow(workspace, task);
+    if (workflow?.interaction?.automated?.passed !== true || workflow.interaction.manualDecision !== "accepted") {
+      throw new Error("Complete automated and manual D2C interaction acceptance before running the quality judge");
+    }
+    const preview = this.#d2cPreviews.get(task);
+    if (preview === undefined) throw new Error("Start and keep the embedded D2C preview open before running the quality judge");
+    const bundle = await readReport(workspace, task, workflow.activeReportId);
+    const manifest = await readManifest(workspace, task);
+    const page = bundle.report.page?.html ?? manifest.entryHtml;
+    const targetUrl = new URL(page, preview.url.endsWith("/") ? preview.url : `${preview.url}/`).toString();
+    const implementationPng = await this.#captureD2cPreview(targetUrl);
+    assertPngDimensions(implementationPng);
+    const judgment = await this.#d2cJudge.evaluate({
+      report: bundle.report,
+      interaction: workflow.interaction.automated,
+      designPng: Buffer.from(bundle.designPng),
+      implementationPng,
+    });
+    const next = await writeWorkflow(workspace, applyQualityJudgment(workflow, judgment));
+    await writeFile(join(taskDir(workspace, task), "quality-judge.json"), `${JSON.stringify(judgment, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    return { workflow: next, judgment };
   }
 
   resolveApproval(decision: "allow" | "deny" | "always"): void {

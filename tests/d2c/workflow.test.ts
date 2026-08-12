@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   applyInteractionRun,
   applyManualInteractionDecision,
+  applyQualityJudgment,
   applyReviewDecision,
   buildD2cRepairPrompt,
   createWorkflow,
@@ -116,7 +117,7 @@ describe("D2C review workflow", () => {
     expect(prompt).toContain("D2cCompare");
   });
 
-  it("requires both automated and manual interaction acceptance before completion", () => {
+  it("requires automated, manual and multimodal judge acceptance before completion", () => {
     const accepted = applyReviewDecision(createWorkflow(report(), "vue"), {
       fingerprints: ["issue-card", "issue-avatar"], decision: "accepted",
     }, report());
@@ -128,7 +129,13 @@ describe("D2C review workflow", () => {
     const automated = applyInteractionRun({ ...accepted, stage: "integrating" }, run);
     expect(automated.stage).toBe("interaction-review");
     expect(automated.interaction).toMatchObject({ manualDecision: "pending", automated: { passed: true } });
-    const complete = applyManualInteractionDecision(automated, true);
+    const readyForJudge = applyManualInteractionDecision(automated, true);
+    expect(readyForJudge.stage).toBe("quality-judge");
+    const complete = applyQualityJudgment(readyForJudge, {
+      schema: 1, runAt: "2026-08-10T02:01:00.000Z", model: "vision-pro", visualScore: 92,
+      interactionScore: 90, staticVisualScore: 91, deterministicInteractionPassed: true,
+      overallScore: 91.1, threshold: 80, verdict: "pass", confidence: "high", summary: "通过", strengths: [], issues: [],
+    });
     expect(complete.stage).toBe("completed");
   });
 
@@ -141,6 +148,27 @@ describe("D2C review workflow", () => {
       scenarios: [{ id: "submit", pageUrl: "http://localhost:5173/", passed: false, durationMs: 5, apiRequestCount: 0, failure: "No API request" }],
     });
     expect(failed.stage).toBe("interaction-review");
+    expect(failed.quality).toBeUndefined();
     expect(applyManualInteractionDecision(failed, false).interaction?.manualDecision).toBe("pending");
+  });
+
+  it("invalidates an old quality judgment when visual or interaction evidence changes", () => {
+    const accepted = applyReviewDecision(createWorkflow(report(), "vue"), {
+      fingerprints: ["issue-card", "issue-avatar"], decision: "accepted",
+    }, report());
+    const run: D2cInteractionRun = {
+      schema: 1, runAt: "2026-08-10T02:00:00.000Z", baseUrl: "http://127.0.0.1:4173/", passed: true,
+      total: 1, failures: 0, apiRequestCount: 1,
+      scenarios: [{ id: "load", pageUrl: "http://127.0.0.1:4173/", passed: true, durationMs: 10, apiRequestCount: 1 }],
+    };
+    const ready = applyManualInteractionDecision(applyInteractionRun({ ...accepted, stage: "integrating" }, run), true);
+    const judged = applyQualityJudgment(ready, {
+      schema: 1, runAt: "2026-08-10T02:01:00.000Z", model: "vision", visualScore: 90, interactionScore: 90,
+      staticVisualScore: 91, deterministicInteractionPassed: true, overallScore: 90, threshold: 80,
+      verdict: "pass", confidence: "high", summary: "ok", strengths: [], issues: [],
+    });
+    expect(judged.stage).toBe("completed");
+    expect(applyInteractionRun(judged, run).quality).toBeUndefined();
+    expect(reconcileWorkflow(judged, report("run-20260810-030405", 15)).quality).toBeUndefined();
   });
 });

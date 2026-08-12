@@ -45,6 +45,9 @@ export const DESKTOP_CHANNELS = {
   d2cGetPreviewStatus: "desktop:d2c-get-preview-status",
   d2cOpenPreview: "desktop:d2c-open-preview",
   d2cRunInteractionTests: "desktop:d2c-run-interaction-tests",
+  d2cGetJudgeConfig: "desktop:d2c-get-judge-config",
+  d2cSaveJudgeConfig: "desktop:d2c-save-judge-config",
+  d2cRunQualityJudge: "desktop:d2c-run-quality-judge",
   d2cSetManualAcceptance: "desktop:d2c-set-manual-acceptance",
   event: "desktop:event",
 } as const;

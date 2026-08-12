@@ -6,11 +6,12 @@ import { z } from "zod";
 
 import { D2C_TASK_PATTERN, taskDir } from "./store.js";
 import type { D2cInteractionRun } from "./interaction.js";
+import type { D2cQualityJudgment } from "./judge.js";
 import type { D2cElementDiff, D2cReport, D2cUnmatchedElement } from "./types.js";
 
 export { buildD2cRepairPrompt, reviewProgress } from "./workflow-shared.js";
 
-export type D2cWorkflowStage = "visual-review" | "api-mapping" | "integrating" | "interaction-review" | "completed";
+export type D2cWorkflowStage = "visual-review" | "api-mapping" | "integrating" | "interaction-review" | "quality-judge" | "completed";
 export type D2cReviewDecision = "pending" | "accepted" | "needs-fix";
 
 export interface D2cIssueReview {
@@ -53,6 +54,7 @@ export interface D2cWorkflow {
     automated?: D2cInteractionRun;
     updatedAt: string;
   };
+  quality?: D2cQualityJudgment;
   updatedAt: string;
 }
 
@@ -75,15 +77,30 @@ const InteractionRunSchema = z.object({
   }).strict()).max(50_000),
 }).strict();
 
+const QualityJudgmentSchema = z.object({
+  schema: z.literal(1), runAt: z.iso.datetime(), model: z.string().min(1).max(256),
+  visualScore: z.number().min(0).max(100), interactionScore: z.number().min(0).max(100),
+  staticVisualScore: z.number().min(0).max(100), deterministicInteractionPassed: z.boolean(),
+  overallScore: z.number().min(0).max(100), threshold: z.number().min(0).max(100), verdict: z.enum(["pass", "fail"]),
+  confidence: z.enum(["high", "medium", "low"]), summary: z.string().min(1).max(4_000),
+  strengths: z.array(z.string().min(1).max(1_000)).max(20),
+  issues: z.array(z.object({
+    category: z.enum(["visual", "interaction", "accessibility", "reliability"]),
+    severity: z.enum(["minor", "major", "critical"]), description: z.string().min(1).max(2_000),
+    evidence: z.string().min(1).max(2_000).optional(), recommendation: z.string().min(1).max(2_000),
+  }).strict()).max(100),
+}).strict();
+
 const WorkflowSchema = z.object({
   schema: z.literal(1), task: z.string().regex(D2C_TASK_PATTERN), revision: z.number().int().nonnegative(),
-  stage: z.enum(["visual-review", "api-mapping", "integrating", "interaction-review", "completed"]), framework: z.enum(["vue", "react"]),
+  stage: z.enum(["visual-review", "api-mapping", "integrating", "interaction-review", "quality-judge", "completed"]), framework: z.enum(["vue", "react"]),
   activeReportId: z.string().min(1).max(128), activeBatchId: z.string().min(1).max(128).optional(),
   implementationDir: z.string().min(1).max(32_768), reviews: z.array(ReviewSchema).max(10_000),
   openapi: z.object({ sourceName: z.string().min(1).max(255), importedAt: z.iso.datetime(), hash: z.string().regex(/^[a-f0-9]{64}$/),
     version: z.string().min(1).max(32), title: z.string().min(1).max(500), baseUrl: z.string().max(4_096).optional() }).strict().optional(),
   mappings: z.array(z.unknown()).max(5_000).optional(), integrationFiles: z.array(z.string().min(1).max(2_048)).max(1_000).optional(),
   interaction: z.object({ manualDecision: z.enum(["pending", "accepted"]), automated: InteractionRunSchema.optional(), updatedAt: z.iso.datetime() }).strict().optional(),
+  quality: QualityJudgmentSchema.optional(),
   updatedAt: z.iso.datetime(),
 }).strict();
 
@@ -146,7 +163,7 @@ export function reconcileWorkflow(workflow: D2cWorkflow, report: D2cReport): D2c
     ...reviewsFor(report, workflow),
   ];
   const complete = report.evaluation.status !== "invalid" && reviews.every((item) => item.decision === "accepted");
-  const { activeBatchId: _activeBatchId, ...base } = workflow;
+  const { activeBatchId: _activeBatchId, quality: _quality, ...base } = workflow;
   return {
     ...base, revision: workflow.revision + 1, activeReportId: report.reportId,
     ...(report.batchId === undefined ? {} : { activeBatchId: report.batchId }),
@@ -185,17 +202,20 @@ export function applyReviewDecision(workflow: D2cWorkflow, mutation: D2cReviewMu
     };
   });
   const complete = report.evaluation.status !== "invalid" && reviews.every((item) => item.decision === "accepted");
-  return { ...workflow, revision: workflow.revision + 1, reviews, stage: complete ? "api-mapping" : "visual-review", updatedAt: now };
+  const { quality: _quality, ...base } = workflow;
+  return { ...base, revision: workflow.revision + 1, reviews, stage: complete ? "api-mapping" : "visual-review", updatedAt: now };
 }
 
-function interactionStage(interaction: D2cWorkflow["interaction"]): D2cWorkflowStage {
-  return interaction?.manualDecision === "accepted" && interaction.automated?.passed === true ? "completed" : "interaction-review";
+function interactionStage(interaction: D2cWorkflow["interaction"], quality?: D2cQualityJudgment): D2cWorkflowStage {
+  if (interaction?.manualDecision !== "accepted" || interaction.automated?.passed !== true) return "interaction-review";
+  return quality?.verdict === "pass" ? "completed" : "quality-judge";
 }
 
 export function applyInteractionRun(workflow: D2cWorkflow, automated: D2cInteractionRun): D2cWorkflow {
   const now = new Date().toISOString();
   const interaction = { manualDecision: workflow.interaction?.manualDecision ?? "pending" as const, automated, updatedAt: now };
-  return { ...workflow, revision: workflow.revision + 1, interaction, stage: interactionStage(interaction), updatedAt: now };
+  const { quality: _quality, ...base } = workflow;
+  return { ...base, revision: workflow.revision + 1, interaction, stage: interactionStage(interaction), updatedAt: now };
 }
 
 export function applyManualInteractionDecision(workflow: D2cWorkflow, accepted: boolean): D2cWorkflow {
@@ -205,7 +225,18 @@ export function applyManualInteractionDecision(workflow: D2cWorkflow, accepted: 
     ...(workflow.interaction?.automated === undefined ? {} : { automated: workflow.interaction.automated }),
     updatedAt: now,
   };
-  return { ...workflow, revision: workflow.revision + 1, interaction, stage: interactionStage(interaction), updatedAt: now };
+  const { quality: _quality, ...base } = workflow;
+  return { ...base, revision: workflow.revision + 1, interaction, stage: interactionStage(interaction), updatedAt: now };
+}
+
+export function applyQualityJudgment(workflow: D2cWorkflow, quality: D2cQualityJudgment): D2cWorkflow {
+  if (workflow.interaction?.automated?.passed !== true || workflow.interaction.manualDecision !== "accepted") {
+    throw new Error("Complete automated and manual D2C interaction acceptance before running the quality judge");
+  }
+  const parsed = QualityJudgmentSchema.parse(quality) as D2cQualityJudgment;
+  const now = new Date().toISOString();
+  return { ...workflow, revision: workflow.revision + 1, quality: parsed,
+    stage: interactionStage(workflow.interaction, parsed), updatedAt: now };
 }
 
 function workflowPath(workspace: string, task: string): string { return join(taskDir(workspace, task), "workflow.json"); }

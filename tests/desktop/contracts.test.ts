@@ -9,6 +9,7 @@ import {
   D2cConfirmMappingInputSchema,
   D2cTaskActionInputSchema,
   D2cManualAcceptanceInputSchema,
+  D2cJudgeConfigInputSchema,
   DeleteSessionInputSchema,
   DeleteMemoryInputSchema,
   MemoryCandidateInputSchema,
@@ -112,6 +113,8 @@ describe("D2C IPC contracts", () => {
       .toEqual({ task: "homepage", moduleId: "stats", operationKey: "GET /metrics" });
     expect(D2cTaskActionInputSchema.parse({ task: "homepage" })).toEqual({ task: "homepage" });
     expect(D2cManualAcceptanceInputSchema.parse({ task: "homepage", accepted: true })).toEqual({ task: "homepage", accepted: true });
+    expect(D2cJudgeConfigInputSchema.parse({ protocol: "openai-compatible", baseURL: "https://judge.example.com/v1",
+      apiKey: "secret", model: "vision-pro", passThreshold: 85 })).toMatchObject({ model: "vision-pro", passThreshold: 85 });
   });
 
   it("rejects malformed task names and unknown fields", () => {
@@ -127,5 +130,7 @@ describe("D2C IPC contracts", () => {
     expect(() => D2cConfirmMappingInputSchema.parse({ task: "homepage", moduleId: "../x", operationKey: "GET /x" })).toThrow();
     expect(() => D2cManualAcceptanceInputSchema.parse({ task: "homepage", accepted: "yes" })).toThrow();
     expect(() => D2cManualAcceptanceInputSchema.parse({ task: "homepage", accepted: true, url: "https://evil.test" })).toThrow();
+    expect(() => D2cJudgeConfigInputSchema.parse({ protocol: "openai-compatible", baseURL: "file:///tmp/model",
+      apiKey: "secret", model: "vision-pro", passThreshold: 85 })).toThrow();
   });
 });

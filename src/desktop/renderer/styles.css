@@ -1049,6 +1049,37 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .d2c-preview-actions button { min-height: 28px; padding: 4px; border: 1px solid #cad5dc; border-radius: 5px; background: #fff; color: #3e4c56; font-size: 9px; cursor: pointer; }
 .d2c-preview-actions button:nth-child(2) { border-color: #273842; background: #273842; color: #fff; }
 .d2c-preview-actions button:disabled { opacity: .45; cursor: not-allowed; }
+.d2c-quality-gate { display: grid; gap: 10px; padding: 13px; border: 1px solid #d5dfe5; border-radius: 8px; background: #fff; }
+.d2c-quality-gate > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.d2c-quality-gate > header p { margin: 0 0 2px; color: #7b8b95; font: 700 8px "Cascadia Code", Consolas, monospace; letter-spacing: .1em; }
+.d2c-quality-gate > header h3 { margin: 0; color: #263741; font-size: 12px; }
+.d2c-quality-gate > header > strong { color: #25495d; font: 750 20px "Cascadia Code", Consolas, monospace; }
+.d2c-quality-gate[data-verdict="pass"] { border-color: #8fc6aa; box-shadow: inset 3px 0 #2f966a; }
+.d2c-quality-gate[data-verdict="fail"] { border-color: #d6a4a6; box-shadow: inset 3px 0 #bd5156; }
+.d2c-judge-config { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.d2c-judge-config label { display: grid; gap: 4px; min-width: 0; color: #647681; font-size: 8.5px; }
+.d2c-judge-config label:nth-child(2), .d2c-judge-config label:nth-child(4), .d2c-judge-config > div { grid-column: 1 / -1; }
+.d2c-judge-config input, .d2c-judge-config select { min-width: 0; height: 30px; padding: 0 8px; border: 1px solid #cad6dd; border-radius: 5px; background: #fbfdfe; color: #273943; font-size: 9px; }
+.d2c-judge-config > div { display: flex; gap: 6px; }
+.d2c-judge-config button, .d2c-judge-model button, .d2c-run-judge { min-height: 29px; padding: 0 9px; border: 1px solid #293b46; border-radius: 5px; background: #293b46; color: #fff; font-size: 8.5px; cursor: pointer; }
+.d2c-judge-model { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; align-items: center; }
+.d2c-judge-model span { overflow: hidden; color: #30444f; font-size: 10px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.d2c-judge-model small { overflow: hidden; color: #87949c; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.d2c-judge-model button { grid-column: 2; grid-row: 1 / 3; border-color: #c6d1d7; background: #fff; color: #50616b; }
+.d2c-quality-gate > p, .d2c-quality-result > p { margin: 0; color: #76858e; font-size: 8.5px; line-height: 1.55; }
+.d2c-quality-result { display: grid; gap: 8px; }
+.d2c-quality-result > div { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+.d2c-quality-result > div span { display: grid; gap: 2px; padding: 7px; border-radius: 5px; background: #f1f5f7; color: #72818a; font-size: 8px; }
+.d2c-quality-result > div b { color: #263b47; font: 700 13px "Cascadia Code", Consolas, monospace; }
+.d2c-quality-result > strong { color: #2f6f54; font-size: 10px; }
+.d2c-quality-gate[data-verdict="fail"] .d2c-quality-result > strong { color: #a94348; }
+.d2c-quality-result ol { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.d2c-quality-result li { display: grid; gap: 2px; padding: 6px 7px; border-left: 2px solid #cf9b51; background: #faf7f1; }
+.d2c-quality-result li[data-severity="critical"] { border-color: #bd5156; background: #fff5f5; }
+.d2c-quality-result li span { color: #485b66; font-size: 8.5px; }
+.d2c-quality-result li small { color: #81909a; font-size: 8px; }
+.d2c-run-judge { width: 100%; }
+.d2c-run-judge:disabled, .d2c-judge-config button:disabled { opacity: .45; cursor: not-allowed; }
 .d2c-test-results { display: grid; gap: 3px; padding: 8px; border-left: 3px solid #bd3c43; background: #fff; }
 .d2c-test-results[data-passed="true"] { border-left-color: #2a9b61; }
 .d2c-test-results > strong { color: #33414a; font-size: 10px; }

@@ -78,6 +78,16 @@ describe("desktop D2C workflow controller", () => {
         schema: 1, runAt: "2026-08-10T03:00:00.000Z", baseUrl, passed: true, total: 1, failures: 0, apiRequestCount: 1,
         scenarios: [{ id: "loads-api-data", pageUrl: baseUrl, passed: true, durationMs: 10, apiRequestCount: 1 }],
       }),
+      captureD2cPreview: async () => png(),
+      d2cJudge: {
+        config: async () => ({ configured: true, protocol: "openai-compatible", baseURL: "https://judge.example.com/v1", model: "vision-pro", passThreshold: 80 }),
+        saveConfig: async () => ({ configured: true, protocol: "openai-compatible", baseURL: "https://judge.example.com/v1", model: "vision-pro", passThreshold: 80 }),
+        evaluate: async ({ report: current, interaction }) => ({
+          schema: 1, runAt: "2026-08-10T03:10:00.000Z", model: "vision-pro", visualScore: 92, interactionScore: 90,
+          staticVisualScore: current.scores.total, deterministicInteractionPassed: interaction.passed,
+          overallScore: 91, threshold: 80, verdict: "pass", confidence: "high", summary: "质量门通过", strengths: [], issues: [],
+        }),
+      },
       emit: () => undefined,
     });
     await controller.openWorkspace(workspace);
@@ -103,7 +113,11 @@ describe("desktop D2C workflow controller", () => {
     expect(automated.workflow.stage).toBe("interaction-review");
     expect(automated.result?.apiRequestCount).toBe(1);
     const completed = await controller.setD2cManualAcceptance("dashboard", true);
-    expect(completed.stage).toBe("completed");
+    expect(completed.stage).toBe("quality-judge");
+    const judged = await controller.runD2cQualityJudge("dashboard");
+    expect(judged.workflow.stage).toBe("completed");
+    expect(judged.judgment.overallScore).toBe(91);
+    expect(JSON.parse(await readFile(join(workspace, ".flavor", "d2c", "dashboard", "quality-judge.json"), "utf8"))).toMatchObject({ verdict: "pass" });
     expect(JSON.parse(await readFile(join(workspace, ".flavor", "d2c", "dashboard", "integration", "interaction-results.json"), "utf8"))).toMatchObject({ passed: true });
     await controller.dispose();
   });

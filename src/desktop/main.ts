@@ -13,6 +13,7 @@ import {
   D2cImportInputSchema,
   D2cReviewInputSchema,
   D2cManualAcceptanceInputSchema,
+  D2cJudgeConfigInputSchema,
   D2cConfirmMappingInputSchema,
   D2cTaskActionInputSchema,
   DeleteSessionInputSchema,
@@ -36,8 +37,11 @@ import {
   type DesktopEvent,
 } from "./contracts.js";
 import { createD2cCaptureService } from "./d2c-capture.js";
-import { runElectronD2cInteractionTests } from "./d2c-interaction-runner.js";
 import { isLoopbackPreviewUrl } from "../d2c/interaction.js";
+import { buildD2cJudgePrompt, finalizeD2cQualityJudgment } from "../d2c/judge.js";
+import { createEmbeddedD2cAutomation, type D2cEmbeddedHost } from "./d2c-embedded-runner.js";
+import { createD2cJudgeClient } from "./d2c-judge-client.js";
+import { createD2cJudgeConfigStore } from "./d2c-judge-config.js";
 import { createD2cTools } from "../d2c/tools.js";
 import { createProductionRuntime } from "../production.js";
 import { DesktopRuntimeController } from "./runtime-controller.js";
@@ -72,10 +76,43 @@ function emitDesktopEvent(event: DesktopEvent): void {
 
 // D2C（Design to Code）：隐藏窗口快照服务，仅供 D2cCompare 工具使用。
 const d2cCapture = createD2cCaptureService();
+const d2cEmbedded = createEmbeddedD2cAutomation((): D2cEmbeddedHost | undefined => {
+  const window = mainWindow;
+  if (window === undefined || window.isDestroyed()) return undefined;
+  return {
+    isDestroyed: () => window.isDestroyed(),
+    mainFrame: window.webContents.mainFrame,
+    capturePage: (rect) => window.webContents.capturePage(rect),
+  };
+});
+const d2cJudgeClient = createD2cJudgeClient();
+const judgeStore = () => createD2cJudgeConfigStore(join(app.getPath("userData"), "d2c-judge.json"));
+function judgeImage(png: Buffer): Buffer {
+  const image = nativeImage.createFromBuffer(png);
+  const size = image.getSize();
+  const longest = Math.max(size.width, size.height);
+  if (longest <= 2_048) return png;
+  const ratio = 2_048 / longest;
+  return image.resize({ width: Math.max(1, Math.round(size.width * ratio)), height: Math.max(1, Math.round(size.height * ratio)), quality: "best" }).toPNG();
+}
 
 const controller = new DesktopRuntimeController({
   emit: emitDesktopEvent,
-  runD2cInteractionTests: runElectronD2cInteractionTests,
+  runD2cInteractionTests: (manifest, baseUrl, mockUrl) => d2cEmbedded.run(manifest, baseUrl, mockUrl),
+  captureD2cPreview: (url) => d2cEmbedded.capture(url),
+  d2cJudge: {
+    config: () => judgeStore().view(),
+    saveConfig: (input) => judgeStore().save(input),
+    evaluate: async ({ report, interaction, designPng, implementationPng }) => {
+      const config = await judgeStore().load();
+      if (config === undefined) throw new Error("Configure a multimodal D2C judge model before running the quality gate");
+      const assessment = await d2cJudgeClient.evaluate(config, {
+        prompt: buildD2cJudgePrompt({ report, interaction }),
+        designPng: judgeImage(designPng), implementationPng: judgeImage(implementationPng),
+      });
+      return finalizeD2cQualityJudgment({ assessment, report, interaction, model: config.model, passThreshold: config.passThreshold });
+    },
+  },
   createRuntime: async (runtimeOptions) => createProductionRuntime({
     ...runtimeOptions,
     ...(runtimeOptions.workspace === undefined ? {} : {
@@ -300,6 +337,13 @@ function installIpcHandlers(): void {
   ipcMain.handle(DESKTOP_CHANNELS.d2cSetManualAcceptance, async (_event, value) => {
     const input = D2cManualAcceptanceInputSchema.parse(value);
     return controller.setD2cManualAcceptance(input.task, input.accepted);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cGetJudgeConfig, async () => controller.getD2cJudgeConfig());
+  ipcMain.handle(DESKTOP_CHANNELS.d2cSaveJudgeConfig, async (_event, value) => {
+    return controller.saveD2cJudgeConfig(D2cJudgeConfigInputSchema.parse(value));
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cRunQualityJudge, async (_event, value) => {
+    return controller.runD2cQualityJudge(D2cTaskActionInputSchema.parse(value).task);
   });
 }
 

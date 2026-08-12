@@ -5,6 +5,7 @@ import type { D2cReviewDecision } from "../../d2c/workflow.js";
 import { buildD2cRepairPrompt, reviewProgress } from "../../d2c/workflow-shared.js";
 import type { D2cApiMapping } from "../../d2c/openapi.js";
 import type { D2cInteractionRun } from "../../d2c/interaction.js";
+import type { D2cJudgeConfig, D2cJudgeConfigView } from "../../d2c/judge.js";
 import type { D2cImportResult, D2cIntegrationView, D2cMockStatus, D2cPreviewStatus, D2cReportListItem, D2cReportView } from "../contracts.js";
 import { buildD2cAxisMeasurements, fitCanvas, focusCanvasRect, zoomCanvasAt, type CanvasTransform } from "./d2c-canvas.js";
 import type { D2cExecutionPhase, D2cFramework, D2cPendingTask, D2cProgressActivity } from "./d2c-progress.js";
@@ -366,6 +367,12 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
   const [previewStatus, setPreviewStatus] = useState<D2cPreviewStatus>({ running: false });
   const [interactionRun, setInteractionRun] = useState<D2cInteractionRun>();
   const [interactionBusy, setInteractionBusy] = useState(false);
+  const [judgeConfig, setJudgeConfig] = useState<D2cJudgeConfigView>({ configured: false });
+  const [judgeBusy, setJudgeBusy] = useState(false);
+  const [judgeEditing, setJudgeEditing] = useState(false);
+  const [judgeDraft, setJudgeDraft] = useState<D2cJudgeConfig>({
+    protocol: "openai-compatible", baseURL: "", apiKey: "", model: "", passThreshold: 80,
+  });
   const [previewReloadKey, setPreviewReloadKey] = useState(0);
   const automatedAfterAgentRef = useRef<string | undefined>(undefined);
   const [transform, setTransform] = useState<CanvasTransform>({ scale: 1, x: 0, y: 0 });
@@ -554,15 +561,21 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
     if (bundle === undefined || integrationBusy) return;
     setIntegrationBusy(true);
     try {
-      const [view, status, preview] = await Promise.all([
+      const [view, status, preview, judge] = await Promise.all([
         window.flavorDesktop.getD2cIntegration(bundle.report.task),
         window.flavorDesktop.getD2cMockStatus(bundle.report.task),
         window.flavorDesktop.getD2cPreviewStatus(bundle.report.task),
+        window.flavorDesktop.getD2cJudgeConfig(),
       ]);
       setIntegration(view);
       setMockStatus(status);
       setPreviewStatus(preview);
       setInteractionRun(view?.workflow.interaction?.automated);
+      setJudgeConfig(judge);
+      if (judge.configured) {
+        setJudgeDraft((current) => ({ ...current, protocol: judge.protocol ?? "openai-compatible",
+          baseURL: judge.baseURL ?? "", model: judge.model ?? "", passThreshold: judge.passThreshold ?? 80, apiKey: "" }));
+      }
     } catch (cause) { reportError(cause); }
     finally { setIntegrationBusy(false); }
   };
@@ -661,6 +674,30 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
       setIntegration((current) => current === undefined ? current : { ...current, workflow });
     } catch (cause) { reportError(cause); }
     finally { setInteractionBusy(false); }
+  };
+
+  const saveJudgeConfig = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (judgeBusy) return;
+    setJudgeBusy(true);
+    try {
+      const config = await window.flavorDesktop.saveD2cJudgeConfig(judgeDraft);
+      setJudgeConfig(config);
+      setJudgeDraft((current) => ({ ...current, apiKey: "" }));
+      setJudgeEditing(false);
+    } catch (cause) { reportError(cause); }
+    finally { setJudgeBusy(false); }
+  };
+
+  const runQualityJudge = async (): Promise<void> => {
+    if (bundle === undefined || judgeBusy) return;
+    setJudgeBusy(true);
+    try {
+      const result = await window.flavorDesktop.runD2cQualityJudge(bundle.report.task);
+      setBundle((current) => current === undefined ? current : { ...current, workflow: result.workflow });
+      setIntegration((current) => current === undefined ? current : { ...current, workflow: result.workflow });
+    } catch (cause) { reportError(cause); }
+    finally { setJudgeBusy(false); }
   };
 
   useEffect(() => {
@@ -1005,7 +1042,42 @@ export function D2cViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
                     {bundle.workflow.interaction?.manualDecision === "accepted" ? "已通过（撤回）" : "确认人工验收通过"}
                   </button>
                 </div>
-                {bundle.workflow.stage === "completed" && <p className="d2c-acceptance-complete">✓ 自动与人工验收均已完成</p>}
+                <section className="d2c-quality-gate" data-verdict={bundle.workflow.quality?.verdict ?? "pending"}>
+                  <header><div><p>LLM-AS-A-JUDGE</p><h3>最终质量门</h3></div>
+                    {bundle.workflow.quality !== undefined && <strong>{bundle.workflow.quality.overallScore.toFixed(1)}</strong>}</header>
+                  {!judgeConfig.configured || judgeEditing ? <form className="d2c-judge-config" onSubmit={(event) => void saveJudgeConfig(event)}>
+                    <label><span>协议</span><select value={judgeDraft.protocol} onChange={(event) => setJudgeDraft((current) => ({ ...current, protocol: event.target.value as D2cJudgeConfig["protocol"] }))}>
+                      <option value="openai-compatible">OpenAI 兼容</option><option value="anthropic">Anthropic</option>
+                    </select></label>
+                    <label><span>Base URL</span><input required type="url" placeholder="https://api.example.com/v1" value={judgeDraft.baseURL}
+                      onChange={(event) => setJudgeDraft((current) => ({ ...current, baseURL: event.target.value }))} /></label>
+                    <label><span>模型</span><input required placeholder="支持视觉的模型名称" value={judgeDraft.model}
+                      onChange={(event) => setJudgeDraft((current) => ({ ...current, model: event.target.value }))} /></label>
+                    <label><span>API Key</span><input required type="password" autoComplete="off" value={judgeDraft.apiKey}
+                      onChange={(event) => setJudgeDraft((current) => ({ ...current, apiKey: event.target.value }))} /></label>
+                    <label><span>通过阈值</span><input required type="number" min={0} max={100} value={judgeDraft.passThreshold}
+                      onChange={(event) => setJudgeDraft((current) => ({ ...current, passThreshold: Number(event.target.value) }))} /></label>
+                    <div><button type="submit" disabled={judgeBusy}>{judgeBusy ? "保存中…" : "保存多模态模型"}</button>
+                      {judgeConfig.configured && <button type="button" onClick={() => setJudgeEditing(false)}>取消</button>}</div>
+                  </form> : <>
+                    <div className="d2c-judge-model"><span>{judgeConfig.model}</span><small>{judgeConfig.baseURL} · 阈值 {judgeConfig.passThreshold}</small>
+                      <button type="button" onClick={() => setJudgeEditing(true)}>修改配置</button></div>
+                    {bundle.workflow.quality === undefined ? <p>{bundle.workflow.interaction?.automated?.passed === true && bundle.workflow.interaction.manualDecision === "accepted"
+                      ? "将综合设计稿、当前联调页面、静态评分与交互证据进行最终评审。"
+                      : "先完成自动交互测试和人工验收，再运行最终评审。"}</p> : <div className="d2c-quality-result">
+                      <div><span>视觉质量 <b>{bundle.workflow.quality.visualScore}</b></span><span>交互质量 <b>{bundle.workflow.quality.interactionScore}</b></span>
+                        <span>综合得分 <b>{bundle.workflow.quality.overallScore}</b></span></div>
+                      <strong>{bundle.workflow.quality.verdict === "pass" ? "质量门通过" : "质量门未通过"}</strong>
+                      <p>{bundle.workflow.quality.summary}</p>
+                      {bundle.workflow.quality.issues.length > 0 && <ol>{bundle.workflow.quality.issues.map((issue, index) => <li key={`${issue.category}-${index}`} data-severity={issue.severity}>
+                        <span>{issue.description}</span><small>{issue.recommendation}</small></li>)}</ol>}
+                    </div>}
+                    <button type="button" className="d2c-run-judge" disabled={judgeBusy || !previewStatus.running
+                      || bundle.workflow.interaction?.automated?.passed !== true || bundle.workflow.interaction.manualDecision !== "accepted"}
+                      onClick={() => void runQualityJudge()}>{judgeBusy ? "AI 评审中…" : bundle.workflow.quality === undefined ? "运行 AI 质量评审" : "重新运行 AI 质量评审"}</button>
+                  </>}
+                </section>
+                {bundle.workflow.stage === "completed" && <p className="d2c-acceptance-complete">✓ 自动、人工与多模态质量验收均已完成</p>}
               </section>
               <button type="button" className="d2c-generate-integration" disabled={integrationBusy || integration.mappings.some((item) => item.status === "needs-confirmation")}
                 onClick={() => void generateIntegration()}>{integrationBusy ? "正在准备联调…" : bundle.workflow.integrationFiles === undefined ? "生成代码并开始联调" : "重新生成并开始联调"}<span>→</span></button>

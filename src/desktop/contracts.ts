@@ -5,6 +5,7 @@ import type { D2cProgressEvent, D2cReport } from "../d2c/types.js";
 import type { D2cWorkflow } from "../d2c/workflow.js";
 import type { D2cInteractionRun } from "../d2c/interaction.js";
 import type { D2cApiMapping, D2cOpenApiDocument } from "../d2c/openapi.js";
+import { D2cJudgeConfigInputSchema, type D2cJudgeConfig, type D2cJudgeConfigView, type D2cQualityJudgment } from "../d2c/judge.js";
 import { McpServerConfigSchema, McpServerNameSchema, type PermissionMode } from "../config/schema.js";
 import type { TranscriptState } from "../ui/transcript.js";
 import type { Question } from "../tools/ask-user-question.js";
@@ -146,6 +147,7 @@ export const D2cReviewInputSchema = z.object({
 }).strict();
 export const D2cTaskActionInputSchema = z.object({ task: D2cTaskInput }).strict();
 export const D2cManualAcceptanceInputSchema = z.object({ task: D2cTaskInput, accepted: z.boolean() }).strict();
+export { D2cJudgeConfigInputSchema };
 export const D2cConfirmMappingInputSchema = z.object({
   task: D2cTaskInput,
   moduleId: D2cModuleInput,
@@ -276,6 +278,11 @@ export interface D2cInteractionStatus {
   result?: D2cInteractionRun;
 }
 
+export interface D2cQualityJudgeStatus {
+  workflow: D2cWorkflow;
+  judgment: D2cQualityJudgment;
+}
+
 export interface D2cReportEventPayload {
   task: string;
   reportId: string;
@@ -347,6 +354,9 @@ export interface FlavorDesktopApi {
   openD2cPreview(task: string): Promise<void>;
   runD2cInteractionTests(task: string): Promise<D2cInteractionStatus>;
   setD2cManualAcceptance(task: string, accepted: boolean): Promise<D2cWorkflow>;
+  getD2cJudgeConfig(): Promise<D2cJudgeConfigView>;
+  saveD2cJudgeConfig(input: D2cJudgeConfig): Promise<D2cJudgeConfigView>;
+  runD2cQualityJudge(task: string): Promise<D2cQualityJudgeStatus>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
 }
 
