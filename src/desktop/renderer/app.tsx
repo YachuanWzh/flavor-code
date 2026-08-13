@@ -7,6 +7,7 @@ import type {
   DesktopEvent,
   DesktopImageAttachmentInput,
   DesktopModelOption,
+  DesktopPermissionProfile,
   DesktopSnapshot,
   DesktopSessionSummary,
 } from "../contracts.js";
@@ -35,9 +36,16 @@ import type { FileChangePresentation, FileDiffLine } from "../../tools/types.js"
 import { SkillManagerView } from "./skill-manager.js";
 import { MemoryManagerView } from "./memory-manager.js";
 import { McpManagerView } from "./mcp-manager.js";
+import { E2eViewer } from "./e2e-viewer.js";
+import {
+  applyD2cAgentProgress,
+  applyD2cEngineProgress,
+  createD2cPendingTask,
+  type D2cPendingTask,
+} from "./d2c-progress.js";
 import type { ManagedSkillSummary } from "../../skills/manager.js";
 
-const EMPTY_SNAPSHOT: DesktopSnapshot = { sessions: [], diagnostics: [], models: [] };
+const EMPTY_SNAPSHOT: DesktopSnapshot = { sessions: [], diagnostics: [], models: [], jobs: [] };
 const PERMISSIONS: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions", "auto", "bubble"];
 const BUILTIN_SLASH_CANDIDATES = MVP_COMMANDS.map((name) => ({ name, description: COMMAND_DESCRIPTIONS[name] }));
 const MAX_DESKTOP_IMAGES = 5;
@@ -93,7 +101,9 @@ export function DesktopApp(): React.JSX.Element {
   const [dismissedMentionInput, setDismissedMentionInput] = useState<string>();
   const [mentionSpan, setMentionSpan] = useState<{ start: number; end: number }>();
   const [cursorPos, setCursorPos] = useState(0);
-  const [view, setView] = useState<"conversation" | "skills" | "memory" | "mcp">("conversation");
+  const [view, setView] = useState<"conversation" | "skills" | "memory" | "mcp" | "e2e">("conversation");
+  const [d2cRefreshKey, setD2cRefreshKey] = useState(0);
+  const [d2cPending, setD2cPending] = useState<D2cPendingTask>();
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const activeSessionIdRef = useRef<string | undefined>(undefined);
@@ -178,6 +188,26 @@ export function DesktopApp(): React.JSX.Element {
 
   useEffect(() => {
     const unsubscribe = window.flavorDesktop.onEvent((event) => {
+      if (event.type === "d2c-report") {
+        setD2cRefreshKey((key) => key + 1);
+        setD2cPending((current) => current !== undefined && current.task === event.payload.task ? undefined : current);
+        setView("e2e");
+        return;
+      }
+      if (event.type === "d2c-progress") {
+        setD2cPending((current) => current === undefined ? current : applyD2cEngineProgress(current, event.payload));
+        return;
+      }
+      if (event.type === "session-output" && event.sessionId === activeSessionIdRef.current) {
+        setD2cPending((current) => current === undefined ? current : applyD2cAgentProgress(current, event.event));
+      }
+      if ((event.type === "session-output"
+          && event.sessionId === activeSessionIdRef.current
+          && ["done", "error", "exit"].includes(event.event.type))
+        || (event.type === "runtime-error"
+          && (event.sessionId === undefined || event.sessionId === activeSessionIdRef.current))) {
+        setD2cPending(undefined);
+      }
       handleEvent(event, activeSessionIdRef, setSnapshot, setTranscript, setError);
     });
     window.flavorDesktop.bootstrap().then((next) => {
@@ -317,10 +347,14 @@ export function DesktopApp(): React.JSX.Element {
     } catch (cause) { setError(errorMessage(cause)); }
   };
 
-  const send = async (override?: string, delivery?: "prompt" | "steer" | "followUp") => {
+  const send = async (
+    override?: string,
+    delivery?: "prompt" | "steer" | "followUp",
+    permissionProfile?: DesktopPermissionProfile,
+  ): Promise<boolean> => {
     const prompt = (override ?? input).trim();
     const selectedAttachments = override === undefined ? attachments : [];
-    if (!prompt && selectedAttachments.length === 0) return;
+    if (!prompt && selectedAttachments.length === 0) return false;
     setError(undefined);
     try {
       let current = snapshot;
@@ -345,12 +379,15 @@ export function DesktopApp(): React.JSX.Element {
         prompt,
         effectiveDelivery,
         selectedAttachments.map(({ name, mediaType, dataBase64 }) => ({ name, mediaType, dataBase64 })),
+        permissionProfile,
       );
       if (selectedAttachments.length > 0) clearAttachments();
+      return true;
     } catch (cause) {
       const value = errorMessage(cause);
       setError(value);
       setTranscript((state) => transcriptReducer(state, { type: "submit-error", message: value }));
+      return false;
     }
   };
 
@@ -416,6 +453,7 @@ export function DesktopApp(): React.JSX.Element {
         <button className="rail-action" data-active={view === "skills"} onClick={() => { setView("skills"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">◇</span><span>技能</span></button>
         <button className="rail-action" data-active={view === "memory"} onClick={() => { setView("memory"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">⌁</span><span>长期记忆</span></button>
         <button className="rail-action" data-active={view === "mcp"} onClick={() => { setView("mcp"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">◎</span><span>MCP 服务</span></button>
+        <button className="rail-action" data-active={view === "e2e"} onClick={() => { setView("e2e"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">▤</span><span>E2E</span></button>
       </nav>
       <div className="sessions-scroll">
         <div className="rail-section-title">项目</div>
@@ -429,7 +467,13 @@ export function DesktopApp(): React.JSX.Element {
               {group.sessions.map((session) => <div className="session-item-shell" key={session.sessionId}
                 onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setSessionMenu(undefined); }}>
                 <button className="session-item" data-active={session.sessionId === snapshot.activeSession?.sessionId}
-                  onClick={() => void startSession(session)}>
+                  disabled={busy && session.sessionId !== snapshot.activeSession?.sessionId}
+                  onClick={() => {
+                    if (session.sessionId === snapshot.activeSession?.sessionId) {
+                      setRailOpen(false);
+                      setView("conversation");
+                    } else void startSession(session);
+                  }}>
                   <span>{sessionTitle(session)}</span><time>{formatSessionTime(session.updatedAt)}</time>
                 </button>
                 <button className="session-more" aria-label={`管理会话：${sessionTitle(session)}`} aria-expanded={sessionMenu === session.sessionId}
@@ -449,13 +493,21 @@ export function DesktopApp(): React.JSX.Element {
     <main className="workspace-panel">
       {view === "skills" && snapshot.workspace !== undefined ? <SkillManagerView onClose={() => setView("conversation")} onError={setError} />
         : view === "memory" && snapshot.workspace !== undefined ? <MemoryManagerView onClose={() => setView("conversation")} onError={setError} />
-          : view === "mcp" && snapshot.workspace !== undefined ? <McpManagerView onClose={() => setView("conversation")} onError={setError} /> : <>
+          : view === "mcp" && snapshot.workspace !== undefined ? <McpManagerView onClose={() => setView("conversation")} onError={setError} />
+            : view === "e2e" && snapshot.workspace !== undefined ? <E2eViewer onClose={() => setView("conversation")} onInterrupt={() => void window.flavorDesktop.interrupt()} onError={setError} refreshKey={d2cRefreshKey}
+                    pending={d2cPending}
+                    disabled={busy}
+                    onLaunch={(task, framework) => setD2cPending(createD2cPendingTask(task, framework))}
+                    onStartTask={(prompt) => send(prompt, "prompt", "d2c")} /> : <>
       <header className="workspace-header">
         <button className="mobile-rail-toggle" onClick={() => setRailOpen(true)} aria-label="打开项目栏">☰</button>
         <div className="workspace-breadcrumb">
           <span>{workspaceName(snapshot.workspace)}</span>
         </div>
         <div className="header-actions">
+          {snapshot.jobs.some((job) => job.state === "running") && <div className="job-strip" title="后台任务">
+            <span className="job-pulse" />{snapshot.jobs.filter((job) => job.state === "running").length} 个后台任务
+          </div>}
           <button className="finish-task-button" onClick={() => void finishTask()}
             disabled={busy || snapshot.activeSession === undefined} title="评估并完成当前任务">完成任务</button>
           <button title="更多选项">•••</button>
@@ -474,7 +526,7 @@ export function DesktopApp(): React.JSX.Element {
 
       {snapshot.diagnostics.length > 0 && <details className="diagnostics"><summary>{snapshot.diagnostics.length} 条启动提示</summary><pre>{snapshot.diagnostics.join("\n")}</pre></details>}
       <Composer input={input} setInput={updateInput} onSend={(delivery) => void send(undefined, delivery)} busy={busy}
-        onInterrupt={() => void window.flavorDesktop.interrupt()} inputRef={inputRef} snapshot={snapshot}
+        onInterrupt={() => { setD2cPending(undefined); void window.flavorDesktop.interrupt(); }} inputRef={inputRef} snapshot={snapshot}
         attachments={attachments} onAddImages={(files) => void addImageFiles(files)}
         onRemoveImage={removeAttachment}
         setModel={setModel} addModel={addModel} setPermission={setPermission}
@@ -569,7 +621,10 @@ function BlockView({ block }: { block: TranscriptBlock }): React.JSX.Element {
     <span className="activity-node">{stateSymbol}</span>
     <div className="activity-body"><div className="activity-title"><span>{block.text.replace(/^[·✓×]\s*/, "")}</span>{block.hint && <code>{block.hint}</code>}</div>
       {block.progress !== undefined && <div className="progress-track"><i style={{ width: `${block.progress}%` }} /></div>}
-      {block.presentation && <DiffPreview presentation={block.presentation} />}
+      {block.presentation?.kind === "file-change" && <DiffPreview presentation={block.presentation} />}
+      {block.presentation?.kind === "generic" && <div className="tool-presentation"><strong>{block.presentation.title}</strong>{block.presentation.summary && <span>{block.presentation.summary}</span>}</div>}
+      {block.presentation?.kind === "terminal" && <div className="tool-presentation"><strong>{block.presentation.title}</strong>{block.presentation.stdout && <pre>{block.presentation.stdout}</pre>}</div>}
+      {block.presentation?.kind === "web" && <div className="tool-presentation"><strong>{block.presentation.title}</strong>{block.presentation.summary && <span>{block.presentation.summary}</span>}</div>}
       {block.tool && <details className="tool-details"><summary>调用详情</summary>
         <label>Input</label><pre>{boundedJson(block.tool.input)}</pre>
         {block.tool.result === undefined ? null : <><label>Result</label><pre>{boundedJson(block.tool.result)}</pre></>}
@@ -935,10 +990,10 @@ function DeleteSessionSheet({ session, deleting, onCancel, onDelete }: {
   </section></div>;
 }
 
-const DESTRUCTIVE_TOOLS = new Set(["Delete", "Move"]);
+const DESTRUCTIVE_TOOLS = new Set(["Delete", "Move", "RemoveTool"]);
 
 function ApprovalSheet({ approval, onResolve }: { approval: NonNullable<DesktopSnapshot["approval"]>; onResolve(decision: "allow" | "deny" | "always"): void }): React.JSX.Element {
-  const isDestructive = DESTRUCTIVE_TOOLS.has(approval.tool);
+  const isDestructive = DESTRUCTIVE_TOOLS.has(approval.tool) || approval.allowAlways === false;
   return <div className="modal-layer"><section className="decision-sheet" role="dialog" aria-modal="true" aria-labelledby="approval-title">
     <div className="sheet-icon warning">!</div><div><p className="sheet-kicker">权限确认 · {approval.agent === "main" ? "主 Agent" : "子 Agent"}</p><h2 id="approval-title">允许执行 {approval.tool}？</h2>
       <p>{approval.reason ?? "这项操作需要你的确认。"}</p>

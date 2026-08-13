@@ -14,6 +14,7 @@ const demoHome = isWindows ? "C:\\Users\\demo" : "/home/demo";
 
 function fakeRuntime(output: (event: SessionOutput) => void, sessionId = "session-live"): RuntimeLike {
   let mainModel = "openai:gpt-5";
+  let permissionProfile: "standard" | "d2c" = "standard";
   return {
     sessionId,
     restoredTranscript: {
@@ -44,12 +45,73 @@ function fakeRuntime(output: (event: SessionOutput) => void, sessionId = "sessio
       questions: { pending: undefined, answer: vi.fn() },
     },
     approvals: { pending: undefined, resolve: vi.fn() },
+    authorization: {
+      permissionProfile: () => permissionProfile,
+      setPermissionProfile: vi.fn((profile: "standard" | "d2c") => { permissionProfile = profile; }),
+    },
     memoryReviews: { pending: [], autoDismissSeconds: 0, accept: vi.fn(async () => true), dismiss: vi.fn(() => true) },
     dispose: vi.fn(async () => undefined),
   };
 }
 
 describe("DesktopRuntimeController", () => {
+  it("publishes desktop snapshots when background job state changes", async () => {
+    const events: unknown[] = [];
+    const runtime = fakeRuntime(() => undefined);
+    let listener: ((jobs: readonly import("../../src/jobs/registry.js").JobSnapshot[]) => void) | undefined;
+    const running = {
+      id: "job-1", kind: "shell" as const, owner: "main", label: "serve", state: "running" as const,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), outputChars: 0, truncated: false,
+    };
+    Object.assign(runtime, { jobs: {
+      list: () => [running],
+      subscribe: (next: (jobs: readonly import("../../src/jobs/registry.js").JobSnapshot[]) => void) => { listener = next; return () => { listener = undefined; }; },
+    } });
+    const controller = new DesktopRuntimeController({
+      home: "C:\\Users\\demo", createRuntime: async () => runtime, listSessions: async () => [], emit: (event) => events.push(event),
+    });
+    await controller.openWorkspace(process.cwd());
+    await controller.startSession();
+    listener?.([running]);
+    expect(controller.snapshot().jobs).toEqual([running]);
+    expect(events).toContainEqual(expect.objectContaining({ type: "snapshot", snapshot: expect.objectContaining({ jobs: [running] }) }));
+    await controller.dispose();
+  });
+  it("scopes the D2C permission profile to one complete Electron submission", async () => {
+    let release!: () => void;
+    const runtime = fakeRuntime(() => undefined);
+    runtime.session.submit = vi.fn(async () => new Promise<void>((resolve) => { release = resolve; }));
+    const controller = new DesktopRuntimeController({
+      home: "C:\\Users\\demo", createRuntime: async () => runtime, listSessions: async () => [], emit: () => undefined,
+    });
+    await controller.openWorkspace("C:\\work");
+    await controller.startSession();
+
+    const running = controller.submit("generate the page", "prompt", [], "d2c");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runtime.authorization.permissionProfile()).toBe("d2c");
+    expect(runtime.authorization.setPermissionProfile).toHaveBeenCalledWith("d2c");
+    release();
+    await running;
+
+    expect(runtime.authorization.permissionProfile()).toBe("standard");
+    expect(runtime.authorization.setPermissionProfile).toHaveBeenLastCalledWith("standard");
+  });
+
+  it("restores the standard profile when a D2C submission fails", async () => {
+    const runtime = fakeRuntime(() => undefined);
+    runtime.session.submit = vi.fn(async () => { throw new Error("generation failed"); });
+    const controller = new DesktopRuntimeController({
+      home: "C:\\Users\\demo", createRuntime: async () => runtime, listSessions: async () => [], emit: () => undefined,
+    });
+    await controller.openWorkspace("C:\\work");
+    await controller.startSession();
+
+    await expect(controller.submit("generate the page", "prompt", [], "d2c")).rejects.toThrow("generation failed");
+    expect(runtime.authorization.permissionProfile()).toBe("standard");
+    expect(runtime.authorization.setPermissionProfile).toHaveBeenLastCalledWith("standard");
+  });
+
   it("stores desktop attachments and submits a multimodal prompt to the active session", async () => {
     const runtime = fakeRuntime(() => undefined);
     const storeAttachments = vi.fn(async () => [{
@@ -172,6 +234,34 @@ describe("DesktopRuntimeController", () => {
       sessionId: "session-live",
       event: { type: "text", text: "answer:hello" },
     });
+    expect(runtime.authorization.setPermissionProfile).not.toHaveBeenCalled();
+  });
+
+  it("publishes a new session to the sidebar before its first submission finishes", async () => {
+    let release!: () => void;
+    const runtime = fakeRuntime(() => undefined);
+    runtime.session.submit = vi.fn(async () => new Promise<void>((resolve) => { release = resolve; }));
+    const controller = new DesktopRuntimeController({
+      home: "C:\\Users\\demo", createRuntime: async () => runtime, listSessions: async () => [], emit: () => undefined,
+    });
+    await controller.openWorkspace("C:\\work");
+
+    const started = await controller.startSession();
+    expect(started.snapshot.sessions).toEqual([
+      expect.objectContaining({ sessionId: "session-live", mainModel: "openai:gpt-5" }),
+    ]);
+
+    const submission = controller.submit("执行 D2C 任务 test");
+    expect(controller.snapshot().sessions).toEqual([
+      expect.objectContaining({ sessionId: "session-live", preview: "执行 D2C 任务 test" }),
+    ]);
+    expect(controller.snapshot().activeSession?.busy).toBe(true);
+
+    release();
+    await submission;
+    expect(controller.snapshot().sessions).toEqual([
+      expect.objectContaining({ sessionId: "session-live", preview: "执行 D2C 任务 test" }),
+    ]);
   });
 
   it("disposes the current runtime when switching projects", async () => {

@@ -312,6 +312,10 @@ describe("production runtime", () => {
 
     expect(globalState.__flavorMcpToolSnapshots).toHaveLength(3);
     expect(globalState.__flavorMcpToolSnapshots?.[0]).toContain("mcp__docs__search");
+    expect(globalState.__flavorMcpToolSnapshots?.[0]).toEqual(expect.arrayContaining([
+      "WebFetch", "WebSearch", "JobList", "JobRead", "JobWait", "JobKill",
+      "TerminalOpen", "TerminalWrite", "TerminalRead", "TerminalResize", "TerminalClose", "TerminalList",
+    ]));
     expect(globalState.__flavorMcpToolSnapshots?.[1]).not.toContain("mcp__docs__search");
     expect(globalState.__flavorMcpToolSnapshots?.[2]).toContain("mcp__docs__search");
     expect(outputs.join("\n")).toContain("Disabled MCP server \"docs\"");

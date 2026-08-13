@@ -35,7 +35,36 @@ Flavor Code connects to OpenAI, Anthropic, or compatible services and works with
 | 🧭 | **Controlled progress on complex tasks** | Task plans, sub-agents, steering, follow-ups, `/loop`, and `/goal` |
 | ⏪ | **Traceable, resumable results** | Full timeline, checkpoints, rewind, traces, diffs, and failure audits |
 | 🧠 | **Local long-term context** | Memory, Skills, plugins, and project guides stored on your machine |
+| 🎨 | **D2C design-to-code** | Import Pixso exports; the agent generates Vue/React implementations with automatic pixel-level visual evaluation (Electron only) |
 | 🛡️ | **Clear permission boundaries** | Independent control over read, write, Shell, network, and destructive actions; Docker supported |
+
+## 1.2.9 Runtime Productivity
+
+1.2.9 adds layered project instructions, safe writes, background jobs, persistent terminals, and native web tools. Usually you can just describe the goal in natural language and the agent picks the right tool; when you need precise control, name the tool and its parameters explicitly in the prompt.
+
+| Feature | How to use |
+| --- | --- |
+| **Layered project instructions** | Put `AGENTS.md` / `CLAUDE.md` in the project root or subdirectories; use `AGENTS.local.md` / `CLAUDE.local.md` for local additions in the same directory. Root rules load at startup; subdirectory rules load automatically when the agent touches files there. |
+| **Per-turn change summary** | No configuration needed. After a successful `Write`, `Edit`, or `ApplyPatch`, the turn automatically lists added, modified, and deleted files with line counts. |
+| **File version protection** | No configuration needed. If the IDE, a formatter, or another process modifies a file after the agent read it, the next write fails with `Stale file`; ask the agent to re-read before editing. |
+| **Standard tool presentation protocol** | Tool authors can declare `outputSchema`, `renderForModel`, `presentCall`, and `presentResult`, so the same result can use an appropriate form in the model context, CLI, and desktop. |
+| **Background Shell / Jobs** | Say "start the dev server in the background" and the agent calls `Shell` with `background: true`. Use `JobList` to view jobs, `JobRead` for incremental output, `JobWait` to wait, and `JobKill` to stop. The CLI shows a color-bordered `JOB` receipt separating job metadata, logs, and the final answer; logs show at most the latest 12 lines and lists at most 8 items. Windows prefers UTF-8 and falls back automatically on GBK/GB18030 system diagnostics. |
+| **Desktop background status** | Electron automatically shows the number of running jobs in the session title bar, updated live on start, output, exit, or cancel. |
+| **Persistent PTY** | Say "open a persistent terminal and keep interacting". The agent uses `TerminalOpen` to create a terminal, `TerminalWrite` for input, `TerminalRead` for incremental output, and `TerminalClose` to close it. |
+| **Unified D2C/E2E process lifecycle** | No usage change. Preview and backend services still start/stop from the E2E/D2C workbench, but the underlying layer unifies output limits, process-tree termination, and idempotent cleanup. |
+| **Native WebSearch** | Say "search the web for ...", or explicitly ask for `WebSearch`. It uses keyless DuckDuckGo Lite by default and degrades to Bing on connection failure, HTTP rejection, or no parseable results; up to 20 results per call. The CLI puts the top 5 into a bordered `WEB SEARCH` evidence block with titles and compact sources in search order. |
+| **Native WebFetch** | Say "read this page: `https://...`", or explicitly ask for `WebFetch`. Supports HTTP(S), redirects, HTML-to-text, timeouts, and response size limits, and is compatible with Clash/TUN Fake-IP DNS. Direct access to Fake-IP, intranet, or cloud metadata addresses is still blocked; network operations still follow Flavor permission approval. |
+
+Common precise usage:
+
+```text
+Start npm run dev with Shell in background mode, then use JobRead to inspect the startup logs.
+Open a persistent terminal, run a Python REPL in it, execute two snippets, then close the terminal.
+Use WebSearch to find the official TypeScript 7 migration notes, then WebFetch the most relevant official page.
+This directory has its own conventions; follow src/payments/AGENTS.md before modifying code here.
+```
+
+See [Technical Design Report §38](./技术方案报告.md#38-129-运行时生产力与原生-web-能力) for tool parameters, state machines, security boundaries, and extension interfaces; acceptance criteria are in the [Runtime productivity spec](./docs/specs/2026-08-13-runtime-productivity-waves.md).
 
 ## Quick Start
 
@@ -166,6 +195,8 @@ npm run desktop:dist     # Windows NSIS installer
 ```
 
 The desktop app provides project and session switching, streaming Markdown, tool and diff views, permission confirmations, task status, and management of Skills, MCP, memory, and models.
+
+The **D2C** module in the sidebar supports a complete design-to-code loop: import a Pixso-exported HTML directory, choose a target framework (Vue 3 / React), and submit the generation task to the current session. The agent implements it under `src/d2c-output/<task>/` following the `d2c-pixso` skill (SOP); a Vite dev server then starts automatically for pixel-level comparison, producing a visual-fidelity score and a structured diff report (region offsets, color deviations, font differences). The results workbench offers overlay, curtain, flicker, and heatmap comparison modes, an SVG annotation layer, and a severity-sorted issue list, so each diff can be accepted or rejected individually and trigger module-level fixes. Once visual review passes, you can import a Swagger/OpenAPI document to auto-generate Axios wrappers and an Express mock server, moving into API integration and interactive acceptance.
 
 ### VS Code / Qoder
 
@@ -338,6 +369,9 @@ npm run build
 - [Runtime reliability spec](./docs/specs/2026-07-26-runtime-reliability.md)
 - [Control plane, sandbox & VS Code spec](./docs/specs/2026-07-29-control-plane-sandbox-vscode.md)
 - [Multimodal image attachments spec](./docs/specs/2026-07-30-multimodal-image-attachments.md)
+- [D2C design-to-code spec](./docs/specs/2026-08-09-d2c-design-to-code.md)
+- [D2C review & integration spec](./docs/specs/2026-08-10-d2c-review-and-integration.md)
+- [1.2.9 runtime productivity spec](./docs/specs/2026-08-13-runtime-productivity-waves.md)
 - [VS Code next steps](./docs/specs/2026-08-01-flavor-code-vscode-next.md)
 
 ## Security Notes

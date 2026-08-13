@@ -3,10 +3,33 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { createApplyPatchTool, createEditTool, createReadTool, createWriteTool } from "../../src/tools/files.js";
+import { FileObservationStore, createApplyPatchTool, createEditTool, createReadTool, createWriteTool } from "../../src/tools/files.js";
 import { getToolPresentation } from "../../src/tools/types.js";
 
 describe("file tools", () => {
+  it("refuses to overwrite a file changed after the model read it", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "shared.txt");
+    writeFileSync(path, "observed");
+    const observations = new FileObservationStore();
+    const signal = new AbortController().signal;
+    await createReadTool(workspace, { observations }).execute({ path }, signal);
+    writeFileSync(path, "external edit with another size");
+
+    await expect(createWriteTool(workspace, { observations }).execute({ path, content: "agent edit" }, signal))
+      .rejects.toThrow(/stale|changed since/i);
+    expect(readFileSync(path, "utf8")).toBe("external edit with another size");
+  });
+
+  it("detects a race between edit preparation and atomic commit", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "race.txt");
+    writeFileSync(path, "before");
+    const tool = createEditTool(workspace, { beforeCommit: async () => { writeFileSync(path, "external"); } });
+    await expect(tool.execute({ path, oldText: "before", newText: "after" }, new AbortController().signal))
+      .rejects.toThrow(/stale|changed since/i);
+    expect(readFileSync(path, "utf8")).toBe("external");
+  });
   it("Read rejects binary files", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
     const path = join(workspace, "binary.dat");

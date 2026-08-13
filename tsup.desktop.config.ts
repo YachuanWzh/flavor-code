@@ -4,7 +4,7 @@ const sourceMap = process.env.FLAVOR_SOURCEMAP === "1";
 
 export default defineConfig([
   {
-    entry: { main: "src/desktop/main.ts" },
+    entry: { main: "src/desktop/main.ts", "pixel-worker": "src/d2c/pixel-worker.ts" },
     outDir: "dist/desktop",
     format: ["esm"],
     platform: "node",
@@ -27,4 +27,3 @@ export default defineConfig([
     outExtension: () => ({ js: ".cjs" }),
   },
 ]);
-

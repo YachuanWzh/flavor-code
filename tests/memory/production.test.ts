@@ -167,6 +167,21 @@ describe("production long-term memory", () => {
     await second.dispose();
   });
 
+  it("does not run automatic memory extraction for internal D2C artifact-generation prompts", async () => {
+    const root = await workspace({ autoExtract: true, autoExtractMinChars: 200 });
+    const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
+    runtime.authorization.setPermissionProfile("d2c");
+
+    await runtime.session.submit(`Generate an internal E2E PRD artifact. ${"Large generated document context. ".repeat(12)}`);
+
+    const requests = (globalThis as { __flavorMemoryRequests?: Array<Array<{ content: string }>> })
+      .__flavorMemoryRequests ?? [];
+    expect(requests.some((messages) => messages.some((message) =>
+      message.content.includes("Evaluate this completed coding task")))).toBe(false);
+    expect(runtime.memoryReviews.pending).toEqual([]);
+    await runtime.dispose();
+  });
+
   it("uses the configured language for generated memory fields", async () => {
     const root = await workspace({ autoExtract: true }, { language: "zh-CN" });
     const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });

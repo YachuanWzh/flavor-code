@@ -2,7 +2,7 @@ import { AgentLoop } from "../agent/loop.js";
 import { MAIN_TASK_TOOL_NAMES } from "../agent/task-tools.js";
 import type { TaskNode } from "../agent/planner.js";
 import type { HallucinationGuard } from "../hallucination/guard.js";
-import type { PermissionMode } from "../permissions/engine.js";
+import type { PermissionMode, PermissionProfile } from "../permissions/engine.js";
 import { PermissionEngine } from "../permissions/engine.js";
 import { createPermissionClassifier } from "../permissions/classifier.js";
 import type { ContextManager } from "../context/manager.js";
@@ -34,6 +34,7 @@ export interface LocalHarnessOptions {
   hallucinationGuard?: HallucinationGuard;
   /** When true, non-destructive tools skip the approval callback. Destructive tools still require confirmation. */
   loopMode?: boolean;
+  afterToolSuccess?(tool: string, paths: readonly string[], input: unknown, output: unknown, context: import("../tools/types.js").ToolContext): Promise<readonly string[]>;
 }
 
 export interface HarnessProfile {
@@ -54,6 +55,7 @@ export class LocalHarness {
   readonly #options: LocalHarnessOptions;
   #subagentModelId: string;
   #mainPermissions!: PermissionEngine;
+  #permissionProfile: PermissionProfile = "standard";
   readonly #contexts = new WeakSet<ContextManager>();
   readonly #children = new Set<SubagentHarness>();
   readonly #mainDefinitions: ToolDefinition<unknown>[];
@@ -80,6 +82,7 @@ export class LocalHarness {
   get mainModelId(): string { return this.main.loop.modelId; }
   get subagentModelId(): string { return this.#subagentModelId; }
   get permissionMode(): PermissionMode { return this.#mainPermissions.mode; }
+  get permissionProfile(): PermissionProfile { return this.#permissionProfile; }
 
   setModel(role: "main" | "subagent", modelId: string): void {
     this.#options.registry.get(modelId);
@@ -91,6 +94,13 @@ export class LocalHarness {
   }
 
   setPermissionMode(mode: PermissionMode): void { this.#mainPermissions.setMode(mode); }
+
+  setPermissionProfile(profile: PermissionProfile): void {
+    this.#permissionProfile = profile;
+    this.#mainPermissions.setProfile(profile);
+    this.main.loop.setIterationLimitMode(profile === "d2c" ? "d2c" : "standard");
+    for (const child of this.#children) child.loop.setIterationLimitMode(profile === "d2c" ? "d2c" : "standard");
+  }
 
   replaceMainTools(definitions: readonly ToolDefinition<unknown>[]): void {
     if (this.#disposed) throw new Error("LocalHarness is disposed");
@@ -107,7 +117,7 @@ export class LocalHarness {
     const tools = this.#toolsForAgent("subagent").filter((tool) => !MAIN_TASK_TOOL_NAMES.has(tool.name));
     const context = this.#options.createContext("subagent", tools, this.#subagentModelId, parentContext);
     this.#claimContext(context);
-    const profile = this.#createProfile(this.#subagentModelId, tools, "subagent", context, this.#options.approve);
+    const profile = this.#createProfile(this.#subagentModelId, tools, "subagent", context, this.#options.approve, undefined, `subagent:${task.id}`);
     let disposed = false;
     const child: SubagentHarness = {
       ...profile,
@@ -169,9 +179,12 @@ export class LocalHarness {
     context: ContextManager,
     approve?: ApprovalCallback,
     fallbackModelId?: string,
+    ownerId: string = agent,
   ): HarnessProfile {
     const permissions = new PermissionEngine({
       workspace: this.#options.workspace,
+      ...(this.#options.afterToolSuccess === undefined ? {} : { afterSuccess: this.#options.afterToolSuccess }),
+      profile: this.#permissionProfile,
       mode: this.#options.loopMode
         ? "bypassPermissions"
         : (agent === "subagent"
@@ -205,10 +218,12 @@ export class LocalHarness {
         hooks: this.#options.hooks,
         tools,
         agent,
+        ownerId,
         ...(maxIterations === undefined ? {} : { maxIterations }),
         ...(isMain && this.#options.hasActiveProgress !== undefined ? { hasActiveProgress: this.#options.hasActiveProgress } : {}),
         ...(isMain && this.#options.hallucinationGuard !== undefined ? { hallucinationGuard: this.#options.hallucinationGuard } : {}),
       });
+      loop.setIterationLimitMode(this.#permissionProfile === "d2c" ? "d2c" : "standard");
       return { get modelId() { return loop.modelId; }, context, runtime, tools, loop };
     } catch (error) {
       runtime.dispose();

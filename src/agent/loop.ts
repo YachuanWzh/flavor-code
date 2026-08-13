@@ -6,9 +6,10 @@ import { withStructuredOutput } from "../models/structured.js";
 import { normalizeProviderError, type ModelMessage, type ModelTool, type ProviderError } from "../models/types.js";
 import type { ToolRuntime } from "../tools/runtime.js";
 import type { ToolResult } from "../tools/types.js";
-import type { AgentError, AgentEvent, AgentRunRequest } from "./types.js";
+import type { AgentError, AgentEvent, AgentRunRequest, TurnDeliverable } from "./types.js";
 
 const DEFAULT_MAX_ITERATIONS = 40;
+const D2C_MAX_ITERATION_EXTENSIONS = 10;
 const DEFAULT_MODEL_ATTEMPTS = 3;
 const FALLBACK_MODEL_ATTEMPTS = 2;
 const RETRY_BASE_DELAY_MS = 1_000;
@@ -42,11 +43,13 @@ export interface AgentLoopOptions {
   maxExtensions?: number;
   hasActiveProgress?(): boolean;
   agent?: "main" | "subagent";
+  ownerId?: string;
   hallucinationGuard?: HallucinationGuard;
 }
 
 export class AgentLoop {
   readonly #options: Required<Pick<AgentLoopOptions, "maxIterations" | "softLimitFactor" | "extendIterations" | "maxExtensions" | "agent">> & Omit<AgentLoopOptions, "maxIterations" | "softLimitFactor" | "extendIterations" | "maxExtensions" | "agent">;
+  #iterationLimitMode: "standard" | "d2c" = "standard";
 
   constructor(options: AgentLoopOptions) {
     const envOverride = envMaxIterations();
@@ -69,6 +72,7 @@ export class AgentLoop {
   }
 
   get modelId(): string { return this.#options.modelId; }
+  get iterationLimitMode(): "standard" | "d2c" { return this.#iterationLimitMode; }
 
   setModel(modelId: string): void {
     this.#options.registry.get(modelId);
@@ -80,6 +84,11 @@ export class AgentLoop {
     this.#options.fallbackModelId = modelId;
   }
 
+  /** D2C keeps a hard cap, but may automatically expand it up to ten times. */
+  setIterationLimitMode(mode: "standard" | "d2c"): void {
+    this.#iterationLimitMode = mode;
+  }
+
   async *run(request: AgentRunRequest): AsyncIterable<AgentEvent> {
     this.#options.context.append(request.initialUserMessage ?? { role: "user", content: request.prompt });
     let totalInputTokens = 0;
@@ -89,8 +98,13 @@ export class AgentLoop {
     let hasCacheData = false;
     let accumulatedText = "";
     let modelInvocation = 0;
+    const deliverables = new Map<string, TurnDeliverable>();
 
     let maxIterations = this.#options.maxIterations;
+    const iterationLimitMode = this.#iterationLimitMode;
+    const maxExtensions = iterationLimitMode === "d2c"
+      ? D2C_MAX_ITERATION_EXTENSIONS
+      : this.#options.maxExtensions;
     let extensions = 0;
     let warned = false;
 
@@ -108,13 +122,17 @@ export class AgentLoop {
         const remaining = maxIterations - iteration;
         yield {
           type: "warning",
-          message: `Approaching iteration limit: ${iteration}/${maxIterations} rounds used. ${remaining} rounds remaining before automatic circuit breaker.`,
+          message: iterationLimitMode === "d2c"
+            ? `Approaching D2C base iteration limit: ${iteration}/${maxIterations} rounds used. ${remaining} rounds remain before automatic expansion (up to ${maxExtensions} expansions).`
+            : `Approaching iteration limit: ${iteration}/${maxIterations} rounds used. ${remaining} rounds remaining before automatic circuit breaker.`,
         };
       }
 
       // 方案4+方案3: hard limit with progress-aware auto-extension
       if (iteration >= maxIterations) {
-        if (this.#options.hasActiveProgress?.() && extensions < this.#options.maxExtensions) {
+        const canAutoExtend = extensions < maxExtensions
+          && (iterationLimitMode === "d2c" || this.#options.hasActiveProgress?.() === true);
+        if (canAutoExtend) {
           const previous = maxIterations;
           maxIterations += this.#options.extendIterations;
           extensions += 1;
@@ -126,7 +144,9 @@ export class AgentLoop {
           };
           yield {
             type: "warning",
-            message: `Iteration limit ${previous} reached but task progress is active. Auto-extending by ${this.#options.extendIterations} rounds (extension ${extensions}/${this.#options.maxExtensions}).`,
+            message: iterationLimitMode === "d2c"
+              ? `D2C iteration limit ${previous} reached. Auto-expanding by ${this.#options.extendIterations} rounds (expansion ${extensions}/${maxExtensions}).`
+              : `Iteration limit ${previous} reached but task progress is active. Auto-extending by ${this.#options.extendIterations} rounds (extension ${extensions}/${maxExtensions}).`,
           };
           continue;
         }
@@ -496,6 +516,7 @@ export class AgentLoop {
             // Guard failure is non-fatal for interactive sessions
           }
         }
+        if (deliverables.size > 0) yield { type: "deliverables", files: [...deliverables.values()] };
         yield {
           type: "done",
           usage: {
@@ -527,13 +548,15 @@ export class AgentLoop {
         for (const call of batch) {
           const label = this.#options.runtime.label(call);
           const hint = this.#options.runtime.hint(call);
+          const presentation = this.#options.runtime.callPresentation(call);
           this.#options.hallucinationGuard?.recordToolCall(call.name, call.input, call.id);
-          yield { type: "tool-start", id: call.id, name: call.name, input: call.input, ...(label === undefined ? {} : { label }), ...(hint === undefined ? {} : { hint }) };
+          yield { type: "tool-start", id: call.id, name: call.name, input: call.input, ...(label === undefined ? {} : { label }), ...(hint === undefined ? {} : { hint }), ...(presentation === undefined ? {} : { presentation }) };
         }
         const results = await Promise.all(batch.map(async (call) => ({
           call,
           result: await this.#options.runtime.execute(call, {
             agent: this.#options.agent,
+            ...(this.#options.ownerId === undefined ? {} : { ownerId: this.#options.ownerId }),
             ...(request.signal === undefined ? {} : { signal: request.signal }),
           }),
         })));
@@ -570,7 +593,16 @@ export class AgentLoop {
         const endLabel = this.#options.runtime.label(call);
         const endHint = this.#options.runtime.hint(call);
         this.#options.hallucinationGuard?.recordToolResult(call.name, result, call.id);
+        if (result.ok && result.presentation?.kind === "file-change") {
+          for (const change of [result.presentation, ...(result.presentation.relatedChanges ?? [])]) {
+            const current = deliverables.get(change.path);
+            deliverables.set(change.path, current === undefined
+              ? { path: change.path, operation: change.operation, added: change.added, removed: change.removed }
+              : { ...current, operation: change.operation, added: current.added + change.added, removed: current.removed + change.removed });
+          }
+        }
         yield { type: "tool-end", id: call.id, name: call.name, result, ...(endLabel === undefined ? {} : { label: endLabel }), ...(endHint === undefined ? {} : { hint: endHint }) };
+        for (const context of result.additionalContext ?? []) this.#options.context.append({ role: "system", content: context });
       }
       if (turnError !== undefined) {
         yield { type: "error", error: turnError };
@@ -607,7 +639,9 @@ function parallelReadBatchEnd(
 }
 
 function toolResultMessage(toolCallId: string, result: ToolResult): ModelMessage {
-  return { role: "tool", toolCallId, content: JSON.stringify(result.ok ? result.output : { error: result.error }) ?? "null" };
+  return { role: "tool", toolCallId, content: result.ok && result.content !== undefined
+    ? result.content
+    : (JSON.stringify(result.ok ? result.output : { error: result.error }) ?? "null") };
 }
 
 function abortMessage(signal: AbortSignal): string {

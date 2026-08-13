@@ -1,6 +1,6 @@
 {
   "name": "flavor-code",
-  "version": "1.2.8",
+  "version": "1.2.9",
   "author": "YachuanWzh",
   "type": "module",
   "publishConfig": {
@@ -46,14 +46,19 @@
     "desktop:dist": "npm run build && electron-builder --win nsis",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:desktop:e2e": "npm run build:desktop && node tests/desktop/electron-app.e2e.mjs",
     "typecheck": "tsc --noEmit",
     "smoke:install": "node scripts/smoke-install.mjs",
+    "smoke:d2c-worker": "npm run build:desktop:main && node scripts/smoke-d2c-worker.mjs",
     "prepack": "npm run build"
   },
   "build": {
     "appId": "dev.flavorcode.desktop",
     "productName": "Flavor Code",
     "asar": true,
+    "asarUnpack": [
+      "dist/desktop/pixel-worker.js"
+    ],
     "icon": "assets/icon",
     "directories": {
       "output": "release"
@@ -97,7 +102,10 @@
     "ink": "^7.1.0",
     "lodash-es": "^4.17.23",
     "marked": "^16.4.2",
+    "node-pty": "^1.1.0",
     "openai": "^6.46.0",
+    "pixelmatch": "^7.2.0",
+    "pngjs": "^7.0.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "semver": "^7.7.4",
@@ -110,12 +118,14 @@
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
+    "@types/pngjs": "^6.0.5",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@types/vscode": "1.95.0",
     "@vscode/vsce": "3.9.2",
     "electron": "^42.7.0",
     "electron-builder": "^26.15.3",
+    "playwright-core": "^1.62.1",
     "sharp": "^0.35.3",
     "tsup": "^8.5.1",
     "vite": "^8.1.5",
@@ -124,6 +134,7 @@
   "allowScripts": {
     "electron-winstaller@5.4.0": true,
     "esbuild@0.27.7": true,
-    "electron@42.7.0": true
+    "electron@42.7.0": true,
+    "node-pty@1.1.0": true
   }
 }

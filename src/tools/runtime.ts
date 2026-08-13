@@ -28,6 +28,7 @@ export interface ToolRuntimeOptions {
   workspace?: string;
   /** Inline tool-result content budgets. */
   outputLimits?: Partial<ToolOutputLimits>;
+  afterSuccess?(tool: string, paths: readonly string[], input: unknown, output: unknown, context: ToolContext): Promise<readonly string[]>;
 }
 
 export interface ToolOutputLimits {
@@ -74,6 +75,7 @@ export class ToolRuntime {
   readonly #disposeSchemas: Array<() => void>;
   readonly #workspace: string;
   readonly #outputLimits: ToolOutputLimits;
+  readonly #afterSuccess: ToolRuntimeOptions["afterSuccess"];
   #turnOutputChars = 0;
   #disposed = false;
 
@@ -86,6 +88,7 @@ export class ToolRuntime {
     this.#alwaysAllowed = new Set(options.alwaysAllowed ?? []);
     this.#workspace = resolve(options.workspace ?? process.cwd());
     this.#outputLimits = { ...DEFAULT_TOOL_OUTPUT_LIMITS, ...options.outputLimits };
+    this.#afterSuccess = options.afterSuccess;
     validateOutputLimit("perToolChars", this.#outputLimits.perToolChars);
     validateOutputLimit("perTurnChars", this.#outputLimits.perTurnChars);
     this.#disposeSchemas = [
@@ -203,7 +206,8 @@ export class ToolRuntime {
       }
       if (
         permission.decision === "ask" && context.agent === "main"
-        && this.#permissions.mode === "auto" && this.#classify !== undefined
+        && this.#permissions.mode === "auto" && this.#permissions.profile === "standard"
+        && this.#classify !== undefined
       ) {
         try {
           const classified = await this.#classify(request, signal);
@@ -226,6 +230,7 @@ export class ToolRuntime {
       const sessionAllowed = this.#alwaysAllowed.has(getToolCategory(tool.name));
       if (!sessionAllowed && (pre.decision === "ask" || permission.decision === "ask")) {
         const reason = [pre.reason, permission.reason].filter((value): value is string => value !== undefined).join("\n") || "Approval required";
+        const allowAlways = permission.allowAlways !== false;
         const requestDecision = await this.#hooks.emit({
           version: 1,
           type: "PermissionRequest",
@@ -245,7 +250,7 @@ export class ToolRuntime {
           const ctx = requestDecision.additionalContext ?? "";
           if (ctx.includes("codeisland:allow-all")) {
             const category = getToolCategory(tool.name);
-            if (category !== "destructive") this.#alwaysAllowed.add(category);
+            if (allowAlways && category !== "destructive") this.#alwaysAllowed.add(category);
           }
         } else if (context.agent !== "main" && this.#permissions.mode !== "bubble") {
           return this.#fail(tool.name, input, context.agent, "approval_required", reason);
@@ -256,14 +261,16 @@ export class ToolRuntime {
           // (The session-always-allowed case never reaches this block — it is
           // short-circuited before the PermissionRequest hook is emitted.)
           const category = getToolCategory(tool.name);
-          if (this.#approve === undefined) {
+          if (allowAlways && this.#alwaysAllowed.has(category)) {
+            // Skip the approval callback — already authorized for this tool type.
+          } else if (this.#approve === undefined) {
             return this.#fail(tool.name, input, context.agent, "permission_denied", reason);
           } else {
-            const decision = await this.#approve({ ...request, reason }, signal);
+            const decision = await this.#approve({ ...request, reason, ...(allowAlways ? {} : { allowAlways: false }) }, signal);
             if (decision === "deny") {
               return this.#fail(tool.name, input, context.agent, "user_denied", reason);
             }
-            if (decision === "always" && category !== "destructive") {
+            if (decision === "always" && allowAlways && category !== "destructive") {
               this.#alwaysAllowed.add(category);
             }
           }
@@ -271,13 +278,21 @@ export class ToolRuntime {
       }
 
       if (signal.aborted) throw signal.reason;
-      const rawOutput = await tool.execute(input, signal);
-      const presentation = getToolPresentation(rawOutput);
-      const output = await this.#limitOutput(tool.name, rawOutput);
+      const executed = await tool.execute(input, signal, context);
+      let rawOutput: unknown;
+      try { rawOutput = tool.outputSchema === undefined ? executed : tool.outputSchema.parse(executed); }
+      catch (error) { return this.#fail(tool.name, input, context.agent, "invalid_output", message(error)); }
+      const declaredPresentation = tool.presentResult?.(rawOutput, input);
+      const presentation = declaredPresentation ?? getToolPresentation(rawOutput);
+      const rendered = tool.renderForModel?.(rawOutput, input);
+      const output = rendered === undefined ? await this.#limitOutput(tool.name, rawOutput) : rawOutput;
+      const content = rendered === undefined ? undefined : await this.#limitText(tool.name, rendered);
+      const additionalContext = await this.#afterSuccess?.(tool.name, tool.paths(input), input, rawOutput, context);
       await this.#hooks.emit({
         version: 1, type: "PostToolUse", payload: { tool: tool.name, input, agent: context.agent, output },
       });
-      return { ok: true, output, ...(presentation === undefined ? {} : { presentation }) };
+      return { ok: true, output, ...(content === undefined ? {} : { content }), ...(presentation === undefined ? {} : { presentation }),
+        ...(additionalContext === undefined || additionalContext.length === 0 ? {} : { additionalContext }) };
     } catch (error) {
       return this.#fail(tool.name, input, context.agent, "tool_error", message(error));
     }
@@ -315,6 +330,18 @@ export class ToolRuntime {
       previewChars: preview.length,
       savedTo,
     } satisfies ToolOutputOverflow;
+  }
+
+  callPresentation(call: ToolCall): import("./types.js").ToolPresentation | undefined {
+    const tool = this.#tools.get(call.name);
+    if (tool?.presentCall === undefined) return undefined;
+    try { return tool.presentCall(tool.inputSchema.parse(call.input)); }
+    catch { return undefined; }
+  }
+
+  async #limitText(tool: string, content: string): Promise<string> {
+    const limited = await this.#limitOutput(tool, content);
+    return typeof limited === "string" ? limited : serializeToolOutput(limited);
   }
 
   async #fail(tool: string, input: unknown, agent: ToolContext["agent"], code: string, errorMessage: string): Promise<ToolResult> {

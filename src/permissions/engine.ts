@@ -4,7 +4,13 @@ import { dirname, isAbsolute, parse, relative, resolve, sep } from "node:path";
 import { normalizePermissionMode, type LegacyPermissionMode, type PermissionMode } from "../config/schema.js";
 
 export type { PermissionMode } from "../config/schema.js";
-export type PermissionDecision = { decision: "allow" | "deny" | "ask"; reason?: string };
+export type PermissionDecision = {
+  decision: "allow" | "deny" | "ask";
+  reason?: string;
+  /** False when an approval must apply to this call only. */
+  allowAlways?: false;
+};
+export type PermissionProfile = "standard" | "d2c";
 
 export interface PermissionRequest {
   agent: "main" | "subagent";
@@ -13,18 +19,20 @@ export interface PermissionRequest {
   command?: string;
   args?: readonly string[];
   cwd?: string;
+  allowAlways?: false;
 }
 
 export interface PermissionEngineOptions {
   workspace: string;
   mode?: PermissionMode | LegacyPermissionMode;
+  profile?: PermissionProfile;
 }
 
-const CONTROL_TOOLS = new Set(["TaskPlan", "TaskUpdate", "AskUserQuestion", "TodoWrite", "TaskOutput"]);
+const CONTROL_TOOLS = new Set(["TaskPlan", "TaskUpdate", "AskUserQuestion", "TodoWrite", "TaskOutput", "JobList", "JobRead", "JobWait", "JobKill", "TerminalRead", "TerminalList"]);
 const READ_TOOLS = new Set(["Read", "Glob", "Grep", "Search", "List", "SkillResource", "LspFindRefs", "LspHover", "LspDiagnostics", "ListRegisteredTools"]);
 const WRITE_TOOLS = new Set(["Write", "Edit", "ApplyPatch", "Copy", "Mkdir", "RegisterTool"]);
 const DESTRUCTIVE_TOOLS = new Set(["Delete", "Move", "RemoveTool"]);
-const SHELL_TOOLS = new Set(["Shell", "Bash", "Command", "Exec"]);
+const SHELL_TOOLS = new Set(["Shell", "Bash", "Command", "Exec", "TerminalOpen", "TerminalWrite", "TerminalResize", "TerminalClose"]);
 const NETWORK_TOOLS = new Set(["WebFetch", "WebSearch", "Fetch", "Network"]);
 const PATH_REQUIRED_TOOLS = new Set([
   "Read", "Write", "Edit", "ApplyPatch", "Glob", "Grep", "Delete", "Move", "Copy", "Mkdir",
@@ -53,6 +61,7 @@ export class PermissionEngine {
   readonly #lexicalWorkspace: string;
   readonly #workspace: string;
   #mode: PermissionMode;
+  #profile: PermissionProfile;
 
   constructor(options: PermissionEngineOptions) {
     const root = resolve(options.workspace);
@@ -63,11 +72,14 @@ export class PermissionEngine {
     this.#lexicalWorkspace = root;
     this.#workspace = existsSync(root) ? realpathSync.native(root) : root;
     this.#mode = canonicalMode(options.mode ?? "default");
+    this.#profile = options.profile ?? "standard";
   }
 
   get mode(): PermissionMode { return this.#mode; }
+  get profile(): PermissionProfile { return this.#profile; }
 
   setMode(mode: PermissionMode | LegacyPermissionMode): void { this.#mode = canonicalMode(mode); }
+  setProfile(profile: PermissionProfile): void { this.#profile = profile; }
 
   decide(request: PermissionRequest): PermissionDecision {
     if (request.tool === "Task") return request.agent === "main"
@@ -90,6 +102,7 @@ export class PermissionEngine {
     }
 
     const inside = paths.every((path) => classifyPath(this.#lexicalWorkspace, this.#workspace, path).inside);
+    if (this.#profile === "d2c") return this.#d2cDecision(request, inside);
     if (this.#mode === "plan") {
       return READ_TOOLS.has(request.tool)
         ? { decision: "allow" }
@@ -115,6 +128,50 @@ export class PermissionEngine {
         : ask(this.#mode, "Network access requires approval");
     }
     return ask(this.#mode, `Unknown tool: ${request.tool}`);
+  }
+
+  #d2cDecision(request: PermissionRequest, inside: boolean): PermissionDecision {
+    if ((request.paths?.length ?? 0) > 0 && !inside) {
+      return { decision: "deny", reason: "D2C tools must remain in the workspace" };
+    }
+    if (READ_TOOLS.has(request.tool)) return { decision: "allow" };
+    if (isDeletionTool(request.tool)) {
+      return { decision: "ask", reason: "Deletion requires approval", allowAlways: false };
+    }
+    if (DESTRUCTIVE_TOOLS.has(request.tool)) {
+      return request.tool === "Move"
+        ? { decision: "allow" }
+        : { decision: "ask", reason: "Deletion requires approval", allowAlways: false };
+    }
+    if (WRITE_TOOLS.has(request.tool)) return { decision: "allow" };
+    if (SHELL_TOOLS.has(request.tool)) return this.#d2cShellDecision(request);
+    if (isNetworkTool(request.tool)) return { decision: "allow" };
+    return { decision: "allow" };
+  }
+
+  #d2cShellDecision(request: PermissionRequest): PermissionDecision {
+    const analysis = request.args === undefined
+      ? analyzeCommand(request.command ?? "")
+      : analyzeArgumentCommand(request.command ?? "", request.args);
+    const cwd = request.cwd ?? this.#workspace;
+    const cwdClassification = classifyPath(this.#lexicalWorkspace, this.#workspace, cwd);
+    if (cwdClassification.escape || !cwdClassification.inside) {
+      return { decision: "deny", reason: "D2C shell cwd must remain in the workspace" };
+    }
+    if (analysis.catastrophic) {
+      return { decision: "deny", reason: "Explicitly forbidden system-level command" };
+    }
+    if (isD2cManagedPreviewCommand(analysis.command)) {
+      return {
+        decision: "deny",
+        reason: "D2C preview lifecycle is managed by D2cCompare; pass the project directory directly instead of starting npm/Vite manually",
+      };
+    }
+    if (assessD2cCommandPaths(analysis.command, cwd, this.#workspace, this.#lexicalWorkspace) === "deny") {
+      return { decision: "deny", reason: "D2C command arguments escape the workspace" };
+    }
+    if (analysis.deletion) return { decision: "ask", reason: "Deletion requires approval", allowAlways: false };
+    return { decision: "allow" };
   }
 
   #shellDecision(request: PermissionRequest): PermissionDecision {
@@ -171,25 +228,30 @@ function isNetworkTool(name: string): boolean {
   return NETWORK_TOOLS.has(name) || name.startsWith("mcp__");
 }
 
+function isDeletionTool(name: string): boolean {
+  if (name === "Delete" || name === "RemoveTool") return true;
+  return /(?:^|[_-])(delete|remove|unlink|destroy)(?:[_-]|$)/i.test(name);
+}
+
 function analyzeArgumentCommand(executable: string, args: readonly string[]): CommandAnalysis {
   const name = parse(executable.replace(/\.exe$/i, "")).name.toLowerCase();
   const command: ParsedCommand = { executable: name, args: [...args], raw: [executable, ...args].join(" ").toLowerCase() };
   if (["sh", "bash", "zsh"].includes(name)) {
     const flag = args.findIndex((arg) => arg.toLowerCase() === "-c");
-    if (flag < 0 || args[flag + 1] === undefined) return { command, destructive: false, opaque: true, wrapped: true };
+    if (flag < 0 || args[flag + 1] === undefined) return commandAnalysis(command, true, true);
     return { ...analyzeCommand(args[flag + 1]!), wrapped: true };
   }
   if (name === "cmd") {
     const flag = args.findIndex((arg) => arg.toLowerCase() === "/c");
-    if (flag < 0 || args[flag + 1] === undefined) return { command, destructive: false, opaque: true, wrapped: true };
+    if (flag < 0 || args[flag + 1] === undefined) return commandAnalysis(command, true, true);
     return { ...analyzeCommand(args.slice(flag + 1).join(" ")), wrapped: true };
   }
   if (["powershell", "pwsh"].includes(name)) {
     const flag = args.findIndex((arg) => ["-command", "-c"].includes(arg.toLowerCase()));
-    if (flag < 0 || args[flag + 1] === undefined) return { command, destructive: false, opaque: true, wrapped: true };
+    if (flag < 0 || args[flag + 1] === undefined) return commandAnalysis(command, true, true);
     return { ...analyzeCommand(args.slice(flag + 1).join(" ")), wrapped: true };
   }
-  return { command, destructive: isForbiddenCommand(command), opaque: false, wrapped: false };
+  return commandAnalysis(command, false, false);
 }
 
 interface ClassifiedPath { inside: boolean; escape: boolean; reason?: string }
@@ -238,35 +300,75 @@ function isWithin(root: string, candidate: string): boolean {
 
 interface ParsedCommand { executable: string; args: string[]; raw: string }
 
-interface CommandAnalysis { command: ParsedCommand; destructive: boolean; opaque: boolean; wrapped: boolean }
+function isD2cManagedPreviewCommand(command: ParsedCommand): boolean {
+  const executable = command.executable.replace(/\.cmd$/i, "");
+  const args = command.args.map((arg) => arg.toLowerCase());
+  if (executable === "npm") {
+    if (args[0] === "start") return true;
+    if (args[0] === "run" && ["dev", "start", "serve", "preview"].includes(args[1] ?? "")) return true;
+    if (args[0] === "exec" && args.some((arg) => arg === "vite")) return true;
+  }
+  if (["pnpm", "yarn", "bun"].includes(executable)) {
+    const script = args[0] === "run" ? args[1] : args[0];
+    if (["dev", "start", "serve", "preview"].includes(script ?? "")) return true;
+  }
+  if (executable === "npx" && args.some((arg) => arg === "vite")) return true;
+  if (executable === "vite") return true;
+  if (executable === "node" && args.some((arg) => /(?:^|[\\/])vite[\\/]bin[\\/]vite(?:\.js)?$/i.test(arg))) return true;
+
+  // `cmd /c start /b ...` is unwrapped by the parser, so inspect the retained
+  // inner command text as well as structured argv. This is the exact pattern
+  // that can leave npm.cmd running as `cmd /K` with inherited stdio handles.
+  return /(?:^|[\s;&|])(?:npm(?:\.cmd)?\s+(?:run\s+)?(?:dev|start|serve|preview)|(?:pnpm|yarn|bun)(?:\.cmd)?\s+(?:run\s+)?(?:dev|start|serve|preview)|npx(?:\.cmd)?\s+(?:[^\s]+\s+)*vite|npm(?:\.cmd)?\s+exec\s+(?:--\s+)?vite|vite(?:\.cmd)?|node(?:\.exe)?\s+[^\s]*vite[\\/]bin[\\/]vite(?:\.js)?)(?:\s|$)/i.test(command.raw);
+}
+
+interface CommandAnalysis {
+  command: ParsedCommand;
+  destructive: boolean;
+  deletion: boolean;
+  catastrophic: boolean;
+  opaque: boolean;
+  wrapped: boolean;
+}
+
+function commandAnalysis(command: ParsedCommand, opaque: boolean, wrapped: boolean): CommandAnalysis {
+  return {
+    command,
+    destructive: isForbiddenCommand(command),
+    deletion: isDeletionCommand(command),
+    catastrophic: isCatastrophicCommand(command),
+    opaque,
+    wrapped,
+  };
+}
 
 function analyzeCommand(raw: string, depth = 0): CommandAnalysis {
   const command = parseCommand(raw);
-  if (depth > 4) return { command, destructive: false, opaque: true, wrapped: depth > 0 };
+  if (depth > 4) return commandAnalysis(command, true, depth > 0);
   const wrapper = command.executable;
   if (["sh", "bash", "zsh"].includes(wrapper)) {
     const flag = command.args.findIndex((arg) => arg.toLowerCase() === "-c");
-    if (flag < 0 || command.args[flag + 1] === undefined) return { command, destructive: false, opaque: true, wrapped: true };
+    if (flag < 0 || command.args[flag + 1] === undefined) return commandAnalysis(command, true, true);
     return { ...analyzeCommand(command.args.slice(flag + 1).join(" "), depth + 1), wrapped: true };
   }
   if (wrapper === "cmd") {
     const flag = command.args.findIndex((arg) => arg.toLowerCase() === "/c");
-    if (flag < 0 || command.args[flag + 1] === undefined) return { command, destructive: false, opaque: true, wrapped: true };
+    if (flag < 0 || command.args[flag + 1] === undefined) return commandAnalysis(command, true, true);
     return { ...analyzeCommand(command.args.slice(flag + 1).join(" "), depth + 1), wrapped: true };
   }
   if (["powershell", "pwsh"].includes(wrapper)) {
     const fileFlag = command.args.some((arg) => ["-file", "-f"].includes(arg.toLowerCase()));
-    if (fileFlag) return { command, destructive: false, opaque: true, wrapped: true };
+    if (fileFlag) return commandAnalysis(command, true, true);
     const flag = command.args.findIndex((arg) => ["-command", "-c"].includes(arg.toLowerCase()));
-    if (flag < 0 || command.args[flag + 1] === undefined) return { command, destructive: false, opaque: true, wrapped: true };
+    if (flag < 0 || command.args[flag + 1] === undefined) return commandAnalysis(command, true, true);
     return { ...analyzeCommand(command.args.slice(flag + 1).join(" "), depth + 1), wrapped: true };
   }
   if (wrapper === "call") {
-    if (command.args.length === 0) return { command, destructive: false, opaque: true, wrapped: true };
+    if (command.args.length === 0) return commandAnalysis(command, true, true);
     return { ...analyzeCommand(command.args.join(" "), depth + 1), wrapped: true };
   }
   const opaque = ["start", "for", "if"].includes(wrapper) || /[%!()]/.test(command.raw);
-  return { command, destructive: isForbiddenCommand(command), opaque, wrapped: depth > 0 };
+  return commandAnalysis(command, opaque, depth > 0);
 }
 
 function parseCommand(raw: string): ParsedCommand {
@@ -276,15 +378,32 @@ function parseCommand(raw: string): ParsedCommand {
 }
 
 function isForbiddenCommand(command: ParsedCommand): boolean {
+  return isCatastrophicCommand(command)
+    || /(^|\s)(git\s+reset\s+--hard|git\s+clean\s+-[^\s]*f)/.test(command.raw);
+}
+
+function isCatastrophicCommand(command: ParsedCommand): boolean {
   if (["shutdown", "reboot", "halt", "mkfs", "diskpart", "format"].includes(command.executable)) return true;
+  if (/(^|[;&|]\s*)(shutdown|reboot|halt|mkfs|diskpart|format)(?:\.exe)?(?:\s|$)/i.test(command.raw)) return true;
   if (command.executable === "rm" && isDestructiveRm(command.args)) return true;
   for (const match of command.raw.matchAll(/\brm(?:\.exe)?\s+([^;&|]+)/gi)) {
     const nested = parseCommand(`rm ${match[1] ?? ""}`);
     if (isDestructiveRm(nested.args)) return true;
   }
-  if (command.executable === "remove-item" && command.args.some((arg) => /^-(recurse|r)$/i.test(arg)) && command.args.some(isFilesystemRoot)) return true;
-  if (command.executable === "dd" && command.args.some((arg) => /^of=\/dev\//i.test(arg))) return true;
-  return /(^|\s)(git\s+reset\s+--hard|git\s+clean\s+-[^\s]*f)/.test(command.raw);
+  if (/\b(remove-item|ri)\b/i.test(command.raw)) {
+    const recursive = /\s-(recurse|r)(?:\s|$)/i.test(command.raw);
+    const root = command.args.some(isFilesystemRoot) || /\s(?:[a-z]:[\\/]?|\/)(?:\s|$)/i.test(command.raw);
+    if (recursive && root) return true;
+  }
+  return command.executable === "dd" && command.args.some((arg) => /^of=\/dev\//i.test(arg));
+}
+
+function isDeletionCommand(command: ParsedCommand): boolean {
+  if (["rm", "rmdir", "unlink", "del", "erase", "remove-item", "ri"].includes(command.executable)) return true;
+  return /(^|[;&|]\s*)(rm|rmdir|unlink|del|erase|remove-item|ri)(?:\.exe)?(?:\s|$)/i.test(command.raw)
+    || /(^|\s)git\s+(rm|clean)(?:\s|$)/i.test(command.raw)
+    || /(^|\s)git\s+reset\s+--hard(?:\s|$)/i.test(command.raw)
+    || /(^|\s)find\s+[^;&|]*(?:-delete|-exec\s+rm)(?:\s|$)/i.test(command.raw);
 }
 
 function isDestructiveRm(args: readonly string[]): boolean {
@@ -372,4 +491,15 @@ function assessArgumentPath(value: string, cwd: string, lexicalWorkspace: string
 function looksLikePath(value: string): boolean {
   return isAbsolute(value) || value === "." || value === ".." || value.startsWith("./") || value.startsWith(".\\")
     || value.startsWith("../") || value.startsWith("..\\") || value.includes("/") || value.includes("\\");
+}
+
+function assessD2cCommandPaths(command: ParsedCommand, cwd: string, workspace: string, lexicalWorkspace: string): "allow" | "deny" {
+  for (const raw of command.args) {
+    const value = raw.includes("=") ? raw.slice(raw.indexOf("=") + 1) : raw;
+    if (process.platform === "win32" && /^\/[a-z?]+$/i.test(value)) continue;
+    if (!(isAbsolute(value) || value === ".." || value.startsWith("../") || value.startsWith("..\\"))) continue;
+    const classification = classifyPath(lexicalWorkspace, workspace, resolve(cwd, value));
+    if (classification.escape || !classification.inside) return "deny";
+  }
+  return "allow";
 }

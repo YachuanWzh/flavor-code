@@ -3,6 +3,17 @@ import { describe, expect, it } from "vitest";
 import {
   AnswerQuestionsInputSchema,
   AppMenuInputSchema,
+  D2cGetReportInputSchema,
+  D2cImportInputSchema,
+  D2cCreateProductInputSchema,
+  D2cProductDecisionInputSchema,
+  D2cPrdRegenerateInputSchema,
+  D2cPrdSectionUpdateInputSchema,
+  D2cReviewInputSchema,
+  D2cConfirmMappingInputSchema,
+  D2cTaskActionInputSchema,
+  D2cManualAcceptanceInputSchema,
+  D2cJudgeConfigInputSchema,
   DeleteSessionInputSchema,
   DeleteMemoryInputSchema,
   MemoryCandidateInputSchema,
@@ -24,6 +35,8 @@ describe("desktop IPC contracts", () => {
     expect(OpenWorkspaceInputSchema.parse({ path: "C:\\work\\demo" })).toEqual({ path: "C:\\work\\demo" });
     expect(StartSessionInputSchema.parse({ resumeSession: "session-1" })).toEqual({ resumeSession: "session-1" });
     expect(SubmitInputSchema.parse({ prompt: "fix the tests" })).toEqual({ prompt: "fix the tests" });
+    expect(SubmitInputSchema.parse({ prompt: "build from design", permissionProfile: "d2c" }))
+      .toEqual({ prompt: "build from design", permissionProfile: "d2c" });
     expect(SubmitInputSchema.parse({
       prompt: "",
       attachments: [{ name: "screen.png", mediaType: "image/png", dataBase64: "iVBORw0KGgo=" }],
@@ -60,6 +73,8 @@ describe("desktop IPC contracts", () => {
 
   it("rejects blank prompts, unknown approval decisions and oversized question indexes", () => {
     expect(() => SubmitInputSchema.parse({ prompt: "   " })).toThrow();
+    expect(() => SubmitInputSchema.parse({ prompt: "build", permissionProfile: "unrestricted" })).toThrow();
+    expect(() => SubmitInputSchema.parse({ prompt: "build", delivery: "steer", permissionProfile: "d2c" })).toThrow();
     expect(() => SubmitInputSchema.parse({
       prompt: "look",
       delivery: "steer",
@@ -86,5 +101,51 @@ describe("desktop IPC contracts", () => {
     expect(() => SaveMcpServerInputSchema.parse({
       draft: { name: "ftp", config: { url: "ftp://example.com/mcp" } },
     })).toThrow();
+  });
+});
+
+describe("D2C IPC contracts", () => {
+  it("accepts well-formed task and report references", () => {
+    expect(D2cImportInputSchema.parse({ task: "homepage" })).toEqual({ task: "homepage" });
+    expect(D2cCreateProductInputSchema.parse({ task: "homepage", framework: "react", requirement: "做一个经营看板" }))
+      .toEqual({ task: "homepage", framework: "react", requirement: "做一个经营看板" });
+    expect(D2cProductDecisionInputSchema.parse({ task: "homepage", stage: "prd", accepted: false, feedback: "补充退款流程" }))
+      .toEqual({ task: "homepage", stage: "prd", accepted: false, feedback: "补充退款流程" });
+    expect(D2cPrdRegenerateInputSchema.parse({ task: "homepage", query: "补充失败恢复流程" }))
+      .toEqual({ task: "homepage", query: "补充失败恢复流程" });
+    expect(D2cPrdSectionUpdateInputSchema.parse({ task: "homepage", sectionId: "验收标准", body: "- [AC-001] 页面可打开", expectedHash: "a".repeat(64) }))
+      .toMatchObject({ sectionId: "验收标准" });
+    expect(D2cGetReportInputSchema.parse({ task: "homepage" })).toEqual({ task: "homepage" });
+    expect(D2cGetReportInputSchema.parse({ task: "homepage", reportId: "run-20260809-100000" }))
+      .toEqual({ task: "homepage", reportId: "run-20260809-100000" });
+    expect(D2cReviewInputSchema.parse({ task: "homepage", reportId: "run-20260809-100000",
+      fingerprints: ["issue-card"], decision: "needs-fix", instruction: "收紧间距" }))
+      .toEqual({ task: "homepage", reportId: "run-20260809-100000", fingerprints: ["issue-card"], decision: "needs-fix", instruction: "收紧间距" });
+    expect(D2cConfirmMappingInputSchema.parse({ task: "homepage", moduleId: "stats", operationKey: "GET /metrics" }))
+      .toEqual({ task: "homepage", moduleId: "stats", operationKey: "GET /metrics" });
+    expect(D2cTaskActionInputSchema.parse({ task: "homepage" })).toEqual({ task: "homepage" });
+    expect(D2cManualAcceptanceInputSchema.parse({ task: "homepage", accepted: true })).toEqual({ task: "homepage", accepted: true });
+    expect(D2cJudgeConfigInputSchema.parse({ protocol: "openai-compatible", baseURL: "https://judge.example.com/v1",
+      apiKey: "secret", model: "vision-pro", passThreshold: 85 })).toMatchObject({ model: "vision-pro", passThreshold: 85 });
+  });
+
+  it("rejects malformed task names and unknown fields", () => {
+    expect(() => D2cImportInputSchema.parse({ task: "Upper Case" })).toThrow();
+    expect(() => D2cCreateProductInputSchema.parse({ task: "homepage", framework: "react", requirement: "" })).toThrow();
+    expect(() => D2cProductDecisionInputSchema.parse({ task: "homepage", stage: "prd", accepted: false })).toThrow();
+    expect(() => D2cPrdSectionUpdateInputSchema.parse({ task: "homepage", sectionId: "验收标准", body: "x", expectedHash: "bad" })).toThrow();
+    expect(() => D2cImportInputSchema.parse({ task: "-leading-dash" })).toThrow();
+    expect(() => D2cImportInputSchema.parse({ task: "", exportDir: "x" })).toThrow();
+    expect(() => D2cImportInputSchema.parse({ task: "homepage", extra: 1 })).toThrow();
+    expect(() => D2cGetReportInputSchema.parse({ task: "homepage", reportId: "" })).toThrow();
+    expect(() => D2cGetReportInputSchema.parse({ task: "homepage", reportId: "../escape" })).toThrow();
+    expect(() => D2cGetReportInputSchema.parse({ task: "homepage", reportId: "run-not-a-date" })).toThrow();
+    expect(() => D2cReviewInputSchema.parse({ task: "homepage", reportId: "run-20260809-100000", fingerprints: [], decision: "accepted" })).toThrow();
+    expect(() => D2cReviewInputSchema.parse({ task: "homepage", reportId: "run-20260809-100000", fingerprints: ["../escape"], decision: "accepted" })).toThrow();
+    expect(() => D2cConfirmMappingInputSchema.parse({ task: "homepage", moduleId: "../x", operationKey: "GET /x" })).toThrow();
+    expect(() => D2cManualAcceptanceInputSchema.parse({ task: "homepage", accepted: "yes" })).toThrow();
+    expect(() => D2cManualAcceptanceInputSchema.parse({ task: "homepage", accepted: true, url: "https://evil.test" })).toThrow();
+    expect(() => D2cJudgeConfigInputSchema.parse({ protocol: "openai-compatible", baseURL: "file:///tmp/model",
+      apiKey: "secret", model: "vision-pro", passThreshold: 85 })).toThrow();
   });
 });

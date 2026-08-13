@@ -9,6 +9,18 @@ import {
   AnswerQuestionsInputSchema,
   AddDesktopModelInputSchema,
   AppMenuInputSchema,
+  D2cGetReportInputSchema,
+  D2cImportInputSchema,
+  D2cCreateProductInputSchema,
+  D2cProductDecisionInputSchema,
+  D2cPrdRegenerateInputSchema,
+  D2cPrdSectionUpdateInputSchema,
+  D2cReviewInputSchema,
+  D2cManualAcceptanceInputSchema,
+  D2cJudgeConfigInputSchema,
+  D2cQualityIssueDecisionInputSchema,
+  D2cConfirmMappingInputSchema,
+  D2cTaskActionInputSchema,
   DeleteSessionInputSchema,
   DeleteMemoryInputSchema,
   DESKTOP_CHANNELS,
@@ -29,6 +41,15 @@ import {
   SubmitInputSchema,
   type DesktopEvent,
 } from "./contracts.js";
+import { createD2cCaptureService } from "./d2c-capture.js";
+import { isLoopbackPreviewUrl } from "../d2c/interaction.js";
+import { buildD2cJudgePrompt, finalizeD2cQualityJudgment } from "../d2c/judge.js";
+import { buildD2cAutonomousPlanPrompt } from "../d2c/interaction-review.js";
+import { createEmbeddedD2cAutomation, type D2cEmbeddedHost } from "./d2c-embedded-runner.js";
+import { createD2cJudgeClient } from "./d2c-judge-client.js";
+import { createD2cJudgeConfigStore } from "./d2c-judge-config.js";
+import { createD2cTools } from "../d2c/tools.js";
+import { createProductionRuntime } from "../production.js";
 import { DesktopRuntimeController } from "./runtime-controller.js";
 import { isSafeExternalUrl, isTrustedNavigation, normalizePersistedWorkspace } from "./security.js";
 import { desktopWindowChrome } from "./window-options.js";
@@ -53,12 +74,72 @@ app.commandLine.appendSwitch("disable-gpu-sandbox");
 
 logStartup("module-loaded", `moduleDirectory=${moduleDirectory}, packaged=${app.isPackaged}`);
 
+function emitDesktopEvent(event: DesktopEvent): void {
+  if (mainWindow !== undefined && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(DESKTOP_CHANNELS.event, event);
+  }
+}
+
+// D2C（Design to Code）：隐藏窗口快照服务，仅供 D2cCompare 工具使用。
+const d2cCapture = createD2cCaptureService();
+const d2cEmbedded = createEmbeddedD2cAutomation((): D2cEmbeddedHost | undefined => {
+  const window = mainWindow;
+  if (window === undefined || window.isDestroyed()) return undefined;
+  return {
+    isDestroyed: () => window.isDestroyed(),
+    mainFrame: window.webContents.mainFrame,
+    capturePage: (rect) => window.webContents.capturePage(rect),
+  };
+});
+const d2cJudgeClient = createD2cJudgeClient();
+const judgeStore = () => createD2cJudgeConfigStore(join(app.getPath("userData"), "d2c-judge.json"));
+function judgeImage(png: Buffer): Buffer {
+  const image = nativeImage.createFromBuffer(png);
+  const size = image.getSize();
+  const longest = Math.max(size.width, size.height);
+  if (longest <= 2_048) return png;
+  const ratio = 2_048 / longest;
+  return image.resize({ width: Math.max(1, Math.round(size.width * ratio)), height: Math.max(1, Math.round(size.height * ratio)), quality: "best" }).toPNG();
+}
+
 const controller = new DesktopRuntimeController({
-  emit(event: DesktopEvent) {
-    if (mainWindow !== undefined && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send(DESKTOP_CHANNELS.event, event);
-    }
+  emit: emitDesktopEvent,
+  runD2cInteractionTests: (manifest, baseUrl, mockUrl) => d2cEmbedded.run(manifest, baseUrl, mockUrl),
+  observeD2cPages: (manifest, baseUrl) => d2cEmbedded.observe(manifest, baseUrl),
+  captureD2cPreview: (url) => d2cEmbedded.capture(url),
+  d2cJudge: {
+    config: () => judgeStore().view(),
+    saveConfig: (input) => judgeStore().save(input),
+    evaluate: async ({ report, interaction, designPng, implementationPng }) => {
+      const config = await judgeStore().load();
+      if (config === undefined) throw new Error("Configure a multimodal D2C judge model before running the quality gate");
+      const assessment = await d2cJudgeClient.evaluate(config, {
+        prompt: buildD2cJudgePrompt({ report, interaction }),
+        designPng: judgeImage(designPng), implementationPng: judgeImage(implementationPng),
+      });
+      return finalizeD2cQualityJudgment({ assessment, report, interaction, model: config.model, passThreshold: config.passThreshold });
+    },
+    planInteractions: async (input) => {
+      const config = await judgeStore().load();
+      if (config === undefined) throw new Error("Configure a multimodal D2C judge model before autonomous interaction review");
+      return d2cJudgeClient.planInteractions(config, {
+        prompt: buildD2cAutonomousPlanPrompt(input),
+        screenshots: input.observations.map((page) => judgeImage(page.screenshot)),
+        observedPages: input.observations.map((page) => page.url),
+        observedSelectors: input.observations.flatMap((page) => page.elements.map((element) => element.selector)),
+      });
+    },
   },
+  createRuntime: async (runtimeOptions) => createProductionRuntime({
+    ...runtimeOptions,
+    ...(runtimeOptions.workspace === undefined ? {} : {
+      extraTools: createD2cTools(runtimeOptions.workspace, {
+        capture: d2cCapture,
+        onProgress: (progress) => emitDesktopEvent({ type: "d2c-progress", payload: progress }),
+        onReport: (report) => emitDesktopEvent({ type: "d2c-report", payload: report }),
+      }),
+    }),
+  }),
 });
 
 function statePath(): string {
@@ -139,8 +220,8 @@ function installIpcHandlers(): void {
     appMenu?.items[index]?.submenu?.popup({ window, x, y });
   });
   ipcMain.handle(DESKTOP_CHANNELS.submit, async (_event, value) => {
-    const { prompt, delivery, attachments } = SubmitInputSchema.parse(value);
-    void controller.submit(prompt, delivery ?? "prompt", attachments ?? []).catch(() => undefined);
+    const { prompt, delivery, attachments, permissionProfile } = SubmitInputSchema.parse(value);
+    void controller.submit(prompt, delivery ?? "prompt", attachments ?? [], permissionProfile).catch(() => undefined);
   });
   ipcMain.handle(DESKTOP_CHANNELS.finishTask, async () => controller.finishTask());
   ipcMain.handle(DESKTOP_CHANNELS.interrupt, async () => controller.interrupt());
@@ -203,6 +284,119 @@ function installIpcHandlers(): void {
   });
   ipcMain.handle(DESKTOP_CHANNELS.addModel, async (_event, value) => {
     return controller.addModel(AddDesktopModelInputSchema.parse(value));
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cImport, async (_event, value) => {
+    const { task } = D2cImportInputSchema.parse(value);
+    const choice = await dialog.showOpenDialog(mainWindow!, {
+      title: "选择 Pixso 导出的设计稿目录",
+      properties: ["openDirectory"],
+    });
+    const exportDir = choice.filePaths[0];
+    if (choice.canceled || exportDir === undefined) return undefined;
+    return controller.importD2cDesign(task, exportDir);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cCreateProduct, async (_event, value) => {
+    return controller.createD2cProduct(D2cCreateProductInputSchema.parse(value));
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cGetProduct, async (_event, value) => {
+    return controller.getD2cProduct(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cRegeneratePrd, async (_event, value) => {
+    const input = D2cPrdRegenerateInputSchema.parse(value);
+    return controller.regenerateD2cPrd(input.task, input.query);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cUpdatePrdSection, async (_event, value) => {
+    const input = D2cPrdSectionUpdateInputSchema.parse(value);
+    return controller.updateD2cPrdSection(input.task, input.sectionId, input.body, input.expectedHash);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cDecideProduct, async (_event, value) => {
+    const input = D2cProductDecisionInputSchema.parse(value);
+    return controller.decideD2cProduct(input.task, input.stage, input.accepted, input.feedback);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cStartProductPreview, async (_event, value) => {
+    return controller.startD2cProductPreview(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cStopProductPreview, async (_event, value) => {
+    return controller.stopD2cProductPreview(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cGetProductPreviewStatus, async (_event, value) => {
+    return controller.getD2cProductPreviewStatus(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cOpenProductPreview, async (_event, value) => {
+    const status = controller.getD2cProductPreviewStatus(D2cTaskActionInputSchema.parse(value).task);
+    if (status.url === undefined || !isLoopbackPreviewUrl(status.url)) throw new Error("D2C product preview is not running on loopback");
+    await shell.openExternal(status.url);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cListReports, async () => controller.listD2cReports());
+  ipcMain.handle(DESKTOP_CHANNELS.d2cGetReport, async (_event, value) => {
+    const { task, reportId } = D2cGetReportInputSchema.parse(value);
+    return controller.getD2cReport(task, reportId);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cUpdateReview, async (_event, value) => {
+    const input = D2cReviewInputSchema.parse(value);
+    return controller.updateD2cReview(input.task, input.reportId, input.fingerprints, input.decision, input.instruction);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cImportOpenApi, async (_event, value) => {
+    const { task } = D2cTaskActionInputSchema.parse(value);
+    const choice = await dialog.showOpenDialog(mainWindow!, {
+      title: "选择 Swagger / OpenAPI JSON",
+      properties: ["openFile"],
+      filters: [{ name: "OpenAPI JSON", extensions: ["json"] }],
+    });
+    const source = choice.filePaths[0];
+    if (choice.canceled || source === undefined) return undefined;
+    return controller.importD2cOpenApi(task, source);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cGetIntegration, async (_event, value) => {
+    return controller.getD2cIntegration(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cConfirmMapping, async (_event, value) => {
+    const input = D2cConfirmMappingInputSchema.parse(value);
+    return controller.confirmD2cMapping(input.task, input.moduleId, input.operationKey);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cGenerateIntegration, async (_event, value) => {
+    return controller.generateD2cIntegration(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cStartMock, async (_event, value) => {
+    return controller.startD2cMock(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cStopMock, async (_event, value) => {
+    return controller.stopD2cMock(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cGetMockStatus, async (_event, value) => {
+    return controller.getD2cMockStatus(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cStartPreview, async (_event, value) => {
+    return controller.startD2cPreview(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cStopPreview, async (_event, value) => {
+    return controller.stopD2cPreview(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cGetPreviewStatus, async (_event, value) => {
+    return controller.getD2cPreviewStatus(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cOpenPreview, async (_event, value) => {
+    const status = controller.getD2cPreviewStatus(D2cTaskActionInputSchema.parse(value).task);
+    if (status.url === undefined || !isLoopbackPreviewUrl(status.url)) throw new Error("D2C preview is not running on loopback");
+    await shell.openExternal(status.url);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cRunInteractionTests, async (_event, value) => {
+    return controller.runD2cInteractionTests(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cSetManualAcceptance, async (_event, value) => {
+    const input = D2cManualAcceptanceInputSchema.parse(value);
+    return controller.setD2cManualAcceptance(input.task, input.accepted);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cGetJudgeConfig, async () => controller.getD2cJudgeConfig());
+  ipcMain.handle(DESKTOP_CHANNELS.d2cSaveJudgeConfig, async (_event, value) => {
+    return controller.saveD2cJudgeConfig(D2cJudgeConfigInputSchema.parse(value));
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cRunQualityJudge, async (_event, value) => {
+    return controller.runD2cQualityJudge(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cResolveQualityIssue, async (_event, value) => {
+    const input = D2cQualityIssueDecisionInputSchema.parse(value);
+    return controller.resolveD2cQualityIssue(input.task, input.issueId, input.decision);
   });
 }
 

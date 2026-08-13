@@ -35,14 +35,22 @@ export interface TaskSnapshot {
   foregroundTaskId?: string;
 }
 
+export interface TurnDeliverable {
+  path: string;
+  operation: "create" | "update" | "delete";
+  added: number;
+  removed: number;
+}
+
 export type AgentEvent =
   | { type: "model-start"; id: string }
   | { type: "model-end"; id: string }
   | { type: "text"; text: string }
-  | { type: "tool-start"; id: string; name: string; input: unknown; label?: string; hint?: string }
+  | { type: "tool-start"; id: string; name: string; input: unknown; label?: string; hint?: string; presentation?: import("../tools/types.js").ToolPresentation }
   | { type: "tool-end"; id: string; name: string; result: ToolResult; label?: string; hint?: string }
   | { type: "tasks"; snapshot: TaskSnapshot }
   | { type: "tasks-cleared" }
+  | { type: "deliverables"; files: readonly TurnDeliverable[] }
   | {
     type: "usage";
     inputTokens: number;

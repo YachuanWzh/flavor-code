@@ -5,6 +5,9 @@ import { runEvaluation } from "../../src/eval/runner.js";
 describe("runEvaluation", () => {
   it("reports verification and token-budget outcomes with injected dependencies", async () => {
     const submit = vi.fn(async () => undefined);
+    const exec = vi.fn(async () => ({
+      exitCode: 0, signal: null, stdout: "ok", stderr: "", terminationReason: null as null,
+    }));
     const report = await runEvaluation({
       name: "parser",
       workspace: "/fixture",
@@ -21,7 +24,7 @@ describe("runEvaluation", () => {
       },
       executionEnvironment: {
         kind: "local",
-        exec: async () => ({ exitCode: 0, signal: null, stdout: "ok", stderr: "", terminationReason: null }),
+        exec,
         dispose: async () => undefined,
       },
       now: (() => {
@@ -34,5 +37,6 @@ describe("runEvaluation", () => {
     expect(report.passed).toBe(true);
     expect(report.tokens).toEqual({ input: 4, output: 3, total: 7, withinBudget: true });
     expect(report.verification[0]).toEqual(expect.objectContaining({ passed: true, exitCode: 0 }));
+    expect(exec).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 600_000 }));
   });
 });

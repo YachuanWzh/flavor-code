@@ -16,6 +16,7 @@ import { updatePlanTask, type TaskPlan } from "./agent/task-plan.js";
 import type { AgentEvent, TaskSnapshot } from "./agent/types.js";
 import { loadConfig, setProjectMcpServerDisabled } from "./config/load.js";
 import { ContextManager, type CompactProgressCallback, type ContextSnapshot } from "./context/manager.js";
+import { WorkspaceInstructions } from "./context/workspace-instructions.js";
 import { summarizeWithModel } from "./context/summarizer.js";
 import { LocalHarness } from "./harness/local.js";
 import { HookBus } from "./hooks/bus.js";
@@ -40,7 +41,7 @@ import { OAuthCallbackAuthProvider } from "./auth/oauth.js";
 import { createFileTokenStore } from "./auth/store.js";
 import { oauthCredentialId } from "./auth/oauth-config.js";
 import type { AuthResult, OAuthLlmConfig } from "./auth/types.js";
-import type { PermissionRequest } from "./permissions/engine.js";
+import type { PermissionProfile, PermissionRequest } from "./permissions/engine.js";
 import { buildCurrentDateSection, buildRuntimeEnvironmentSection, buildSubagentDirective, buildSystemPrompt, type PromptEnvironment } from "./prompts/system.js";
 import type { ApprovalDecision } from "./tools/runtime.js";
 import { PluginHost } from "./plugins/host.js";
@@ -55,10 +56,12 @@ import {
   createEditTool,
   createReadTool,
   createWriteTool,
+  FileObservationStore,
   type FileWriteProposal,
 } from "./tools/files.js";
 import { createGlobTool, createGrepTool } from "./tools/search.js";
 import { createShellTool } from "./tools/shell.js";
+import { createWebFetchTool, createWebSearchTool } from "./tools/web.js";
 import { createLspTools } from "./tools/lsp.js";
 import { createAskUserQuestionTool, hookAnswersFromUpdatedInput, QuestionBridge, type AskUserQuestionHandler } from "./tools/ask-user-question.js";
 import { createTaskOutputTool } from "./tools/task-output.js";
@@ -82,6 +85,10 @@ import { DEFAULT_MEMORY_BEHAVIOR, MemoryStore, renderMemoryDocument } from "./me
 import { MemoryReviewBridge } from "./memory/review.js";
 import { createExecutionEnvironment } from "./execution/factory.js";
 import { FlavorIdeClient } from "./ide/client.js";
+import { JobRegistry, type JobSnapshot } from "./jobs/registry.js";
+import { TerminalService } from "./terminal/service.js";
+import { createJobTools } from "./tools/jobs.js";
+import { createTerminalTools } from "./tools/terminal.js";
 
 const INTERRUPTED_TASK_PLAN_CONTEXT = [
   "The previous turn's task plan was cancelled and archived, so it is no longer active.",
@@ -105,16 +112,23 @@ export interface ProductionRuntimeOptions {
   resumeSession?: string | true;
   /** Test and embedding seam for creating configured MCP clients. */
   mcpClientFactory?: McpClientFactory;
+  /** Additional tools provided by embedders (e.g. desktop-only D2C tools). */
+  extraTools?: readonly ToolDefinition<unknown>[];
 }
 
 export interface ProductionRuntime {
   session: FlavorSession;
   services: SessionServices;
+  authorization: {
+    permissionProfile(): PermissionProfile;
+    setPermissionProfile(profile: PermissionProfile): void;
+  };
   approvals: ApprovalBridge;
   memoryReviews: MemoryReviewBridge;
   diagnostics: readonly string[];
   sessionId: string;
   restoredTranscript: TranscriptState;
+  jobs: { list(): readonly JobSnapshot[]; subscribe(listener: (jobs: readonly JobSnapshot[]) => void): () => void };
   dispose(): Promise<void>;
 }
 
@@ -325,17 +339,24 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     return questions.ask(qs, signal);
   };
   const executionEnvironment = createExecutionEnvironment(workspace, config.execution);
-  const fileMutationOptions = options.beforeFileCommit === undefined
-    ? {}
-    : { beforeCommit: options.beforeFileCommit };
+  const jobs = new JobRegistry();
+  const terminals = new TerminalService(workspace, { jobs });
+  const observations = new FileObservationStore();
+  const workspaceInstructions = new WorkspaceInstructions(workspace);
+  const fileMutationOptions = {
+    observations,
+    ...(options.beforeFileCommit === undefined ? {} : { beforeCommit: options.beforeFileCommit }),
+  };
   const tools: ToolDefinition<unknown>[] = [
-    createReadTool(workspace),
+    createReadTool(workspace, { observations }),
     createWriteTool(workspace, fileMutationOptions),
     createEditTool(workspace, fileMutationOptions),
     createApplyPatchTool(workspace, fileMutationOptions),
     createGlobTool(workspace), createGrepTool(workspace), createShellTool(workspace, {
+      jobs,
       ...(executionEnvironment === undefined ? {} : { executionEnvironment }),
     }),
+    createWebFetchTool(), createWebSearchTool(), ...createJobTools(jobs), ...createTerminalTools(terminals, workspace),
     ...createLspTools(workspace, {
       onStatus: (message) => emitOutput({ type: "notice", message }),
     }),
@@ -453,7 +474,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const skillsReady = skills.discover();
   skillsReady.catch(() => undefined); // Re-surfaced at the await before harness creation.
   tools.push(createSkillResourceTool(skills));
+  if (options.extraTools !== undefined) tools.push(...options.extraTools);
   const flavor = await optionalText(join(workspace, "FLAVOR.md"));
+  const instructionBaseline = await workspaceInstructions.baseline();
   let memoryContext: string | undefined;
   if (memoryStore !== undefined) {
     try {
@@ -652,6 +675,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         }),
       ],
       ...(flavor === undefined ? {} : { flavor }),
+      ...(instructionBaseline === "" ? {} : { workspaceInstructions: instructionBaseline }),
       ...(memoryContext === undefined ? {} : { memory: memoryContext }),
       ...(taskState === undefined ? {} : { taskState }),
       userMemory: () => userMemoryContext ?? "",
@@ -684,6 +708,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     maxIterationsMain: config.maxIterations.main,
     maxIterationsSubagent: config.maxIterations.subagent,
     hasActiveProgress,
+    afterToolSuccess: async (_tool, paths, _input, _output, context) => workspaceInstructions.discover(paths, context.ownerId ?? context.agent),
     approve: resolveToolApproval,
   });
   harnessCreated = true;
@@ -781,7 +806,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     const prompt = String(event.payload.prompt);
     const reassessInterruptedPlan = interruptedTaskPlanNeedsReassessment && !prompt.startsWith("/");
     timelineState = transcriptReducer(timelineState, { type: "submit", prompt });
-    automaticMemoryTask = !prompt.startsWith("/");
+    // D2C/E2E prompts are internal artifact-generation jobs. Their often-large PRD and
+    // prototype transcripts are already persisted with the task and must not hold the
+    // foreground submission open for automatic long-term-memory extraction.
+    automaticMemoryTask = !prompt.startsWith("/") && harness.permissionProfile !== "d2c";
     if (automaticMemoryTask) memoryReviews.dismissAll();
     if (!prompt.startsWith("/") && memoryLifecycle.status === "completed") {
       memoryLifecycle = {
@@ -900,12 +928,17 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       return;
     }
     const loopExecutionEnvironment = createExecutionEnvironment(input.workspace, config.execution);
+    const loopObservations = new FileObservationStore();
+    const loopInstructions = new WorkspaceInstructions(input.workspace);
+    const loopMutationOptions = { observations: loopObservations };
     const loopTools: ToolDefinition<unknown>[] = [
-      createReadTool(input.workspace), createWriteTool(input.workspace), createEditTool(input.workspace),
-      createApplyPatchTool(input.workspace), createGlobTool(input.workspace), createGrepTool(input.workspace),
+      createReadTool(input.workspace, { observations: loopObservations }), createWriteTool(input.workspace, loopMutationOptions), createEditTool(input.workspace, loopMutationOptions),
+      createApplyPatchTool(input.workspace, loopMutationOptions), createGlobTool(input.workspace), createGrepTool(input.workspace),
       createShellTool(input.workspace, {
+        jobs,
         ...(loopExecutionEnvironment === undefined ? {} : { executionEnvironment: loopExecutionEnvironment }),
       }),
+      createWebFetchTool(), createWebSearchTool(), ...createJobTools(jobs),
       ...createLspTools(input.workspace, {
         onStatus: (status) => emitOutput({ type: "notice", message: status }),
       }),
@@ -913,6 +946,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       ...mcpTools,
     ];
     const loopFlavor = await optionalText(join(input.workspace, "FLAVOR.md"));
+    const loopInstructionBaseline = await loopInstructions.baseline();
     const loopEnvironment = createPromptEnvironment({
       now: new Date(), platform: process.platform, osVersion: `${osVersion()} ${osRelease()}`,
       shell: environment.ComSpec ?? environment.SHELL ?? "unknown",
@@ -944,6 +978,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
           }),
         ],
         ...(loopFlavor === undefined ? {} : { flavor: loopFlavor }),
+        ...(loopInstructionBaseline === "" ? {} : { workspaceInstructions: loopInstructionBaseline }),
         ...(memoryContext === undefined ? {} : { memory: memoryContext }),
         userMemory: () => userMemoryContext ?? "",
         ...(compactAtChars === undefined ? {} : { compactAtChars }),
@@ -968,6 +1003,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       maxIterationsMain: config.maxIterations.main,
       maxIterationsSubagent: config.maxIterations.subagent,
       loopMode: true,
+      afterToolSuccess: async (_tool, paths, _input, _output, context) => loopInstructions.discover(paths, context.ownerId ?? context.agent),
       approve: resolveToolApproval,
     });
     try {
@@ -1387,9 +1423,14 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     sleepScheduler.start();
   }
   const session = new FlavorSession(services);
+  const authorization = {
+    permissionProfile: () => harness.permissionProfile,
+    setPermissionProfile: (profile: PermissionProfile) => harness.setPermissionProfile(profile),
+  };
   let disposed = false;
   return {
-    session, services, approvals, memoryReviews, restoredTranscript,
+    session, services, authorization, approvals, memoryReviews, restoredTranscript,
+    jobs: { list: () => jobs.list(), subscribe: (listener) => jobs.subscribe(listener) },
     get sessionId() { return sessionId; },
     get diagnostics() { return diagnostics.map((item) => redactSecrets(item, secrets)); },
     async dispose() {
@@ -1402,6 +1443,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       await persistTail;
       if (ideSessionId !== undefined) await ide.endSession(ideSessionId);
       await executionEnvironment?.dispose();
+      terminals.dispose();
+      await jobs.dispose();
       auditLogger.close();
       memoryReviews.dispose();
       await cleanupProduction(approvals, questions, pluginHost, mcpManager, harness);
@@ -1414,6 +1457,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       if (ideSessionId !== undefined) await ide.endSession(ideSessionId);
       await sleepScheduler?.dispose();
       await executionEnvironment?.dispose();
+      terminals.dispose();
+      await jobs.dispose();
       await cleanupProduction(approvals, questions, pluginHost, mcpManager, harnessCreated ? harness : undefined);
     }
     catch (cleanupError) { attachCleanupError(primaryError, cleanupError); }

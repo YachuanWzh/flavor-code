@@ -40,6 +40,35 @@ function fixture(decision: "allow" | "deny" | "ask" = "allow") {
 }
 
 describe("ToolRuntime", () => {
+  it("validates canonical outputs and renders bounded model content independently", async () => {
+    const f = fixture();
+    const tool: ToolDefinition<{ path: string }, { value: number }> = {
+      ...f.tool,
+      outputSchema: z.object({ value: z.number() }),
+      execute: async () => ({ value: 7 }),
+      renderForModel: (output) => `value=${output.value}`,
+      presentCall: (input) => ({ kind: "generic", title: "Call", summary: input.path }),
+      presentResult: (output) => ({ kind: "generic", title: "Result", summary: String(output.value) }),
+    };
+    const runtime = new ToolRuntime({ tools: [tool], hooks: f.hooks, permissions: f.permissions });
+
+    expect(runtime.callPresentation({ name: "Test", input: { path: "x" } })).toEqual({ kind: "generic", title: "Call", summary: "x" });
+
+    await expect(runtime.execute({ name: "Test", input: { path: "x" } }, { agent: "main" })).resolves.toMatchObject({
+      ok: true,
+      output: { value: 7 },
+      content: "value=7",
+      presentation: { kind: "generic", title: "Result", summary: "7" },
+    });
+  });
+
+  it("fails a tool that violates its declared output schema", async () => {
+    const f = fixture();
+    const tool = { ...f.tool, outputSchema: z.object({ value: z.number() }), execute: async () => ({ value: "bad" }) };
+    const runtime = new ToolRuntime({ tools: [tool], hooks: f.hooks, permissions: f.permissions });
+    await expect(runtime.execute({ name: "Test", input: { path: "x" } }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: false, error: { code: "invalid_output" } });
+  });
   it("uses the documented 50K per-tool and 200K per-turn defaults", () => {
     expect(DEFAULT_TOOL_OUTPUT_LIMITS).toEqual({ perToolChars: 50_000, perTurnChars: 200_000 });
   });
@@ -180,6 +209,28 @@ describe("ToolRuntime", () => {
       { agent: "main" },
     )).resolves.toMatchObject({ ok: false, error: { code: "permission_denied" } });
     expect(classifications).toBe(0);
+  });
+
+  it("requires a fresh user approval for every D2C shell deletion", async () => {
+    const f = fixture();
+    let classifications = 0;
+    let approvals = 0;
+    const runtime = new ToolRuntime({
+      tools: [createShellTool(f.workspace)], hooks: f.hooks,
+      permissions: new PermissionEngine({ workspace: f.workspace, mode: "auto", profile: "d2c" }),
+      classify: async () => { classifications += 1; return { decision: "allow" }; },
+      approve: async (request) => {
+        approvals += 1;
+        expect(request.allowAlways).toBe(false);
+        return "always" as const;
+      },
+    });
+    const call = { name: "Shell", input: { command: "rm", args: ["old.tsx"], cwd: "." } };
+
+    await expect(runtime.execute(call, { agent: "main" })).resolves.toMatchObject({ ok: true });
+    await expect(runtime.execute(call, { agent: "main" })).resolves.toMatchObject({ ok: true });
+    expect(classifications).toBe(0);
+    expect(approvals).toBe(2);
   });
 
   it("falls back to normal approval when auto classification is unavailable", async () => {

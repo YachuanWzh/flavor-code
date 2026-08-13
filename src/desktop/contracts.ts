@@ -1,6 +1,13 @@
 import { z } from "zod";
 
 import type { AgentEvent } from "../agent/types.js";
+import type { D2cProgressEvent, D2cReport } from "../d2c/types.js";
+import type { D2cWorkflow } from "../d2c/workflow.js";
+import type { D2cInteractionRun } from "../d2c/interaction.js";
+import type { D2cAutonomousInteractionPlan } from "../d2c/interaction-review.js";
+import type { CreateD2cProductPlanInput, D2cProductPlanView, D2cProductStage } from "../d2c/product.js";
+import type { D2cApiMapping, D2cOpenApiDocument } from "../d2c/openapi.js";
+import { D2cJudgeConfigInputSchema, type D2cJudgeConfig, type D2cJudgeConfigView, type D2cQualityJudgment } from "../d2c/judge.js";
 import { McpServerConfigSchema, McpServerNameSchema, type PermissionMode } from "../config/schema.js";
 import type { TranscriptState } from "../ui/transcript.js";
 import type { Question } from "../tools/ask-user-question.js";
@@ -9,6 +16,7 @@ import type { ManagedSkill, ManagedSkillSummary, SkillDraft } from "../skills/ma
 import { MEMORY_TYPES, type MemoryCandidate, type MemoryEntry } from "../memory/types.js";
 import type { MemorySnapshot } from "../memory/manager.js";
 import type { MemoryReviewItem } from "../memory/review.js";
+import type { JobSnapshot } from "../jobs/registry.js";
 import type { ManagedMcpServer } from "../mcp/config-manager.js";
 import {
   DEFAULT_MAX_IMAGE_BYTES,
@@ -30,6 +38,7 @@ export const AppMenuInputSchema = z.object({
   y: z.number().int().min(0).max(32_768),
 }).strict();
 const DesktopMessageDeliverySchema = z.enum(["prompt", "steer", "followUp"]);
+const DesktopPermissionProfileSchema = z.literal("d2c");
 const ImageAttachmentInputSchema = z.object({
   name: z.string().min(1).max(255),
   mediaType: z.enum(["image/png", "image/jpeg", "image/webp"]),
@@ -38,6 +47,7 @@ const ImageAttachmentInputSchema = z.object({
 export const SubmitInputSchema = z.object({
   prompt: z.string().max(1_000_000),
   delivery: DesktopMessageDeliverySchema.optional(),
+  permissionProfile: DesktopPermissionProfileSchema.optional(),
   attachments: z.array(ImageAttachmentInputSchema).max(DEFAULT_MAX_IMAGES).optional(),
 }).strict().superRefine((value, context) => {
   const attachments = value.attachments ?? [];
@@ -47,12 +57,16 @@ export const SubmitInputSchema = z.object({
   if (value.delivery !== undefined && value.delivery !== "prompt" && attachments.length > 0) {
     context.addIssue({ code: "custom", path: ["attachments"], message: "Images are only supported on new prompts" });
   }
+  if (value.permissionProfile !== undefined && value.delivery !== undefined && value.delivery !== "prompt") {
+    context.addIssue({ code: "custom", path: ["permissionProfile"], message: "Permission profiles require a new prompt" });
+  }
   if (attachments.length > 0 && value.prompt.trim().startsWith("/")) {
     context.addIssue({ code: "custom", path: ["attachments"], message: "Images cannot be attached to slash commands" });
   }
 });
 export type DesktopImageAttachmentInput = ImageAttachmentInput;
 export type DesktopMessageDelivery = z.infer<typeof DesktopMessageDeliverySchema>;
+export type DesktopPermissionProfile = z.infer<typeof DesktopPermissionProfileSchema>;
 export const ResolveApprovalInputSchema = z.object({ decision: z.enum(["allow", "deny", "always"]) }).strict();
 export const AnswerQuestionsInputSchema = z.object({
   answers: z.record(z.coerce.number().int().min(0).max(3), z.string().min(1).max(10_000)),
@@ -115,6 +129,64 @@ export const SwitchDesktopModelInputSchema = z.object({
   }, "模型 ID 必须使用 provider:model 格式"),
 }).strict();
 
+const D2cTaskInput = z.string().trim().min(1).max(64)
+  .regex(/^[a-z0-9][a-z0-9-]{0,63}$/, "Invalid D2C task name");
+export const D2cImportInputSchema = z.object({
+  task: D2cTaskInput,
+}).strict();
+export const D2cCreateProductInputSchema = z.object({
+  task: D2cTaskInput,
+  framework: z.enum(["vue", "react"]),
+  requirement: z.string().trim().min(2).max(50_000),
+}).strict();
+export const D2cProductDecisionInputSchema = z.object({
+  task: D2cTaskInput,
+  stage: z.enum(["prd", "design"]),
+  accepted: z.boolean(),
+  feedback: z.string().trim().min(1).max(10_000).optional(),
+}).strict().superRefine((value, context) => {
+  if (!value.accepted && value.feedback === undefined) {
+    context.addIssue({ code: "custom", path: ["feedback"], message: "Feedback is required when rejecting an artifact" });
+  }
+});
+export const D2cPrdRegenerateInputSchema = z.object({
+  task: D2cTaskInput,
+  query: z.string().trim().min(1).max(10_000),
+}).strict();
+export const D2cPrdSectionUpdateInputSchema = z.object({
+  task: D2cTaskInput,
+  sectionId: z.string().trim().min(1).max(500),
+  body: z.string().max(100_000),
+  expectedHash: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+export const D2cGetReportInputSchema = z.object({
+  task: D2cTaskInput,
+  reportId: z.string().trim().regex(/^run-\d{8}-\d{6}(?:-[2-9]\d*)?$/, "Invalid D2C report id").optional(),
+}).strict();
+const D2cReportInput = z.string().trim().regex(/^run-\d{8}-\d{6}(?:-[2-9]\d*)?$/, "Invalid D2C report id");
+const D2cFingerprintInput = z.string().trim().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, "Invalid D2C issue fingerprint");
+const D2cModuleInput = z.string().trim().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, "Invalid D2C module id");
+export const D2cReviewInputSchema = z.object({
+  task: D2cTaskInput,
+  reportId: D2cReportInput,
+  fingerprints: z.array(D2cFingerprintInput).min(1).max(10_000),
+  decision: z.enum(["pending", "accepted", "needs-fix"]),
+  instruction: z.string().trim().min(1).max(10_000).optional(),
+}).strict();
+export const D2cTaskActionInputSchema = z.object({ task: D2cTaskInput }).strict();
+export const D2cManualAcceptanceInputSchema = z.object({ task: D2cTaskInput, accepted: z.boolean() }).strict();
+export const D2cQualityIssueDecisionInputSchema = z.object({
+  task: D2cTaskInput,
+  issueId: z.string().regex(/^quality-[a-f0-9]{20}$/),
+  decision: z.enum(["skipped", "fixing"]),
+}).strict();
+export { D2cJudgeConfigInputSchema };
+export const D2cConfirmMappingInputSchema = z.object({
+  task: D2cTaskInput,
+  moduleId: D2cModuleInput,
+  operationKey: z.string().trim().min(3).max(2_048).refine((value) => !/[\u0000-\u001f]/.test(value), "Invalid operation key"),
+}).strict();
+
 export type AddDesktopModelInput = z.infer<typeof AddDesktopModelInputSchema>;
 export type McpServerDraft = z.input<typeof SaveMcpServerInputSchema>["draft"];
 
@@ -143,6 +215,7 @@ export interface DesktopApproval {
   command?: string;
   args?: readonly string[];
   cwd?: string;
+  allowAlways?: false;
 }
 
 export interface DesktopSnapshot {
@@ -163,6 +236,7 @@ export interface DesktopSnapshot {
   memoryAutoDismissSeconds?: number;
   diagnostics: readonly string[];
   models: readonly DesktopModelOption[];
+  jobs: readonly JobSnapshot[];
 }
 
 export interface DesktopModelMutationResult {
@@ -176,10 +250,118 @@ export interface SessionStartedPayload {
   snapshot: DesktopSnapshot;
 }
 
+export interface D2cReportListItem {
+  task: string;
+  reportId: string;
+  createdAt: string;
+  total: number;
+  grade: string;
+  evaluationStatus: D2cReport["evaluation"]["status"];
+  verdict: D2cReport["evaluation"]["verdict"];
+  issueCount: number;
+  batchId?: string;
+  page?: D2cReport["page"];
+}
+
+/** Result of importing a Pixso export directory through the D2C view. */
+export interface D2cImportResult {
+  task: string;
+  entryHtml: string;
+  files: readonly string[];
+  pages: readonly { id: string; label: string; html: string }[];
+}
+
+/** Report plus screenshots encoded as PNG data URLs for renderer display. */
+export interface D2cReportView {
+  report: D2cReport;
+  /** Requirement deliveries own their API contract; design imports may attach an existing one. */
+  deliveryOrigin: "requirement" | "design";
+  /** True when the task design was re-imported after this report was created. */
+  designOutdated: boolean;
+  designPng: string;
+  implementationPng: string;
+  heatmapPng: string;
+  /** Other page reports from the same comparison batch; PNGs load on selection. */
+  relatedPages: readonly D2cReportListItem[];
+  workflow: D2cWorkflow;
+}
+
+export interface D2cIntegrationView {
+  workflow: D2cWorkflow;
+  document: D2cOpenApiDocument;
+  mappings: readonly D2cApiMapping[];
+}
+
+export interface D2cIntegrationGenerationResult extends D2cIntegrationView {
+  files: readonly string[];
+  prompt: string;
+}
+
+export interface D2cMockStatus {
+  running: boolean;
+  url?: string;
+  output?: string;
+}
+
+export interface D2cPreviewStatus {
+  running: boolean;
+  url?: string;
+  mockUrl?: string;
+}
+
+export interface D2cInteractionStatus {
+  workflow: D2cWorkflow;
+  result?: D2cInteractionRun;
+  review?: {
+    mode: "autonomous" | "contract" | "contract-fallback";
+    model?: string;
+    summary?: string;
+    warning?: string;
+    plannedScenarios: number;
+    pageAnalyses?: D2cAutonomousInteractionPlan["pageAnalyses"];
+  };
+}
+
+export interface D2cProductGenerationResult {
+  view: D2cProductPlanView;
+  prompt: string;
+}
+
+export interface D2cProductDecisionResult {
+  view: D2cProductPlanView;
+  prompt?: string;
+  imported?: D2cImportResult;
+}
+
+export interface D2cProductPreviewStatus {
+  running: boolean;
+  url?: string;
+}
+
+export interface D2cQualityJudgeStatus {
+  workflow: D2cWorkflow;
+  judgment: D2cQualityJudgment;
+}
+
+export interface D2cQualityIssueDecisionResult {
+  workflow: D2cWorkflow;
+  prompt?: string;
+}
+
+export interface D2cReportEventPayload {
+  task: string;
+  reportId: string;
+  total: number;
+  grade: string;
+  pageCount?: number;
+}
+
 export type DesktopEvent =
   | { type: "snapshot"; snapshot: DesktopSnapshot }
   | { type: "session-started"; payload: SessionStartedPayload }
   | { type: "session-output"; sessionId: string; event: SessionOutput }
+  | { type: "d2c-progress"; payload: D2cProgressEvent }
+  | { type: "d2c-report"; payload: D2cReportEventPayload }
   | { type: "runtime-error"; sessionId?: string; message: string };
 
 export interface FlavorDesktopApi {
@@ -195,6 +377,7 @@ export interface FlavorDesktopApi {
     prompt: string,
     delivery?: DesktopMessageDelivery,
     attachments?: readonly DesktopImageAttachmentInput[],
+    permissionProfile?: DesktopPermissionProfile,
   ): Promise<void>;
   finishTask(): Promise<string>;
   interrupt(): Promise<void>;
@@ -218,6 +401,37 @@ export interface FlavorDesktopApi {
   deleteMemory(id: string): Promise<boolean>;
   switchModel(modelId: string): Promise<DesktopSnapshot>;
   addModel(input: AddDesktopModelInput): Promise<DesktopModelMutationResult>;
+  listD2cReports(): Promise<readonly D2cReportListItem[]>;
+  getD2cReport(task: string, reportId?: string): Promise<D2cReportView>;
+  /** Opens a directory picker and imports the chosen Pixso export; undefined when cancelled. */
+  importD2cDesign(task: string): Promise<D2cImportResult | undefined>;
+  createD2cProduct(input: CreateD2cProductPlanInput): Promise<D2cProductGenerationResult>;
+  getD2cProduct(task: string): Promise<D2cProductPlanView | undefined>;
+  regenerateD2cPrd(task: string, query: string): Promise<D2cProductGenerationResult>;
+  updateD2cPrdSection(task: string, sectionId: string, body: string, expectedHash: string): Promise<D2cProductPlanView>;
+  decideD2cProduct(task: string, stage: D2cProductStage, accepted: boolean, feedback?: string): Promise<D2cProductDecisionResult>;
+  startD2cProductPreview(task: string): Promise<D2cProductPreviewStatus>;
+  stopD2cProductPreview(task: string): Promise<D2cProductPreviewStatus>;
+  getD2cProductPreviewStatus(task: string): Promise<D2cProductPreviewStatus>;
+  openD2cProductPreview(task: string): Promise<void>;
+  updateD2cReview(task: string, reportId: string, fingerprints: readonly string[], decision: "pending" | "accepted" | "needs-fix", instruction?: string): Promise<D2cWorkflow>;
+  importD2cOpenApi(task: string): Promise<D2cIntegrationView | undefined>;
+  getD2cIntegration(task: string): Promise<D2cIntegrationView | undefined>;
+  confirmD2cMapping(task: string, moduleId: string, operationKey: string): Promise<D2cIntegrationView>;
+  generateD2cIntegration(task: string): Promise<D2cIntegrationGenerationResult>;
+  startD2cMock(task: string): Promise<D2cMockStatus>;
+  stopD2cMock(task: string): Promise<D2cMockStatus>;
+  getD2cMockStatus(task: string): Promise<D2cMockStatus>;
+  startD2cPreview(task: string): Promise<D2cPreviewStatus>;
+  stopD2cPreview(task: string): Promise<D2cPreviewStatus>;
+  getD2cPreviewStatus(task: string): Promise<D2cPreviewStatus>;
+  openD2cPreview(task: string): Promise<void>;
+  runD2cInteractionTests(task: string): Promise<D2cInteractionStatus>;
+  setD2cManualAcceptance(task: string, accepted: boolean): Promise<D2cWorkflow>;
+  getD2cJudgeConfig(): Promise<D2cJudgeConfigView>;
+  saveD2cJudgeConfig(input: D2cJudgeConfig): Promise<D2cJudgeConfigView>;
+  runD2cQualityJudge(task: string): Promise<D2cQualityJudgeStatus>;
+  resolveD2cQualityIssue(task: string, issueId: string, decision: "skipped" | "fixing"): Promise<D2cQualityIssueDecisionResult>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
 }
 
