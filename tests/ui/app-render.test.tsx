@@ -791,4 +791,135 @@ describe("TerminalLayout", () => {
     expect(plain).toContain("✓ Read package.json");
     expect(plain).not.toContain("(");
   });
+
+  it("renders web search evidence as a ranked block separated from the final answer", () => {
+    const items = Array.from({ length: 8 }, (_, index) => ({
+      title: `DeepSeek result ${index + 1}`,
+      url: `https://www.example${index + 1}.com/articles/result-${index + 1}?tracking=ignored`,
+      snippet: `Snippet ${index + 1}`,
+    }));
+    const turn: TranscriptTurn = {
+      id: 1,
+      prompt: "deepseek 最新版本是多少？",
+      assistantText: "结论正文",
+      statusLines: [],
+      blocks: [{
+        kind: "status",
+        id: "tool:web-search",
+        state: "completed",
+        text: "WebSearch",
+        presentation: {
+          kind: "web",
+          title: "Search: DeepSeek 最新版本 模型 2026",
+          summary: "8 results",
+          items,
+        },
+      }, { kind: "text", text: "结论正文" }],
+    };
+    const raw = renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[turn]}
+      input=""
+      promptCursor={0}
+      columns={100}
+      activeSession={false}
+    />, { columns: 100 });
+    const plain = raw.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(plain).toContain("┌─ WEB SEARCH · 8 RESULTS");
+    expect(plain).toContain("│  DeepSeek 最新版本 模型 2026");
+    expect(plain).toContain("│  01  DeepSeek result 1");
+    expect(plain).toContain("│      example1.com/articles/result-1");
+    expect(plain).toMatch(/└─ Showing 5 of 8\n\n\s+结论正文/u);
+    expect(plain).not.toContain("DeepSeek result 6");
+    expect(raw).not.toBe(plain);
+
+    const narrow = renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[turn]}
+      input=""
+      promptCursor={0}
+      columns={44}
+      activeSession={false}
+    />, { columns: 44 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+    expect(narrow).toContain("WEB SEARCH · 8 RESULTS");
+    expect(narrow).not.toContain("tracking=ignored");
+    expect(narrow).not.toContain("DeepSeek result 6");
+  });
+
+  it("renders job state and logs as a bounded receipt separated from assistant text", () => {
+    const turn: TranscriptTurn = {
+      id: 1,
+      prompt: "读取后台任务结果",
+      assistantText: "后台任务失败，需要检查网络。",
+      statusLines: [],
+      blocks: [{
+        kind: "status",
+        id: "tool:job-read",
+        state: "completed",
+        text: "JobRead",
+        presentation: {
+          kind: "job",
+          action: "read",
+          id: "job-60eaefd1-0ea",
+          jobKind: "shell",
+          label: "check DeepSeek versions",
+          state: "failed",
+          exitCode: 1,
+          cursor: 184,
+          output: "=== [1/4] npm:deepseek ===\n0.0.2\n=== [2/4] pypi:deepseek ===\n1.0.0\nERR: fetch failed\n=== DONE ===\n",
+        },
+      }, { kind: "text", text: "后台任务失败，需要检查网络。" }],
+    };
+    const raw = renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={[turn]}
+      input="" promptCursor={0} columns={90} activeSession={false}
+    />, { columns: 90 });
+    const plain = raw.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(plain).toContain("┌─ JOB · FAILED");
+    expect(plain).toContain("│  job-60eaefd1-0ea · shell");
+    expect(plain).toContain("│  check DeepSeek versions");
+    expect(plain).toContain("├─ LOG · 6 LINES");
+    expect(plain).toContain("│  ERR: fetch failed");
+    expect(plain).toContain("└─ exit 1 · cursor 184");
+    expect(plain).toMatch(/cursor 184\n\n\s+后台任务失败/u);
+    expect(raw).not.toBe(plain);
+  });
+
+  it("renders wait receipts without a log section and bounds job lists", () => {
+    const jobs = Array.from({ length: 10 }, (_, index) => ({
+      id: `job-00000000-00${index}`,
+      kind: "shell",
+      label: `background command ${index}`,
+      state: index === 0 ? "failed" as const : "completed" as const,
+      exitCode: index === 0 ? 1 : 0,
+    }));
+    const turn: TranscriptTurn = {
+      id: 1, prompt: "检查任务", assistantText: "检查完成。", statusLines: [],
+      blocks: [{
+        kind: "status", id: "tool:wait", state: "completed", text: "JobWait",
+        presentation: {
+          kind: "job", action: "wait", id: jobs[0]!.id, jobKind: "shell",
+          label: jobs[0]!.label, state: "failed", exitCode: 1,
+        },
+      }, {
+        kind: "status", id: "tool:list", state: "completed", text: "JobList",
+        presentation: { kind: "job", action: "list", jobs },
+      }, { kind: "text", text: "检查完成。" }],
+    };
+    const plain = renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={[turn]}
+      input="" promptCursor={0} columns={90} rows={40} activeSession={false}
+    />, { columns: 90 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(plain).toContain("JOB · FAILED");
+    expect(plain).toContain("└─ exit 1");
+    expect(plain).not.toContain("LOG · NO NEW OUTPUT");
+    expect(plain).toContain("JOBS · 10");
+    expect(plain).toContain("└─ Showing 8 of 10");
+    expect(plain).not.toContain("background command 8");
+  });
 });

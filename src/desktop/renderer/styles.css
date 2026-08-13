@@ -97,6 +97,9 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .workspace-breadcrumb { display: flex; align-items: center; gap: 9px; min-width: 0; font-size: 13px; font-weight: 500; color: #44505c; }
 .workspace-breadcrumb > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .header-actions { display: flex; align-items: center; margin-left: auto; gap: 8px; }
+.job-strip { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; padding: 0 9px; border: 1px solid #d8e5ee; border-radius: 999px; background: #f4f9fc; color: #536a7b; font-size: 11px; white-space: nowrap; }
+.job-pulse { width: 7px; height: 7px; border-radius: 50%; background: #2e9b72; box-shadow: 0 0 0 3px rgb(46 155 114 / 12%); animation: job-pulse 1.6s ease-in-out infinite; }
+@keyframes job-pulse { 50% { opacity: .42; transform: scale(.8); } }
 .header-actions button { width: 30px; height: 30px; border-radius: 7px; background: transparent; color: #88939e; cursor: pointer; }
 .header-actions button:hover { background: #f2f5f8; color: #55606b; }
 .header-actions .finish-task-button { width: auto; padding: 0 11px; border: 1px solid #d7e0e8; color: #536273; font-size: 12px; }

@@ -2,6 +2,7 @@ import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from "node:ch
 import { access, readFile, realpath } from "node:fs/promises";
 import { createServer } from "node:net";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { ManagedProcess } from "../jobs/managed-process.js";
 
 /** Extracts the first localhost dev server URL from process output. */
 export function parseDevServerUrl(output: string): string | undefined {
@@ -253,17 +254,6 @@ function awaitWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T
   });
 }
 
-function waitForExit(exitPromise: Promise<void>, timeoutMs: number): Promise<void> {
-  return new Promise((resolvePromise) => {
-    const timer = setTimeout(resolvePromise, timeoutMs);
-    timer.unref();
-    exitPromise.then(() => {
-      clearTimeout(timer);
-      resolvePromise();
-    });
-  });
-}
-
 /**
  * Runs a Vite-based frontend project (Vue or React) for D2C comparison:
  * installs dependencies when missing, starts the dev server, waits until it
@@ -312,41 +302,8 @@ export async function runFrontendProject(
     [viteReal, "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
     { cwd: resolved, windowsHide: true },
   );
-  let output = "";
-  let exited = false;
-  let stopPromise: Promise<void> | undefined;
-  let exitCode: number | null = null;
-  let processError: Error | undefined;
-  const exitPromise = new Promise<void>((resolvePromise) => {
-    child.on("exit", (code) => {
-      exited = true;
-      exitCode = code;
-      resolvePromise();
-    });
-    child.on("error", (error) => {
-      processError = error;
-      exited = true;
-      resolvePromise();
-    });
-  });
-  const append = (chunk: Buffer): void => {
-    output = (output + chunk.toString("utf8")).slice(-65_536);
-  };
-  child.stdout.on("data", append);
-  child.stderr.on("data", append);
-
-  const stop = (): Promise<void> => {
-    if (exited) return Promise.resolve();
-    if (stopPromise !== undefined) return stopPromise;
-    stopPromise = (async () => {
-      await terminateProcessTree(child, false);
-      await waitForExit(exitPromise, STOP_GRACE_MS);
-      if (exited) return;
-      await terminateProcessTree(child, true);
-      await waitForExit(exitPromise, STOP_FORCE_GRACE_MS);
-    })();
-    return stopPromise;
-  };
+  const managed = new ManagedProcess(child, { terminate: terminateProcessTree });
+  const stop = (): Promise<void> => managed.stop(STOP_GRACE_MS, STOP_FORCE_GRACE_MS);
 
   try {
     const deadline = Date.now() + readyTimeoutMs;
@@ -366,12 +323,12 @@ export async function runFrontendProject(
         if (options.signal?.aborted === true) throw options.signal.reason;
         // Server not accepting connections yet; keep probing.
       }
-      if (exited) {
-        if (processError !== undefined) throw new Error(`D2C dev server could not start: ${processError.message}`);
-        throw new Error(withDiagnostics(`D2C dev server exited with code ${exitCode} before becoming ready`, output));
+      if (managed.exited()) {
+        if (managed.error() !== undefined) throw new Error(`D2C dev server could not start: ${managed.error()!.message}`);
+        throw new Error(withDiagnostics(`D2C dev server exited with code ${managed.exitCode()} before becoming ready`, managed.output()));
       }
       if (Date.now() > deadline) {
-        throw new Error(withDiagnostics(`D2C dev server was not ready within ${readyTimeoutMs} ms: ${url}`, output));
+        throw new Error(withDiagnostics(`D2C dev server was not ready within ${readyTimeoutMs} ms: ${url}`, managed.output()));
       }
       await wait(pollIntervalMs, options.signal);
     }

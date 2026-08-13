@@ -18,6 +18,8 @@ export interface ContextManagerOptions {
   /** Dynamic system suffix excluded from the stable prompt-cache prefix. */
   volatileSystem?: SystemPromptSource;
   flavor?: string;
+  /** Root AGENTS.md/CLAUDE.md guidance, separate from FLAVOR.md attribution. */
+  workspaceInstructions?: string;
   memory?: string;
   taskState?: string;
   /** Stable user preferences, emitted as the final system section for prompt caching. */
@@ -63,6 +65,7 @@ export class ContextManager {
   readonly #system: SystemPromptSource;
   readonly #volatileSystem: SystemPromptSource | undefined;
   readonly #flavor: string | undefined;
+  readonly #workspaceInstructions: string | undefined;
   readonly #memory: string | undefined;
   readonly #userMemory: SystemPromptSource | undefined;
   readonly #compactAtChars: number;
@@ -97,6 +100,7 @@ export class ContextManager {
     this.#system = options.system;
     this.#volatileSystem = options.volatileSystem;
     this.#flavor = options.flavor;
+    this.#workspaceInstructions = options.workspaceInstructions;
     this.#memory = options.memory;
     this.#userMemory = options.userMemory;
     this.#taskState = options.taskState;
@@ -132,6 +136,7 @@ export class ContextManager {
       system: resolveSystemSections(this.#system),
       ...(this.#volatileSystem === undefined ? {} : { volatileSystem: resolveSystemSections(this.#volatileSystem) }),
       ...(this.#flavor === undefined ? {} : { flavor: this.#flavor }),
+      ...(this.#workspaceInstructions === undefined ? {} : { workspaceInstructions: this.#workspaceInstructions }),
       ...(this.#memory === undefined ? {} : { memory: this.#memory }),
       ...(this.#taskState === undefined ? {} : { taskState: this.#taskState }),
       ...(userMemory === undefined ? {} : { userMemory }),
@@ -365,6 +370,11 @@ export class ContextManager {
       ...(this.#flavor === undefined ? [] : [{
         role: "system" as const,
         content: `FLAVOR.md\n${this.#flavor}`,
+        cacheBreakpoint: true,
+      }]),
+      ...(this.#workspaceInstructions === undefined ? [] : [{
+        role: "system" as const,
+        content: `Workspace instructions\n${this.#workspaceInstructions}`,
         cacheBreakpoint: true,
       }]),
       // Stable user preferences close the cacheable prefix.

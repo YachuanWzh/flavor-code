@@ -165,24 +165,29 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
   if (event.type === "tool-start") return upsertStatus({ ...state, active: withoutModelActivity(state.active) }, {
     kind: "status", id: `tool:${event.id}`, state: "running", text: `${event.name}${event.label ? ` ${event.label}` : ""}`,
     ...(event.hint === undefined ? {} : { hint: event.hint }),
+    ...(event.presentation === undefined ? {} : { presentation: event.presentation }),
     tool: { name: event.name, input: event.input },
   });
   if (event.type === "tool-end") {
     const cancelled = !event.result.ok && event.result.error?.code === "cancelled";
     const previous = state.active.blocks.find((block) => block.kind === "status" && block.id === `tool:${event.id}`);
     const input = previous?.kind === "status" && previous.tool !== undefined ? previous.tool.input : null;
+    const presentation = event.result.ok ? (event.result.presentation ?? (previous?.kind === "status" ? previous.presentation : undefined)) : undefined;
     return upsertStatus(state, {
       kind: "status",
       id: `tool:${event.id}`,
       state: event.result.ok ? "completed" : cancelled ? "cancelled" : "failed",
       text: `${event.result.ok ? "✓" : "×"} ${event.name}${event.label ? ` ${event.label}` : ""}`,
       ...(event.hint === undefined ? {} : { hint: event.hint }),
-      ...(event.result.ok && event.result.presentation !== undefined
-        ? { presentation: event.result.presentation }
-        : {}),
+      ...(presentation === undefined ? {} : { presentation }),
       tool: { name: event.name, input, result: event.result },
     });
   }
+  if (event.type === "deliverables") return upsertStatus(state, {
+    kind: "status", id: `deliverables:${state.active.id}`, state: "info",
+    text: `Changed ${event.files.length} file${event.files.length === 1 ? "" : "s"}`,
+    details: event.files.map((file) => `${file.operation} ${file.path} (+${file.added} -${file.removed})`).join("\n"),
+  });
   if (event.type === "notice") return upsertStatus(state, {
     kind: "status", id: `notice:${state.active.blocks.length}`, state: "info", text: `· ${event.message}`,
   });

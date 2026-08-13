@@ -31,7 +31,7 @@ import {
 import { wrapPromptInput } from "./wrap-prompt.js";
 import { charWidth } from "./char-width.js";
 import { TaskProgressPanel, TaskStatusLine } from "./task-progress.js";
-import type { FileChangePresentation, FileDiffLine } from "../tools/types.js";
+import type { FileChangePresentation, FileDiffLine, ToolPresentation } from "../tools/types.js";
 import { fileDiffLineStyle } from "./file-diff-style.js";
 import { COMMAND_DESCRIPTIONS, MVP_COMMANDS } from "./commands.js";
 import {
@@ -1330,13 +1330,190 @@ function StatusBlockView({
   const primary = visibleBlock.activity === "model" || visibleBlock.task !== undefined
     ? <TaskStatusLine block={visibleBlock} interactive={interactive} />
     : visibleBlock.state === "completed" && visibleBlock.presentation !== undefined
-      ? <FileDiffView presentation={visibleBlock.presentation} />
+      ? <ToolPresentationView presentation={visibleBlock.presentation} />
       : <StatusLine block={visibleBlock} interactive={interactive} />;
   return <Box flexDirection="column">
     {primary}
     {outcome === undefined ? null : <Box paddingLeft={2}><Text dimColor>└ {outcome}</Text></Box>}
     {block.details === undefined ? null : <Box paddingLeft={2}><AssistantText text={block.details} /></Box>}
   </Box>;
+}
+
+function ToolPresentationView({ presentation }: { presentation: ToolPresentation }): React.JSX.Element {
+  if (presentation.kind === "file-change") return <FileDiffView presentation={presentation} />;
+  if (presentation.kind === "terminal") return <Box flexDirection="column" paddingLeft={2}>
+    <Text>{presentation.title}{presentation.state ? ` · ${presentation.state}` : ""}</Text>
+    {presentation.stdout ? <Text dimColor>{presentation.stdout}</Text> : null}
+    {presentation.stderr ? <Text color="red">{presentation.stderr}</Text> : null}
+  </Box>;
+  if (presentation.kind === "web") return <WebPresentationView presentation={presentation} />;
+  if (presentation.kind === "job") return <JobPresentationView presentation={presentation} />;
+  return <Box paddingLeft={2}><Text>{presentation.title}{presentation.summary ? ` · ${presentation.summary}` : ""}</Text></Box>;
+}
+
+const CLI_WEB_RESULT_LIMIT = 5;
+
+function WebPresentationView({
+  presentation,
+}: {
+  presentation: Extract<ToolPresentation, { kind: "web" }>;
+}): React.JSX.Element {
+  const items = presentation.items ?? [];
+  if (presentation.items === undefined) return <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
+    <Box><Text color="#5f87af">┌─ </Text><Text color="ansi:cyanBright" bold>WEB FETCH</Text>
+      {presentation.summary === undefined ? null : <Text dimColor>{` · ${presentation.summary}`}</Text>}
+    </Box>
+    <Box><Text color="#5f87af">│  </Text><Text color="ansi:whiteBright" wrap="truncate-end">{presentation.url ?? presentation.title}</Text></Box>
+    <Box><Text color="#5f87af">└─ </Text><Text dimColor>Page content added to context</Text></Box>
+  </Box>;
+
+  const visibleItems = items.slice(0, CLI_WEB_RESULT_LIMIT);
+  const query = presentation.title.replace(/^Search:\s*/iu, "").trim();
+  return <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
+    <Box>
+      <Text color="#5f87af">┌─ </Text>
+      <Text color="ansi:cyanBright" bold>WEB SEARCH</Text>
+      <Text dimColor>{` · ${items.length} ${items.length === 1 ? "RESULT" : "RESULTS"}`}</Text>
+    </Box>
+    <Box><Text color="#5f87af">│  </Text><Text color="ansi:whiteBright" bold wrap="truncate-end">{query}</Text></Box>
+    <Text color="#5f87af">│</Text>
+    {visibleItems.map((item, index) => <Box key={item.url} flexDirection="column">
+      <Box>
+        <Text color="#5f87af">│  </Text>
+        <Text color="ansi:cyanBright" bold>{String(index + 1).padStart(2, "0")}</Text>
+        <Text color="ansi:whiteBright" wrap="truncate-end">  {item.title}</Text>
+      </Box>
+      <Box>
+        <Text color="#5f87af">│      </Text>
+        <Text dimColor wrap="truncate-end">{compactWebSource(item.url)}</Text>
+      </Box>
+    </Box>)}
+    <Box>
+      <Text color="#5f87af">└─ </Text>
+      <Text dimColor>{items.length > visibleItems.length
+        ? `Showing ${visibleItems.length} of ${items.length}`
+        : `${items.length} ${items.length === 1 ? "source" : "sources"}`}</Text>
+    </Box>
+  </Box>;
+}
+
+function compactWebSource(value: string): string {
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.replace(/^www\./iu, "");
+    const path = url.pathname === "/" ? "" : url.pathname.replace(/\/$/u, "");
+    return `${hostname}${path}`;
+  } catch { return value; }
+}
+
+const CLI_JOB_LOG_LINE_LIMIT = 12;
+const CLI_JOB_LIST_LIMIT = 8;
+
+function JobPresentationView({
+  presentation,
+}: {
+  presentation: Extract<ToolPresentation, { kind: "job" }>;
+}): React.JSX.Element {
+  if (presentation.action === "list") return <JobListPresentationView presentation={presentation} />;
+  const state = presentation.state ?? "running";
+  const tone = jobStateColor(state);
+  const lines = jobOutputLines(presentation.output ?? "");
+  const visibleLines = lines.slice(-CLI_JOB_LOG_LINE_LIMIT);
+  const hiddenLines = lines.length - visibleLines.length;
+  const showLog = presentation.action === "read" || presentation.action === "kill" || lines.length > 0;
+  return <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
+    <Box>
+      <Text color={tone}>┌─ </Text>
+      <Text color={tone} bold>JOB · {state.toUpperCase()}</Text>
+    </Box>
+    <Box>
+      <Text color={tone}>│  </Text>
+      <Text color="ansi:whiteBright" bold>{presentation.id ?? "unknown job"}</Text>
+      {presentation.jobKind === undefined ? null : <Text dimColor>{` · ${presentation.jobKind}`}</Text>}
+    </Box>
+    {presentation.label === undefined ? null : <Box>
+      <Text color={tone}>│  </Text>
+      <Text color="ansi:whiteBright" wrap="truncate-end">{presentation.label}</Text>
+    </Box>}
+    {presentation.error === undefined ? null : <Box>
+      <Text color={tone}>│  </Text>
+      <Text color="#e06c50" wrap="truncate-end">{presentation.error}</Text>
+    </Box>}
+    {showLog ? <>
+      <Box>
+        <Text color={tone}>├─ </Text>
+        <Text color={tone} bold>LOG</Text>
+        <Text dimColor>{lines.length === 0 ? " · NO NEW OUTPUT" : ` · ${lines.length} ${lines.length === 1 ? "LINE" : "LINES"}`}</Text>
+      </Box>
+      {hiddenLines > 0 ? <Box>
+        <Text color={tone}>│  </Text>
+        <Text dimColor>… {hiddenLines} earlier {hiddenLines === 1 ? "line" : "lines"} hidden</Text>
+      </Box> : null}
+      {visibleLines.map((line, index) => <JobLogLine key={`${index}:${line}`} line={line} tone={tone} />)}
+    </> : null}
+    <Box>
+      <Text color={tone}>└─ </Text>
+      <Text dimColor>{jobFooter(presentation)}</Text>
+    </Box>
+  </Box>;
+}
+
+function JobListPresentationView({
+  presentation,
+}: {
+  presentation: Extract<ToolPresentation, { kind: "job" }>;
+}): React.JSX.Element {
+  const jobs = presentation.jobs ?? [];
+  const visibleJobs = jobs.slice(0, CLI_JOB_LIST_LIMIT);
+  return <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
+    <Box><Text color="#d7a657">┌─ </Text><Text color="#d7a657" bold>JOBS · {jobs.length}</Text></Box>
+    {jobs.length === 0
+      ? <Box><Text color="#d7a657">│  </Text><Text dimColor>No background jobs</Text></Box>
+      : visibleJobs.map((job) => <Box key={job.id}>
+        <Text color="#d7a657">│  </Text>
+        <Text color={jobStateColor(job.state)} bold>{job.state.toUpperCase().padEnd(9)}</Text>
+        <Text color="ansi:whiteBright"> {job.id}</Text>
+        <Text dimColor wrap="truncate-end"> · {job.label}</Text>
+      </Box>)}
+    <Box><Text color="#d7a657">└─ </Text><Text dimColor>{jobs.length > visibleJobs.length
+      ? `Showing ${visibleJobs.length} of ${jobs.length}`
+      : `${jobs.length} ${jobs.length === 1 ? "job" : "jobs"}`}</Text></Box>
+  </Box>;
+}
+
+function JobLogLine({ line, tone }: { line: string; tone: string }): React.JSX.Element {
+  const error = /^(?:\[stderr\]|ERR(?:OR)?(?:!|:|\s)|npm ERR!)/iu.test(line.trimStart());
+  const stage = /^={3}.*={3}$/u.test(line.trim());
+  return <Box>
+    <Text color={tone}>│  </Text>
+    <Text
+      {...(error ? { color: "#e06c50" } : stage ? { color: "ansi:cyanBright", bold: true } : { dimColor: true })}
+      wrap="truncate-end"
+    >{line === "" ? " " : line}</Text>
+  </Box>;
+}
+
+function jobOutputLines(output: string): string[] {
+  if (output === "") return [];
+  const lines = output.replace(/\r\n?/gu, "\n").split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
+
+function jobStateColor(state: "running" | "completed" | "failed" | "cancelled"): string {
+  if (state === "completed") return "ansi:green";
+  if (state === "failed") return "#e06c50";
+  if (state === "cancelled") return "#858585";
+  return "#d7a657";
+}
+
+function jobFooter(presentation: Extract<ToolPresentation, { kind: "job" }>): string {
+  const parts: string[] = [];
+  if (presentation.exitCode !== undefined) parts.push(presentation.exitCode === null ? "no exit code" : `exit ${presentation.exitCode}`);
+  else parts.push(presentation.state ?? "running");
+  if (presentation.cursor !== undefined) parts.push(`cursor ${presentation.cursor}`);
+  if (presentation.truncated === true) parts.push("output truncated");
+  return parts.join(" · ");
 }
 
 function cliToolTitle(

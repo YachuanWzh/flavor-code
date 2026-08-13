@@ -46,6 +46,28 @@ function fakeRuntime(output: (event: SessionOutput) => void, sessionId = "sessio
 }
 
 describe("DesktopRuntimeController", () => {
+  it("publishes desktop snapshots when background job state changes", async () => {
+    const events: unknown[] = [];
+    const runtime = fakeRuntime(() => undefined);
+    let listener: ((jobs: readonly import("../../src/jobs/registry.js").JobSnapshot[]) => void) | undefined;
+    const running = {
+      id: "job-1", kind: "shell" as const, owner: "main", label: "serve", state: "running" as const,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), outputChars: 0, truncated: false,
+    };
+    Object.assign(runtime, { jobs: {
+      list: () => [running],
+      subscribe: (next: (jobs: readonly import("../../src/jobs/registry.js").JobSnapshot[]) => void) => { listener = next; return () => { listener = undefined; }; },
+    } });
+    const controller = new DesktopRuntimeController({
+      home: "C:\\Users\\demo", createRuntime: async () => runtime, listSessions: async () => [], emit: (event) => events.push(event),
+    });
+    await controller.openWorkspace(process.cwd());
+    await controller.startSession();
+    listener?.([running]);
+    expect(controller.snapshot().jobs).toEqual([running]);
+    expect(events).toContainEqual(expect.objectContaining({ type: "snapshot", snapshot: expect.objectContaining({ jobs: [running] }) }));
+    await controller.dispose();
+  });
   it("scopes the D2C permission profile to one complete Electron submission", async () => {
     let release!: () => void;
     const runtime = fakeRuntime(() => undefined);

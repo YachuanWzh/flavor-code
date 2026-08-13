@@ -45,7 +45,7 @@ import {
 } from "./d2c-progress.js";
 import type { ManagedSkillSummary } from "../../skills/manager.js";
 
-const EMPTY_SNAPSHOT: DesktopSnapshot = { sessions: [], diagnostics: [], models: [] };
+const EMPTY_SNAPSHOT: DesktopSnapshot = { sessions: [], diagnostics: [], models: [], jobs: [] };
 const PERMISSIONS: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions", "auto", "bubble"];
 const BUILTIN_SLASH_CANDIDATES = MVP_COMMANDS.map((name) => ({ name, description: COMMAND_DESCRIPTIONS[name] }));
 const MAX_DESKTOP_IMAGES = 5;
@@ -505,6 +505,9 @@ export function DesktopApp(): React.JSX.Element {
           <span>{workspaceName(snapshot.workspace)}</span>
         </div>
         <div className="header-actions">
+          {snapshot.jobs.some((job) => job.state === "running") && <div className="job-strip" title="后台任务">
+            <span className="job-pulse" />{snapshot.jobs.filter((job) => job.state === "running").length} 个后台任务
+          </div>}
           <button className="finish-task-button" onClick={() => void finishTask()}
             disabled={busy || snapshot.activeSession === undefined} title="评估并完成当前任务">完成任务</button>
           <button title="更多选项">•••</button>
@@ -618,7 +621,10 @@ function BlockView({ block }: { block: TranscriptBlock }): React.JSX.Element {
     <span className="activity-node">{stateSymbol}</span>
     <div className="activity-body"><div className="activity-title"><span>{block.text.replace(/^[·✓×]\s*/, "")}</span>{block.hint && <code>{block.hint}</code>}</div>
       {block.progress !== undefined && <div className="progress-track"><i style={{ width: `${block.progress}%` }} /></div>}
-      {block.presentation && <DiffPreview presentation={block.presentation} />}
+      {block.presentation?.kind === "file-change" && <DiffPreview presentation={block.presentation} />}
+      {block.presentation?.kind === "generic" && <div className="tool-presentation"><strong>{block.presentation.title}</strong>{block.presentation.summary && <span>{block.presentation.summary}</span>}</div>}
+      {block.presentation?.kind === "terminal" && <div className="tool-presentation"><strong>{block.presentation.title}</strong>{block.presentation.stdout && <pre>{block.presentation.stdout}</pre>}</div>}
+      {block.presentation?.kind === "web" && <div className="tool-presentation"><strong>{block.presentation.title}</strong>{block.presentation.summary && <span>{block.presentation.summary}</span>}</div>}
       {block.tool && <details className="tool-details"><summary>调用详情</summary>
         <label>Input</label><pre>{boundedJson(block.tool.input)}</pre>
         {block.tool.result === undefined ? null : <><label>Result</label><pre>{boundedJson(block.tool.result)}</pre></>}

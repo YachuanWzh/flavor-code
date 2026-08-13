@@ -35,6 +35,34 @@ Flavor Code 接入 OpenAI、Anthropic 或兼容服务，在受控工作区内使
 | 🎨 | **D2C 设计稿到代码** | 导入 Pixso 导出稿，Agent 生成 Vue/React 实现并自动做像素级视觉评测（仅 Electron） |
 | 🛡️ | **明确的权限边界** | 分别控制读、写、Shell、网络和破坏性操作，也可使用 Docker |
 
+## 1.2.9 运行时增强
+
+1.2.9 增加了分层项目指令、安全写入、后台任务、持久终端和原生联网工具。通常只需用自然语言描述目标，Agent 会自行选择工具；需要精确控制时，也可以在提示词中明确指定下面的工具和参数。
+
+| 功能 | 怎么使用 |
+| --- | --- |
+| **分层项目指令** | 在项目根目录或子目录放置 `AGENTS.md`、`CLAUDE.md`；同目录需要本地补充时使用 `AGENTS.local.md`、`CLAUDE.local.md`。根规则启动时加载，子目录规则在 Agent 访问该目录文件后自动加载。 |
+| **每轮成果物汇总** | 无需配置。`Write`、`Edit` 或 `ApplyPatch` 成功后，回合结束会自动列出新增、修改、删除的文件和行数。 |
+| **文件版本保护** | 无需配置。Agent 读取文件后，如果 IDE、格式化器或其他进程先修改了它，后续写入会报 `Stale file`；让 Agent 重新读取后再修改即可。 |
+| **标准工具展示协议** | 工具作者可声明 `outputSchema`、`renderForModel`、`presentCall` 和 `presentResult`，同一结果即可在模型上下文、CLI 与桌面端分别使用合适的形式。 |
+| **后台 Shell / Job** | 提示“在后台启动开发服务器”，Agent 会调用 `Shell` 并设置 `background: true`。用 `JobList` 查看任务、`JobRead` 增量读取输出、`JobWait` 等待结束、`JobKill` 停止任务。CLI 使用带状态色边界的 `JOB` 运行收据区分任务元数据、日志与最终回答；日志最多展示最近 12 行、列表最多 8 项。Windows 优先识别 UTF-8，遇到 GBK/GB18030 系统诊断时自动回退。 |
+| **桌面后台状态** | Electron 会在会话标题栏自动显示当前运行中的 Job 数量，任务启动、输出、退出或取消时实时更新。 |
+| **持久 PTY** | 提示“打开一个持久终端并继续交互”。Agent 使用 `TerminalOpen` 创建终端，用 `TerminalWrite` 连续输入，用 `TerminalRead` 读取增量输出，最后用 `TerminalClose` 关闭。 |
+| **D2C/E2E 统一进程生命周期** | 无需改变使用方式。预览和后端服务仍从 E2E/D2C 工作台启停，但底层统一处理输出上限、进程树终止和幂等清理。 |
+| **原生 WebSearch** | 提示“搜索 Web 上的……”，或明确要求使用 `WebSearch`。默认使用无需密钥的 DuckDuckGo Lite，连接失败、HTTP 拒绝或无可解析结果时自动降级到 Bing；单次最多返回 20 条。CLI 将前 5 条收进带边界的 `WEB SEARCH` 证据块，按搜索排名显示标题和紧凑来源，与后续回答分层。 |
+| **原生 WebFetch** | 提示“读取这个网页：`https://...`”，或明确要求使用 `WebFetch`。支持 HTTP(S)、重定向、HTML 转可读文本、超时和响应大小限制，并兼容 Clash/TUN Fake-IP DNS。直接访问 Fake-IP、内网或云元数据地址仍会被拦截；网络操作仍遵守 Flavor 权限审批。 |
+
+常见的精确用法：
+
+```text
+使用 Shell 的后台模式启动 npm run dev，然后用 JobRead 查看启动日志。
+打开持久终端，在其中运行 Python REPL，连续执行两段代码后关闭终端。
+使用 WebSearch 搜索 TypeScript 7 官方迁移说明，再用 WebFetch 读取最相关的官方页面。
+这个目录有独立约定，请先遵守 src/payments/AGENTS.md 再修改代码。
+```
+
+原生工具的参数、状态机、安全边界和扩展接口详见[技术方案报告第 38 节](./技术方案报告.md#38-129-运行时生产力与原生-web-能力)；验收规格见[运行时生产力规范](./docs/specs/2026-08-13-runtime-productivity-waves.md)。
+
 ## 快速开始
 
 > [!IMPORTANT]
@@ -340,6 +368,7 @@ npm run build
 - [多模态图片规范](./docs/specs/2026-07-30-multimodal-image-attachments.md)
 - [D2C 设计稿到代码规范](./docs/specs/2026-08-09-d2c-design-to-code.md)
 - [D2C 人工审阅与接口联调规范](./docs/specs/2026-08-10-d2c-review-and-integration.md)
+- [1.2.9 运行时生产力规范](./docs/specs/2026-08-13-runtime-productivity-waves.md)
 - [VS Code 后续规划](./docs/specs/2026-08-01-flavor-code-vscode-next.md)
 
 ## 安全提示

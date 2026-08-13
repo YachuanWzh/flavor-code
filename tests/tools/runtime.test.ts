@@ -40,6 +40,35 @@ function fixture(decision: "allow" | "deny" | "ask" = "allow") {
 }
 
 describe("ToolRuntime", () => {
+  it("validates canonical outputs and renders bounded model content independently", async () => {
+    const f = fixture();
+    const tool: ToolDefinition<{ path: string }, { value: number }> = {
+      ...f.tool,
+      outputSchema: z.object({ value: z.number() }),
+      execute: async () => ({ value: 7 }),
+      renderForModel: (output) => `value=${output.value}`,
+      presentCall: (input) => ({ kind: "generic", title: "Call", summary: input.path }),
+      presentResult: (output) => ({ kind: "generic", title: "Result", summary: String(output.value) }),
+    };
+    const runtime = new ToolRuntime({ tools: [tool], hooks: f.hooks, permissions: f.permissions });
+
+    expect(runtime.callPresentation({ name: "Test", input: { path: "x" } })).toEqual({ kind: "generic", title: "Call", summary: "x" });
+
+    await expect(runtime.execute({ name: "Test", input: { path: "x" } }, { agent: "main" })).resolves.toMatchObject({
+      ok: true,
+      output: { value: 7 },
+      content: "value=7",
+      presentation: { kind: "generic", title: "Result", summary: "7" },
+    });
+  });
+
+  it("fails a tool that violates its declared output schema", async () => {
+    const f = fixture();
+    const tool = { ...f.tool, outputSchema: z.object({ value: z.number() }), execute: async () => ({ value: "bad" }) };
+    const runtime = new ToolRuntime({ tools: [tool], hooks: f.hooks, permissions: f.permissions });
+    await expect(runtime.execute({ name: "Test", input: { path: "x" } }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: false, error: { code: "invalid_output" } });
+  });
   it("uses the documented 50K per-tool and 200K per-turn defaults", () => {
     expect(DEFAULT_TOOL_OUTPUT_LIMITS).toEqual({ perToolChars: 50_000, perTurnChars: 200_000 });
   });

@@ -1,4 +1,4 @@
-import { constants } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import { mkdir, open, readFile, realpath, rename, rm, stat } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -29,6 +29,7 @@ export interface ReadFileHandle {
 
 export interface ReadToolOptions {
   openFile?: (path: string) => Promise<ReadFileHandle>;
+  observations?: FileObservationStore;
 }
 
 export interface FileWriteProposal {
@@ -40,6 +41,19 @@ export interface FileWriteProposal {
 
 export interface FileMutationOptions {
   beforeCommit?(proposal: FileWriteProposal, signal: AbortSignal): Promise<void>;
+  observations?: FileObservationStore;
+}
+
+/** Session-scoped compare-and-swap versions shared by Read/Write/Edit/ApplyPatch. */
+export class FileObservationStore {
+  readonly #versions = new Map<string, string>();
+  get(path: string): string | undefined { return this.#versions.get(path); }
+  set(path: string, version: string): void { this.#versions.set(path, version); }
+  async refresh(path: string): Promise<void> { this.set(path, await fileVersion(path)); }
+  async assertCurrent(path: string, expected: string): Promise<void> {
+    const current = await fileVersion(path);
+    if (current !== expected) throw new Error(`Stale file: ${path} changed since it was read; read it again before writing`);
+  }
 }
 
 export function createReadTool(workspace: string, options: ReadToolOptions = {}): ToolDefinition<z.infer<typeof ReadInput>> {
@@ -73,6 +87,7 @@ export function createReadTool(workspace: string, options: ReadToolOptions = {})
       const textEnd = utf8SafeEnd(contents, maxBytes);
       const truncated = contents.length > maxBytes;
       const text = contents.subarray(0, textEnd).toString("utf8").replaceAll("\r\n", "\n");
+      options.observations?.set(path, versionOfStat(info));
       const lines = text.split("\n");
       if (lines.at(-1) === "") lines.pop();
       const availableLines = lines.length;
@@ -126,6 +141,7 @@ export function createWriteTool(workspace: string, options: FileMutationOptions 
     execute: async (input, signal) => {
       abortIfNeeded(signal);
       const path = await guard.destination(input.path);
+      const expected = await expectedMutationVersion(path, options.observations);
       const previous = await readOptionalPresentationText(path);
       if (!previous.exists || previous.text !== undefined) {
         await options.beforeCommit?.({
@@ -135,7 +151,9 @@ export function createWriteTool(workspace: string, options: FileMutationOptions 
           kind: previous.exists ? "update" : "create",
         }, signal);
       }
-      await atomicWrite(path, input.content, signal);
+      await assertMutationVersion(path, expected, options.observations);
+      await atomicWrite(path, input.content, signal, expected);
+      await options.observations?.refresh(path);
       const output = { path, bytes: Buffer.byteLength(input.content) };
       if (previous.exists && previous.text === undefined) return output;
       return withToolPresentation(output, buildFileChangePresentation(
@@ -158,6 +176,7 @@ export function createEditTool(workspace: string, options: FileMutationOptions =
     execute: async (input, signal) => {
       abortIfNeeded(signal);
       const path = await guard.existing(input.path);
+      const expected = await expectedMutationVersion(path, options.observations);
       const contents = await readText(path);
       const hasCRLF = contents.includes("\r\n");
       const norm = (s: string): string => hasCRLF ? s.replace(/\r\n/g, "\n") : s;
@@ -173,7 +192,9 @@ export function createEditTool(workspace: string, options: FileMutationOptions =
       const updatedLF = contentsLF.slice(0, first) + newTextLF + contentsLF.slice(first + oldTextLF.length);
       const updated = hasCRLF ? updatedLF.replace(/\n/g, "\r\n") : updatedLF;
       await options.beforeCommit?.({ path, before: contents, after: updated, kind: "update" }, signal);
-      await atomicWrite(path, updated, signal);
+      await assertMutationVersion(path, expected, options.observations);
+      await atomicWrite(path, updated, signal, expected);
+      await options.observations?.refresh(path);
       return withToolPresentation(
         { path, replacements: 1 },
         buildFileChangePresentation(path, contents, updated, "update"),
@@ -192,15 +213,17 @@ export function createApplyPatchTool(workspace: string, options: FileMutationOpt
     execute: async (input, signal) => {
       abortIfNeeded(signal);
       const changes = parsePatch(input.patch);
-      const prepared: Array<{ path: string; content: string; change: PatchFile; hunks: PatchHunk[] }> = [];
+      const prepared: Array<{ path: string; content: string; change: PatchFile; hunks: PatchHunk[]; expected: string }> = [];
       for (const change of changes) {
         const path = await guard.destination(change.path);
+        const expected = await expectedMutationVersion(path, options.observations);
         const original = change.created
           ? await requireAbsent(guard, change.path)
           : await readText(await guard.existing(change.path));
         const applied = applyHunks(original, change.hunks);
-        prepared.push({ path, content: applied.content, change, hunks: applied.hunks });
+        prepared.push({ path, content: applied.content, change, hunks: applied.hunks, expected });
       }
+      for (const change of prepared) await assertMutationVersion(change.path, change.expected, options.observations);
       for (const change of prepared) {
         const before = change.change.created ? "" : await readText(change.path);
         await options.beforeCommit?.({
@@ -209,12 +232,20 @@ export function createApplyPatchTool(workspace: string, options: FileMutationOpt
           after: change.content,
           kind: change.change.created ? "create" : "update",
         }, signal);
-        await atomicWrite(change.path, change.content, signal);
+      }
+      // Hooks may take arbitrarily long and external editors may update any target.
+      // Revalidate the whole patch before the first replacement to avoid partial commits.
+      for (const change of prepared) await assertMutationVersion(change.path, change.expected, options.observations);
+      for (const change of prepared) {
+        await atomicWrite(change.path, change.content, signal, change.expected);
+        await options.observations?.refresh(change.path);
       }
       const first = prepared[0]!;
+      const primaryPresentation = buildPatchPresentation(first.path, first.change.created, first.hunks);
+      const relatedChanges = prepared.slice(1).map((change) => buildPatchPresentation(change.path, change.change.created, change.hunks));
       return withToolPresentation(
         { files: prepared.map((change) => change.path) },
-        buildPatchPresentation(first.path, first.change.created, first.hunks),
+        relatedChanges.length === 0 ? primaryPresentation : { ...primaryPresentation, relatedChanges },
       );
     },
   };
@@ -267,7 +298,7 @@ function createPathGuard(workspace: string): PathGuard {
   };
 }
 
-async function atomicWrite(path: string, content: string, signal: AbortSignal): Promise<void> {
+async function atomicWrite(path: string, content: string, signal: AbortSignal, expectedVersion?: string): Promise<void> {
   abortIfNeeded(signal);
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${randomUUID()}.tmp`;
@@ -276,6 +307,9 @@ async function atomicWrite(path: string, content: string, signal: AbortSignal): 
     try { await handle.writeFile(content, "utf8"); await handle.sync(); }
     finally { await handle.close(); }
     abortIfNeeded(signal);
+    if (expectedVersion !== undefined && await fileVersion(path) !== expectedVersion) {
+      throw new Error(`Stale file: ${path} changed while the replacement was being prepared`);
+    }
     await rename(temporary, path);
   } finally {
     await rm(temporary, { force: true });
@@ -286,6 +320,31 @@ async function readText(path: string): Promise<string> {
   const contents = await readFile(path);
   if (isBinary(contents)) throw new Error("Cannot edit binary file as text");
   return contents.toString("utf8");
+}
+
+const ABSENT_VERSION = "absent";
+
+async function expectedMutationVersion(path: string, observations?: FileObservationStore): Promise<string> {
+  const current = await fileVersion(path);
+  const observed = observations?.get(path);
+  if (observed !== undefined && observed !== current) {
+    throw new Error(`Stale file: ${path} changed since it was read; read it again before writing`);
+  }
+  return current;
+}
+
+async function assertMutationVersion(path: string, expected: string, observations?: FileObservationStore): Promise<void> {
+  if (observations !== undefined) await observations.assertCurrent(path, expected);
+  else if (await fileVersion(path) !== expected) throw new Error(`Stale file: ${path} changed since mutation preparation`);
+}
+
+async function fileVersion(path: string): Promise<string> {
+  try { return versionOfStat(await stat(path)); }
+  catch (error) { if (isMissing(error)) return ABSENT_VERSION; throw error; }
+}
+
+function versionOfStat(info: Stats): string {
+  return `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`;
 }
 
 async function readOptionalPresentationText(path: string): Promise<{ exists: boolean; text?: string }> {

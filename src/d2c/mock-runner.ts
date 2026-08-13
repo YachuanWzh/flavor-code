@@ -4,6 +4,7 @@ import { createServer } from "node:net";
 import { join } from "node:path";
 
 import { terminateProcessTree } from "./runner.js";
+import { ManagedProcess } from "../jobs/managed-process.js";
 
 export interface D2cRunningMock {
   url: string;
@@ -39,15 +40,6 @@ function waitForProcess(child: ChildProcessWithoutNullStreams, timeoutMs: number
     const timer = setTimeout(() => { void terminateProcessTree(child, true); rejectPromise(new Error(`${label} timed out`)); }, timeoutMs);
     child.once("error", (error) => { clearTimeout(timer); rejectPromise(error); });
     child.once("exit", (code) => { clearTimeout(timer); code === 0 ? resolvePromise() : rejectPromise(new Error(`${label} failed with exit code ${code}`)); });
-  });
-}
-
-function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> {
-  if (child.exitCode !== null) return Promise.resolve(true);
-  return new Promise((resolvePromise) => {
-    const onExit = (): void => { clearTimeout(timer); resolvePromise(true); };
-    const timer = setTimeout(() => { child.removeListener("exit", onExit); resolvePromise(false); }, timeoutMs);
-    child.once("exit", onExit);
   });
 }
 
@@ -125,34 +117,23 @@ async function runPythonBackend(projectDir: string, options: RunD2cMockOptions):
     env: { ...process.env, PORT: String(selectedPort), D2C_SERVER_PORT: String(selectedPort),
       DATABASE_URL: process.env.DATABASE_URL?.trim() || "sqlite:///./data/app.db", FLAVOR_E2E_ALLOW_RESET: "1" },
   });
-  let output = "";
-  let exited = false;
-  const append = (chunk: Buffer): void => { output = (output + chunk.toString("utf8")).slice(-65_536); };
-  child.stdout.on("data", append); child.stderr.on("data", append);
-  child.once("exit", () => { exited = true; });
+  const managed = new ManagedProcess(child, { terminate: terminateProcessTree });
   const deadline = Date.now() + (options.readyTimeoutMs ?? 30_000);
   try {
     while (Date.now() < deadline) {
       options.signal?.throwIfAborted();
-      if (exited) throw new Error(`E2E backend exited before readiness\n${output.slice(-4_000)}`);
+      if (managed.exited()) throw new Error(`E2E backend exited before readiness\n${managed.output().slice(-4_000)}`);
       try { const response = await fetch(`${url}/_e2e/health`); if (response.ok) break; } catch { /* keep probing */ }
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
     }
-    if (Date.now() >= deadline) throw new Error(`E2E backend readiness timed out\n${output.slice(-4_000)}`);
+    if (Date.now() >= deadline) throw new Error(`E2E backend readiness timed out\n${managed.output().slice(-4_000)}`);
   } catch (error) {
     await terminateProcessTree(child, true);
     throw error;
   }
-  let stopped: Promise<void> | undefined;
   return {
-    url, kind: "real-backend", output: () => output, exited: () => exited,
-    stop: () => stopped ??= (async () => {
-      if (exited) return;
-      await terminateProcessTree(child, false);
-      if (await waitForExit(child, 2_000)) return;
-      await terminateProcessTree(child, true);
-      await waitForExit(child, 2_000);
-    })(),
+    url, kind: "real-backend", output: () => managed.output(), exited: () => managed.exited(),
+    stop: () => managed.stop(2_000, 2_000),
   };
 }
 
@@ -188,36 +169,25 @@ export async function runD2cMockServer(projectDir: string, options: RunD2cMockOp
     cwd: projectDir, windowsHide: true,
     env: { ...process.env, D2C_MOCK_PORT: String(selectedPort), ELECTRON_RUN_AS_NODE: "1" },
   });
-  let output = "";
-  let exited = false;
-  const append = (chunk: Buffer): void => { output = (output + chunk.toString("utf8")).slice(-65_536); };
-  child.stdout.on("data", append); child.stderr.on("data", append);
-  child.once("exit", () => { exited = true; });
+  const managed = new ManagedProcess(child, { terminate: terminateProcessTree });
   const deadline = Date.now() + (options.readyTimeoutMs ?? 30_000);
   try {
     while (Date.now() < deadline) {
       options.signal?.throwIfAborted();
-      if (exited) throw new Error(`D2C mock server exited before readiness\n${output.slice(-4_000)}`);
+      if (managed.exited()) throw new Error(`D2C mock server exited before readiness\n${managed.output().slice(-4_000)}`);
       try { const response = await fetch(`${url}/_d2c/health`); if (response.ok) break; } catch { /* keep probing */ }
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
     }
-    if (Date.now() >= deadline) throw new Error(`D2C mock server readiness timed out\n${output.slice(-4_000)}`);
+    if (Date.now() >= deadline) throw new Error(`D2C mock server readiness timed out\n${managed.output().slice(-4_000)}`);
   } catch (error) {
     await terminateProcessTree(child, true);
     throw error;
   }
-  let stopped: Promise<void> | undefined;
   return {
     url,
     kind: "contract-mock",
-    output: () => output,
-    exited: () => exited,
-    stop: () => stopped ??= (async () => {
-      if (exited) return;
-      await terminateProcessTree(child, false);
-      if (await waitForExit(child, 2_000)) return;
-      await terminateProcessTree(child, true);
-      await waitForExit(child, 2_000);
-    })(),
+    output: () => managed.output(),
+    exited: () => managed.exited(),
+    stop: () => managed.stop(2_000, 2_000),
   };
 }

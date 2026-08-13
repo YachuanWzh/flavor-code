@@ -4,11 +4,26 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { createShellTool } from "../../src/tools/shell.js";
+import { JobRegistry } from "../../src/jobs/registry.js";
 
 const node = process.execPath;
 const signal = new AbortController().signal;
 
 describe("Shell", () => {
+  it("returns immediately for background commands and exposes incremental job output", async () => {
+    const jobs = new JobRegistry();
+    const tool = createShellTool(process.cwd(), { jobs });
+    const result = await tool.execute({
+      command: node, args: ["-e", "process.stdout.write('ready')"], background: true,
+    }, signal, { agent: "main" });
+    expect(result).toMatchObject({ state: "running", jobId: expect.stringMatching(/^job-/) });
+    if (!("jobId" in result)) throw new Error("expected background result");
+    expect(tool.presentResult?.(result, {
+      command: node, args: ["-e", "process.stdout.write('ready')"], background: true,
+    })).toMatchObject({ kind: "job", action: "start", id: result.jobId, state: "running" });
+    await jobs.wait(result.jobId, "main");
+    expect(jobs.read(result.jobId, "main").output).toContain("ready");
+  });
   it("passes argument arrays without shell parsing and uses a workspace cwd", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor shell "));
     const result = await createShellTool(workspace).execute({
@@ -27,6 +42,38 @@ describe("Shell", () => {
     }, signal);
 
     expect(result).toMatchObject({ exitCode: 7, signal: null, stderr: "bad", truncated: false });
+  });
+
+  it.skipIf(process.platform !== "win32")("decodes non-ASCII cmd output as UTF-8", async () => {
+    const result = await createShellTool(process.cwd()).execute({
+      command: "cmd.exe", args: ["/d", "/c", "echo 中文错误"],
+    }, signal);
+
+    expect(result.stdout.trim()).toBe("中文错误");
+    expect(result.stdout).not.toContain("�");
+
+    const gbk = await createShellTool(process.cwd()).execute({
+      command: node, args: ["-e", "process.stdout.write(Buffer.from('d6d0cec4b4edcef3','hex'))"],
+    }, signal);
+    expect(gbk.stdout).toBe("中文错误");
+
+    const invalid = await createShellTool(process.cwd()).execute({
+      command: "npm view node dist-tags --json", args: [],
+    }, signal);
+    expect(invalid.exitCode).not.toBe(0);
+    expect(`${invalid.stdout}${invalid.stderr}`).not.toContain("�");
+  });
+
+  it.skipIf(process.platform !== "win32")("streams split GBK output to background jobs without replacement characters", async () => {
+    const jobs = new JobRegistry();
+    const tool = createShellTool(process.cwd(), { jobs });
+    const script = "process.stdout.write(Buffer.from('d6','hex')); setTimeout(()=>process.stdout.write(Buffer.from('d0cec4b4edcef3','hex')),20)";
+    const result = await tool.execute({ command: node, args: ["-e", script], background: true }, signal, { agent: "main" });
+    if (!("jobId" in result)) throw new Error("expected background result");
+    await jobs.wait(result.jobId, "main");
+    const output = jobs.read(result.jobId, "main").output;
+    expect(output).toContain("中文错误");
+    expect(output).not.toContain("�");
   });
 
   it("terminates commands on timeout", async () => {

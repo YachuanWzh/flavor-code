@@ -49,6 +49,7 @@ import { message } from "../utils/error.js";
 import { modelContentText } from "../models/types.js";
 import type { ApprovalDecision } from "../tools/runtime.js";
 import type { PermissionProfile } from "../permissions/engine.js";
+import type { JobSnapshot } from "../jobs/registry.js";
 import { createGlobTool, type SearchResult } from "../tools/search.js";
 import { SkillManager, type ManagedSkill, type ManagedSkillSummary, type SkillDraft } from "../skills/manager.js";
 import { createProjectMemoryManager, type MemoryManagerLike, type MemorySnapshot } from "../memory/manager.js";
@@ -116,6 +117,7 @@ export interface RuntimeLike {
     accept(id: string): Promise<boolean>;
     dismiss(id: string): boolean;
   };
+  readonly jobs?: { list(): readonly JobSnapshot[]; subscribe(listener: (jobs: readonly JobSnapshot[]) => void): () => void };
   dispose(): Promise<void>;
 }
 
@@ -193,6 +195,7 @@ export class DesktopRuntimeController {
   #mcpManager: ProjectMcpConfigManagerLike | undefined;
   #models: readonly DesktopModelOption[] = DEFAULT_DESKTOP_MODELS;
   #busy = false;
+  #disposeJobSubscription: (() => void) | undefined;
   readonly #d2cMocks = new Map<string, D2cRunningMock>();
   readonly #d2cPreviews = new Map<string, RunningProject>();
   readonly #d2cProductPreviews = new Map<string, RunningProject>();
@@ -269,6 +272,7 @@ export class DesktopRuntimeController {
       }),
       diagnostics: runtime?.diagnostics ?? [],
       models: this.#models,
+      jobs: runtime?.jobs?.list() ?? [],
     };
   }
 
@@ -321,6 +325,7 @@ export class DesktopRuntimeController {
     });
     outputSessionId = runtime.sessionId;
     this.#runtime = runtime;
+    this.#disposeJobSubscription = runtime.jobs?.subscribe(() => this.#publishSnapshot());
     await runtime.session.start();
     if (!this.#sessions.some((session) => session.sessionId === runtime.sessionId)) {
       const now = new Date().toISOString();
@@ -1249,6 +1254,8 @@ export class DesktopRuntimeController {
 
   async #disposeRuntime(): Promise<void> {
     const runtime = this.#runtime;
+    this.#disposeJobSubscription?.();
+    this.#disposeJobSubscription = undefined;
     this.#runtime = undefined;
     this.#busy = false;
     if (runtime === undefined) return;

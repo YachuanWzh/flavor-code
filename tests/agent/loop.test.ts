@@ -9,8 +9,39 @@ import { ModelRegistry } from "../../src/models/registry.js";
 import { modelContentText, type ModelAdapter, type ModelEvent, type ModelRequest } from "../../src/models/types.js";
 import { PermissionEngine } from "../../src/permissions/engine.js";
 import { ToolRuntime } from "../../src/tools/runtime.js";
+import { withToolPresentation } from "../../src/tools/types.js";
 
 describe("AgentLoop", () => {
+  it("emits one aggregated deliverables event before done", async () => {
+    const path = `${process.cwd()}\\notes.txt`;
+    const fixture = createLoop({
+      toolNames: ["Write"],
+      adapter: fakeAdapter([[
+        { type: "tool-call", id: "write", name: "Write", input: { value: "one" } },
+        { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      ], [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }]]),
+      execute: async () => withToolPresentation({ path }, {
+        kind: "file-change", operation: "update", path, added: 2, removed: 1, lines: [],
+      }),
+    });
+    const events = await collect(fixture.loop.run({ prompt: "write" }));
+    expect(events.at(-2)).toEqual({ type: "deliverables", files: [{ path, operation: "update", added: 2, removed: 1 }] });
+    expect(events.at(-1)?.type).toBe("done");
+  });
+
+  it("injects newly discovered tool context before the next model call", async () => {
+    const requests: ModelRequest[] = [];
+    const fixture = createLoop({
+      toolNames: ["Read"],
+      afterSuccess: async () => ["<workspace-instructions path=\"src/AGENTS.md\">nested rule</workspace-instructions>"],
+      adapter: fakeAdapter([[
+        { type: "tool-call", id: "read", name: "Read", input: { value: "x" } },
+        { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      ], [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }]], requests),
+    });
+    await collect(fixture.loop.run({ prompt: "read" }));
+    expect(requests[1]?.messages).toContainEqual({ role: "system", content: expect.stringContaining("nested rule") });
+  });
   it("uses a supplied multimodal user message while keeping the routing prompt textual", async () => {
     const requests: ModelRequest[] = [];
     const fixture = createLoop({
@@ -847,6 +878,7 @@ function createLoop(options: {
   summarize?: () => Promise<string>;
   toolSummarize?: (input: { value: string }) => string | undefined;
   toolNames?: readonly string[];
+  afterSuccess?: import("../../src/tools/runtime.js").ToolRuntimeOptions["afterSuccess"];
 }) {
   const hooks = new HookBus();
   const tools = (options.toolNames ?? ["echo"]).map((name) => ({
@@ -862,6 +894,7 @@ function createLoop(options: {
     hooks,
     permissions: new PermissionEngine({ workspace: process.cwd() }),
     approve: () => "once",
+    ...(options.afterSuccess === undefined ? {} : { afterSuccess: options.afterSuccess }),
   });
   const registry = new ModelRegistry().register("fake", options.adapter);
   if (options.fallbackAdapter !== undefined) registry.register("cheap", options.fallbackAdapter);

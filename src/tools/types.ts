@@ -17,9 +17,57 @@ export interface FileChangePresentation {
   added: number;
   removed: number;
   lines: FileDiffLine[];
+  /** Additional files changed by the same atomic multi-file operation. */
+  relatedChanges?: readonly FileChangePresentation[];
 }
 
-export type ToolPresentation = FileChangePresentation;
+export interface GenericToolPresentation {
+  kind: "generic";
+  title: string;
+  summary?: string;
+  details?: string;
+}
+
+export interface TerminalToolPresentation {
+  kind: "terminal";
+  title: string;
+  command?: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number | null;
+  state?: "running" | "completed" | "failed" | "cancelled";
+}
+
+export interface WebToolPresentation {
+  kind: "web";
+  title: string;
+  url?: string;
+  summary?: string;
+  items?: readonly { title: string; url: string; snippet?: string }[];
+}
+
+export interface JobToolPresentation {
+  kind: "job";
+  action: "start" | "list" | "read" | "wait" | "kill";
+  id?: string;
+  jobKind?: string;
+  label?: string;
+  state?: "running" | "completed" | "failed" | "cancelled";
+  exitCode?: number | null;
+  error?: string;
+  output?: string;
+  cursor?: number;
+  truncated?: boolean;
+  jobs?: readonly {
+    id: string;
+    kind: string;
+    label: string;
+    state: "running" | "completed" | "failed" | "cancelled";
+    exitCode?: number | null;
+  }[];
+}
+
+export type ToolPresentation = FileChangePresentation | GenericToolPresentation | TerminalToolPresentation | WebToolPresentation | JobToolPresentation;
 
 const TOOL_PRESENTATION = Symbol("flavor.tool-presentation");
 
@@ -30,16 +78,18 @@ export function withToolPresentation<T extends object>(output: T, presentation: 
   return output;
 }
 
-export function getToolPresentation(output: unknown): ToolPresentation | undefined {
+export function getToolPresentation(output: unknown): FileChangePresentation | undefined {
   return typeof output === "object" && output !== null
-    ? (output as PresentedOutput)[TOOL_PRESENTATION]
+    ? (output as PresentedOutput)[TOOL_PRESENTATION] as FileChangePresentation | undefined
     : undefined;
 }
 
-export interface ToolDefinition<T> {
+export interface ToolDefinition<T, O = unknown> {
   name: string;
   description: string;
   inputSchema: z.ZodType<T>;
+  /** Optional validation for the canonical value produced by execute. */
+  outputSchema?: z.ZodType<O>;
   /** Restrict a tool to selected agent roles. Omit to expose it to both roles. */
   agents?: readonly ToolContext["agent"][];
   /** Optional provider-facing JSON Schema when it must differ from runtime validation. */
@@ -52,8 +102,14 @@ export interface ToolDefinition<T> {
    * Must return plain text (no ANSI escapes). Return undefined or an empty string to omit the hint.
    */
   summarize?(input: T): string | undefined;
+  /** Stable, model-facing serialization. Runtime output budgets are applied to this text. */
+  renderForModel?(output: O, input: T): string;
+  /** Renderer-neutral presentation available as soon as the call starts. */
+  presentCall?(input: T): ToolPresentation | undefined;
+  /** Renderer-neutral presentation of a completed call. */
+  presentResult?(output: O, input: T): ToolPresentation | undefined;
   permissions?(input: T): ToolPermissionMetadata;
-  execute(input: T, signal: AbortSignal): Promise<unknown>;
+  execute(input: T, signal: AbortSignal, context?: ToolContext): Promise<O>;
 }
 
 export interface ToolCall {
@@ -63,12 +119,17 @@ export interface ToolCall {
 
 export interface ToolContext {
   agent: "main" | "subagent";
+  ownerId?: string;
   signal?: AbortSignal;
 }
 
 export interface ToolResult {
   ok: boolean;
   output?: unknown;
+  /** Bounded model-facing content when the tool opts into the standard protocol. */
+  content?: string;
   presentation?: ToolPresentation;
+  /** Context discovered as a consequence of this successful call. */
+  additionalContext?: readonly string[];
   error?: { code: string; message: string };
 }

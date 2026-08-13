@@ -28,11 +28,11 @@ export interface PermissionEngineOptions {
   profile?: PermissionProfile;
 }
 
-const CONTROL_TOOLS = new Set(["TaskPlan", "TaskUpdate", "AskUserQuestion", "TodoWrite", "TaskOutput"]);
+const CONTROL_TOOLS = new Set(["TaskPlan", "TaskUpdate", "AskUserQuestion", "TodoWrite", "TaskOutput", "JobList", "JobRead", "JobWait", "JobKill", "TerminalRead", "TerminalList"]);
 const READ_TOOLS = new Set(["Read", "Glob", "Grep", "Search", "List", "SkillResource", "LspFindRefs", "LspHover", "LspDiagnostics", "ListRegisteredTools"]);
 const WRITE_TOOLS = new Set(["Write", "Edit", "ApplyPatch", "Copy", "Mkdir", "RegisterTool"]);
 const DESTRUCTIVE_TOOLS = new Set(["Delete", "Move", "RemoveTool"]);
-const SHELL_TOOLS = new Set(["Shell", "Bash", "Command", "Exec"]);
+const SHELL_TOOLS = new Set(["Shell", "Bash", "Command", "Exec", "TerminalOpen", "TerminalWrite", "TerminalResize", "TerminalClose"]);
 const NETWORK_TOOLS = new Set(["WebFetch", "WebSearch", "Fetch", "Network"]);
 const PATH_REQUIRED_TOOLS = new Set([
   "Read", "Write", "Edit", "ApplyPatch", "Glob", "Grep", "Delete", "Move", "Copy", "Mkdir",

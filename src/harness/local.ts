@@ -34,6 +34,7 @@ export interface LocalHarnessOptions {
   hallucinationGuard?: HallucinationGuard;
   /** When true, non-destructive tools skip the approval callback. Destructive tools still require confirmation. */
   loopMode?: boolean;
+  afterToolSuccess?(tool: string, paths: readonly string[], input: unknown, output: unknown, context: import("../tools/types.js").ToolContext): Promise<readonly string[]>;
 }
 
 export interface HarnessProfile {
@@ -116,7 +117,7 @@ export class LocalHarness {
     const tools = this.#toolsForAgent("subagent").filter((tool) => !MAIN_TASK_TOOL_NAMES.has(tool.name));
     const context = this.#options.createContext("subagent", tools, this.#subagentModelId, parentContext);
     this.#claimContext(context);
-    const profile = this.#createProfile(this.#subagentModelId, tools, "subagent", context, this.#options.approve);
+    const profile = this.#createProfile(this.#subagentModelId, tools, "subagent", context, this.#options.approve, undefined, `subagent:${task.id}`);
     let disposed = false;
     const child: SubagentHarness = {
       ...profile,
@@ -178,9 +179,11 @@ export class LocalHarness {
     context: ContextManager,
     approve?: ApprovalCallback,
     fallbackModelId?: string,
+    ownerId: string = agent,
   ): HarnessProfile {
     const permissions = new PermissionEngine({
       workspace: this.#options.workspace,
+      ...(this.#options.afterToolSuccess === undefined ? {} : { afterSuccess: this.#options.afterToolSuccess }),
       profile: this.#permissionProfile,
       mode: this.#options.loopMode
         ? "bypassPermissions"
@@ -215,6 +218,7 @@ export class LocalHarness {
         hooks: this.#options.hooks,
         tools,
         agent,
+        ownerId,
         ...(maxIterations === undefined ? {} : { maxIterations }),
         ...(isMain && this.#options.hasActiveProgress !== undefined ? { hasActiveProgress: this.#options.hasActiveProgress } : {}),
         ...(isMain && this.#options.hallucinationGuard !== undefined ? { hallucinationGuard: this.#options.hallucinationGuard } : {}),

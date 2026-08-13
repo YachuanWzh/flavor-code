@@ -16,6 +16,7 @@ import type { ManagedSkill, ManagedSkillSummary, SkillDraft } from "../skills/ma
 import { MEMORY_TYPES, type MemoryCandidate, type MemoryEntry } from "../memory/types.js";
 import type { MemorySnapshot } from "../memory/manager.js";
 import type { MemoryReviewItem } from "../memory/review.js";
+import type { JobSnapshot } from "../jobs/registry.js";
 import type { ManagedMcpServer } from "../mcp/config-manager.js";
 import {
   DEFAULT_MAX_IMAGE_BYTES,
@@ -235,6 +236,7 @@ export interface DesktopSnapshot {
   memoryAutoDismissSeconds?: number;
   diagnostics: readonly string[];
   models: readonly DesktopModelOption[];
+  jobs: readonly JobSnapshot[];
 }
 
 export interface DesktopModelMutationResult {

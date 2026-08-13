@@ -6,7 +6,7 @@ import { withStructuredOutput } from "../models/structured.js";
 import { normalizeProviderError, type ModelMessage, type ModelTool, type ProviderError } from "../models/types.js";
 import type { ToolRuntime } from "../tools/runtime.js";
 import type { ToolResult } from "../tools/types.js";
-import type { AgentError, AgentEvent, AgentRunRequest } from "./types.js";
+import type { AgentError, AgentEvent, AgentRunRequest, TurnDeliverable } from "./types.js";
 
 const DEFAULT_MAX_ITERATIONS = 40;
 const D2C_MAX_ITERATION_EXTENSIONS = 10;
@@ -43,6 +43,7 @@ export interface AgentLoopOptions {
   maxExtensions?: number;
   hasActiveProgress?(): boolean;
   agent?: "main" | "subagent";
+  ownerId?: string;
   hallucinationGuard?: HallucinationGuard;
 }
 
@@ -97,6 +98,7 @@ export class AgentLoop {
     let hasCacheData = false;
     let accumulatedText = "";
     let modelInvocation = 0;
+    const deliverables = new Map<string, TurnDeliverable>();
 
     let maxIterations = this.#options.maxIterations;
     const iterationLimitMode = this.#iterationLimitMode;
@@ -514,6 +516,7 @@ export class AgentLoop {
             // Guard failure is non-fatal for interactive sessions
           }
         }
+        if (deliverables.size > 0) yield { type: "deliverables", files: [...deliverables.values()] };
         yield {
           type: "done",
           usage: {
@@ -545,13 +548,15 @@ export class AgentLoop {
         for (const call of batch) {
           const label = this.#options.runtime.label(call);
           const hint = this.#options.runtime.hint(call);
+          const presentation = this.#options.runtime.callPresentation(call);
           this.#options.hallucinationGuard?.recordToolCall(call.name, call.input, call.id);
-          yield { type: "tool-start", id: call.id, name: call.name, input: call.input, ...(label === undefined ? {} : { label }), ...(hint === undefined ? {} : { hint }) };
+          yield { type: "tool-start", id: call.id, name: call.name, input: call.input, ...(label === undefined ? {} : { label }), ...(hint === undefined ? {} : { hint }), ...(presentation === undefined ? {} : { presentation }) };
         }
         const results = await Promise.all(batch.map(async (call) => ({
           call,
           result: await this.#options.runtime.execute(call, {
             agent: this.#options.agent,
+            ...(this.#options.ownerId === undefined ? {} : { ownerId: this.#options.ownerId }),
             ...(request.signal === undefined ? {} : { signal: request.signal }),
           }),
         })));
@@ -588,7 +593,16 @@ export class AgentLoop {
         const endLabel = this.#options.runtime.label(call);
         const endHint = this.#options.runtime.hint(call);
         this.#options.hallucinationGuard?.recordToolResult(call.name, result, call.id);
+        if (result.ok && result.presentation?.kind === "file-change") {
+          for (const change of [result.presentation, ...(result.presentation.relatedChanges ?? [])]) {
+            const current = deliverables.get(change.path);
+            deliverables.set(change.path, current === undefined
+              ? { path: change.path, operation: change.operation, added: change.added, removed: change.removed }
+              : { ...current, operation: change.operation, added: current.added + change.added, removed: current.removed + change.removed });
+          }
+        }
         yield { type: "tool-end", id: call.id, name: call.name, result, ...(endLabel === undefined ? {} : { label: endLabel }), ...(endHint === undefined ? {} : { hint: endHint }) };
+        for (const context of result.additionalContext ?? []) this.#options.context.append({ role: "system", content: context });
       }
       if (turnError !== undefined) {
         yield { type: "error", error: turnError };
@@ -625,7 +639,9 @@ function parallelReadBatchEnd(
 }
 
 function toolResultMessage(toolCallId: string, result: ToolResult): ModelMessage {
-  return { role: "tool", toolCallId, content: JSON.stringify(result.ok ? result.output : { error: result.error }) ?? "null" };
+  return { role: "tool", toolCallId, content: result.ok && result.content !== undefined
+    ? result.content
+    : (JSON.stringify(result.ok ? result.output : { error: result.error }) ?? "null") };
 }
 
 function abortMessage(signal: AbortSignal): string {

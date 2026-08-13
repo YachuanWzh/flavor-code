@@ -1,6 +1,6 @@
 {
   "name": "flavor-code",
-  "version": "1.2.3",
+  "version": "1.2.9",
   "author": "YachuanWzh",
   "type": "module",
   "main": "dist/desktop/main.js",
@@ -96,6 +96,7 @@
     "ink": "^7.1.0",
     "lodash-es": "^4.17.23",
     "marked": "^16.4.2",
+    "node-pty": "^1.1.0",
     "openai": "^6.46.0",
     "pixelmatch": "^7.2.0",
     "pngjs": "^7.0.0",
@@ -127,6 +128,7 @@
   "allowScripts": {
     "electron-winstaller@5.4.0": true,
     "esbuild@0.27.7": true,
-    "electron@42.7.0": true
+    "electron@42.7.0": true,
+    "node-pty@1.1.0": true
   }
 }
