@@ -925,4 +925,143 @@ describe("TerminalLayout", () => {
     expect(plain).toContain("└─ Showing 8 of 10");
     expect(plain).not.toContain("background command 8");
   });
+
+  it("renders successful command output as a bounded receipt separated from assistant text", () => {
+    const outputLines = Array.from({ length: 20 }, (_, index) => `file-${index + 1}.ts | ${index + 1} +++`).join("\n");
+    const turn: TranscriptTurn = {
+      id: 1, prompt: "查看提交", assistantText: "这个提交修改了多个文件。", statusLines: [],
+      blocks: [{
+        kind: "status", id: "tool:shell", state: "completed", text: "Shell",
+        presentation: {
+          kind: "terminal", title: "git show", command: "git show --stat --oneline 14adcc5",
+          stdout: `14adcc5 feat(desktop): improve E2E\n${outputLines}\n`, stderr: "", exitCode: 0,
+          state: "completed",
+        },
+      }, { kind: "text", text: "这个提交修改了多个文件。" }],
+    };
+    const raw = renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={[turn]}
+      input="" promptCursor={0} columns={88} rows={50} activeSession={false}
+    />, { columns: 88 });
+    const plain = raw.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(plain).toContain("┌─ COMMAND · COMPLETED");
+    expect(plain).toContain("│  git show --stat --oneline 14adcc5");
+    expect(plain).toContain("├─ OUTPUT · 21 LINES");
+    expect(plain).toContain("│  14adcc5 feat(desktop): improve E2E");
+    expect(plain).toContain("│  … 5 lines hidden");
+    expect(plain).toContain("└─ exit 0");
+    expect(plain).toMatch(/exit 0\n\n\s+这个提交修改了多个文件/u);
+    expect(raw).not.toBe(plain);
+  });
+
+  it("renders failed command stderr with error hierarchy and stays compact on narrow terminals", () => {
+    const turn: TranscriptTurn = {
+      id: 1, prompt: "查看状态", assistantText: "命令参数需要调整。", statusLines: [],
+      blocks: [{
+        kind: "status", id: "tool:shell", state: "completed", text: "Shell",
+        presentation: {
+          kind: "terminal", title: "git status", command: "git status --short",
+          stdout: "", stderr: "'git status' 不是内部或外部命令，也不是可运行的程序。\n", exitCode: 1,
+          state: "failed",
+        },
+      }, { kind: "text", text: "命令参数需要调整。" }],
+    };
+    const raw = renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={[turn]}
+      input="" promptCursor={0} columns={46} rows={32} activeSession={false}
+    />, { columns: 46 });
+    const plain = raw.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(plain).toContain("COMMAND · FAILED");
+    expect(plain).toContain("git status --short");
+    expect(plain).toContain("ERROR · 1 LINE");
+    expect(plain).toContain("exit 1");
+    expect(plain).toMatch(/exit 1\n\n\s+命令参数需要调整/u);
+    expect(raw).not.toBe(plain);
+  });
+
+  it("shares the 16-line command receipt budget between stdout and stderr", () => {
+    const stream = (prefix: string) => Array.from({ length: 12 }, (_, index) => `${prefix} ${index + 1}`).join("\n");
+    const turn: TranscriptTurn = {
+      id: 1, prompt: "run", assistantText: "done", statusLines: [],
+      blocks: [{
+        kind: "status", id: "tool:mixed", state: "completed", text: "Shell",
+        presentation: {
+          kind: "terminal", variant: "command", title: "mixed", command: "mixed",
+          stdout: stream("out"), stderr: stream("err"), exitCode: 1, state: "failed",
+        },
+      }],
+    };
+    const plain = renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={[turn]}
+      input="" promptCursor={0} columns={80} rows={40} activeSession={false}
+    />, { columns: 80 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(plain).toContain("OUTPUT · 12 LINES");
+    expect(plain).toContain("ERROR · 12 LINES");
+    expect(plain.match(/… 4 lines hidden/gu)).toHaveLength(2);
+    expect(plain).toContain("out 1");
+    expect(plain).toContain("out 12");
+    expect(plain).toContain("err 1");
+    expect(plain).toContain("err 12");
+  });
+
+  it("renders turn deliverables as a workspace-relative changeset receipt", () => {
+    const turn: TranscriptTurn = {
+      id: 1, prompt: "更新变更日志", assistantText: "变更日志已经更新。", statusLines: [],
+      blocks: [{
+        kind: "status", id: "deliverables:1", state: "completed", text: "Changed 3 files",
+        details: "legacy fallback must not be rendered twice",
+        presentation: {
+          kind: "changeset",
+          files: [
+            { path: "C:\\Users\\wangzh\\Desktop\\idea\\flavor-code\\CHANGELOG.md", operation: "update", added: 26, removed: 1 },
+            { path: "C:\\Users\\wangzh\\Desktop\\idea\\flavor-code\\src\\new.ts", operation: "create", added: 12, removed: 0 },
+            { path: "C:\\Users\\wangzh\\Desktop\\idea\\flavor-code\\src\\old.ts", operation: "delete", added: 0, removed: 4 },
+          ],
+        },
+      }, { kind: "text", text: "变更日志已经更新。" }],
+    };
+    const raw = renderToString(<TerminalLayout
+      model="model" workspaceName="flavor-code" completed={[turn]}
+      input="" promptCursor={0} columns={88} rows={32} activeSession={false}
+    />, { columns: 88 });
+    const plain = raw.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(plain).toContain("┌─ CHANGESET · 3 FILES");
+    expect(plain).toContain("│  UPDATE  +26 -1   CHANGELOG.md");
+    expect(plain).toContain("│  CREATE  +12 -0   src/new.ts");
+    expect(plain).toContain("│  DELETE  +0 -4    src/old.ts");
+    expect(plain).toContain("└─ +38 -5");
+    expect(plain).not.toContain("C:\\Users\\wangzh");
+    expect(plain).not.toContain("legacy fallback");
+    expect(plain).toMatch(/\+38 -5\n\n\s+变更日志已经更新/u);
+    expect(raw).not.toBe(plain);
+  });
+
+  it("bounds long changeset receipts and reports omitted files", () => {
+    const files = Array.from({ length: 10 }, (_, index) => ({
+      path: `C:\\work\\flavor-code\\src\\file-${index + 1}.ts`,
+      operation: "update" as const,
+      added: index + 1,
+      removed: 0,
+    }));
+    const turn: TranscriptTurn = {
+      id: 1, prompt: "批量更新", assistantText: "", statusLines: [],
+      blocks: [{
+        kind: "status", id: "deliverables:1", state: "completed", text: "Changed 10 files",
+        presentation: { kind: "changeset", files },
+      }],
+    };
+    const plain = renderToString(<TerminalLayout
+      model="model" workspaceName="flavor-code" completed={[turn]}
+      input="" promptCursor={0} columns={60} rows={32} activeSession={false}
+    />, { columns: 60 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(plain).toContain("CHANGESET · 10 FILES");
+    expect(plain).toContain("src/file-8.ts");
+    expect(plain).not.toContain("src/file-9.ts");
+    expect(plain).toContain("└─ +55 -0 · Showing 8 of 10");
+  });
 });

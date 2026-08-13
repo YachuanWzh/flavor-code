@@ -130,7 +130,7 @@ export async function tmuxLoadBuffer(text: string): Promise<boolean> {
  * Local (no SSH_CONNECTION): also shell out to a native clipboard utility.
  * OSC 52 and tmux -w both depend on terminal settings — iTerm2 disables
  * OSC 52 by default, VS Code shows a permission prompt on first use. Native
- * utilities (pbcopy/wl-copy/xclip/xsel/clip.exe) always work locally. Over
+ * utilities (pbcopy/wl-copy/xclip/xsel/PowerShell) always work locally. Over
  * SSH these would write to the remote clipboard — OSC 52 is the right path there.
  *
  * Returns the sequence for the caller to write to stdout (raw OSC 52
@@ -169,39 +169,58 @@ let linuxCopy: 'wl-copy' | 'xclip' | 'xsel' | null | undefined
  * the remote machine's clipboard — OSC 52 is the right path there).
  * Fire-and-forget: failures are silent since OSC 52 may have succeeded.
  */
-function copyNative(text: string): void {
+const WRITE_WINDOWS_CLIPBOARD_TEXT = String.raw`
+$inputStream = [Console]::OpenStandardInput()
+$memoryStream = New-Object System.IO.MemoryStream
+try {
+  $inputStream.CopyTo($memoryStream)
+  $text = [System.Text.Encoding]::UTF8.GetString($memoryStream.ToArray())
+  Add-Type -AssemblyName System.Windows.Forms
+  [System.Windows.Forms.Clipboard]::SetText($text)
+} finally {
+  $memoryStream.Dispose()
+}
+`
+
+type ClipboardRunner = typeof execFileNoThrow
+
+export function copyNative(
+  text: string,
+  options: { platform?: NodeJS.Platform; run?: ClipboardRunner } = {},
+): void {
   const opts = { input: text, useCwd: false, timeout: 2000 }
-  switch (process.platform) {
+  const run = options.run ?? execFileNoThrow
+  switch (options.platform ?? process.platform) {
     case 'darwin':
-      void execFileNoThrow('pbcopy', [], opts)
+      void run('pbcopy', [], opts)
       return
     case 'linux': {
       if (linuxCopy === null) return
       if (linuxCopy === 'wl-copy') {
-        void execFileNoThrow('wl-copy', [], opts)
+        void run('wl-copy', [], opts)
         return
       }
       if (linuxCopy === 'xclip') {
-        void execFileNoThrow('xclip', ['-selection', 'clipboard'], opts)
+        void run('xclip', ['-selection', 'clipboard'], opts)
         return
       }
       if (linuxCopy === 'xsel') {
-        void execFileNoThrow('xsel', ['--clipboard', '--input'], opts)
+        void run('xsel', ['--clipboard', '--input'], opts)
         return
       }
       // First call: probe wl-copy (Wayland) then xclip/xsel (X11), cache winner.
-      void execFileNoThrow('wl-copy', [], opts).then(r => {
+      void run('wl-copy', [], opts).then(r => {
         if (r.code === 0) {
           linuxCopy = 'wl-copy'
           return
         }
-        void execFileNoThrow('xclip', ['-selection', 'clipboard'], opts).then(
+        void run('xclip', ['-selection', 'clipboard'], opts).then(
           r2 => {
             if (r2.code === 0) {
               linuxCopy = 'xclip'
               return
             }
-            void execFileNoThrow('xsel', ['--clipboard', '--input'], opts).then(
+            void run('xsel', ['--clipboard', '--input'], opts).then(
               r3 => {
                 linuxCopy = r3.code === 0 ? 'xsel' : null
               },
@@ -212,9 +231,14 @@ function copyNative(text: string): void {
       return
     }
     case 'win32':
-      // clip.exe is always available on Windows. Unicode handling is
-      // imperfect (system locale encoding) but good enough for a fallback.
-      void execFileNoThrow('clip', [], opts)
+      // clip.exe decodes redirected stdin with the active Windows code page,
+      // corrupting Node's UTF-8 bytes on systems such as CP936. Read stdin as
+      // raw bytes and write CF_UNICODETEXT through the .NET clipboard API.
+      void run(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-STA', '-Command', WRITE_WINDOWS_CLIPBOARD_TEXT],
+        opts,
+      )
       return
   }
 }

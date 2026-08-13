@@ -61,7 +61,7 @@ export function createShellTool(
     inputSchema: ShellInput,
     paths: (input) => [workingDirectory(root, input.cwd ?? undefined)],
     summarize: (input) => [input.command, ...input.args].join(" "),
-    presentCall: (input) => ({ kind: "terminal", title: input.background ? "Starting background command" : "Running command", command: [input.command, ...input.args].join(" "), state: "running" }),
+    presentCall: (input) => ({ kind: "terminal", variant: "command", title: input.background ? "Starting background command" : "Running command", command: [input.command, ...input.args].join(" "), state: "running" }),
     permissions: (input) => ({
       paths: [workingDirectory(root, input.cwd ?? undefined)],
       command: input.command,
@@ -73,7 +73,7 @@ export function createShellTool(
         kind: "job", action: "start", id: output.jobId, jobKind: "shell",
         label: [input.command, ...input.args].join(" "), state: "running",
       } satisfies JobToolPresentation)
-      : { kind: "terminal", title: [input.command, ...input.args].join(" "), command: [input.command, ...input.args].join(" "), stdout: output.stdout, stderr: output.stderr, exitCode: output.exitCode, state: output.terminationReason === "cancelled" ? "cancelled" : output.exitCode === 0 ? "completed" : "failed" },
+      : { kind: "terminal", variant: "command", title: [input.command, ...input.args].join(" "), command: [input.command, ...input.args].join(" "), stdout: output.stdout, stderr: output.stderr, exitCode: output.exitCode, state: output.terminationReason === "cancelled" ? "cancelled" : output.exitCode === 0 ? "completed" : "failed", truncated: output.truncated },
     execute: async (input, signal, context) => {
       const timeoutMs = input.timeoutMs ?? defaultTimeoutMs;
       if (input.background === true) {

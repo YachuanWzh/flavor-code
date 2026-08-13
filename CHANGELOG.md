@@ -2,7 +2,50 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.2.7 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.2.9 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.2.9] - 2026-08-14
+
+### 新增
+- 新增分层项目指令：支持根目录或子目录的 `AGENTS.md` / `CLAUDE.md` 自动加载，同目录可用 `AGENTS.local.md` / `CLAUDE.local.md` 做本地补充
+- 新增每轮成果物汇总：`Write`、`Edit`、`ApplyPatch` 成功后展示带语义色的 CHANGESET 收据（CREATE / UPDATE / DELETE、各文件行数与总计）
+- 新增文件版本保护：文件在 Agent 读取后被 IDE、格式化器或其他进程修改时，再次写入会报 `Stale file` 并提示重新读取
+- 新增标准工具展示协议：工具可声明 `outputSchema`、`renderForModel`、`presentCall`、`presentResult`
+- 新增后台任务管理：Shell 支持 `background: true`，通过 `JobList` / `JobRead` / `JobWait` / `JobKill` 管理后台任务
+- 新增持久终端（PTY）：支持 `TerminalOpen` / `TerminalWrite` / `TerminalRead` / `TerminalClose`，引入 node-pty 依赖
+- 新增原生 WebSearch 工具：无需 MCP 与密钥，默认使用 DuckDuckGo Lite，连接失败或无可解析结果时自动降级到 Bing，单次最多返回 20 条
+- 新增原生 WebFetch 工具：支持 HTTP(S)、重定向、HTML 转文本、超时与响应大小限制，并兼容 Clash/TUN Fake-IP DNS
+- 桌面端（Electron）会话标题栏实时显示运行中的后台任务数量
+
+### 改进
+- 统一 D2C/E2E 预览与后端服务进程生命周期：输出限制、进程树终止与幂等清理
+- CLI 输出展示升级：区分 JOB、COMMAND、TERMINAL 与 WEB SEARCH 收据，长输出折叠中间部分
+- Windows 终端输出编码优先使用 UTF-8，遇到 GBK/GB18030 系统诊断时自动回退
+- 增强安全边界：WebFetch 拦截 Fake-IP、内网与云元数据地址访问（SSRF 防护）
+
+## [1.2.8] - 2026-08-13
+
+### 新增
+- 新增 D2C（设计稿到代码）模块：设计稿导入、框架选择与自动对比的端到端流程
+- 实现 D2C diff engine 核心：元素对齐、差异识别、评分与报告生成（TDD 覆盖）
+- 新增设计稿像素对比功能，支持生成项目经 vite dev server 运行后对比
+- 新增桌面端截图服务、工具扩展接入点与报告 IPC
+- 新增差异检查器 UI：叠加层、标注、报告列表，并改进问题筛选与评分展示
+- 新增 D2C 人工审阅与接口联调功能
+- 新增 D2C 模拟服务器健康检查与运行时同步功能
+- 新增交互契约验证与自主规划功能，以及端到端测试重置与交互修复提示
+- 新增 Python FastAPI 集成与质量评估功能
+- 新增端到端交付功能：从粗需求到可验收成果物的全流程支持
+- 为 Anthropic 模型适配器添加 Claude 客户端支持及请求指纹
+- 新增 PRD 治理与桌面端 E2E 测试支持
+
+### 改进
+- 优化 D2C 评测体系与用户体验，新增内嵌质量评估能力
+- 改进测试失败处理并新增诊断功能
+- 交互过程中展示编码中状态并校验任务名
+
+### 修复
+- 修复差异检查器空状态卡片在画布区域的居中问题
 
 ## [1.2.7] - 2026-08-11
 
@@ -184,6 +227,8 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.2.9 | 2026-08-14 | 运行时生产力与原生 Web：分层项目指令、安全写入、后台任务、持久终端、WebSearch/WebFetch |
+| 1.2.8 | 2026-08-13 | D2C 设计稿到代码、E2E 端到端交付、Claude 客户端支持 |
 | 1.2.7 | 2026-08-11 | 启动流程优化 |
 | 1.2.6 | 2026-08-11 | 清除冷记忆功能 |
 | 1.2.5 | 2026-08-10 | 权限请求钩子重复调用修复 |

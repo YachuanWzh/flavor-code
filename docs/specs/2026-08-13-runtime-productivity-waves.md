@@ -23,6 +23,8 @@ Bring the first two runtime-productivity waves into Flavor Code without copying 
 - A completed agent turn emits one `deliverables` event when successful file tools changed files.
 - Items are unique by path, preserve first-change order, and accumulate operation and added/removed line counts.
 - CLI/desktop transcript rendering uses the same event; the summary is not inferred from assistant prose.
+- The CLI renders the event as a distinct `CHANGESET` receipt with semantic operation colors, workspace-relative paths, per-file and aggregate line counts, and one blank line before subsequent assistant text.
+- The CLI shows at most the first 8 files and reports the shown/total count when the receipt is bounded. The transcript retains a plain-text detail fallback for renderers that do not implement the structured presentation.
 
 ### Read-before-write version protection
 
@@ -49,6 +51,7 @@ Bring the first two runtime-productivity waves into Flavor Code without copying 
 - Cancelling or disposing the owning runtime terminates running children and their process trees.
 - Windows shell execution selects UTF-8 code page 65001 and automatically falls back to GB18030 when system diagnostics are not valid UTF-8; incremental job output uses an adaptive streaming decoder so non-ASCII characters are not corrupted at chunk boundaries.
 - CLI job presentations use a state-colored receipt: semantic job status and metadata, a bounded log section (latest 12 lines with omission count), at most eight list entries, and a footer containing exit/cursor/truncation details. Non-zero process exits are failed jobs rather than completed jobs with an error code.
+- Foreground shell results use a state-colored `COMMAND` receipt with separate command, stdout `OUTPUT`, stderr `ERROR`, and exit/truncation footer regions. At most 16 output lines are shown, preserving both head and tail with an explicit middle omission count. Persistent PTY presentations use `TERMINAL` instead of `COMMAND`.
 
 ### Desktop job status
 

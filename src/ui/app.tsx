@@ -871,13 +871,13 @@ export function TerminalLayout({
       {completed.map((turn, index) => (
         <Box key={turn.id} flexDirection="column">
           {index > 0 ? <TurnSeparator width={columns} /> : null}
-          <TurnView turn={turn} interactive={false} />
+          <TurnView turn={turn} interactive={false} workspaceName={workspaceName} />
         </Box>
       ))}
       {activeWithoutTasks === undefined ? null : (
         <Box flexDirection="column">
           {completed.length > 0 ? <TurnSeparator width={columns} /> : null}
-          <TurnView turn={activeWithoutTasks} interactive={activeSession} />
+          <TurnView turn={activeWithoutTasks} interactive={activeSession} workspaceName={workspaceName} />
         </Box>
       )}
     </ScrollBox>
@@ -1130,12 +1130,20 @@ function TurnSeparator({ width }: { width: number }): React.JSX.Element {
   return <Text dimColor>{"─".repeat(Math.max(1, width - 1))}</Text>;
 }
 
-function TurnView({ turn, interactive }: { turn: TranscriptTurn; interactive: boolean }): React.JSX.Element {
+function TurnView({
+  turn,
+  interactive,
+  workspaceName,
+}: {
+  turn: TranscriptTurn;
+  interactive: boolean;
+  workspaceName: string;
+}): React.JSX.Element {
   if (turn.kind === "compaction") {
     return <Box flexDirection="column" marginBottom={1} borderStyle="round" borderColor="ansi:yellowBright" paddingX={1}>
       <Text color="ansi:yellowBright" bold>{turn.prompt}</Text>
       {turn.blocks.map((block, index) => block.kind === "status"
-        ? <StatusBlockView key={block.id} block={block} interactive={interactive} />
+        ? <StatusBlockView key={block.id} block={block} interactive={interactive} workspaceName={workspaceName} />
         : <Box key={`${turn.id}-text-${index}`}><AssistantText text={block.text} /></Box>)}
     </Box>;
   }
@@ -1148,7 +1156,7 @@ function TurnView({ turn, interactive }: { turn: TranscriptTurn; interactive: bo
     {/* Model output: indented to create clear visual hierarchy */}
     <Box flexDirection="column" paddingLeft={2} marginTop={1}>
       {turn.blocks.map((block, index) => block.kind === "status"
-        ? <StatusBlockView key={block.id} block={block} interactive={interactive} />
+        ? <StatusBlockView key={block.id} block={block} interactive={interactive} workspaceName={workspaceName} />
         : <Box key={`${turn.id}-text-${index}`} marginBottom={1}><AssistantText text={block.text} /></Box>)}
     </Box>
   </Box>;
@@ -1321,34 +1329,198 @@ interface PastedDraftMatch {
 function StatusBlockView({
   block,
   interactive,
+  workspaceName,
 }: {
   block: Extract<TranscriptBlock, { kind: "status" }>;
   interactive: boolean;
+  workspaceName: string;
 }): React.JSX.Element {
   const visibleBlock = cliToolTitle(block);
   const outcome = cliToolOutcome(block);
   const primary = visibleBlock.activity === "model" || visibleBlock.task !== undefined
     ? <TaskStatusLine block={visibleBlock} interactive={interactive} />
     : visibleBlock.state === "completed" && visibleBlock.presentation !== undefined
-      ? <ToolPresentationView presentation={visibleBlock.presentation} />
+      ? <ToolPresentationView presentation={visibleBlock.presentation} workspaceName={workspaceName} />
       : <StatusLine block={visibleBlock} interactive={interactive} />;
   return <Box flexDirection="column">
     {primary}
     {outcome === undefined ? null : <Box paddingLeft={2}><Text dimColor>└ {outcome}</Text></Box>}
-    {block.details === undefined ? null : <Box paddingLeft={2}><AssistantText text={block.details} /></Box>}
+    {block.details === undefined || block.presentation?.kind === "changeset"
+      ? null
+      : <Box paddingLeft={2}><AssistantText text={block.details} /></Box>}
   </Box>;
 }
 
-function ToolPresentationView({ presentation }: { presentation: ToolPresentation }): React.JSX.Element {
+function ToolPresentationView({
+  presentation,
+  workspaceName,
+}: {
+  presentation: ToolPresentation;
+  workspaceName: string;
+}): React.JSX.Element {
+  if (presentation.kind === "changeset") return <ChangeSetPresentationView presentation={presentation} workspaceName={workspaceName} />;
   if (presentation.kind === "file-change") return <FileDiffView presentation={presentation} />;
-  if (presentation.kind === "terminal") return <Box flexDirection="column" paddingLeft={2}>
-    <Text>{presentation.title}{presentation.state ? ` · ${presentation.state}` : ""}</Text>
-    {presentation.stdout ? <Text dimColor>{presentation.stdout}</Text> : null}
-    {presentation.stderr ? <Text color="red">{presentation.stderr}</Text> : null}
-  </Box>;
+  if (presentation.kind === "terminal") return <CommandPresentationView presentation={presentation} />;
   if (presentation.kind === "web") return <WebPresentationView presentation={presentation} />;
   if (presentation.kind === "job") return <JobPresentationView presentation={presentation} />;
   return <Box paddingLeft={2}><Text>{presentation.title}{presentation.summary ? ` · ${presentation.summary}` : ""}</Text></Box>;
+}
+
+const CLI_CHANGESET_FILE_LIMIT = 8;
+const CHANGESET_TONE = "#b99bf8";
+
+function ChangeSetPresentationView({
+  presentation,
+  workspaceName,
+}: {
+  presentation: Extract<ToolPresentation, { kind: "changeset" }>;
+  workspaceName: string;
+}): React.JSX.Element {
+  const visibleFiles = presentation.files.slice(0, CLI_CHANGESET_FILE_LIMIT);
+  const added = presentation.files.reduce((total, file) => total + file.added, 0);
+  const removed = presentation.files.reduce((total, file) => total + file.removed, 0);
+  const fileLabel = presentation.files.length === 1 ? "FILE" : "FILES";
+  const showing = presentation.files.length > visibleFiles.length
+    ? ` · Showing ${visibleFiles.length} of ${presentation.files.length}`
+    : "";
+  return <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
+    <Box>
+      <Text color={CHANGESET_TONE}>┌─ </Text>
+      <Text color={CHANGESET_TONE} bold>CHANGESET · {presentation.files.length} {fileLabel}</Text>
+    </Box>
+    {visibleFiles.map((file) => {
+      const operation = file.operation.toUpperCase();
+      const stats = `+${file.added} -${file.removed}`;
+      return <Box key={`${file.operation}:${file.path}`}>
+        <Text color={CHANGESET_TONE}>│  </Text>
+        <Text color={changeSetOperationColor(file.operation)} bold>{operation.padEnd(8)}</Text>
+        <Text><Text color="ansi:green">+{file.added}</Text> <Text color="#e06c50">-{file.removed}</Text>{" ".repeat(Math.max(1, 9 - stats.length))}</Text>
+        <Text color="ansi:whiteBright" wrap="truncate-end">{workspaceRelativePath(file.path, workspaceName)}</Text>
+      </Box>;
+    })}
+    <Box>
+      <Text color={CHANGESET_TONE}>└─ </Text>
+      <Text><Text color="ansi:green">+{added}</Text> <Text color="#e06c50">-{removed}</Text><Text dimColor>{showing}</Text></Text>
+    </Box>
+  </Box>;
+}
+
+function changeSetOperationColor(operation: "create" | "update" | "delete"): string {
+  if (operation === "create") return "ansi:green";
+  if (operation === "delete") return "#e06c50";
+  return "ansi:cyanBright";
+}
+
+function workspaceRelativePath(value: string, workspaceName: string): string {
+  const normalized = value.replace(/\\/gu, "/");
+  const marker = `/${workspaceName}/`;
+  const markerIndex = normalized.toLocaleLowerCase().lastIndexOf(marker.toLocaleLowerCase());
+  if (markerIndex >= 0) return normalized.slice(markerIndex + marker.length);
+  const rootPrefix = `${workspaceName}/`;
+  if (normalized.toLocaleLowerCase().startsWith(rootPrefix.toLocaleLowerCase())) return normalized.slice(rootPrefix.length);
+  return normalized;
+}
+
+const CLI_COMMAND_OUTPUT_LINE_LIMIT = 16;
+
+function CommandPresentationView({
+  presentation,
+}: {
+  presentation: Extract<ToolPresentation, { kind: "terminal" }>;
+}): React.JSX.Element {
+  const state = presentation.state ?? commandState(presentation.exitCode);
+  const tone = jobStateColor(state);
+  const label = presentation.variant === "terminal" ? "TERMINAL" : "COMMAND";
+  const hasStdout = jobOutputLines(presentation.stdout ?? "").length > 0;
+  const hasStderr = jobOutputLines(presentation.stderr ?? "").length > 0;
+  const perStreamLimit = hasStdout && hasStderr ? Math.floor(CLI_COMMAND_OUTPUT_LINE_LIMIT / 2) : CLI_COMMAND_OUTPUT_LINE_LIMIT;
+  const stdout = boundedCommandLines(presentation.stdout ?? "", perStreamLimit);
+  const stderr = boundedCommandLines(presentation.stderr ?? "", perStreamLimit);
+  return <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
+    <Box>
+      <Text color={tone}>┌─ </Text>
+      <Text color={tone} bold>{label} · {state.toUpperCase()}</Text>
+    </Box>
+    <Box>
+      <Text color={tone}>│  </Text>
+      <Text color="ansi:whiteBright" bold wrap="truncate-end">{presentation.command ?? presentation.title}</Text>
+    </Box>
+    {stdout.total === 0 ? null : <CommandOutputSection label="OUTPUT" value={stdout} tone={tone} error={false} />}
+    {stderr.total === 0 ? null : <CommandOutputSection label="ERROR" value={stderr} tone={tone} error />}
+    <Box>
+      <Text color={tone}>└─ </Text>
+      <Text dimColor>{commandFooter(presentation, state)}</Text>
+    </Box>
+  </Box>;
+}
+
+interface BoundedCommandLines {
+  total: number;
+  head: string[];
+  tail: string[];
+  hidden: number;
+}
+
+function CommandOutputSection({
+  label,
+  value,
+  tone,
+  error,
+}: {
+  label: "OUTPUT" | "ERROR";
+  value: BoundedCommandLines;
+  tone: string;
+  error: boolean;
+}): React.JSX.Element {
+  return <>
+    <Box>
+      <Text color={tone}>├─ </Text>
+      <Text color={error ? "#e06c50" : tone} bold>{label}</Text>
+      <Text dimColor>{` · ${value.total} ${value.total === 1 ? "LINE" : "LINES"}`}</Text>
+    </Box>
+    {value.head.map((line, index) => <CommandOutputLine key={`head:${index}`} line={line} tone={tone} error={error} />)}
+    {value.hidden === 0 ? null : <Box>
+      <Text color={tone}>│  </Text>
+      <Text dimColor>… {value.hidden} {value.hidden === 1 ? "line" : "lines"} hidden</Text>
+    </Box>}
+    {value.tail.map((line, index) => <CommandOutputLine key={`tail:${index}`} line={line} tone={tone} error={error} />)}
+  </>;
+}
+
+function CommandOutputLine({ line, tone, error }: { line: string; tone: string; error: boolean }): React.JSX.Element {
+  return <Box>
+    <Text color={tone}>│  </Text>
+    <Text color={error ? "#e06c50" : "#b8bcc2"} wrap="truncate-end">{line === "" ? " " : line}</Text>
+  </Box>;
+}
+
+function boundedCommandLines(output: string, limit: number): BoundedCommandLines {
+  const lines = jobOutputLines(output);
+  if (lines.length <= limit) return { total: lines.length, head: lines, tail: [], hidden: 0 };
+  const headCount = Math.ceil(limit / 2);
+  const tailCount = Math.floor(limit / 2);
+  return {
+    total: lines.length,
+    head: lines.slice(0, headCount),
+    tail: lines.slice(-tailCount),
+    hidden: lines.length - headCount - tailCount,
+  };
+}
+
+function commandState(exitCode: number | null | undefined): "running" | "completed" | "failed" | "cancelled" {
+  if (exitCode === undefined) return "running";
+  return exitCode === 0 ? "completed" : "failed";
+}
+
+function commandFooter(
+  presentation: Extract<ToolPresentation, { kind: "terminal" }>,
+  state: "running" | "completed" | "failed" | "cancelled",
+): string {
+  const parts = [presentation.exitCode === undefined
+    ? state
+    : presentation.exitCode === null ? "no exit code" : `exit ${presentation.exitCode}`];
+  if (presentation.truncated === true) parts.push("output truncated");
+  return parts.join(" · ");
 }
 
 const CLI_WEB_RESULT_LIMIT = 5;

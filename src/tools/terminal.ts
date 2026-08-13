@@ -27,7 +27,7 @@ export function createTerminalTools(terminals: TerminalService, workspace = proc
         ...(input.columns === undefined ? {} : { columns: input.columns }),
         ...(input.rows === undefined ? {} : { rows: input.rows }),
       }),
-      presentResult: (output) => ({ kind: "terminal", title: `Terminal ${(output as { id: string }).id}`, state: "running" }),
+      presentResult: (output) => ({ kind: "terminal", variant: "terminal", title: `Terminal ${(output as { id: string }).id}`, state: "running" }),
     } satisfies ToolDefinition<z.infer<typeof OpenInput>>,
     {
       name: "TerminalWrite", description: "Write text or a command to a persistent terminal",
@@ -40,7 +40,16 @@ export function createTerminalTools(terminals: TerminalService, workspace = proc
       inputSchema: ReadInput, paths: () => [],
       execute: async (input, _signal, context) => terminals.read(input.id, owner(context), input.cursor ?? 0),
       renderForModel: (output) => (output as { output: string }).output,
-      presentResult: (output) => ({ kind: "terminal", title: `Terminal ${(output as { id: string }).id}`, stdout: (output as { output: string }).output }),
+      presentResult: (output) => {
+        const result = output as { id: string; output: string; state: "running" | "exited" | "closed"; exitCode?: number; truncated: boolean };
+        return {
+          kind: "terminal" as const, variant: "terminal" as const, title: `Terminal ${result.id}`,
+          stdout: result.output, truncated: result.truncated,
+          ...(result.exitCode === undefined ? { state: result.state === "closed" ? "cancelled" as const : "running" as const } : {
+            exitCode: result.exitCode, state: result.exitCode === 0 ? "completed" as const : "failed" as const,
+          }),
+        };
+      },
     } satisfies ToolDefinition<z.infer<typeof ReadInput>>,
     {
       name: "TerminalResize", description: "Resize a persistent terminal", inputSchema: ResizeInput, paths: () => [],

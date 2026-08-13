@@ -15,7 +15,16 @@ describe("transcriptReducer", () => {
     state = transcriptReducer(state, { type: "session", event: { type: "deliverables", files: [
       { path: "src/a.ts", operation: "update", added: 3, removed: 1 },
     ] } });
-    expect(state.active?.blocks[0]).toMatchObject({ id: "deliverables:1", text: "Changed 1 file", details: "update src/a.ts (+3 -1)" });
+    expect(state.active?.blocks[0]).toMatchObject({
+      id: "deliverables:1",
+      state: "completed",
+      text: "Changed 1 file",
+      details: "update src/a.ts (+3 -1)",
+      presentation: {
+        kind: "changeset",
+        files: [{ path: "src/a.ts", operation: "update", added: 3, removed: 1 }],
+      },
+    });
   });
   it("hydrates retained turns and reconstructs tool calls by call id", () => {
     const state = transcriptReducer(createTranscriptState(), { type: "hydrate", messages: [

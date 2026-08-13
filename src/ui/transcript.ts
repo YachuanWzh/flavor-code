@@ -184,9 +184,10 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
     });
   }
   if (event.type === "deliverables") return upsertStatus(state, {
-    kind: "status", id: `deliverables:${state.active.id}`, state: "info",
+    kind: "status", id: `deliverables:${state.active.id}`, state: "completed",
     text: `Changed ${event.files.length} file${event.files.length === 1 ? "" : "s"}`,
     details: event.files.map((file) => `${file.operation} ${file.path} (+${file.added} -${file.removed})`).join("\n"),
+    presentation: { kind: "changeset", files: event.files },
   });
   if (event.type === "notice") return upsertStatus(state, {
     kind: "status", id: `notice:${state.active.blocks.length}`, state: "info", text: `· ${event.message}`,

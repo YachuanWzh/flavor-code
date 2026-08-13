@@ -35,7 +35,37 @@ Flavor Code 接入 OpenAI、Anthropic 或兼容服务，在受控工作区内使
 | 🧭 | **复杂任务可控推进** | 任务计划、子 Agent、steering、follow-up、`/loop` 和 `/goal` |
 | ⏪ | **结果可追溯、可恢复** | 完整时间线、checkpoint、rewind、trace、Diff 和失败审计 |
 | 🧠 | **本地长期上下文** | 记忆、Skill、插件和项目指南均保存在本机 |
+| 🎨 | **D2C 设计转代码** | 导入 Pixso 导出结果，由 Agent 生成 Vue/React 实现并自动进行像素级视觉评估（仅 Electron） |
 | 🛡️ | **明确的权限边界** | 分别控制读、写、Shell、网络和破坏性操作，也可使用 Docker |
+
+## 1.2.9 运行时生产力
+
+1.2.9 新增分层项目指令、安全写入、后台任务、持久终端和原生 Web 工具。通常只需用自然语言描述目标，Agent 会选择合适的工具；需要精确控制时，也可以在提示词中明确指定工具和参数。
+
+| 功能 | 使用方式 |
+| --- | --- |
+| **分层项目指令** | 在项目根目录或子目录放置 `AGENTS.md` / `CLAUDE.md`；同目录需要本地补充时使用 `AGENTS.local.md` / `CLAUDE.local.md`。根规则启动时加载，子目录规则在 Agent 访问该目录文件时自动加载。 |
+| **每轮成果物汇总** | 无需配置。`Write`、`Edit` 或 `ApplyPatch` 成功后，回合结束会显示带语义色的 `CHANGESET` 收据，使用工作区相对路径列出 `CREATE` / `UPDATE` / `DELETE` 操作、各文件行数和总计。最多展示 8 个文件，超出时明确显示已展示数与总数。 |
+| **文件版本保护** | 无需配置。如果 IDE、格式化器或其他进程在 Agent 读取后修改了文件，后续写入会报 `Stale file`；让 Agent 重新读取后再修改即可。 |
+| **标准工具展示协议** | 工具作者可声明 `outputSchema`、`renderForModel`、`presentCall` 和 `presentResult`，让同一结果在模型上下文、CLI 与桌面端分别使用合适的形式。CLI 会把文件 Diff、Web 证据、Job 运行收据、前台 `COMMAND` 和持久 `TERMINAL` 与最终回答明确分开。 |
+| **后台 Shell / Job** | 提示“在后台启动开发服务器”，Agent 会调用 `Shell` 并设置 `background: true`。使用 `JobList` 查看任务、`JobRead` 增量读取输出、`JobWait` 等待结束、`JobKill` 停止任务。CLI 使用带状态色边界的 `JOB` 收据区分任务元数据、日志与最终回答；日志最多显示最近 12 行，列表最多显示 8 项。Windows 优先使用 UTF-8，遇到 GBK/GB18030 系统诊断时自动回退。 |
+| **前台命令结果** | 前台 `Shell` 显示为带状态色的 `COMMAND` 收据，分别展示命令、stdout、stderr 和退出状态。长输出保留开头 8 行与结尾 8 行，并明确折叠中间部分；持久 PTY 使用独立的 `TERMINAL` 标签。 |
+| **桌面后台状态** | Electron 会在会话标题栏自动显示运行中的 Job 数量，并在任务启动、输出、退出或取消时实时更新。 |
+| **持久 PTY** | 提示“打开一个持久终端并继续交互”。Agent 使用 `TerminalOpen` 创建终端、`TerminalWrite` 输入、`TerminalRead` 增量读取输出，并用 `TerminalClose` 关闭。 |
+| **D2C/E2E 统一进程生命周期** | 使用方式不变。预览和后端服务仍从 E2E/D2C 工作台启动或停止，底层统一处理输出限制、进程树终止和幂等清理。 |
+| **原生 WebSearch** | 提示“搜索 Web 上的……”，或明确要求使用 `WebSearch`。默认使用无需密钥的 DuckDuckGo Lite；连接失败、HTTP 拒绝或没有可解析结果时自动降级到 Bing。单次最多返回 20 条；CLI 将前 5 条放入带边界的 `WEB SEARCH` 证据块，按搜索排名显示标题和紧凑来源。 |
+| **原生 WebFetch** | 提示“读取这个网页：`https://...`”，或明确要求使用 `WebFetch`。支持 HTTP(S)、重定向、HTML 转文本、超时和响应大小限制，并兼容 Clash/TUN Fake-IP DNS。直接访问 Fake-IP、内网或云元数据地址仍会被拦截；网络操作继续遵守 Flavor 权限审批。 |
+
+常见的精确用法：
+
+```text
+使用 Shell 后台模式启动 npm run dev，然后通过 JobRead 检查启动日志。
+打开持久终端，在其中运行 Python REPL，连续执行两段代码后关闭终端。
+使用 WebSearch 搜索 TypeScript 7 官方迁移说明，再用 WebFetch 读取最相关的官方页面。
+这个目录有独立约定，请先遵守 src/payments/AGENTS.md 再修改代码。
+```
+
+原生工具的参数、状态机、安全边界和扩展接口详见[技术方案报告第 38 节](./技术方案报告.md#38-129-运行时生产力与原生-web-能力)；验收规格见[运行时生产力规范](./docs/specs/2026-08-13-runtime-productivity-waves.md)。
 
 ## 快速开始
 

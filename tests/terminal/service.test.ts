@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { JobRegistry } from "../../src/jobs/registry.js";
 import { TerminalService, type PtyLike } from "../../src/terminal/service.js";
+import { createTerminalTools } from "../../src/tools/terminal.js";
 
 class FakePty implements PtyLike {
   data = (_value: string): void => undefined;
@@ -47,5 +48,26 @@ describe("TerminalService", () => {
     expect(() => service.read(opened.id, "subagent")).toThrow(/owner/);
     service.dispose();
     expect(backend.killed).toBe(true);
+  });
+
+  it("presents persistent terminal output as a terminal rather than a command", async () => {
+    const root = mkdtempSync(join(tmpdir(), "flavor-terminal-"));
+    const backend = new FakePty();
+    const service = new TerminalService(root, { factory: () => backend });
+    const tools = createTerminalTools(service, root);
+    const context = { agent: "main" as const };
+    const signal = new AbortController().signal;
+    const open = tools.find((tool) => tool.name === "TerminalOpen");
+    const read = tools.find((tool) => tool.name === "TerminalRead");
+    if (open === undefined || read === undefined) throw new Error("terminal tools missing");
+    const opened = await open.execute({}, signal, context) as { id: string };
+    backend.data("interactive output\n");
+    const result = await read.execute({ id: opened.id }, signal, context);
+
+    expect(open.presentResult?.(opened, {})).toMatchObject({ kind: "terminal", variant: "terminal", state: "running" });
+    expect(read.presentResult?.(result, { id: opened.id })).toMatchObject({
+      kind: "terminal", variant: "terminal", state: "running", stdout: "interactive output\n",
+    });
+    service.dispose();
   });
 });

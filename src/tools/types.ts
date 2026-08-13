@@ -21,6 +21,16 @@ export interface FileChangePresentation {
   relatedChanges?: readonly FileChangePresentation[];
 }
 
+export interface ChangeSetPresentation {
+  kind: "changeset";
+  files: readonly {
+    path: string;
+    operation: "create" | "update" | "delete";
+    added: number;
+    removed: number;
+  }[];
+}
+
 export interface GenericToolPresentation {
   kind: "generic";
   title: string;
@@ -30,12 +40,14 @@ export interface GenericToolPresentation {
 
 export interface TerminalToolPresentation {
   kind: "terminal";
+  variant?: "command" | "terminal";
   title: string;
   command?: string;
   stdout?: string;
   stderr?: string;
   exitCode?: number | null;
   state?: "running" | "completed" | "failed" | "cancelled";
+  truncated?: boolean;
 }
 
 export interface WebToolPresentation {
@@ -67,7 +79,7 @@ export interface JobToolPresentation {
   }[];
 }
 
-export type ToolPresentation = FileChangePresentation | GenericToolPresentation | TerminalToolPresentation | WebToolPresentation | JobToolPresentation;
+export type ToolPresentation = ChangeSetPresentation | FileChangePresentation | GenericToolPresentation | TerminalToolPresentation | WebToolPresentation | JobToolPresentation;
 
 const TOOL_PRESENTATION = Symbol("flavor.tool-presentation");
 
