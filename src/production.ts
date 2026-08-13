@@ -29,7 +29,7 @@ import { prepareLoopWorkspace } from "./loop/isolation.js";
 import { LoopStore } from "./loop/store.js";
 import type { LoopStatus } from "./loop/types.js";
 import { inferVerificationPlan, runVerificationPlan } from "./loop/verifier.js";
-import { AnthropicModelAdapter } from "./models/anthropic.js";
+import { AnthropicModelAdapter, CLAUDE_CLIENT_HEADERS } from "./models/anthropic.js";
 import { isDashScopeBaseURL, resolveCacheProfile, type CacheStrategy } from "./models/cache-profile.js";
 import { OpenAIModelAdapter } from "./models/openai.js";
 import { ModelRegistry, parseModelId } from "./models/registry.js";
@@ -1329,7 +1329,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
           ...(next.maxOutputTokens === undefined ? {} : { maxOutputTokens: next.maxOutputTokens }),
         };
         registry.register(next.providerId, next.apiType === "anthropic"
-          ? new AnthropicModelAdapter(adapterOptions)
+          ? new AnthropicModelAdapter({
+            ...adapterOptions,
+            ...(providerConfig?.claudeClient === true ? { headers: CLAUDE_CLIENT_HEADERS } : {}),
+          })
           : new OpenAIModelAdapter(adapterOptions));
         effectiveLlm = next;
         mainModel = `${next.providerId}:${next.defaultModel}`;
@@ -1766,7 +1769,10 @@ async function registerConfiguredAdapters(
         ...(runtimeProvider.maxOutputTokens === undefined ? {} : { maxOutputTokens: runtimeProvider.maxOutputTokens }),
       };
       const adapter: ModelAdapter = apiProtocol === "anthropic"
-        ? new AnthropicModelAdapter(adapterOptions)
+        ? new AnthropicModelAdapter({
+          ...adapterOptions,
+          ...(runtimeProvider.claudeClient === true ? { headers: CLAUDE_CLIENT_HEADERS } : {}),
+        })
         : new OpenAIModelAdapter(adapterOptions);
 
       // Step 4: Identify cache capability from apiType (flavor.json) and baseURL
@@ -1798,6 +1804,7 @@ interface ProviderRuntimeConfig {
   cheapModel?: string | undefined;
   maxOutputTokens?: number | undefined;
   models?: string[] | undefined;
+  claudeClient?: boolean | undefined;
   // OAuth PKCE fields — all have built-in defaults when type=oauth-callback
   apiType?: "openai" | "anthropic" | undefined;
   authorizationUrl?: string | undefined;
