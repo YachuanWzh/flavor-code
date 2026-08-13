@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
+import { copyFile, mkdir, open, readFile, rename, rm, stat, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 
 const LOCK_WAIT_MS = 20;
@@ -19,7 +19,16 @@ export interface ProtectedFileUpdate<T> {
   backupEncode?(current: T): string | Promise<string>;
   lockTimeoutMs?: number;
   staleLockMs?: number;
+  fileOperations?: ProtectedFileOperations;
 }
+
+export interface ProtectedFileOperations {
+  rename(source: string, target: string): Promise<void>;
+  copyFile(source: string, target: string): Promise<void>;
+  unlink(path: string): Promise<void>;
+}
+
+const defaultFileOperations: ProtectedFileOperations = { rename, copyFile, unlink };
 
 export async function readRecoverableFile<T>(
   path: string,
@@ -54,9 +63,9 @@ export async function updateProtectedFile<T>(options: ProtectedFileUpdate<T>): P
       const backup = options.backupEncode === undefined
         ? await options.encode(current.value)
         : await options.backupEncode(current.value);
-      await writeAtomic(`${options.path}.bak`, backup);
+      await writeAtomic(`${options.path}.bak`, backup, options.fileOperations ?? defaultFileOperations);
     }
-    await writeAtomic(options.path, await options.encode(next));
+    await writeAtomic(options.path, await options.encode(next), options.fileOperations ?? defaultFileOperations);
     return next;
   }, options.lockTimeoutMs ?? LOCK_TIMEOUT_MS, options.staleLockMs ?? STALE_LOCK_MS);
 }
@@ -141,7 +150,7 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-async function writeAtomic(path: string, content: string): Promise<void> {
+async function writeAtomic(path: string, content: string, operations: ProtectedFileOperations): Promise<void> {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   let handle;
   try {
@@ -150,11 +159,22 @@ async function writeAtomic(path: string, content: string): Promise<void> {
     await handle.sync();
     await handle.close();
     handle = undefined;
-    await rename(temporary, path);
+    try {
+      await operations.rename(temporary, path);
+    } catch (error) {
+      if (!isWindowsSharingError(error)) throw error;
+      await operations.copyFile(temporary, path);
+      await operations.unlink(temporary).catch(() => undefined);
+    }
   } finally {
     await handle?.close().catch(() => undefined);
     await rm(temporary, { force: true }).catch(() => undefined);
   }
+}
+
+function isWindowsSharingError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error
+    && ["EPERM", "EACCES", "EBUSY", "EEXIST"].includes(String((error as NodeJS.ErrnoException).code));
 }
 
 function delay(ms: number): Promise<void> {

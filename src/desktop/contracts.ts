@@ -148,6 +148,16 @@ export const D2cProductDecisionInputSchema = z.object({
     context.addIssue({ code: "custom", path: ["feedback"], message: "Feedback is required when rejecting an artifact" });
   }
 });
+export const D2cPrdRegenerateInputSchema = z.object({
+  task: D2cTaskInput,
+  query: z.string().trim().min(1).max(10_000),
+}).strict();
+export const D2cPrdSectionUpdateInputSchema = z.object({
+  task: D2cTaskInput,
+  sectionId: z.string().trim().min(1).max(500),
+  body: z.string().max(100_000),
+  expectedHash: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
 export const D2cGetReportInputSchema = z.object({
   task: D2cTaskInput,
   reportId: z.string().trim().regex(/^run-\d{8}-\d{6}(?:-[2-9]\d*)?$/, "Invalid D2C report id").optional(),
@@ -395,6 +405,8 @@ export interface FlavorDesktopApi {
   importD2cDesign(task: string): Promise<D2cImportResult | undefined>;
   createD2cProduct(input: CreateD2cProductPlanInput): Promise<D2cProductGenerationResult>;
   getD2cProduct(task: string): Promise<D2cProductPlanView | undefined>;
+  regenerateD2cPrd(task: string, query: string): Promise<D2cProductGenerationResult>;
+  updateD2cPrdSection(task: string, sectionId: string, body: string, expectedHash: string): Promise<D2cProductPlanView>;
   decideD2cProduct(task: string, stage: D2cProductStage, accepted: boolean, feedback?: string): Promise<D2cProductDecisionResult>;
   startD2cProductPreview(task: string): Promise<D2cProductPreviewStatus>;
   stopD2cProductPreview(task: string): Promise<D2cProductPreviewStatus>;

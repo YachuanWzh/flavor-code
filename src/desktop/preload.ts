@@ -47,6 +47,9 @@ const api: FlavorDesktopApi = {
   importD2cDesign: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cImport, { task }),
   createD2cProduct: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cCreateProduct, input),
   getD2cProduct: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cGetProduct, { task }),
+  regenerateD2cPrd: (task, query) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cRegeneratePrd, { task, query }),
+  updateD2cPrdSection: (task, sectionId, body, expectedHash) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cUpdatePrdSection,
+    { task, sectionId, body, expectedHash }),
   decideD2cProduct: (task, stage, accepted, feedback) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cDecideProduct, {
     task, stage, accepted, ...(feedback === undefined ? {} : { feedback }),
   }),

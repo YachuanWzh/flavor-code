@@ -13,6 +13,8 @@ import {
   D2cImportInputSchema,
   D2cCreateProductInputSchema,
   D2cProductDecisionInputSchema,
+  D2cPrdRegenerateInputSchema,
+  D2cPrdSectionUpdateInputSchema,
   D2cReviewInputSchema,
   D2cManualAcceptanceInputSchema,
   D2cJudgeConfigInputSchema,
@@ -298,6 +300,14 @@ function installIpcHandlers(): void {
   });
   ipcMain.handle(DESKTOP_CHANNELS.d2cGetProduct, async (_event, value) => {
     return controller.getD2cProduct(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cRegeneratePrd, async (_event, value) => {
+    const input = D2cPrdRegenerateInputSchema.parse(value);
+    return controller.regenerateD2cPrd(input.task, input.query);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cUpdatePrdSection, async (_event, value) => {
+    const input = D2cPrdSectionUpdateInputSchema.parse(value);
+    return controller.updateD2cPrdSection(input.task, input.sectionId, input.body, input.expectedHash);
   });
   ipcMain.handle(DESKTOP_CHANNELS.d2cDecideProduct, async (_event, value) => {
     const input = D2cProductDecisionInputSchema.parse(value);

@@ -7,6 +7,8 @@ import {
   D2cImportInputSchema,
   D2cCreateProductInputSchema,
   D2cProductDecisionInputSchema,
+  D2cPrdRegenerateInputSchema,
+  D2cPrdSectionUpdateInputSchema,
   D2cReviewInputSchema,
   D2cConfirmMappingInputSchema,
   D2cTaskActionInputSchema,
@@ -109,6 +111,10 @@ describe("D2C IPC contracts", () => {
       .toEqual({ task: "homepage", framework: "react", requirement: "做一个经营看板" });
     expect(D2cProductDecisionInputSchema.parse({ task: "homepage", stage: "prd", accepted: false, feedback: "补充退款流程" }))
       .toEqual({ task: "homepage", stage: "prd", accepted: false, feedback: "补充退款流程" });
+    expect(D2cPrdRegenerateInputSchema.parse({ task: "homepage", query: "补充失败恢复流程" }))
+      .toEqual({ task: "homepage", query: "补充失败恢复流程" });
+    expect(D2cPrdSectionUpdateInputSchema.parse({ task: "homepage", sectionId: "验收标准", body: "- [AC-001] 页面可打开", expectedHash: "a".repeat(64) }))
+      .toMatchObject({ sectionId: "验收标准" });
     expect(D2cGetReportInputSchema.parse({ task: "homepage" })).toEqual({ task: "homepage" });
     expect(D2cGetReportInputSchema.parse({ task: "homepage", reportId: "run-20260809-100000" }))
       .toEqual({ task: "homepage", reportId: "run-20260809-100000" });
@@ -127,6 +133,7 @@ describe("D2C IPC contracts", () => {
     expect(() => D2cImportInputSchema.parse({ task: "Upper Case" })).toThrow();
     expect(() => D2cCreateProductInputSchema.parse({ task: "homepage", framework: "react", requirement: "" })).toThrow();
     expect(() => D2cProductDecisionInputSchema.parse({ task: "homepage", stage: "prd", accepted: false })).toThrow();
+    expect(() => D2cPrdSectionUpdateInputSchema.parse({ task: "homepage", sectionId: "验收标准", body: "x", expectedHash: "bad" })).toThrow();
     expect(() => D2cImportInputSchema.parse({ task: "-leading-dash" })).toThrow();
     expect(() => D2cImportInputSchema.parse({ task: "", exportDir: "x" })).toThrow();
     expect(() => D2cImportInputSchema.parse({ task: "homepage", extra: 1 })).toThrow();

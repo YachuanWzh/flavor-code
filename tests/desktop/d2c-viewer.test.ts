@@ -152,6 +152,16 @@ describe("resultPresentation", () => {
     const source = await import("node:fs/promises").then(({ readFile }) =>
       readFile(new URL("../../src/desktop/renderer/d2c-viewer.tsx", import.meta.url), "utf8"));
     expect(source).toContain("createD2cProduct");
+    expect(source).toContain("regenerateD2cPrd");
+    expect(source).toContain("updateD2cPrdSection");
+    expect(source).toContain("beginPrdSectionEdit");
+    expect(source).toContain('onDoubleClick={() => beginPrdSectionEdit');
+    expect(source).toContain('scrollIntoView({ behavior: "smooth", block: "center" })');
+    expect(source).toContain("d2c-prd-edit-hint");
+    expect(source).toContain("d2c-prd-regenerate-button");
+    expect(source).toContain("重新生成 PRD");
+    expect(source).toContain("双击任一区域即可编辑 Markdown");
+    expect(source).toContain("PRD 确认后将冻结");
     expect(source).toContain("确认 PRD，生成交互稿");
     expect(source).toContain("确认设计，进入 D2C 视觉还原");
     expect(source).toContain("交互契约未通过预检");
@@ -164,6 +174,11 @@ describe("resultPresentation", () => {
     expect(source).toContain("自主规划失败，已执行设计契约");
     expect(source).toContain("interactionReview.warning");
     expect(source).toContain("d2c-product-preview");
+    const css = await import("node:fs/promises").then(({ readFile }) =>
+      readFile(new URL("../../src/desktop/renderer/styles.css", import.meta.url), "utf8"));
+    expect(source).not.toContain('className="d2c-prd-sections"');
+    expect(css).toContain(".d2c-prd-section[data-editing=\"true\"]");
+    expect(css).toContain(".d2c-prd-regenerate-button");
     expect(source.match(/sandbox="allow-scripts allow-forms allow-modals allow-same-origin"/g)).toHaveLength(2);
     expect(source).toContain("导入 HTML，从 D2C 视觉还原开始");
   });

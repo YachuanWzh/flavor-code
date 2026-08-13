@@ -6,6 +6,7 @@ import { buildD2cInteractionRepairPrompt, buildD2cRepairPrompt, reviewProgress }
 import type { D2cApiMapping } from "../../d2c/openapi.js";
 import type { D2cInteractionRun } from "../../d2c/interaction.js";
 import type { D2cProductPhase, D2cProductPlanView } from "../../d2c/product.js";
+import type { PrdSection } from "../../e2e/prd-governance.js";
 import type { D2cJudgeConfig, D2cJudgeConfigView, D2cQualityIssue } from "../../d2c/judge.js";
 import type { D2cImportResult, D2cIntegrationView, D2cMockStatus, D2cPreviewStatus, D2cProductPreviewStatus, D2cReportListItem, D2cReportView } from "../contracts.js";
 import type { D2cInteractionStatus } from "../contracts.js";
@@ -28,6 +29,10 @@ const TASK_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const ANNOTATION_LIMIT = 240;
 const INITIAL_ISSUE_LIMIT = 120;
 const PRODUCT_PREVIEW_VIEWPORT = { width: 1280, height: 800 } as const;
+
+function prdSectionMarkdown(section: PrdSection): string {
+  return section.level === 0 ? section.body : `${"#".repeat(section.level)} ${section.title}\n\n${section.body}`;
+}
 
 export function shouldDeferD2cProductReview(
   currentPhase: D2cProductPhase | undefined,
@@ -448,6 +453,9 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
   const [productView, setProductView] = useState<D2cProductPlanView>();
   const [productPreview, setProductPreview] = useState<D2cProductPreviewStatus>({ running: false });
   const [productFeedback, setProductFeedback] = useState("");
+  const [prdQuery, setPrdQuery] = useState("");
+  const [editingPrdSection, setEditingPrdSection] = useState<string>();
+  const [prdSectionBody, setPrdSectionBody] = useState("");
   const [productBusy, setProductBusy] = useState(false);
   const disabledRef = useRef(disabled);
   const productPhaseRef = useRef<D2cProductPhase | undefined>(productView?.plan.phase);
@@ -478,6 +486,8 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
   const [transform, setTransform] = useState<CanvasTransform>({ scale: 1, x: 0, y: 0 });
 
   const viewportRef = useRef<HTMLDivElement>(null);
+  const prdDocumentRef = useRef<HTMLDivElement>(null);
+  const prdEditorRef = useRef<HTMLTextAreaElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const transformRef = useRef(transform);
   const frameRef = useRef<number | undefined>(undefined);
@@ -893,6 +903,50 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
     finally { setProductBusy(false); }
   };
 
+  const regeneratePrd = async (): Promise<void> => {
+    if (productView === undefined || prdQuery.trim().length === 0 || productBusy || disabled) return;
+    setProductBusy(true);
+    try {
+      const result = await window.flavorDesktop.regenerateD2cPrd(productView.plan.task, prdQuery);
+      setProductView(result.view);
+      setPrdQuery("");
+      await onStartTask(result.prompt);
+    } catch (cause) { reportError(cause); }
+    finally { setProductBusy(false); }
+  };
+
+  const beginPrdSectionEdit = (section: PrdSection): void => {
+    if (productBusy || disabled) return;
+    setEditingPrdSection(section.id);
+    setPrdSectionBody(section.body);
+  };
+
+  useEffect(() => {
+    if (editingPrdSection === undefined) return;
+    const section = Array.from(prdDocumentRef.current?.querySelectorAll<HTMLElement>("[data-prd-section]") ?? [])
+      .find((element) => element.dataset.prdSection === editingPrdSection);
+    section?.scrollIntoView({ behavior: "smooth", block: "center" });
+    const frame = requestAnimationFrame(() => {
+      prdEditorRef.current?.focus();
+      prdEditorRef.current?.setSelectionRange(prdEditorRef.current.value.length, prdEditorRef.current.value.length);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [editingPrdSection]);
+
+  const savePrdSection = async (): Promise<void> => {
+    if (productView === undefined || editingPrdSection === undefined || productView.prdHash === undefined || productBusy || disabled) return;
+    setProductBusy(true);
+    try {
+      const view = await window.flavorDesktop.updateD2cPrdSection(
+        productView.plan.task, editingPrdSection, prdSectionBody, productView.prdHash,
+      );
+      setProductView(view);
+      setEditingPrdSection(undefined);
+      setPrdSectionBody("");
+    } catch (cause) { reportError(cause); }
+    finally { setProductBusy(false); }
+  };
+
   const saveJudgeConfig = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     if (judgeBusy) return;
@@ -1103,8 +1157,32 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
             <button type="button" onClick={() => void refreshProduct(productView.plan.task)}>刷新</button>
           </div>}
           {productView?.plan.phase === "prd-review" && <div className="d2c-artifact-review">
-            <header><span>PRODUCT REQUIREMENT</span><h3>确认产品定义</h3><p>这份 PRD 将约束后续视觉、交互和代码生成。</p></header>
-            <div className="d2c-prd-document">{productView.prdMarkdown !== undefined && <MarkdownContent text={productView.prdMarkdown} />}</div>
+            <header><span>PRODUCT REQUIREMENT</span><h3>确认产品定义</h3><p>PRD 确认后将冻结，并严格约束后续设计、开发、接口和测试。</p></header>
+            <div className="d2c-prd-edit-hint"><span>双击任一区域即可编辑 Markdown</span><kbd>Double click</kbd></div>
+            <div className="d2c-prd-document" ref={prdDocumentRef}>{productView.prdSections?.map((section) => {
+              const editing = editingPrdSection === section.id;
+              return <section key={section.id} className="d2c-prd-section" data-prd-section={section.id} data-editing={editing}
+                tabIndex={editing ? -1 : 0} aria-label={editing ? `正在编辑 ${section.title}` : `双击编辑 ${section.title}`}
+                onDoubleClick={() => beginPrdSectionEdit(section)}
+                onKeyDown={(event) => { if (!editing && (event.key === "Enter" || event.key === " ")) beginPrdSectionEdit(section); }}>
+                {editing ? <div className="d2c-prd-section-editor">
+                  <header><div><strong>{section.title}</strong><span>MARKDOWN</span></div>
+                    <button type="button" onClick={() => { setEditingPrdSection(undefined); setPrdSectionBody(""); }}>取消</button>
+                    <button type="button" className="primary" disabled={productBusy} onClick={() => void savePrdSection()}>保存修改</button></header>
+                  <textarea ref={prdEditorRef} rows={Math.max(8, Math.min(20, prdSectionBody.split("\n").length + 3))}
+                    value={prdSectionBody} onChange={(event) => setPrdSectionBody(event.target.value)}
+                    onDoubleClick={(event) => event.stopPropagation()} spellCheck={false} />
+                </div> : <MarkdownContent text={prdSectionMarkdown(section)} />}
+              </section>;
+            }) ?? (productView.prdMarkdown !== undefined && <MarkdownContent text={productView.prdMarkdown} />)}</div>
+            <section className="d2c-prd-regenerate">
+              <header><div><strong>需要整体调整？</strong><span>描述期望变化，AI 会基于当前 PRD 生成一份新草案。</span></div></header>
+              <textarea rows={3} value={prdQuery} aria-label="PRD 重新生成要求" placeholder="例如：保留现有范围，补充退款失败后的恢复流程"
+                onChange={(event) => setPrdQuery(event.target.value)} />
+              <footer><span>当前版本不会在生成过程中被覆盖</span><button type="button" className="d2c-prd-regenerate-button"
+                disabled={productBusy || disabled || prdQuery.trim().length === 0} onClick={() => void regeneratePrd()}>
+                <i aria-hidden="true">↻</i>重新生成 PRD</button></footer>
+            </section>
             <label><span>退回意见</span><textarea rows={3} value={productFeedback} placeholder="例如：补充退款失败后的恢复路径"
               onChange={(event) => setProductFeedback(event.target.value)} /></label>
             <div className="d2c-artifact-actions"><button type="button" disabled={productBusy || disabled || productFeedback.trim().length === 0}

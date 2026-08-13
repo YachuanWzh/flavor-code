@@ -1,8 +1,8 @@
-import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 import { z } from "zod";
+import { readRecoverableFile, updateProtectedFile } from "../config/protected-file.js";
 
 import { D2C_TASK_PATTERN, taskDir } from "./store.js";
 import type { D2cInteractionRun } from "./interaction.js";
@@ -113,8 +113,6 @@ const WorkflowSchema = z.object({
   updatedAt: z.iso.datetime(),
 }).strict();
 
-const workflowLocks = new Map<string, Promise<void>>();
-
 function pageId(report: D2cReport): string { return report.page?.id ?? "index"; }
 
 function issueSignature(issue: D2cElementDiff | D2cUnmatchedElement, kind: string): string {
@@ -172,7 +170,8 @@ export function reconcileWorkflow(workflow: D2cWorkflow, report: D2cReport): D2c
     ...reviewsFor(report, workflow),
   ];
   const complete = report.evaluation.status !== "invalid" && reviews.every((item) => item.decision === "accepted");
-  const { activeBatchId: _activeBatchId, quality: _quality, ...base } = workflow;
+  const { activeBatchId: _activeBatchId, quality: _quality, openapi: _openapi, mappings: _mappings,
+    integrationFiles: _integrationFiles, interaction: _interaction, qualityWaivers: _qualityWaivers, ...base } = workflow;
   return {
     ...base, revision: workflow.revision + 1, activeReportId: report.reportId,
     ...(report.batchId === undefined ? {} : { activeBatchId: report.batchId }),
@@ -268,36 +267,43 @@ export function applyQualityIssueDecision(
 
 function workflowPath(workspace: string, task: string): string { return join(taskDir(workspace, task), "workflow.json"); }
 
-async function withLock<T>(key: string, action: () => Promise<T>): Promise<T> {
-  const previous = workflowLocks.get(key) ?? Promise.resolve();
-  let release!: () => void;
-  const current = new Promise<void>((resolvePromise) => { release = resolvePromise; });
-  const queued = previous.then(() => current);
-  workflowLocks.set(key, queued);
-  await previous;
-  try { return await action(); }
-  finally { release(); if (workflowLocks.get(key) === queued) workflowLocks.delete(key); }
-}
-
 export async function readWorkflow(workspace: string, task: string): Promise<D2cWorkflow | undefined> {
-  let raw: string;
-  try { raw = await readFile(workflowPath(workspace, task), "utf8"); }
-  catch { return undefined; }
-  if (Buffer.byteLength(raw) > 4 * 1024 * 1024) throw new Error("D2C workflow exceeds the supported size");
-  const parsed = WorkflowSchema.parse(JSON.parse(raw)) as D2cWorkflow;
-  return parsed.quality === undefined ? parsed : { ...parsed, quality: normalizeD2cQualityJudgment(parsed.quality) };
+  return (await readRecoverableFile(workflowPath(workspace, task), decodeWorkflow))?.value;
 }
 
 export async function writeWorkflow(workspace: string, workflow: D2cWorkflow): Promise<D2cWorkflow> {
   WorkflowSchema.parse(workflow);
   const path = workflowPath(workspace, workflow.task);
-  return withLock(path, async () => {
-    const stored = WorkflowSchema.parse({ ...workflow, revision: workflow.revision + 1, updatedAt: new Date().toISOString() }) as D2cWorkflow;
-    await mkdir(taskDir(workspace, workflow.task), { recursive: true });
-    const stage = `${path}.${randomUUID()}.tmp`;
-    await writeFile(stage, `${JSON.stringify(stored, null, 2)}\n`, { flag: "wx" });
-    try { await rename(stage, path); }
-    finally { await rm(stage, { force: true }); }
-    return stored;
+  return updateProtectedFile({
+    path, decode: decodeWorkflow, encode: encodeWorkflow,
+    update: (current) => ({ ...workflow, revision: (current?.revision ?? workflow.revision) + 1, updatedAt: new Date().toISOString() }),
   });
+}
+
+export async function updateWorkflow(
+  workspace: string,
+  task: string,
+  expectedRevision: number,
+  mutation: (current: D2cWorkflow) => D2cWorkflow,
+): Promise<D2cWorkflow> {
+  return updateProtectedFile({
+    path: workflowPath(workspace, task), decode: decodeWorkflow, encode: encodeWorkflow,
+    update: (current) => {
+      if (current === undefined) throw new Error(`D2C workflow is unavailable: ${task}`);
+      if (current.revision !== expectedRevision) throw new Error(`STALE_REVISION: expected ${expectedRevision}, current ${current.revision}`);
+      const next = mutation(current);
+      if (next.task !== current.task || next.schema !== current.schema) throw new Error("D2C workflow identity cannot change");
+      return { ...next, revision: current.revision + 1, updatedAt: new Date().toISOString() };
+    },
+  });
+}
+
+function decodeWorkflow(raw: string): D2cWorkflow {
+  if (Buffer.byteLength(raw) > 4 * 1024 * 1024) throw new Error("D2C workflow exceeds the supported size");
+  const parsed = WorkflowSchema.parse(JSON.parse(raw)) as D2cWorkflow;
+  return parsed.quality === undefined ? parsed : { ...parsed, quality: normalizeD2cQualityJudgment(parsed.quality) };
+}
+
+function encodeWorkflow(workflow: D2cWorkflow): string {
+  return `${JSON.stringify(WorkflowSchema.parse(workflow), null, 2)}\n`;
 }

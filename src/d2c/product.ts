@@ -7,6 +7,7 @@ import { z } from "zod";
 import { D2C_TASK_PATTERN, taskDir } from "./store.js";
 import { parseInteractionManifest, interactionManifestSchemaGuide } from "./interaction.js";
 import type { D2cModuleDefinition } from "./openapi.js";
+import { approvePrd, hashPrd, parsePrdSections, type ApprovedPrd, type PrdSection } from "../e2e/prd-governance.js";
 
 export type D2cProductPhase = "prd-generating" | "prd-review" | "design-generating" | "design-review" | "ready-for-d2c";
 export type D2cProductStage = "prd" | "design";
@@ -27,6 +28,7 @@ export interface D2cProductPlan {
   technology?: D2cProductTechnology;
   requirement: string;
   prd?: { path: "product/prd.md"; updatedAt: string; contentHash?: string };
+  approvedPrd?: ApprovedPrd;
   prototype?: {
     entryHtml: "product/prototype/index.html";
     interactionManifest: "product/prototype/interaction-manifest.json";
@@ -41,6 +43,8 @@ export interface D2cProductPlan {
 export interface D2cProductPlanView {
   plan: D2cProductPlan;
   prdMarkdown?: string;
+  prdHash?: string;
+  prdSections?: PrdSection[];
   validationError?: { stage: "design"; message: string };
 }
 
@@ -77,6 +81,10 @@ const PlanSchema = z.object({
   }).strict().optional(),
   requirement: z.string().trim().min(2).max(50_000),
   prd: z.object({ path: z.literal(RelativePrdPath), updatedAt: z.iso.datetime(), contentHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict().optional(),
+  approvedPrd: z.object({
+    hash: z.string().regex(/^[a-f0-9]{64}$/), approvedAt: z.iso.datetime(),
+    criteria: z.array(z.object({ id: z.string().regex(/^AC-\d{3,}$/), text: z.string().trim().min(1).max(4_000) }).strict()).min(1).max(10_000),
+  }).strict().optional(),
   prototype: z.object({
     entryHtml: z.literal(RelativePrototypePath),
     interactionManifest: z.literal(RelativeInteractionPath),
@@ -357,7 +365,7 @@ export async function readD2cProductPlanView(workspace: string, task: string): P
     : undefined;
   return {
     plan,
-    ...(prdMarkdown === undefined ? {} : { prdMarkdown }),
+    ...(prdMarkdown === undefined ? {} : { prdMarkdown, prdHash: hashPrd(prdMarkdown), prdSections: parsePrdSections(prdMarkdown) }),
     ...(validationError === undefined ? {} : { validationError: { stage: "design" as const, message: validationError } }),
   };
 }
@@ -381,6 +389,31 @@ export function applyD2cProductDecision(
   };
 }
 
+export function requestD2cPrdRegeneration(
+  plan: D2cProductPlan,
+  query: string,
+  timestamp = new Date().toISOString(),
+): D2cProductPlan {
+  if (plan.phase !== "prd-review") throw new Error("D2C product plan is not in PRD review");
+  const message = query.trim();
+  if (message.length === 0 || message.length > 10_000) throw new Error("PRD regeneration query must be between 1 and 10,000 characters");
+  const { approvedPrd: _approvedPrd, feedback: _feedback, ...base } = plan;
+  return { ...base, revision: plan.revision + 1, phase: "prd-generating",
+    feedback: { stage: "prd", message, updatedAt: timestamp }, updatedAt: timestamp };
+}
+
+export function approveD2cProductPlan(
+  plan: D2cProductPlan,
+  markdown: string,
+  now = new Date(),
+): D2cProductPlan {
+  if (plan.phase !== "prd-review") throw new Error("D2C product plan is not in PRD review");
+  const timestamp = now.toISOString();
+  const { feedback: _feedback, ...base } = plan;
+  return { ...base, revision: plan.revision + 1, phase: "design-generating",
+    approvedPrd: approvePrd(markdown, now), updatedAt: timestamp };
+}
+
 export function buildD2cPrdPrompt(plan: D2cProductPlan): string {
   const feedback = plan.feedback?.stage === "prd" ? `\n本轮必须处理用户反馈：${plan.feedback.message}` : "";
   const technology = productTechnology(plan);
@@ -391,6 +424,7 @@ export function buildD2cPrdPrompt(plan: D2cProductPlan): string {
     `只创建或修改 .flavor/d2c/${plan.task}/product/prd.md；此阶段不要编写产品代码或设计原型。`,
     "先检查工作区现有产品语境、设计系统和相关代码；只有会实质改变产品范围的问题才使用 AskUserQuestion。",
     "PRD 必须包含：背景与目标、目标用户与核心问题、范围与非范围、用户故事、信息架构/页面清单、关键流程、loading/empty/error/success 状态、交互规则、数据与 API 假设、可逐条验证的验收标准、风险和未决问题。",
+    "每条验收标准必须在“验收标准”章节中定义一次，使用唯一稳定编号 [AC-001]、[AC-002]……；其他章节引用时只写 AC-001，不要再次写成 [AC-001]。编号确认后将用于设计场景、接口、实现和测试的全链路追踪，禁止缺项。",
     "明确区分事实、合理假设和待确认项；不要伪造指标、接口或业务规则。完成文件后汇报路径和最需要用户确认的三项决策。",
   ].join("\n");
 }
@@ -400,10 +434,13 @@ export function buildD2cDesignPrompt(plan: D2cProductPlan, prdMarkdown: string):
   if (plan.phase !== "design-generating") throw new Error("Approve the PRD before generating the design");
   const feedback = plan.feedback?.stage === "design" ? `\n本轮必须处理用户反馈：${plan.feedback.message}` : "";
   const technology = productTechnology(plan);
+  if (plan.approvedPrd === undefined) throw new Error("Approve and freeze the PRD before generating the design");
   return [
     artifactPaths,
     `根据已确认 PRD 为 D2C 任务“${plan.task}”生成视觉与交互原型。${feedback}`,
     `PRD 位于 .flavor/d2c/${plan.task}/product/prd.md，并以其中内容为唯一产品范围。`,
+    `PRD 已冻结，SHA-256 为 ${plan.approvedPrd.hash}。后续任何阶段都不得修改 PRD；发现摘要不一致必须停止。`,
+    `必须完整覆盖以下验收标准，不得缺项：${plan.approvedPrd.criteria.map((item) => `${item.id} ${item.text}`).join("；")}。interaction-manifest 每条场景必须通过 requirementIds 关联这些 ID，并保证每个 ID 至少被一条场景覆盖。`,
     `创建 .flavor/d2c/${plan.task}/product/prototype/index.html、必要的本地 assets、interaction-manifest.json，以及 .flavor/d2c/${plan.task}/product/openapi.json。openapi.json 必须是与已确认 PRD 一致的 OpenAPI 3.1 契约，供后续 Python 服务端与前端联调自动使用。`,
     "后续验收将运行对应技术栈的真实服务端代码，不会用 Node mock 代替业务服务；交互清单中的数据动作必须能由 OpenAPI 契约和真实持久化行为支撑。",
     "原型必须可离线打开，不使用 CDN、远程字体或远程图片；使用真实中文产品文案，覆盖主流程和关键 loading/empty/error/success 状态，具备键盘焦点与 reduced-motion 处理。",

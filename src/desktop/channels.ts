@@ -32,6 +32,8 @@ export const DESKTOP_CHANNELS = {
   d2cImport: "desktop:d2c-import",
   d2cCreateProduct: "desktop:d2c-create-product",
   d2cGetProduct: "desktop:d2c-get-product",
+  d2cRegeneratePrd: "desktop:d2c-regenerate-prd",
+  d2cUpdatePrdSection: "desktop:d2c-update-prd-section",
   d2cDecideProduct: "desktop:d2c-decide-product",
   d2cStartProductPreview: "desktop:d2c-start-product-preview",
   d2cStopProductPreview: "desktop:d2c-stop-product-preview",

@@ -1499,10 +1499,37 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .d2c-artifact-review > header span { color: #317ca5; font: 700 8px "Cascadia Code", Consolas, monospace; letter-spacing: .12em; }
 .d2c-artifact-review > header h3 { margin: 6px 0 4px; color: #1b3442; font-size: 16px; letter-spacing: -.025em; }
 .d2c-artifact-review > header p { margin: 0; color: #7a8992; font-size: 9px; line-height: 1.55; }
-.d2c-prd-document { max-height: 310px; padding: 18px 20px; overflow-y: auto; border: 1px solid #dbe4e8; border-radius: 8px; background: #fbfcfc; color: #324854; }
+.d2c-prd-edit-hint { display: flex; align-items: center; justify-content: space-between; margin-bottom: -7px; color: #70838e; font-size: 8.5px; }
+.d2c-prd-edit-hint kbd { padding: 2px 6px; border: 1px solid #d8e2e7; border-radius: 4px; background: #f8fafb; color: #84949d; font: 7.5px "Cascadia Code", Consolas, monospace; letter-spacing: .04em; }
+.d2c-prd-document { max-height: 430px; padding: 8px 0; overflow-y: auto; border: 1px solid #d5e0e6; border-radius: 9px; background: #fff; color: #324854; scroll-behavior: smooth; }
 .d2c-prd-document .markdown-content { font-size: 9.5px; line-height: 1.65; }
 .d2c-prd-document .markdown-content h1 { font-size: 18px; }
 .d2c-prd-document .markdown-content h2 { margin-top: 18px; font-size: 13px; }
+.d2c-prd-section { position: relative; padding: 5px 20px 9px; border-left: 2px solid transparent; transition: border-color .14s ease, background-color .14s ease; }
+.d2c-prd-section + .d2c-prd-section { border-top: 1px solid #eef2f4; }
+.d2c-prd-section:not([data-editing="true"]):hover { border-left-color: #65a8cc; background: #f7fbfd; cursor: text; }
+.d2c-prd-section:not([data-editing="true"]):hover::after { position: absolute; top: 9px; right: 14px; padding: 3px 6px; border-radius: 4px; background: #eaf4f9; color: #397897; content: "双击编辑"; font: 7.5px "Cascadia Code", Consolas, monospace; letter-spacing: .04em; pointer-events: none; }
+.d2c-prd-section:focus-visible { outline: 2px solid #65a8cc; outline-offset: -2px; }
+.d2c-prd-section[data-editing="true"] { padding: 14px 16px 16px; border-left-color: #317ca5; background: #f5f9fb; box-shadow: inset 0 1px #dce8ee, inset 0 -1px #dce8ee; }
+.d2c-prd-section-editor { display: grid; gap: 10px; }
+.d2c-prd-section-editor > header { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 7px; }
+.d2c-prd-section-editor > header > div { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.d2c-prd-section-editor > header strong { overflow: hidden; color: #213b49; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.d2c-prd-section-editor > header span { color: #5285a0; font: 700 7px "Cascadia Code", Consolas, monospace; letter-spacing: .1em; }
+.d2c-prd-section-editor button { min-height: 28px; padding: 0 9px; border: 1px solid #c9d6dd; border-radius: 6px; background: #fff; color: #536a76; font-size: 8.5px; cursor: pointer; }
+.d2c-prd-section-editor button.primary { border-color: #245e7d; background: #245e7d; color: #fff; }
+.d2c-prd-section-editor textarea { width: 100%; min-height: 150px; resize: vertical; padding: 13px 14px; border: 1px solid #aebfca; border-radius: 7px; background: #fff; color: #223b48; font: 9.5px/1.65 "Cascadia Code", Consolas, monospace; tab-size: 2; box-shadow: inset 0 1px 2px rgba(24,52,67,.04); }
+.d2c-prd-section-editor textarea:focus { border-color: #317ca5; outline: 3px solid rgba(49,124,165,.13); }
+.d2c-prd-regenerate { display: grid; gap: 9px; padding: 13px 14px; border: 1px solid #dce5ea; border-radius: 9px; background: #f8fafb; }
+.d2c-prd-regenerate > header strong { display: block; color: #2b4553; font-size: 9.5px; }
+.d2c-prd-regenerate > header span { display: block; margin-top: 3px; color: #7a8b94; font-size: 8.5px; line-height: 1.5; }
+.d2c-prd-regenerate > textarea { width: 100%; min-height: 58px; resize: vertical; padding: 9px 10px; border: 1px solid #cfdae0; border-radius: 7px; background: #fff; color: #263e4b; font-family: inherit; font-size: 9px; line-height: 1.55; }
+.d2c-prd-regenerate > footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.d2c-prd-regenerate > footer > span { color: #87969f; font-size: 8px; }
+.d2c-prd-regenerate-button { display: inline-flex; align-items: center; justify-content: center; min-height: 34px; padding: 0 13px; gap: 7px; border: 1px solid #245e7d; border-radius: 7px; background: #245e7d; color: #fff; font-size: 9px; font-weight: 700; cursor: pointer; box-shadow: 0 3px 9px rgba(36,94,125,.14); }
+.d2c-prd-regenerate-button:hover:not(:disabled) { border-color: #194b66; background: #194b66; }
+.d2c-prd-regenerate-button:disabled { border-color: #cbd6dc; background: #dbe3e7; color: #89979f; cursor: not-allowed; box-shadow: none; }
+.d2c-prd-regenerate-button i { font-size: 14px; font-style: normal; font-weight: 400; line-height: 1; }
 .d2c-artifact-review > label { display: grid; gap: 6px; color: #596d78; font-size: 9px; font-weight: 650; }
 .d2c-artifact-review > label textarea { width: 100%; min-height: 64px; resize: vertical; padding: 9px 10px; border: 1px solid #d5dfe4; border-radius: 7px; color: #263e4b; font: inherit; font-weight: 400; line-height: 1.5; }
 .d2c-artifact-actions { display: flex; justify-content: flex-end; gap: 8px; }

@@ -6,7 +6,7 @@ import { basename, join, resolve } from "node:path";
 import type { PermissionMode } from "../config/schema.js";
 import { assertPngDimensions } from "../d2c/pixel.js";
 import { importDesign, listReports, listTasks, readManifest, readReport, taskDir } from "../d2c/store.js";
-import { applyInteractionRun, applyManualInteractionDecision, applyQualityIssueDecision, applyQualityJudgment, applyReviewDecision, createWorkflow, readWorkflow, reconcileWorkflow, reviewProgress, writeWorkflow, type D2cWorkflow } from "../d2c/workflow.js";
+import { applyInteractionRun, applyManualInteractionDecision, applyQualityIssueDecision, applyQualityJudgment, applyReviewDecision, createWorkflow, readWorkflow, reconcileWorkflow, reviewProgress, updateWorkflow, writeWorkflow, type D2cWorkflow } from "../d2c/workflow.js";
 import { buildD2cQualityRepairPrompt } from "../d2c/workflow-shared.js";
 import { parseInteractionManifest, type D2cInteractionManifest, type D2cInteractionRun } from "../d2c/interaction.js";
 import { mergeInteractionManifests, type D2cAutonomousInteractionPlan, type D2cPageObservation } from "../d2c/interaction-review.js";
@@ -19,16 +19,23 @@ import { applyD2cQualityIssueDecision, type D2cJudgeConfig, type D2cJudgeConfigV
 import type { D2cReport } from "../d2c/types.js";
 import {
   applyD2cProductDecision,
+  approveD2cProductPlan,
   buildD2cDesignPrompt,
   buildD2cProductOpenApi,
   buildD2cPrdPrompt,
   createD2cProductPlan,
   d2cProductPrototypeDirectory,
   readD2cProductPlanView,
+  requestD2cPrdRegeneration,
   writeD2cProductPlan,
   type CreateD2cProductPlanInput,
   type D2cProductStage,
 } from "../d2c/product.js";
+import { assertApprovedPrd, updatePrdSectionFile } from "../e2e/prd-governance.js";
+import { captureAcceptanceBaseline, createAcceptanceEvidence, verifyAcceptanceArtifact, verifyAcceptanceBaseline, verifyRequirementCoverage,
+  type AcceptanceBaseline, type AcceptanceBaselinePaths } from "../e2e/acceptance-baseline.js";
+import { artifactRef, beginDeliveryNode, completeDeliveryNode, createDeliveryRun, initializeDeliveryRun,
+  readDeliveryRun, updateDeliveryRun } from "../e2e/delivery-run.js";
 import { createProductionRuntime, type ProductionRuntimeOptions } from "../production.js";
 import { SessionStore } from "../session/store.js";
 import {
@@ -579,14 +586,15 @@ export class DesktopRuntimeController {
   async getD2cReport(task: string, reportId?: string): Promise<D2cReportView> {
     const workspace = this.#workspace;
     if (workspace === undefined) throw new Error("Open a project before viewing D2C reports");
+    await this.#assertProductPrdLocked(workspace, task);
     const bundle = await readReport(workspace, task, reportId);
     const currentManifest = await readManifest(workspace, task);
     const relatedPages = bundle.report.batchId === undefined ? [] : (await listReports(workspace, task))
       .filter((item) => item.batchId === bundle.report.batchId)
       .map((item) => ({ task, ...item }));
-    let workflow = await readWorkflow(workspace, task);
-    if (workflow === undefined) workflow = createWorkflow(bundle.report, await detectD2cFramework(workspace, task));
-    else if (workflow.activeReportId !== bundle.report.reportId) workflow = reconcileWorkflow(workflow, bundle.report);
+    const storedWorkflow = await readWorkflow(workspace, task);
+    let workflow = storedWorkflow ?? createWorkflow(bundle.report, await detectD2cFramework(workspace, task));
+    if (storedWorkflow !== undefined && workflow.activeReportId !== bundle.report.reportId) workflow = reconcileWorkflow(workflow, bundle.report);
     if (relatedPages.length > 1) {
       for (const page of relatedPages) {
         if (page.reportId === bundle.report.reportId) continue;
@@ -594,7 +602,17 @@ export class DesktopRuntimeController {
       }
       workflow = reconcileWorkflow(workflow, bundle.report);
     }
-    workflow = await writeWorkflow(workspace, workflow);
+    if (storedWorkflow === undefined) workflow = await writeWorkflow(workspace, workflow);
+    else if (JSON.stringify(workflow) !== JSON.stringify(storedWorkflow)) {
+      workflow = await updateWorkflow(workspace, task, storedWorkflow.revision, () => workflow);
+    }
+    const delivery = await readDeliveryRun(workspace, task);
+    if (delivery?.nodes.d2c.status === "running") {
+      const completed = await updateDeliveryRun(workspace, task, delivery.revision,
+        (run) => completeDeliveryNode(run, "d2c", [artifactRef(`reports/${bundle.report.reportId}/report.json`, JSON.stringify(bundle.report))]));
+      await updateDeliveryRun(workspace, task, completed.revision,
+        (run) => beginDeliveryNode(run, "api", run.nodes.d2c.outputs));
+    }
     return {
       report: bundle.report,
       deliveryOrigin: await readD2cProductPlanView(workspace, task) === undefined ? "design" : "requirement",
@@ -617,11 +635,18 @@ export class DesktopRuntimeController {
   ): Promise<D2cWorkflow> {
     const workspace = this.#workspace;
     if (workspace === undefined) throw new Error("Open a project before reviewing D2C issues");
+    await this.#assertProductPrdLocked(workspace, task);
     const report = (await readReport(workspace, task, reportId)).report;
-    let workflow = await readWorkflow(workspace, task);
-    if (workflow === undefined) workflow = createWorkflow(report, await detectD2cFramework(workspace, task));
-    if (workflow.activeReportId !== reportId) workflow = reconcileWorkflow(workflow, report);
-    return writeWorkflow(workspace, applyReviewDecision(workflow, { fingerprints, decision, ...(instruction === undefined ? {} : { instruction }) }, report));
+    const stored = await readWorkflow(workspace, task);
+    if (stored === undefined) {
+      const created = createWorkflow(report, await detectD2cFramework(workspace, task));
+      return writeWorkflow(workspace,
+        applyReviewDecision(created, { fingerprints, decision, ...(instruction === undefined ? {} : { instruction }) }, report));
+    }
+    return updateWorkflow(workspace, task, stored.revision, (current) => {
+      const active = current.activeReportId === reportId ? current : reconcileWorkflow(current, report);
+      return applyReviewDecision(active, { fingerprints, decision, ...(instruction === undefined ? {} : { instruction }) }, report);
+    });
   }
 
   async #storeD2cOpenApi(
@@ -631,7 +656,7 @@ export class DesktopRuntimeController {
     raw: string,
     generated: boolean,
   ): Promise<D2cIntegrationView> {
-    const workflow = await readWorkflow(workspace, task);
+    let workflow = await readWorkflow(workspace, task);
     if (workflow === undefined || !reviewProgress(workflow).complete || workflow.stage === "visual-review") {
       throw new Error("Complete visual review before importing OpenAPI");
     }
@@ -657,12 +682,13 @@ export class DesktopRuntimeController {
         version: document.version, title: document.title, ...(document.baseUrl === undefined ? {} : { baseUrl: document.baseUrl }) },
       updatedAt: new Date().toISOString(),
     };
-    return { workflow: await writeWorkflow(workspace, next), document, mappings };
+    return { workflow: await updateWorkflow(workspace, task, workflow.revision, () => next), document, mappings };
   }
 
   async importD2cOpenApi(task: string, sourcePath: string): Promise<D2cIntegrationView> {
     const workspace = this.#workspace;
     if (workspace === undefined) throw new Error("Open a project before importing OpenAPI");
+    await this.#assertProductPrdLocked(workspace, task);
     const info = await stat(sourcePath);
     if (!info.isFile() || info.size > 8 * 1024 * 1024) throw new Error("OpenAPI JSON must be a file no larger than 8 MiB");
     return this.#storeD2cOpenApi(workspace, task, basename(sourcePath), await readFile(sourcePath, "utf8"), false);
@@ -671,6 +697,7 @@ export class DesktopRuntimeController {
   async getD2cIntegration(task: string): Promise<D2cIntegrationView | undefined> {
     const workspace = this.#workspace;
     if (workspace === undefined) return undefined;
+    await this.#assertProductPrdLocked(workspace, task);
     let workflow = await readWorkflow(workspace, task);
     if (workflow?.openapi === undefined && workflow !== undefined && reviewProgress(workflow).complete
       && await readD2cProductPlanView(workspace, task) !== undefined) {
@@ -692,17 +719,20 @@ export class DesktopRuntimeController {
   async confirmD2cMapping(task: string, moduleId: string, operationKey: string): Promise<D2cIntegrationView> {
     const workspace = this.#workspace;
     if (workspace === undefined) throw new Error("Open a project before confirming API mappings");
+    await this.#assertProductPrdLocked(workspace, task);
     const view = await this.getD2cIntegration(task);
     if (view === undefined) throw new Error("Import OpenAPI before confirming mappings");
     if (!view.mappings.some((item) => item.moduleId === moduleId)) throw new Error(`Unknown D2C module: ${moduleId}`);
     const mappings = view.mappings.map((item) => item.moduleId === moduleId ? confirmApiMapping(item, operationKey, view.document.operations) : item);
-    const workflow = await writeWorkflow(workspace, { ...view.workflow, revision: view.workflow.revision + 1, mappings, updatedAt: new Date().toISOString() });
+    const workflow = await updateWorkflow(workspace, task, view.workflow.revision,
+      (current) => ({ ...current, mappings, updatedAt: new Date().toISOString() }));
     return { workflow, document: view.document, mappings };
   }
 
   async generateD2cIntegration(task: string): Promise<D2cIntegrationGenerationResult> {
     const workspace = this.#workspace;
     if (workspace === undefined) throw new Error("Open a project before generating integration code");
+    await this.#assertProductPrdLocked(workspace, task);
     const view = await this.getD2cIntegration(task);
     if (view === undefined) throw new Error("Import OpenAPI before generating integration code");
     const project = d2cOutputDirectory(workspace, task);
@@ -712,11 +742,15 @@ export class DesktopRuntimeController {
     const generated = await generateIntegrationArtifacts(project, view.document, view.mappings, { pythonServer });
     const now = new Date().toISOString();
     const { quality: _quality, ...workflowBase } = view.workflow;
-    const workflow = await writeWorkflow(workspace, { ...workflowBase, revision: view.workflow.revision + 1,
+    const workflow = await updateWorkflow(workspace, task, view.workflow.revision, () => ({ ...workflowBase,
       stage: "integrating", integrationFiles: generated.files,
-      interaction: { manualDecision: "pending", updatedAt: now }, updatedAt: now });
+      interaction: { manualDecision: "pending", updatedAt: now }, updatedAt: now }));
     const prompt = [
       `继续 D2C 任务“${task}”的接口联调。视觉审阅已全部通过。`,
+      ...(product?.plan.approvedPrd === undefined ? [] : [
+        `已确认 PRD SHA-256：${product.plan.approvedPrd.hash}。PRD 是不可变开发准则，禁止修改 product/prd.md。`,
+        `实现与测试必须逐项覆盖：${product.plan.approvedPrd.criteria.map((item) => `${item.id} ${item.text}`).join("；")}。任何缺项都必须视为联调失败。`,
+      ]),
       `OpenAPI 绑定计划位于 src/d2c-output/${task}/src/api/d2c-bindings.json，Axios client 已生成。`,
       ...(pythonServer ? [`Python FastAPI 服务端骨架已生成在 src/d2c-output/${task}/server/，必须按契约补全业务实现与测试。`] : []),
       ...view.mappings.map((mapping) => `- 模块 ${mapping.moduleId} → ${mapping.operationId}（${mapping.operationKey}）`),
@@ -737,6 +771,13 @@ export class DesktopRuntimeController {
       "Do not start or stop long-running dev servers yourself; Flavor Code owns the frontend preview and backend service lifecycles and Vite hot reload will pick up source changes.",
       "Run the project build and available unit tests before reporting completion. Only edit within the generated D2C project.",
     ].join("\n");
+    const delivery = await readDeliveryRun(workspace, task);
+    if (delivery?.nodes.api.status === "running") {
+      const completed = await updateDeliveryRun(workspace, task, delivery.revision,
+        (run) => completeDeliveryNode(run, "api", generated.files.map((file) => artifactRef(file, file))));
+      await updateDeliveryRun(workspace, task, completed.revision,
+        (run) => beginDeliveryNode(run, "acceptance", run.nodes.api.outputs));
+    }
     return { workflow, document: view.document, mappings: view.mappings, files: generated.files, prompt };
   }
 
@@ -778,14 +819,15 @@ export class DesktopRuntimeController {
     if (existing !== undefined) return { running: true, url: existing.url, ...this.#mockUrl(task) };
     const workspace = this.#workspace;
     if (workspace === undefined) throw new Error("Open a project before starting a D2C preview");
-    const workflow = await readWorkflow(workspace, task);
+    let workflow = await readWorkflow(workspace, task);
     if (workflow?.integrationFiles === undefined) throw new Error("Generate D2C integration code before starting the preview");
     const mockStatus = await this.startD2cMock(task);
     const running = await this.#runD2cPreview(d2cOutputDirectory(workspace, task), { workspace });
     this.#d2cPreviews.set(task, running);
     if (mockStatus.url !== undefined) this.#d2cPreviewMockUrls.set(task, mockStatus.url);
     const interaction = workflow.interaction ?? { manualDecision: "pending" as const, updatedAt: new Date().toISOString() };
-    await writeWorkflow(workspace, { ...workflow, revision: workflow.revision + 1, stage: "interaction-review", interaction, updatedAt: new Date().toISOString() });
+    await updateWorkflow(workspace, task, workflow.revision,
+      (current) => ({ ...current, stage: "interaction-review", interaction, updatedAt: new Date().toISOString() }));
     return { running: true, url: running.url, ...this.#mockUrl(task) };
   }
 
@@ -808,18 +850,22 @@ export class DesktopRuntimeController {
     const mock = this.#d2cMocks.get(task);
     if (mock === undefined) throw new Error("Start the E2E backend service before running tests");
     if (this.#executeD2cInteractionTests === undefined) throw new Error("D2C interaction runner is unavailable");
-    const workflow = await readWorkflow(workspace, task);
+    let workflow = await readWorkflow(workspace, task);
     if (workflow === undefined) throw new Error("D2C workflow is unavailable");
     const mappings = workflow.mappings as D2cApiMapping[] | undefined;
     if (mappings === undefined || !mappings.some((mapping) => mapping.status === "confirmed" || mapping.status === "auto")) {
       throw new Error("No API binding is confirmed; confirm module bindings in the integration view before running automated acceptance");
     }
     await this.#syncD2cRuntimeForAcceptance(task);
+    workflow = await readWorkflow(workspace, task);
+    if (workflow === undefined) throw new Error("D2C workflow is unavailable after runtime synchronization");
     const readyPreview = this.#d2cPreviews.get(task);
     const readyMock = this.#d2cMocks.get(task);
     if (readyPreview === undefined || readyMock === undefined) throw new Error("D2C preview or backend service is unavailable after synchronization");
     const manifestPath = join(taskDir(workspace, task), "design", "interaction-manifest.json");
     const manifest = parseInteractionManifest(await readFile(manifestPath, "utf8"));
+    const baseline = await this.#verifyAcceptanceBaseline(workspace, task);
+    const coverage = baseline === undefined ? undefined : verifyRequirementCoverage(baseline.approvedPrd.criteria, manifest);
     let executableManifest = manifest;
     let review: D2cInteractionStatus["review"] = { mode: "contract", plannedScenarios: manifest.pages.reduce((total, page) => total + page.scenarios.length, 0) };
     const judgeConfig = await this.#d2cJudge?.config();
@@ -847,11 +893,16 @@ export class DesktopRuntimeController {
       }
     }
     const rawResult = await this.annotateD2cMockFailure(await this.#executeD2cInteractionTests(executableManifest, readyPreview.url, readyMock.url), task);
-    const result: D2cInteractionRun = { ...rawResult, evidenceMode: review.mode };
+    let result: D2cInteractionRun = { ...rawResult, evidenceMode: review.mode };
+    if (coverage !== undefined) {
+      const evidence = createAcceptanceEvidence(coverage, result);
+      await writeFile(join(taskDir(workspace, task), "acceptance-evidence.json"), `${JSON.stringify({ ...evidence, baseline }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+      if (!evidence.passed) result = { ...result, passed: false, failures: Math.max(1, result.failures) };
+    }
     const dir = integrationDirectory(workspace, task);
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "interaction-results.json"), `${JSON.stringify(result, null, 2)}\n`);
-    const next = await writeWorkflow(workspace, applyInteractionRun(workflow, result));
+    const next = await updateWorkflow(workspace, task, workflow.revision, (current) => applyInteractionRun(current, result));
     return { workflow: next, result, review };
   }
 
@@ -901,7 +952,7 @@ export class DesktopRuntimeController {
     if (accepted && !this.#d2cPreviews.has(task)) throw new Error("Start and inspect the interactive preview before accepting it");
     const workflow = await readWorkflow(workspace, task);
     if (workflow === undefined) throw new Error("D2C workflow is unavailable");
-    return writeWorkflow(workspace, applyManualInteractionDecision(workflow, accepted));
+    return updateWorkflow(workspace, task, workflow.revision, (current) => applyManualInteractionDecision(current, accepted));
   }
 
   async createD2cProduct(input: CreateD2cProductPlanInput): Promise<D2cProductGenerationResult> {
@@ -909,6 +960,10 @@ export class DesktopRuntimeController {
     if (workspace === undefined) throw new Error("Open a project before creating a D2C product");
     await this.stopD2cProductPreview(input.task);
     const plan = await createD2cProductPlan(workspace, input);
+    const initialized = await initializeDeliveryRun(workspace,
+      createDeliveryRun(input.task, artifactRef("requirement.txt", input.requirement)));
+    await updateDeliveryRun(workspace, input.task, initialized.revision,
+      (run) => beginDeliveryNode(run, "prd", run.nodes.requirement.outputs));
     return { view: { plan }, prompt: buildD2cPrdPrompt(plan) };
   }
 
@@ -916,6 +971,67 @@ export class DesktopRuntimeController {
     const workspace = this.#workspace;
     if (workspace === undefined) return undefined;
     return readD2cProductPlanView(workspace, task);
+  }
+
+  async regenerateD2cPrd(task: string, query: string): Promise<D2cProductGenerationResult> {
+    const workspace = this.#workspace;
+    if (workspace === undefined) throw new Error("Open a project before regenerating a PRD");
+    const current = await readD2cProductPlanView(workspace, task);
+    if (current === undefined) throw new Error("D2C product plan is unavailable");
+    const plan = await writeD2cProductPlan(workspace, requestD2cPrdRegeneration(current.plan, query));
+    const delivery = await readDeliveryRun(workspace, task);
+    if (delivery !== undefined) await updateDeliveryRun(workspace, task, delivery.revision,
+      (run) => beginDeliveryNode(run, "prd", run.nodes.requirement.outputs));
+    return { view: { plan, ...(current.prdMarkdown === undefined ? {} : { prdMarkdown: current.prdMarkdown,
+      prdHash: current.prdHash, prdSections: current.prdSections }) }, prompt: buildD2cPrdPrompt(plan) };
+  }
+
+  async updateD2cPrdSection(task: string, sectionId: string, body: string, expectedHash: string) {
+    const workspace = this.#workspace;
+    if (workspace === undefined) throw new Error("Open a project before editing a PRD");
+    const current = await readD2cProductPlanView(workspace, task);
+    if (current === undefined) throw new Error("D2C product plan is unavailable");
+    if (current.plan.approvedPrd !== undefined) throw new Error("The approved PRD is immutable and cannot be edited");
+    if (current.plan.phase !== "prd-review") throw new Error("PRD sections can only be edited during PRD review");
+    const path = join(taskDir(workspace, task), "product", "prd.md");
+    const updated = await updatePrdSectionFile(path, { sectionId, body, expectedHash });
+    const now = new Date().toISOString();
+    await writeD2cProductPlan(workspace, { ...current.plan, revision: current.plan.revision + 1,
+      prd: { path: "product/prd.md", updatedAt: now, contentHash: updated.hash }, updatedAt: now });
+    return readD2cProductPlanView(workspace, task).then((view) => view!);
+  }
+
+  async #assertProductPrdLocked(workspace: string, task: string): Promise<void> {
+    const current = await readD2cProductPlanView(workspace, task);
+    if (current?.plan.approvedPrd === undefined) return;
+    await assertApprovedPrd(join(taskDir(workspace, task), "product", "prd.md"), current.plan.approvedPrd);
+  }
+
+  async #acceptancePaths(workspace: string, task: string): Promise<AcceptanceBaselinePaths> {
+    const product = join(taskDir(workspace, task), "product");
+    const openapi = join(product, "openapi.json");
+    return { prd: join(product, "prd.md"), prototype: join(product, "prototype", "index.html"),
+      interaction: join(product, "prototype", "interaction-manifest.json"),
+      ...((await stat(openapi).catch(() => undefined)) === undefined ? {} : { openapi }) };
+  }
+
+  async #verifyAcceptanceBaseline(workspace: string, task: string): Promise<AcceptanceBaseline | undefined> {
+    const product = await readD2cProductPlanView(workspace, task);
+    if (product?.plan.approvedPrd === undefined) return undefined;
+    await this.#assertProductPrdLocked(workspace, task);
+    const baseline = JSON.parse(await readFile(join(taskDir(workspace, task), "acceptance-baseline.json"), "utf8")) as AcceptanceBaseline;
+    await verifyAcceptanceBaseline(await this.#acceptancePaths(workspace, task), baseline);
+    const design = join(taskDir(workspace, task), "design");
+    await Promise.all([
+      verifyAcceptanceArtifact(join(design, "index.html"), baseline.artifacts.prototype, "runtime prototype"),
+      verifyAcceptanceArtifact(join(design, "interaction-manifest.json"), baseline.artifacts.interaction, "runtime interaction contract"),
+    ]);
+    const workflow = await readWorkflow(workspace, task);
+    if (workflow?.openapi !== undefined) {
+      await verifyAcceptanceArtifact(join(taskDir(workspace, task), "integration", "swagger.json"),
+        { hash: workflow.openapi.hash }, "runtime OpenAPI contract");
+    }
+    return baseline;
   }
 
   async decideD2cProduct(
@@ -928,6 +1044,7 @@ export class DesktopRuntimeController {
     if (workspace === undefined) throw new Error("Open a project before reviewing D2C product artifacts");
     const current = await readD2cProductPlanView(workspace, task);
     if (current === undefined) throw new Error("D2C product plan is unavailable");
+    if (stage === "design") await this.#assertProductPrdLocked(workspace, task);
     if (stage === "design" && accepted && current.plan.phase === "ready-for-d2c") {
       const imported = await this.importD2cDesign(task, d2cProductPrototypeDirectory(workspace, task));
       return { view: current, imported };
@@ -938,12 +1055,27 @@ export class DesktopRuntimeController {
     if (stage === "design" && accepted) {
       const manifest = join(d2cProductPrototypeDirectory(workspace, task), "interaction-manifest.json");
       const normalizedManifest = parseInteractionManifest(await readFile(manifest, "utf8"));
+      if (current.plan.approvedPrd === undefined) throw new Error("Approve the PRD before confirming the design");
+      verifyRequirementCoverage(current.plan.approvedPrd.criteria, normalizedManifest);
       await writeFile(manifest, `${JSON.stringify(normalizedManifest, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+      const baseline = await captureAcceptanceBaseline(await this.#acceptancePaths(workspace, task), current.plan.approvedPrd);
+      await writeFile(join(taskDir(workspace, task), "acceptance-baseline.json"), `${JSON.stringify(baseline, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     }
     const plan = await writeD2cProductPlan(workspace,
-      applyD2cProductDecision(current.plan, stage, accepted, feedback));
+      stage === "prd" && accepted
+        ? approveD2cProductPlan(current.plan, current.prdMarkdown ?? "")
+        : applyD2cProductDecision(current.plan, stage, accepted, feedback));
     const view = { plan, ...(current.prdMarkdown === undefined ? {} : { prdMarkdown: current.prdMarkdown }) };
     if (stage === "prd") {
+      if (accepted) {
+        const delivery = await readDeliveryRun(workspace, task);
+        if (delivery !== undefined) {
+          const completed = await updateDeliveryRun(workspace, task, delivery.revision,
+            (run) => completeDeliveryNode(run, "prd", [artifactRef("product/prd.md", current.prdMarkdown ?? "")]));
+          await updateDeliveryRun(workspace, task, completed.revision,
+            (run) => beginDeliveryNode(run, "design", run.nodes.prd.outputs));
+        }
+      }
       const prompt = accepted
         ? buildD2cDesignPrompt(plan, current.prdMarkdown ?? "")
         : buildD2cPrdPrompt(plan);
@@ -952,6 +1084,17 @@ export class DesktopRuntimeController {
     await this.stopD2cProductPreview(task);
     if (!accepted) return { view, prompt: buildD2cDesignPrompt(plan, current.prdMarkdown ?? "") };
     const imported = await this.importD2cDesign(task, d2cProductPrototypeDirectory(workspace, task));
+    const delivery = await readDeliveryRun(workspace, task);
+    if (delivery !== undefined) {
+      const prototype = await readFile(join(d2cProductPrototypeDirectory(workspace, task), "index.html"), "utf8");
+      const interaction = await readFile(join(d2cProductPrototypeDirectory(workspace, task), "interaction-manifest.json"), "utf8");
+      const completed = await updateDeliveryRun(workspace, task, delivery.revision, (run) => completeDeliveryNode(run, "design", [
+        artifactRef("product/prototype/index.html", prototype),
+        artifactRef("product/prototype/interaction-manifest.json", interaction),
+      ]));
+      await updateDeliveryRun(workspace, task, completed.revision,
+        (run) => beginDeliveryNode(run, "d2c", run.nodes.design.outputs));
+    }
     return { view, imported };
   }
 
@@ -995,6 +1138,7 @@ export class DesktopRuntimeController {
   async runD2cQualityJudge(task: string): Promise<D2cQualityJudgeStatus> {
     const workspace = this.#workspace;
     if (workspace === undefined) throw new Error("Open a project before running the D2C quality judge");
+    await this.#verifyAcceptanceBaseline(workspace, task);
     if (this.#d2cJudge === undefined || this.#captureD2cPreview === undefined) {
       throw new Error("D2C multimodal judge is unavailable");
     }
@@ -1026,8 +1170,23 @@ export class DesktopRuntimeController {
         judgment = applyD2cQualityIssueDecision(judgment, issue.id, "skipped", new Date(waiver?.updatedAt ?? previous!.updatedAt));
       }
     }
-    const next = await writeWorkflow(workspace, applyQualityJudgment(workflow, judgment));
-    await writeFile(join(taskDir(workspace, task), "quality-judge.json"), `${JSON.stringify(judgment, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    const next = await updateWorkflow(workspace, task, workflow.revision, (current) => applyQualityJudgment(current, judgment));
+    const qualityContent = `${JSON.stringify(judgment, null, 2)}\n`;
+    await writeFile(join(taskDir(workspace, task), "quality-judge.json"), qualityContent, { encoding: "utf8", mode: 0o600 });
+    const delivery = await readDeliveryRun(workspace, task);
+    if (next.stage === "completed" && delivery?.nodes.acceptance.status === "running") {
+      const interactionContent = await readFile(join(integrationDirectory(workspace, task), "interaction-results.json"), "utf8");
+      const accepted = await updateDeliveryRun(workspace, task, delivery.revision, (run) => completeDeliveryNode(run, "acceptance", [
+        artifactRef("integration/interaction-results.json", interactionContent),
+        artifactRef("quality-judge.json", qualityContent),
+      ]));
+      const delivering = await updateDeliveryRun(workspace, task, accepted.revision,
+        (run) => beginDeliveryNode(run, "delivery", run.nodes.acceptance.outputs));
+      await updateDeliveryRun(workspace, task, delivering.revision, (run) => completeDeliveryNode(run, "delivery", [
+        artifactRef("workflow.json", `${JSON.stringify(next, null, 2)}\n`),
+        artifactRef("quality-judge.json", qualityContent),
+      ]));
+    }
     return { workflow: next, judgment };
   }
 
@@ -1042,7 +1201,8 @@ export class DesktopRuntimeController {
     if (current?.quality === undefined) throw new Error("Run the D2C quality judge before resolving quality issues");
     const issue = current.quality.issues.find((item) => item.id === issueId);
     if (issue === undefined) throw new Error(`Unknown D2C quality issue: ${issueId}`);
-    const workflow = await writeWorkflow(workspace, applyQualityIssueDecision(current, issueId, decision));
+    const workflow = await updateWorkflow(workspace, task, current.revision,
+      (latest) => applyQualityIssueDecision(latest, issueId, decision));
     return {
       workflow,
       ...(decision === "fixing" ? { prompt: buildD2cQualityRepairPrompt(task, issue) } : {}),

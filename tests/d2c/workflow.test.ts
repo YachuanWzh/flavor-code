@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,6 +17,7 @@ import {
   reconcileWorkflow,
   reviewProgress,
   writeWorkflow,
+  updateWorkflow,
 } from "../../src/d2c/workflow.js";
 import type { D2cInteractionRun } from "../../src/d2c/interaction.js";
 import { finalizeD2cQualityJudgment } from "../../src/d2c/judge.js";
@@ -109,6 +110,40 @@ describe("D2C review workflow", () => {
     await expect(readWorkflow(dir, "dashboard")).resolves.toBeUndefined();
     await writeWorkflow(dir, createWorkflow(report(), "vue"));
     await expect(readWorkflow(dir, "dashboard")).resolves.toMatchObject({ task: "dashboard", schema: 1, revision: 1 });
+  });
+
+  it("updates with expected-revision CAS and increments exactly once", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "flavor-d2c-workflow-cas-")); dirs.push(dir);
+    const stored = await writeWorkflow(dir, createWorkflow(report(), "vue"));
+    const updated = await updateWorkflow(dir, "dashboard", stored.revision, (current) =>
+      applyReviewDecision(current, { fingerprints: ["issue-card"], decision: "accepted" }, report()));
+    expect(updated.revision).toBe(stored.revision + 1);
+    await expect(updateWorkflow(dir, "dashboard", stored.revision, (current) => current)).rejects.toThrow(/STALE_REVISION/);
+  });
+
+  it("recovers a valid workflow backup without mutating revision during reads", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "flavor-d2c-workflow-recovery-")); dirs.push(dir);
+    const first = await writeWorkflow(dir, createWorkflow(report(), "vue"));
+    const second = await updateWorkflow(dir, "dashboard", first.revision, (current) =>
+      applyReviewDecision(current, { fingerprints: ["issue-card"], decision: "accepted" }, report()));
+    await writeFile(join(dir, ".flavor", "d2c", "dashboard", "workflow.json"), "{broken");
+    const recovered = await readWorkflow(dir, "dashboard");
+    expect(recovered?.revision).toBe(first.revision);
+    expect((await readWorkflow(dir, "dashboard"))?.revision).toBe(first.revision);
+    expect(second.revision).toBe(first.revision + 1);
+  });
+
+  it("invalidates API, integration and acceptance evidence when visual output changes", () => {
+    const base = { ...createWorkflow(report(), "vue"), stage: "completed" as const,
+      openapi: { sourceName: "api.json", importedAt: "2026-08-13T10:00:00.000Z", hash: "a".repeat(64), version: "3.1", title: "API" },
+      mappings: [{}], integrationFiles: ["src/api/http.js"],
+      interaction: { manualDecision: "accepted" as const, updatedAt: "2026-08-13T10:00:00.000Z" },
+    };
+    const next = reconcileWorkflow(base, report("run-20260810-030405", 15));
+    expect(next.openapi).toBeUndefined();
+    expect(next.mappings).toBeUndefined();
+    expect(next.integrationFiles).toBeUndefined();
+    expect(next.interaction).toBeUndefined();
   });
 
   it("builds a repair prompt constrained to the detected module files", () => {

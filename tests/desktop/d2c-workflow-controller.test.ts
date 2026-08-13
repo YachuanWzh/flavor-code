@@ -9,6 +9,14 @@ import { buildReport } from "../../src/d2c/report.js";
 import { parseInteractionManifest } from "../../src/d2c/interaction.js";
 import { importDesign, writeReport } from "../../src/d2c/store.js";
 import { writeWorkflow } from "../../src/d2c/workflow.js";
+import {
+  artifactRef,
+  beginDeliveryNode,
+  completeDeliveryNode,
+  createDeliveryRun,
+  initializeDeliveryRun,
+  readDeliveryRun,
+} from "../../src/e2e/delivery-run.js";
 import { DesktopRuntimeController, type DesktopRuntimeControllerOptions } from "../../src/desktop/runtime-controller.js";
 
 const dirs: string[] = [];
@@ -63,6 +71,16 @@ function writeSpec(target: string): Promise<void> {
   }));
 }
 
+async function seedDeliveryAtAcceptance(workspace: string, task: string): Promise<void> {
+  let run = createDeliveryRun(task, artifactRef("requirement.txt", "dashboard"));
+  for (const node of ["prd", "design", "d2c", "api"] as const) {
+    run = beginDeliveryNode(run, node, []);
+    run = completeDeliveryNode(run, node, [artifactRef(`${node}.json`, node)]);
+  }
+  run = beginDeliveryNode(run, "acceptance", run.nodes.api.outputs);
+  await initializeDeliveryRun(workspace, run);
+}
+
 describe("desktop D2C workflow controller", () => {
   it("moves a coarse requirement through PRD and prototype gates before reusing design import", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-d2c-product-controller-")); dirs.push(workspace);
@@ -79,17 +97,23 @@ describe("desktop D2C workflow controller", () => {
     const created = await controller.createD2cProduct({ task: "merchant-console", framework: "react", requirement: "做一个经营分析后台" });
     expect(created.view.plan.phase).toBe("prd-generating");
     expect(created.prompt).toContain("product/prd.md");
+    expect(await readDeliveryRun(workspace, "merchant-console")).toMatchObject({
+      nodes: { requirement: { status: "succeeded" }, prd: { status: "running", attempt: 1 } },
+    });
     const product = join(workspace, ".flavor", "d2c", "merchant-console", "product");
-    await writeFile(join(product, "prd.md"), "# 经营分析后台\n\n## 验收标准\n- 展示今日交易额\n");
+    await writeFile(join(product, "prd.md"), "# 经营分析后台\n\n## 验收标准\n- [AC-001] 展示今日交易额\n");
     expect((await controller.getD2cProduct("merchant-console"))?.plan.phase).toBe("prd-review");
 
     const prdAccepted = await controller.decideD2cProduct("merchant-console", "prd", true);
     expect(prdAccepted.view.plan.phase).toBe("design-generating");
     expect(prdAccepted.prompt).toContain("interaction-manifest.json");
+    expect(await readDeliveryRun(workspace, "merchant-console")).toMatchObject({
+      nodes: { prd: { status: "succeeded" }, design: { status: "running", attempt: 1 } },
+    });
     await writeFile(join(product, "prototype", "index.html"), "<!doctype html><main>经营分析</main>");
     await writeFile(join(product, "prototype", "interaction-manifest.json"), JSON.stringify({
       schemaVersion: 1, product: "merchant-console", deterministic: true, notes: "model-authored metadata",
-      pages: [{ url: "index.html", title: "经营台", scenarios: [{ id: "loads", title: "加载首页", steps: [
+      pages: [{ url: "index.html", title: "经营台", scenarios: [{ id: "loads", title: "加载首页", requirementIds: ["AC-001"], steps: [
         { action: "wait", ms: 50 }, { expect: "visible", selector: "main" },
         { expect: "url", selector: "body", value: "index.html" },
       ] }] }],
@@ -101,20 +125,83 @@ describe("desktop D2C workflow controller", () => {
     const designAccepted = await controller.decideD2cProduct("merchant-console", "design", true);
     expect(designAccepted.view.plan.phase).toBe("ready-for-d2c");
     expect(designAccepted.imported).toMatchObject({ task: "merchant-console", entryHtml: "index.html" });
+    expect(await readDeliveryRun(workspace, "merchant-console")).toMatchObject({
+      nodes: { design: { status: "succeeded" }, d2c: { status: "running", attempt: 1 } },
+    });
     const normalizedSource = JSON.parse(await readFile(join(product, "prototype", "interaction-manifest.json"), "utf8"));
     expect(normalizedSource.notes).toBeUndefined();
     expect(normalizedSource.pages[0].title).toBeUndefined();
     expect(normalizedSource.pages[0].scenarios[0].title).toBeUndefined();
     expect(await readFile(join(workspace, ".flavor", "d2c", "merchant-console", "design", "index.html"), "utf8"))
       .toContain("经营分析");
+    expect(JSON.parse(await readFile(join(workspace, ".flavor", "d2c", "merchant-console", "acceptance-baseline.json"), "utf8")))
+      .toMatchObject({ approvedPrd: { criteria: [{ id: "AC-001" }] }, artifacts: { prd: {}, prototype: {}, interaction: {} } });
     await expect(controller.decideD2cProduct("merchant-console", "design", true)).resolves.toMatchObject({
       view: { plan: { phase: "ready-for-d2c" } }, imported: { entryHtml: "index.html" },
     });
     await controller.dispose();
   });
 
+  it("rejects design confirmation when the interaction contract misses a PRD criterion", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-d2c-coverage-controller-")); dirs.push(workspace);
+    const controller = createController({ home: workspace });
+    await controller.openWorkspace(workspace);
+    await controller.createD2cProduct({ task: "merchant-console", framework: "vue", requirement: "经营后台" });
+    const product = join(workspace, ".flavor", "d2c", "merchant-console", "product");
+    await writeFile(join(product, "prd.md"), "# 经营后台\n\n- [AC-001] 可查询。\n- [AC-002] 可重试。\n");
+    await controller.getD2cProduct("merchant-console");
+    await controller.decideD2cProduct("merchant-console", "prd", true);
+    await writeFile(join(product, "prototype", "index.html"), "<main>Demo</main>");
+    await writeFile(join(product, "prototype", "interaction-manifest.json"), JSON.stringify({
+      schemaVersion: 1, product: "Demo", deterministic: true,
+      pages: [{ url: "index.html", scenarios: [{ id: "query", requirementIds: ["AC-001"], steps: [{ expect: "visible", selector: "main" }] }] }],
+    }));
+    await controller.getD2cProduct("merchant-console");
+    await expect(controller.decideD2cProduct("merchant-console", "design", true)).rejects.toThrow(/AC-002/);
+    await controller.dispose();
+  });
+
+  it("supports query regeneration and optimistic section editing only before PRD approval", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-d2c-prd-controller-")); dirs.push(workspace);
+    const controller = createController({ home: workspace });
+    await controller.openWorkspace(workspace);
+    await controller.createD2cProduct({ task: "merchant-console", framework: "vue", requirement: "经营后台" });
+    const prdPath = join(workspace, ".flavor", "d2c", "merchant-console", "product", "prd.md");
+    await writeFile(prdPath, "# 经营后台\n\n## 背景\n\n旧背景\n\n## 验收标准\n\n- [AC-001] 可查询。\n");
+    const review = await controller.getD2cProduct("merchant-console");
+    expect(review?.prdSections).toEqual(expect.arrayContaining([expect.objectContaining({ id: "背景" })]));
+    const edited = await controller.updateD2cPrdSection("merchant-console", "背景", "新背景", review!.prdHash!);
+    expect(edited.prdMarkdown).toContain("新背景");
+    await expect(controller.updateD2cPrdSection("merchant-console", "背景", "覆盖", review!.prdHash!))
+      .rejects.toThrow(/PRD_EDIT_CONFLICT/);
+    const regenerated = await controller.regenerateD2cPrd("merchant-console", "增加失败恢复路径");
+    expect(regenerated.view.plan.phase).toBe("prd-generating");
+    expect(regenerated.prompt).toContain("增加失败恢复路径");
+    await controller.dispose();
+  });
+
+  it("freezes the approved PRD and blocks downstream work after out-of-band mutation", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-d2c-prd-lock-controller-")); dirs.push(workspace);
+    const controller = createController({ home: workspace });
+    await controller.openWorkspace(workspace);
+    await controller.createD2cProduct({ task: "merchant-console", framework: "vue", requirement: "经营后台" });
+    const product = join(workspace, ".flavor", "d2c", "merchant-console", "product");
+    const prdPath = join(product, "prd.md");
+    await writeFile(prdPath, "# 经营后台\n\n## 验收标准\n\n- [AC-001] 可查询。\n");
+    await controller.getD2cProduct("merchant-console");
+    const accepted = await controller.decideD2cProduct("merchant-console", "prd", true);
+    expect(accepted.view.plan.approvedPrd).toMatchObject({ criteria: [{ id: "AC-001" }] });
+    await writeFile(prdPath, "# 被篡改\n\n- [AC-001] 可查询。\n");
+    await expect(controller.decideD2cProduct("merchant-console", "design", false, "修改设计"))
+      .rejects.toThrow(/PRD_LOCK_VIOLATION/);
+    await expect(controller.updateD2cPrdSection("merchant-console", "preamble", "覆盖", "a".repeat(64)))
+      .rejects.toThrow(/approved PRD/i);
+    await controller.dispose();
+  });
+
   it("persists review, imports OpenAPI, confirms mappings and generates usable integration files", async () => {
     const { workspace, report } = await seedWorkspace();
+    await seedDeliveryAtAcceptance(workspace, "dashboard");
     const project = join(workspace, "src", "d2c-output", "dashboard");
     await writeFile(join(project, "d2c.modules.json"), JSON.stringify({ schema: 1, modules: [{ id: "stats", label: "统计", sourceFiles: ["src/Stats.jsx"], keywords: ["metrics"] }] }));
     const controller = new DesktopRuntimeController({
@@ -168,6 +255,9 @@ describe("desktop D2C workflow controller", () => {
     const judged = await controller.runD2cQualityJudge("dashboard");
     expect(judged.workflow.stage).toBe("completed");
     expect(judged.judgment.overallScore).toBe(91);
+    expect(await readDeliveryRun(workspace, "dashboard")).toMatchObject({
+      nodes: { acceptance: { status: "succeeded" }, delivery: { status: "succeeded" } },
+    });
     expect(JSON.parse(await readFile(join(workspace, ".flavor", "d2c", "dashboard", "quality-judge.json"), "utf8"))).toMatchObject({ verdict: "pass" });
     expect(JSON.parse(await readFile(join(workspace, ".flavor", "d2c", "dashboard", "integration", "interaction-results.json"), "utf8"))).toMatchObject({ passed: true });
     await controller.dispose();

@@ -42,6 +42,7 @@ const ExpectStepSchema = z.union([VisibleStep, HiddenStep, NotExistsStep, TextSt
 const StepSchema = z.union([ActionStepSchema, ExpectStepSchema]);
 const ScenarioSchema = z.object({
   id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/),
+  requirementIds: z.array(z.string().regex(/^AC-\d{3,}$/)).min(1).max(1_000).optional(),
   requireApi: z.boolean().optional(),
   steps: z.array(StepSchema).min(1).max(500),
 }).strict();
@@ -264,7 +265,7 @@ export async function runInteractionManifest(
  */
 export function interactionManifestSchemaGuide(): string {
   return [
-    "interaction-manifest.json 只能使用 schemaVersion、product、deterministic、pages；page 只能包含 url、requireApi、scenarios；scenario 只能包含 id、requireApi、steps，不要写 title 或 notes。",
+    "interaction-manifest.json 只能使用 schemaVersion、product、deterministic、pages；page 只能包含 url、requireApi、scenarios；scenario 只能包含 id、requirementIds、requireApi、steps，不要写 title 或 notes。需求驱动任务的每条 scenario 必须通过 requirementIds 关联一个或多个已确认 PRD 验收标准，并完整覆盖全部标准。",
     `步骤仅允许 action(${INTERACTION_ACTION_NAMES.join("/")}) 或 expect(${INTERACTION_EXPECTATION_NAMES.join("/")})。`,
     "open 必须有安全的相对 url；click/hover/blur 必须有 selector；fill/select 必须有 selector 和 value；key 必须有 value；wait 必须有 0~30000 的整数 ms；wait-for 必须有 selector 和 state(visible/hidden/not-exists)，可选 timeoutMs(1~30000)。除 url 和 request 外的 expect 必须有 selector，url 只写 value。",
     "request 断言用于验证真实 API 行为：method(GET/POST/PUT/PATCH/DELETE)、path(请求路径子串)、status(响应状态码) 至少提供一个，三者都满足才通过。",

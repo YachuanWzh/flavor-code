@@ -14,6 +14,8 @@ import {
   readD2cProductPlanView,
   resolveD2cProductTechnology,
   buildD2cProductOpenApi,
+  approveD2cProductPlan,
+  requestD2cPrdRegeneration,
   writeD2cProductPlan,
 } from "../../src/d2c/product.js";
 
@@ -68,6 +70,7 @@ describe("D2C product discovery workflow", () => {
     expect(prompt).toContain("product/prd.md");
     expect(prompt).toContain("目标用户");
     expect(prompt).toContain("验收标准");
+    expect(prompt).toContain("其他章节引用时只写 AC-001");
     expect(prompt).not.toContain("src/d2c-output");
   });
 
@@ -78,14 +81,15 @@ describe("D2C product discovery workflow", () => {
     });
     const product = join(workspace, ".flavor", "d2c", "merchant-console", "product");
     await mkdir(join(product, "prototype"), { recursive: true });
-    await writeFile(join(product, "prd.md"), "# 商户经营台\n\n## 验收标准\n- 能查看今日交易额\n");
+    const prdMarkdown = "# 商户经营台\n\n## 验收标准\n- [AC-001] 能查看今日交易额\n";
+    await writeFile(join(product, "prd.md"), prdMarkdown);
     plan = await discoverD2cProductArtifacts(workspace, plan);
     expect(plan.phase).toBe("prd-review");
 
     const rejectedPrd = applyD2cProductDecision(plan, "prd", false, "补充异常退款流程");
     expect((await discoverD2cProductArtifacts(workspace, rejectedPrd)).phase).toBe("prd-generating");
 
-    plan = applyD2cProductDecision(plan, "prd", true, undefined, "2026-08-12T03:00:00.000Z");
+    plan = approveD2cProductPlan(plan, prdMarkdown, new Date("2026-08-12T03:00:00.000Z"));
     expect(plan.phase).toBe("design-generating");
     const designPrompt = buildD2cDesignPrompt(plan, "# 商户经营台");
     expect(designPrompt).toContain("interaction-manifest.json");
@@ -151,5 +155,34 @@ describe("D2C product discovery workflow", () => {
     expect(rejected).toMatchObject({ phase: "prd-generating", feedback: { stage: "prd", message: "补充异常退款流程" } });
     expect((await discoverD2cProductArtifacts(workspace, rejected)).phase).toBe("prd-generating");
     expect(() => applyD2cProductDecision(initial, "design", true)).toThrow(/design review/i);
+  });
+
+  it("regenerates a reviewable PRD from a user query and clears any previous approval", () => {
+    const plan = {
+      schema: 1 as const, task: "merchant-console", revision: 2, phase: "prd-review" as const,
+      framework: "vue" as const, requirement: "经营分析后台",
+      prd: { path: "product/prd.md" as const, updatedAt: "2026-08-13T10:00:00.000Z" },
+      approvedPrd: { hash: "a".repeat(64), approvedAt: "2026-08-13T10:00:00.000Z", criteria: [{ id: "AC-001", text: "旧标准" }] },
+      createdAt: "2026-08-13T09:00:00.000Z", updatedAt: "2026-08-13T10:00:00.000Z",
+    };
+    const revised = requestD2cPrdRegeneration(plan, "增加退款失败后的恢复流程", "2026-08-13T10:10:00.000Z");
+    expect(revised).toMatchObject({ phase: "prd-generating", feedback: { stage: "prd", message: "增加退款失败后的恢复流程" } });
+    expect(revised.approvedPrd).toBeUndefined();
+    expect(buildD2cPrdPrompt(revised)).toContain("增加退款失败后的恢复流程");
+  });
+
+  it("stores the approved PRD hash and criteria as the immutable development baseline", () => {
+    const markdown = "# 商户经营台\n\n## 验收标准\n\n- [AC-001] 展示今日交易额。\n";
+    const plan = {
+      schema: 1 as const, task: "merchant-console", revision: 1, phase: "prd-review" as const,
+      framework: "vue" as const, requirement: "经营分析后台",
+      prd: { path: "product/prd.md" as const, updatedAt: "2026-08-13T10:00:00.000Z" },
+      createdAt: "2026-08-13T09:00:00.000Z", updatedAt: "2026-08-13T10:00:00.000Z",
+    };
+    const approved = approveD2cProductPlan(plan, markdown, new Date("2026-08-13T10:30:00.000Z"));
+    expect(approved).toMatchObject({ phase: "design-generating",
+      approvedPrd: { approvedAt: "2026-08-13T10:30:00.000Z", criteria: [{ id: "AC-001", text: "展示今日交易额。" }] } });
+    expect(buildD2cDesignPrompt(approved, markdown)).toContain(approved.approvedPrd!.hash);
+    expect(buildD2cDesignPrompt(approved, markdown)).toContain("PRD 已冻结");
   });
 });
