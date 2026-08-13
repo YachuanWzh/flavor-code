@@ -352,6 +352,21 @@ it("preserves a positive provider output token limit", () => {
   })).toThrow();
 });
 
+it("accepts an optional claudeClient toggle on providers", () => {
+  const parsed = FlavorConfigSchema.parse({
+    providers: {
+      gateway: { type: "anthropic", apiKey: "k", claudeClient: true },
+      plain: { type: "anthropic", apiKey: "k" },
+    },
+  });
+
+  expect(parsed.providers.gateway?.claudeClient).toBe(true);
+  expect(parsed.providers.plain?.claudeClient).toBeUndefined();
+  expect(() => FlavorConfigSchema.parse({
+    providers: { gateway: { type: "anthropic", claudeClient: "yes" } },
+  })).toThrow();
+});
+
 it("merges CLI, project, env, global, and defaults in precedence order", async () => {
   const root = await mkdtemp(join(tmpdir(), "flavor-config-"));
   const home = join(root, "home");

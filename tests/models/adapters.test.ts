@@ -794,6 +794,22 @@ describe("AnthropicModelAdapter", () => {
     );
   });
 
+  it("applies custom headers as SDK default headers, overriding the User-Agent", () => {
+    const adapter = new AnthropicModelAdapter({
+      apiKey: "test-key",
+      headers: { "User-Agent": "claude-cli/2.1.0 (external, cli)", "x-app": "cli" },
+    });
+
+    const client = (adapter as unknown as {
+      client: { _options?: { defaultHeaders?: Record<string, string> } };
+    }).client;
+
+    expect(client._options?.defaultHeaders).toEqual({
+      "User-Agent": "claude-cli/2.1.0 (external, cli)",
+      "x-app": "cli",
+    });
+  });
+
   it("normalizes rejected SDK streams without throwing provider-specific errors", async () => {
     const client = {
       messages: {

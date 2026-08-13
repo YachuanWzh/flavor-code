@@ -25,6 +25,9 @@ export const ProviderConfigSchema = z.object({
   cheapModel: z.string().min(1).optional(),
   models: z.array(z.string().min(1)).max(100).optional(),
   maxOutputTokens: z.number().int().positive().optional(),
+  // Send the Claude Code client fingerprint (User-Agent/x-app) with Anthropic requests,
+  // for gateways that restrict the Anthropic protocol to Claude clients.
+  claudeClient: z.boolean().optional(),
   // OAuth PKCE fields
   apiType: z.enum(["openai", "anthropic"]).optional(),
   authorizationUrl: z.string().url().optional(),

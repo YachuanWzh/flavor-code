@@ -35,9 +35,17 @@ export interface AnthropicModelAdapterOptions {
   baseURL?: string;
   client?: AnthropicClient;
   maxOutputTokens?: number;
+  /** Extra headers sent with every request; override SDK defaults such as User-Agent. */
+  headers?: Record<string, string>;
   /** Mirror the per-request cache breakdown to stderr. Defaults to FLAVOR_DEBUG_USAGE=1. File logging to usage.jsonl is always on. */
   debugUsage?: boolean;
 }
+
+/** Claude Code client fingerprint, used by gateways that restrict the Anthropic protocol to Claude clients. */
+export const CLAUDE_CLIENT_HEADERS: Record<string, string> = {
+  "User-Agent": "claude-cli/2.1.0 (external, cli)",
+  "x-app": "cli",
+};
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
 
@@ -166,6 +174,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
       new Anthropic({
         ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
         ...(options.baseURL === undefined ? {} : { baseURL: options.baseURL }),
+        ...(options.headers === undefined ? {} : { defaultHeaders: options.headers }),
       });
   }
 
