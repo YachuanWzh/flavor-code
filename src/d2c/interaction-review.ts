@@ -67,9 +67,25 @@ function normalizedPage(value: string): string {
   return url.pathname.replace(/^\//, "") || "index.html";
 }
 
+/**
+ * Extracts stable locator keys (`#id` and `[attr=value]`) from a selector.
+ * Structural selectors (tag/class/nth) yield no keys, so they are skipped by
+ * existence validation rather than rejected for being unverifiable.
+ */
+function selectorKeys(selector: string): string[] {
+  const keys: string[] = [];
+  for (const match of selector.matchAll(/#([\w-]+)/g)) keys.push(`#${match[1]}`);
+  for (const match of selector.matchAll(/\[([\w-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s\]]+)))?\]/g)) {
+    const value = match[2] ?? match[3] ?? match[4] ?? "";
+    keys.push(`${match[1]}=${value}`);
+  }
+  return keys;
+}
+
 export function validateAutonomousInteractionManifest(
   manifest: D2cInteractionManifest,
   observedPages: readonly string[],
+  observedSelectors?: readonly string[],
 ): D2cInteractionManifest {
   const allowed = new Set(observedPages.map(normalizedPage));
   const planned = new Set(manifest.pages.map((page) => normalizedPage(page.url)));
@@ -79,6 +95,8 @@ export function validateAutonomousInteractionManifest(
   for (const page of allowed) {
     if (!planned.has(page)) throw new Error(`Autonomous interaction plan omitted an observed page: ${page}`);
   }
+  const knownKeys = new Set((observedSelectors ?? []).flatMap(selectorKeys));
+  const unresolvedSelectors = new Set<string>();
   const ids = new Set<string>();
   let total = 0;
   for (const page of manifest.pages) {
@@ -92,7 +110,17 @@ export function validateAutonomousInteractionManifest(
       if (actions.length === 0 || expectations.length === 0 || !("expect" in scenario.steps.at(-1)!)) {
         throw new Error(`Autonomous journey ${scenario.id} must perform actions and finish with observable evidence`);
       }
+      for (const step of scenario.steps) {
+        if (!("selector" in step) || step.selector === undefined) continue;
+        const keys = selectorKeys(step.selector);
+        if (keys.length === 0 || keys.some((key) => knownKeys.has(key))) continue;
+        unresolvedSelectors.add(step.selector);
+      }
     }
+  }
+  if (knownKeys.size > 0 && unresolvedSelectors.size > 0) {
+    const sample = [...unresolvedSelectors].slice(0, 5).join(", ");
+    throw new Error(`Autonomous interaction plan references selectors absent from the observed DOM: ${sample}`);
   }
   if (total > 100) throw new Error("Autonomous interaction plan exceeds 100 user journeys");
   return manifest;
@@ -124,12 +152,13 @@ export function mergeInteractionManifests(
 
 export function parseD2cAutonomousPlanResponse(
   raw: string,
-  input: { model: string; observedPages: readonly string[]; now?: Date },
+  input: { model: string; observedPages: readonly string[]; observedSelectors?: readonly string[]; now?: Date },
 ): D2cAutonomousInteractionPlan {
   const modelPlan = ModelPlanSchema.parse(parseJsonObject(raw));
   const manifest = validateAutonomousInteractionManifest(
     parseInteractionManifest(JSON.stringify(modelPlan.manifest)),
     input.observedPages,
+    input.observedSelectors,
   );
   return {
     schema: 1,

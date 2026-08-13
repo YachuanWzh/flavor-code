@@ -5,6 +5,10 @@ const SafePageUrl = z.string().trim().min(1).max(1_024).refine((value) => {
   return !value.split("/").includes("..");
 }, "Interaction page URL must be workspace-relative");
 
+/** Authoritative action/expectation vocabulary shared by the schema and the authoring prompt. */
+export const INTERACTION_ACTION_NAMES = ["open", "click", "fill", "select", "hover", "blur", "key", "wait", "wait-for"] as const;
+export const INTERACTION_EXPECTATION_NAMES = ["visible", "hidden", "not-exists", "text", "text-contains", "attribute", "class", "count", "value", "url", "request"] as const;
+
 const ClickStep = z.object({ action: z.literal("click"), selector: z.string().min(1).max(2_048) }).strict();
 const FillStep = z.object({ action: z.literal("fill"), selector: z.string().min(1).max(2_048), value: z.string().max(10_000) }).strict();
 const SelectStep = z.object({ action: z.literal("select"), selector: z.string().min(1).max(2_048), value: z.string().max(10_000) }).strict();
@@ -12,6 +16,7 @@ const HoverStep = z.object({ action: z.literal("hover"), selector: z.string().mi
 const BlurStep = z.object({ action: z.literal("blur"), selector: z.string().min(1).max(2_048) }).strict();
 const KeyStep = z.object({ action: z.literal("key"), value: z.string().min(1).max(64) }).strict();
 const WaitStep = z.object({ action: z.literal("wait"), ms: z.number().int().nonnegative().max(30_000) }).strict();
+const WaitForStep = z.object({ action: z.literal("wait-for"), selector: z.string().min(1).max(2_048), state: z.enum(["visible", "hidden", "not-exists"]), timeoutMs: z.number().int().positive().max(30_000).optional() }).strict();
 const OpenStep = z.object({ action: z.literal("open"), url: SafePageUrl }).strict();
 const VisibleStep = z.object({ expect: z.literal("visible"), selector: z.string().min(1).max(2_048) }).strict();
 const HiddenStep = z.object({ expect: z.literal("hidden"), selector: z.string().min(1).max(2_048) }).strict();
@@ -22,9 +27,18 @@ const ClassStep = z.object({ expect: z.literal("class"), selector: z.string().mi
 const CountStep = z.object({ expect: z.literal("count"), selector: z.string().min(1).max(2_048), value: z.number().int().nonnegative().max(100_000) }).strict();
 const ValueStep = z.object({ expect: z.literal("value"), selector: z.string().min(1).max(2_048), value: z.string().max(10_000) }).strict();
 const UrlStep = z.object({ expect: z.literal("url"), value: SafePageUrl }).strict();
+const RequestStep = z.object({
+  expect: z.literal("request"),
+  method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).optional(),
+  path: z.string().min(1).max(1_024).optional(),
+  status: z.number().int().min(100).max(599).optional(),
+}).strict().refine(
+  (step) => step.method !== undefined || step.path !== undefined || step.status !== undefined,
+  "request assertion requires at least one of method, path, or status",
+);
 
-const ActionStepSchema = z.union([ClickStep, FillStep, SelectStep, HoverStep, BlurStep, KeyStep, WaitStep, OpenStep]);
-const ExpectStepSchema = z.union([VisibleStep, HiddenStep, NotExistsStep, TextStep, AttributeStep, ClassStep, CountStep, ValueStep, UrlStep]);
+const ActionStepSchema = z.union([ClickStep, FillStep, SelectStep, HoverStep, BlurStep, KeyStep, WaitStep, WaitForStep, OpenStep]);
+const ExpectStepSchema = z.union([VisibleStep, HiddenStep, NotExistsStep, TextStep, AttributeStep, ClassStep, CountStep, ValueStep, UrlStep, RequestStep]);
 const StepSchema = z.union([ActionStepSchema, ExpectStepSchema]);
 const ScenarioSchema = z.object({
   id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/),
@@ -49,7 +63,7 @@ function normalizeRequireApi(value: unknown): unknown {
 }
 
 const MODEL_EXPECTATION_ACTIONS = new Set([
-  "visible", "hidden", "not-exists", "text", "text-contains", "attribute", "class", "count", "value", "url",
+  "visible", "hidden", "not-exists", "text", "text-contains", "attribute", "class", "count", "value", "url", "request",
 ]);
 
 function normalizeInteractionStep(stepValue: unknown, pageUrl: unknown): unknown {
@@ -110,6 +124,15 @@ function manifestIssueSummary(error: z.ZodError): string {
   }).join("; ");
 }
 
+export interface D2cApiRequest {
+  method: string;
+  path: string;
+  status: number;
+}
+
+/** Which evidence source produced the executable interaction contract. */
+export type D2cEvidenceMode = "contract" | "autonomous" | "contract-fallback";
+
 export interface D2cInteractionDriver {
   load(url: string): Promise<void>;
   action(step: D2cInteractionActionStep): Promise<void>;
@@ -118,6 +141,8 @@ export interface D2cInteractionDriver {
   /** Optional host-side diagnostics (network/console errors) surfaced alongside a failure. */
   diagnostics?(): string | undefined;
   apiRequestCount(): number;
+  /** Detailed requests observed so far, used by `expect request` assertions. */
+  apiRequests?(): D2cApiRequest[];
   close(): Promise<void>;
 }
 
@@ -128,6 +153,7 @@ export interface D2cInteractionScenarioResult {
   durationMs: number;
   apiRequestCount: number;
   failure?: string;
+  requests?: D2cApiRequest[];
 }
 
 export interface D2cInteractionRun {
@@ -139,6 +165,7 @@ export interface D2cInteractionRun {
   failures: number;
   apiRequestCount: number;
   scenarios: D2cInteractionScenarioResult[];
+  evidenceMode?: D2cEvidenceMode;
 }
 
 export type D2cInteractionDriverFactory = (scenario: { id: string; pageUrl: string }) => Promise<D2cInteractionDriver>;
@@ -160,8 +187,17 @@ export function isLoopbackPreviewUrl(value: string): boolean {
   } catch { return false; }
 }
 
+function requestDescription(step: Extract<D2cInteractionExpectStep, { expect: "request" }>): string {
+  const parts: string[] = [];
+  if (step.method !== undefined) parts.push(`method ${step.method}`);
+  if (step.path !== undefined) parts.push(`path containing ${step.path}`);
+  if (step.status !== undefined) parts.push(`status ${step.status}`);
+  return parts.join(" and ");
+}
+
 function expectationDescription(step: D2cInteractionExpectStep): string {
   if (step.expect === "url") return `URL path to equal ${step.value}`;
+  if (step.expect === "request") return `a request to match ${requestDescription(step)}`;
   if (step.expect === "visible") return `${step.selector} to be visible`;
   if (step.expect === "hidden") return `${step.selector} to be hidden`;
   if (step.expect === "not-exists") return `${step.selector} not to exist`;
@@ -198,6 +234,7 @@ export async function runInteractionManifest(
         }
         await driver.settle?.();
         apiRequestCount = driver.apiRequestCount();
+        const requests = driver.apiRequests?.();
         if ((scenario.requireApi ?? page.requireApi ?? true) && apiRequestCount === 0) {
           throw new Error("No API request was observed; the page is still behaving as a static implementation");
         }
@@ -209,11 +246,28 @@ export async function runInteractionManifest(
       } finally {
         await driver?.close().catch(() => undefined);
       }
+      const capturedRequests = driver?.apiRequests?.();
       scenarios.push({ id: scenario.id, pageUrl, passed: failure === undefined, durationMs: Date.now() - started, apiRequestCount,
-        ...(failure === undefined ? {} : { failure }) });
+        ...(failure === undefined ? {} : { failure }),
+        ...(capturedRequests === undefined ? {} : { requests: capturedRequests }) });
     }
   }
   const failures = scenarios.filter((item) => !item.passed).length;
   return { schema: 1, runAt: new Date().toISOString(), baseUrl, passed: failures === 0, total: scenarios.length, failures,
     apiRequestCount: scenarios.reduce((total, item) => total + item.apiRequestCount, 0), scenarios };
+}
+
+/**
+ * Human-readable schema contract for model-authored interaction manifests.
+ * This is the single source of truth for the design prompt; it is kept beside
+ * the zod schema so the two can only drift together in one file.
+ */
+export function interactionManifestSchemaGuide(): string {
+  return [
+    "interaction-manifest.json 只能使用 schemaVersion、product、deterministic、pages；page 只能包含 url、requireApi、scenarios；scenario 只能包含 id、requireApi、steps，不要写 title 或 notes。",
+    `步骤仅允许 action(${INTERACTION_ACTION_NAMES.join("/")}) 或 expect(${INTERACTION_EXPECTATION_NAMES.join("/")})。`,
+    "open 必须有安全的相对 url；click/hover/blur 必须有 selector；fill/select 必须有 selector 和 value；key 必须有 value；wait 必须有 0~30000 的整数 ms；wait-for 必须有 selector 和 state(visible/hidden/not-exists)，可选 timeoutMs(1~30000)。除 url 和 request 外的 expect 必须有 selector，url 只写 value。",
+    "request 断言用于验证真实 API 行为：method(GET/POST/PUT/PATCH/DELETE)、path(请求路径子串)、status(响应状态码) 至少提供一个，三者都满足才通过。",
+    "不要添加这些定义之外的字段。",
+  ].join("\n");
 }

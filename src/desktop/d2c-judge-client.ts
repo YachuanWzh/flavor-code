@@ -13,6 +13,7 @@ export interface D2cJudgeClient {
     prompt: string;
     screenshots: readonly Buffer[];
     observedPages: readonly string[];
+    observedSelectors?: readonly string[];
   }): Promise<D2cAutonomousInteractionPlan>;
 }
 
@@ -132,7 +133,11 @@ export function createD2cJudgeClient(
       const screenshots = input.screenshots.slice(0, 12);
       if (screenshots.length === 0) throw new Error("D2C autonomous reviewer requires at least one page screenshot");
       const raw = await request(config, input.prompt, screenshots, 16_384);
-      return parseD2cAutonomousPlanResponse(raw, { model: config.model, observedPages: input.observedPages });
+      return parseD2cAutonomousPlanResponse(raw, {
+        model: config.model,
+        observedPages: input.observedPages,
+        ...(input.observedSelectors === undefined ? {} : { observedSelectors: input.observedSelectors }),
+      });
     },
   };
 }

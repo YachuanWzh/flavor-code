@@ -75,7 +75,9 @@ const InteractionRunSchema = z.object({
     id: z.string().min(1).max(128), pageUrl: z.string().url().max(2_048), passed: z.boolean(),
     durationMs: z.number().int().nonnegative().max(86_400_000), apiRequestCount: z.number().int().nonnegative().max(10_000_000),
     failure: z.string().max(20_000).optional(),
+    requests: z.array(z.object({ method: z.string().min(1).max(16), path: z.string().min(1).max(2_048), status: z.number().int().min(0).max(599) }).strict()).max(10_000).optional(),
   }).strict()).max(50_000),
+  evidenceMode: z.enum(["contract", "autonomous", "contract-fallback"]).optional(),
 }).strict();
 
 const QualityJudgmentSchema = z.object({
@@ -86,10 +88,12 @@ const QualityJudgmentSchema = z.object({
   overallScore: z.number().min(0).max(100), threshold: z.number().min(0).max(100), verdict: z.enum(["pass", "fail"]),
   confidence: z.enum(["high", "medium", "low"]), summary: z.string().min(1).max(4_000),
   strengths: z.array(z.string().min(1).max(1_000)).max(20),
+  evidenceMode: z.enum(["contract", "autonomous", "contract-fallback"]).optional(),
   issues: z.array(z.object({
     category: z.enum(["visual", "interaction", "accessibility", "reliability"]),
     severity: z.enum(["minor", "major", "critical"]), description: z.string().min(1).max(2_000),
     evidence: z.string().min(1).max(2_000).optional(), recommendation: z.string().min(1).max(2_000),
+    selector: z.string().min(1).max(2_048).optional(),
     scoreImpact: z.number().min(0).max(30).optional(), id: z.string().regex(/^quality-[a-f0-9]{20}$/).optional(),
     decision: z.enum(["pending", "skipped", "fixing"]).optional(), updatedAt: z.iso.datetime().optional(),
   }).strict()).max(100),

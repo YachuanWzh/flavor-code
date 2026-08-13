@@ -841,7 +841,8 @@ export class DesktopRuntimeController {
         }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
       }
     }
-    const result = await this.annotateD2cMockFailure(await this.#executeD2cInteractionTests(executableManifest, readyPreview.url, readyMock.url), task);
+    const rawResult = await this.annotateD2cMockFailure(await this.#executeD2cInteractionTests(executableManifest, readyPreview.url, readyMock.url), task);
+    const result: D2cInteractionRun = { ...rawResult, evidenceMode: review.mode };
     const dir = integrationDirectory(workspace, task);
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "interaction-results.json"), `${JSON.stringify(result, null, 2)}\n`);

@@ -1,4 +1,4 @@
-import type { D2cInteractionActionStep, D2cInteractionExpectStep, D2cInteractionManifest, D2cInteractionRun } from "../d2c/interaction.js";
+import type { D2cApiRequest, D2cInteractionActionStep, D2cInteractionExpectStep, D2cInteractionManifest, D2cInteractionRun } from "../d2c/interaction.js";
 import { isLoopbackPreviewUrl, runInteractionManifest } from "../d2c/interaction.js";
 import type { D2cPageObservation } from "../d2c/interaction-review.js";
 
@@ -86,6 +86,7 @@ function visualizerBootstrap(delayMs: number): string {
 function actionDescription(step: D2cInteractionActionStep): string {
   if (step.action === "open") return `打开 ${step.url}`;
   if (step.action === "wait") return `等待 ${step.ms}ms`;
+  if (step.action === "wait-for") return `等待 ${step.selector} ${step.state}`;
   if (step.action === "click") return `点击 ${step.selector}`;
   if (step.action === "fill") return `输入 ${step.selector}`;
   if (step.action === "select") return `选择 ${step.selector}`;
@@ -99,6 +100,24 @@ function actionScript(step: D2cInteractionActionStep, scenarioId: string, stepNu
   return `(async () => { const step = ${JSON.stringify(step)}; const fail = (message) => { throw new Error(message); };
     ${visualizerBootstrap(delayMs)}
     if (step.action === "wait") { await d2cPresent(document.body, ${JSON.stringify(label)}); await d2cPause(step.ms); return; }
+    if (step.action === "wait-for") {
+      const waitTarget = document.querySelector(step.selector);
+      await d2cPresent(waitTarget || document.body, ${JSON.stringify(label)});
+      const waitDeadline = Date.now() + (step.timeoutMs ?? 3000);
+      const waitMatches = () => {
+        const el = document.querySelector(step.selector);
+        if (step.state === "not-exists") return !el;
+        if (!el) return step.state === "hidden";
+        const style = getComputedStyle(el); const rect = el.getBoundingClientRect();
+        const visible = !el.hidden && style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+        return step.state === "visible" ? visible : !visible;
+      };
+      while (!waitMatches()) {
+        if (Date.now() > waitDeadline) fail("Timed out waiting for " + step.selector + " to be " + step.state);
+        await d2cPause(50);
+      }
+      return;
+    }
     if (step.action === "key") { const target = document.activeElement || document.body; await d2cPresent(target, ${JSON.stringify(label)}); await d2cPause(Math.min(220, d2cDelay * .35)); target.dispatchEvent(new KeyboardEvent("keydown", { key: step.value, bubbles: true, cancelable: true })); return; }
     let element = document.querySelector(step.selector);
     if (!element && step.action === "click") {
@@ -178,6 +197,9 @@ function scenarioCompleteScript(scenarioId: string, delayMs: number): string {
 function assertionScript(step: D2cInteractionExpectStep): string {
   return `(() => { const step = ${JSON.stringify(step)};
     if (step.expect === "url") { const actual = (location.pathname.replace(/^\\//, "") || "index.html") + location.hash; return { passed: actual === step.value, actual }; }
+    if (step.expect === "request") { const requests = window.__flavorD2cRequests || []; const matches = requests.filter((item) =>
+      (step.method == null || item.method === step.method) && (step.path == null || item.path.includes(step.path)) && (step.status == null || item.status === step.status));
+      return { passed: matches.length > 0, actual: matches.length + " matching / " + requests.length + " requests" }; }
     const elements = [...document.querySelectorAll(step.selector)]; const element = elements[0];
     if (step.expect === "count") return { passed: elements.length === step.value, actual: String(elements.length) };
     if (step.expect === "not-exists") return { passed: elements.length === 0, actual: String(elements.length) };
@@ -188,6 +210,41 @@ function assertionScript(step: D2cInteractionExpectStep): string {
     if (step.expect === "class") return { passed: element.classList.contains(step.value), actual: element.className };
     if (step.expect === "value") { const actual = String(element.value ?? ""); return { passed: actual === step.value, actual }; }
     const actual = (element.textContent || "").trim(); return { passed: step.expect === "text" ? actual === step.value : actual.includes(step.value), actual };
+  })()`;
+}
+
+function requestRecorderScript(mockOrigin: string): string {
+  return `(() => {
+    if (window.__flavorD2cRequests) return;
+    window.__flavorD2cRequests = [];
+    const record = (method, url, status) => {
+      try {
+        const target = new URL(url, location.href);
+        if (target.origin !== ${JSON.stringify(mockOrigin)}) return;
+        window.__flavorD2cRequests.push({ method: String(method || "GET").toUpperCase(), path: target.pathname, status: Number(status) || 0 });
+      } catch { }
+    };
+    const originalFetch = window.fetch;
+    if (typeof originalFetch === "function") {
+      window.fetch = async function(...args) {
+        const input = args[0]; const init = args[1] || {};
+        const url = typeof input === "string" ? input : (input && input.url) || String(input);
+        const method = init.method || (typeof input === "object" && input && input.method) || "GET";
+        let status = 0;
+        try { const response = await originalFetch.apply(this, args); status = response.status; return response; }
+        finally { record(method, url, status); }
+      };
+    }
+    const originalOpen = XMLHttpRequest.prototype.open;
+    const originalSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+      this.__flavorD2cMethod = method; this.__flavorD2cUrl = url;
+      return originalOpen.call(this, method, url, ...rest);
+    };
+    XMLHttpRequest.prototype.send = function(...args) {
+      this.addEventListener("loadend", function() { record(this.__flavorD2cMethod, this.__flavorD2cUrl, this.status); });
+      return originalSend.apply(this, args);
+    };
   })()`;
 }
 
@@ -355,11 +412,13 @@ export function createEmbeddedD2cAutomation(
       return runInteractionManifest(manifest, baseUrl, async ({ id: scenarioId }) => {
         let activeUrl = baseUrl;
         let requests = 0;
+        let capturedRequests: D2cApiRequest[] = [];
         let stepNumber = 0;
         return {
           load: async (url) => {
             const loaded = await navigate(url);
             activeUrl = loaded.url;
+            await frame(activeUrl).executeJavaScript(requestRecorderScript(mockOrigin), true).catch(() => undefined);
             await frame(activeUrl).executeJavaScript(scenarioScript(scenarioId, visualDelayMs), true);
           },
           action: async (step) => {
@@ -396,9 +455,12 @@ export function createEmbeddedD2cAutomation(
             requests = await frame(activeUrl).executeJavaScript(`performance.getEntriesByType("resource").filter((entry) => {
               try { return ["fetch", "xmlhttprequest"].includes(entry.initiatorType) && new URL(entry.name).origin === ${JSON.stringify(mockOrigin)}; } catch { return false; }
             }).length`, false).catch(() => 0) as number;
+            const observed = await frame(activeUrl).executeJavaScript(`window.__flavorD2cRequests || []`, false).catch(() => []) as D2cApiRequest[];
+            if (Array.isArray(observed)) capturedRequests = observed;
             await frame(activeUrl).executeJavaScript(scenarioCompleteScript(scenarioId, visualDelayMs), true);
           },
           apiRequestCount: () => requests,
+          apiRequests: () => capturedRequests,
           close: async () => undefined,
           diagnostics: () => undefined,
         };

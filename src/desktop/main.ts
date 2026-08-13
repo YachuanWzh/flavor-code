@@ -124,6 +124,7 @@ const controller = new DesktopRuntimeController({
         prompt: buildD2cAutonomousPlanPrompt(input),
         screenshots: input.observations.map((page) => judgeImage(page.screenshot)),
         observedPages: input.observations.map((page) => page.url),
+        observedSelectors: input.observations.flatMap((page) => page.elements.map((element) => element.selector)),
       });
     },
   },

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { isLoopbackPreviewUrl, parseInteractionManifest, runInteractionManifest, type D2cInteractionDriver } from "../../src/d2c/interaction.js";
+import { INTERACTION_ACTION_NAMES, INTERACTION_EXPECTATION_NAMES, interactionManifestSchemaGuide, isLoopbackPreviewUrl, parseInteractionManifest, runInteractionManifest, type D2cInteractionDriver } from "../../src/d2c/interaction.js";
 
 const raw = JSON.stringify({ schemaVersion: 1, product: "Demo", deterministic: true, pages: [{ url: "orders.html", scenarios: [{ id: "orders-filter", steps: [
   { action: "fill", selector: "#search", value: "PO-1" },
@@ -188,5 +188,81 @@ describe("D2C interaction acceptance", () => {
     expect(result).toMatchObject({ passed: true, total: 2, failures: 0, apiRequestCount: 2 });
     expect(created).toBe(2);
     expect(closes.every((close) => close.mock.calls.length === 1)).toBe(true);
+  });
+
+  it("supports request-level assertions and records the observed requests", async () => {
+    const requestManifest = parseInteractionManifest(JSON.stringify({
+      schemaVersion: 1, product: "api", deterministic: true,
+      pages: [{ url: "index.html", scenarios: [{ id: "api-flow", steps: [
+        { action: "click", selector: "#submit" },
+        { expect: "request", method: "POST", path: "/orders" },
+      ] }] }],
+    }));
+    const result = await runInteractionManifest(requestManifest, "http://localhost:4173/", async () => ({
+      load: async () => undefined, action: async () => undefined,
+      assertion: async (step) => step.expect === "request" ? { passed: true, actual: "1 matching / 1 requests" } : { passed: true },
+      apiRequestCount: () => 1,
+      apiRequests: () => [{ method: "POST", path: "/orders", status: 201 }],
+      close: async () => undefined,
+    }));
+    expect(result.passed).toBe(true);
+    expect(result.scenarios[0]?.requests).toEqual([{ method: "POST", path: "/orders", status: 201 }]);
+
+    const failed = await runInteractionManifest(requestManifest, "http://localhost:4173/", async () => ({
+      load: async () => undefined, action: async () => undefined,
+      assertion: async (step) => step.expect === "request" ? { passed: false, actual: "0 matching / 0 requests" } : { passed: true },
+      apiRequestCount: () => 0,
+      close: async () => undefined,
+    }));
+    expect(failed.scenarios[0]?.failure).toMatch(/request to match method POST/i);
+  });
+
+  it("keeps the authoring guide vocabulary aligned with the parseable schema", () => {
+    const guide = interactionManifestSchemaGuide();
+    expect(guide).toContain(`action(${INTERACTION_ACTION_NAMES.join("/")})`);
+    expect(guide).toContain(`expect(${INTERACTION_EXPECTATION_NAMES.join("/")})`);
+
+    const actionSteps: Record<string, unknown> = {
+      open: { action: "open", url: "index.html" },
+      click: { action: "click", selector: "button" },
+      fill: { action: "fill", selector: "input", value: "x" },
+      select: { action: "select", selector: "select", value: "x" },
+      hover: { action: "hover", selector: "button" },
+      blur: { action: "blur", selector: "button" },
+      key: { action: "key", value: "Enter" },
+      wait: { action: "wait", ms: 100 },
+      "wait-for": { action: "wait-for", selector: "button", state: "visible" },
+    };
+    const expectationSteps: Record<string, unknown> = {
+      visible: { expect: "visible", selector: "button" },
+      hidden: { expect: "hidden", selector: "button" },
+      "not-exists": { expect: "not-exists", selector: "button" },
+      text: { expect: "text", selector: "span", value: "x" },
+      "text-contains": { expect: "text-contains", selector: "span", value: "x" },
+      attribute: { expect: "attribute", selector: "button", name: "aria-expanded", value: "true" },
+      class: { expect: "class", selector: "button", value: "active" },
+      count: { expect: "count", selector: ".row", value: 1 },
+      value: { expect: "value", selector: "input", value: "x" },
+      url: { expect: "url", value: "index.html" },
+      request: { expect: "request", method: "GET", path: "/users" },
+    };
+
+    expect([...INTERACTION_ACTION_NAMES].sort()).toEqual(Object.keys(actionSteps).sort());
+    expect([...INTERACTION_EXPECTATION_NAMES].sort()).toEqual(Object.keys(expectationSteps).sort());
+
+    for (const [name, step] of Object.entries(actionSteps)) {
+      const manifest = parseInteractionManifest(JSON.stringify({
+        schemaVersion: 1, product: "guide", deterministic: true,
+        pages: [{ url: "index.html", scenarios: [{ id: `action-${name}`, steps: [step] }] }],
+      }));
+      expect(manifest.pages[0]?.scenarios[0]?.steps).toHaveLength(1);
+    }
+    for (const [name, step] of Object.entries(expectationSteps)) {
+      const manifest = parseInteractionManifest(JSON.stringify({
+        schemaVersion: 1, product: "guide", deterministic: true,
+        pages: [{ url: "index.html", scenarios: [{ id: `expect-${name}`, steps: [step] }] }],
+      }));
+      expect(manifest.pages[0]?.scenarios[0]?.steps).toHaveLength(1);
+    }
   });
 });

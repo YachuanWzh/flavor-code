@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { z } from "zod";
 
-import type { D2cInteractionRun } from "./interaction.js";
+import type { D2cEvidenceMode, D2cInteractionRun } from "./interaction.js";
 import type { D2cReport } from "./types.js";
 
 export const D2cJudgeConfigInputSchema = z.object({
@@ -33,6 +33,7 @@ export const D2cJudgeIssueSchema = z.object({
   description: z.string().trim().min(1).max(2_000),
   evidence: z.string().trim().min(1).max(2_000).optional(),
   recommendation: z.string().trim().min(1).max(2_000),
+  selector: z.string().trim().min(1).max(2_048).optional(),
   scoreImpact: z.number().min(0).max(30).optional(),
 }).strict();
 
@@ -67,6 +68,7 @@ export interface D2cQualityJudgment extends Omit<D2cJudgeModelAssessment, "issue
   overallScore: number;
   threshold: number;
   verdict: "pass" | "fail";
+  evidenceMode?: D2cEvidenceMode;
 }
 
 export function parseD2cJudgeModelResponse(raw: string): D2cJudgeModelAssessment {
@@ -85,10 +87,19 @@ export function parseD2cJudgeModelResponse(raw: string): D2cJudgeModelAssessment
   return D2cJudgeModelAssessmentSchema.parse(parsed);
 }
 
+function interactionEvidenceNote(interaction: D2cInteractionRun): string {
+  switch (interaction.evidenceMode) {
+    case "autonomous": return "交互契约证据来源：多模态自主规划扩展（autonomous）。";
+    case "contract-fallback": return "交互契约证据来源：多模态自主规划失败，已降级为已确认的设计契约（contract-fallback）。";
+    default: return "交互契约证据来源：已确认的设计契约（contract），未叠加多模态自主规划。";
+  }
+}
+
 function scenarioEvidence(interaction: D2cInteractionRun): string[] {
   return interaction.scenarios.slice(0, 100).map((scenario) =>
     `- ${scenario.id}: ${scenario.passed ? "passed" : "failed"}; ${scenario.durationMs}ms; `
-    + `${scenario.apiRequestCount} API requests${scenario.failure === undefined ? "" : `; ${scenario.failure.slice(0, 1_000)}`}`,
+    + `${scenario.apiRequestCount} API requests${scenario.failure === undefined ? "" : `; ${scenario.failure.slice(0, 1_000)}`}`
+    + `${scenario.requests === undefined ? "" : `; requests ${JSON.stringify(scenario.requests.slice(0, 5))}`}`,
   );
 }
 
@@ -115,10 +126,12 @@ export function buildD2cJudgePrompt(input: { report: D2cReport; interaction: D2c
     `静态 D2C：${report.scores.total}/100；状态 ${report.evaluation.status}；结论 ${report.evaluation.verdict}；结构化问题 ${issues.length}。`,
     ...reportEvidence(report),
     `确定性交互：${interaction.passed ? "passed" : "failed"}；${interaction.total} scenarios；${interaction.failures} failures；${interaction.apiRequestCount} API requests。`,
+    interactionEvidenceNote(interaction),
     ...scenarioEvidence(interaction),
     "只返回一个 JSON 对象，不要 Markdown。结构必须为：",
     "每个问题的 scoreImpact 表示该问题对所属维度造成的 0-30 分扣分，所有问题的扣分应能解释对应维度得分。",
-    '{"visualScore":0,"interactionScore":0,"confidence":"high|medium|low","summary":"...","strengths":["..."],"issues":[{"category":"visual|interaction|accessibility|reliability","severity":"minor|major|critical","description":"...","evidence":"...","recommendation":"...","scoreImpact":0}]}',
+    "凡能定位到具体元素的问题，selector 必须填该元素的稳定选择器（优先复用结构化问题或截图中的 id、data-*、aria-*）；确实无法定位时，evidence 中必须描述该元素在截图中的视觉位置。",
+    '{"visualScore":0,"interactionScore":0,"confidence":"high|medium|low","summary":"...","strengths":["..."],"issues":[{"category":"visual|interaction|accessibility|reliability","severity":"minor|major|critical","description":"...","evidence":"...","selector":"...","recommendation":"...","scoreImpact":0}]}',
   ].join("\n").slice(0, 40_000);
 }
 
@@ -224,5 +237,6 @@ export function finalizeD2cQualityJudgment(input: {
     overallScore: 0,
     threshold,
     verdict: "fail",
+    evidenceMode: input.interaction.evidenceMode ?? "contract",
   });
 }

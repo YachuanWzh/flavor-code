@@ -1,11 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { copyFile, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { z } from "zod";
 
 import { D2C_TASK_PATTERN, taskDir } from "./store.js";
-import { parseInteractionManifest } from "./interaction.js";
+import { parseInteractionManifest, interactionManifestSchemaGuide } from "./interaction.js";
 import type { D2cModuleDefinition } from "./openapi.js";
 
 export type D2cProductPhase = "prd-generating" | "prd-review" | "design-generating" | "design-review" | "ready-for-d2c";
@@ -26,11 +26,12 @@ export interface D2cProductPlan {
   framework: "vue" | "react";
   technology?: D2cProductTechnology;
   requirement: string;
-  prd?: { path: "product/prd.md"; updatedAt: string };
+  prd?: { path: "product/prd.md"; updatedAt: string; contentHash?: string };
   prototype?: {
     entryHtml: "product/prototype/index.html";
     interactionManifest: "product/prototype/interaction-manifest.json";
     updatedAt: string;
+    contentHash?: string;
   };
   feedback?: { stage: D2cProductStage; message: string; updatedAt: string };
   createdAt: string;
@@ -75,11 +76,12 @@ const PlanSchema = z.object({
     backendSource: z.enum(["default", "requirement"]),
   }).strict().optional(),
   requirement: z.string().trim().min(2).max(50_000),
-  prd: z.object({ path: z.literal(RelativePrdPath), updatedAt: z.iso.datetime() }).strict().optional(),
+  prd: z.object({ path: z.literal(RelativePrdPath), updatedAt: z.iso.datetime(), contentHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict().optional(),
   prototype: z.object({
     entryHtml: z.literal(RelativePrototypePath),
     interactionManifest: z.literal(RelativeInteractionPath),
     updatedAt: z.iso.datetime(),
+    contentHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   }).strict().optional(),
   feedback: z.object({
     stage: z.enum(["prd", "design"]), message: z.string().trim().min(1).max(10_000), updatedAt: z.iso.datetime(),
@@ -195,6 +197,14 @@ async function fileTimestamp(path: string): Promise<string | undefined> {
   return info?.isFile() ? info.mtime.toISOString() : undefined;
 }
 
+async function fileHash(path: string): Promise<string | undefined> {
+  const buffer = await readFile(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  return buffer === undefined ? undefined : createHash("sha256").update(buffer).digest("hex");
+}
+
 async function validateAndNormalizePrototypeManifest(path: string): Promise<string | undefined> {
   const raw = await readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return undefined;
@@ -292,7 +302,9 @@ export async function readD2cProductPlan(workspace: string, task: string): Promi
 export async function discoverD2cProductArtifacts(workspace: string, plan: D2cProductPlan): Promise<D2cProductPlan> {
   const product = d2cProductDirectory(workspace, plan.task);
   const prdUpdatedAt = await fileTimestamp(join(product, "prd.md"));
+  const prdHash = await fileHash(join(product, "prd.md"));
   const prototypeUpdatedAt = await fileTimestamp(join(product, "prototype", "index.html"));
+  const prototypeHash = await fileHash(join(product, "prototype", "index.html"));
   const expectedManifest = join(product, "prototype", "interaction-manifest.json");
   let manifestUpdatedAt = await fileTimestamp(expectedManifest);
   if (manifestUpdatedAt === undefined) {
@@ -308,23 +320,24 @@ export async function discoverD2cProductArtifacts(workspace: string, plan: D2cPr
     : await validateAndNormalizePrototypeManifest(expectedManifest);
   const prototypeComplete = prototypeUpdatedAt !== undefined && manifestUpdatedAt !== undefined && manifestError === undefined;
   let phase = plan.phase;
-  if (prdUpdatedAt !== undefined && phase === "prd-generating" && prdUpdatedAt !== plan.prd?.updatedAt) phase = "prd-review";
+  if (prdHash !== undefined && phase === "prd-generating" && prdHash !== plan.prd?.contentHash) phase = "prd-review";
   if (prototypeComplete && phase === "design-generating"
-    && (prototypeUpdatedAt !== plan.prototype?.updatedAt || plan.prototype?.interactionManifest === undefined)) phase = "design-review";
+    && (prototypeHash !== plan.prototype?.contentHash || plan.prototype?.interactionManifest === undefined)) phase = "design-review";
   if (!prototypeComplete && manifestUpdatedAt !== undefined && phase === "design-review") phase = "design-generating";
   const changed = phase !== plan.phase
-    || (prdUpdatedAt !== undefined && prdUpdatedAt !== plan.prd?.updatedAt)
-    || (prototypeComplete && prototypeUpdatedAt !== plan.prototype?.updatedAt)
+    || (prdHash !== undefined && prdHash !== plan.prd?.contentHash)
+    || (prototypeComplete && prototypeHash !== plan.prototype?.contentHash)
     || (prototypeComplete && plan.prototype?.interactionManifest === undefined);
   if (!changed) return plan;
   const now = new Date().toISOString();
   return {
     ...plan, revision: plan.revision + 1, phase,
-    ...(prdUpdatedAt === undefined ? {} : { prd: { path: RelativePrdPath, updatedAt: prdUpdatedAt } }),
+    ...(prdHash === undefined ? {} : { prd: { path: RelativePrdPath, updatedAt: prdUpdatedAt!, contentHash: prdHash } }),
     ...(!prototypeComplete ? {} : { prototype: {
       entryHtml: RelativePrototypePath,
       interactionManifest: RelativeInteractionPath,
-      updatedAt: prototypeUpdatedAt,
+      updatedAt: prototypeUpdatedAt!,
+      contentHash: prototypeHash!,
     } }),
     updatedAt: now,
   };
@@ -397,7 +410,7 @@ export function buildD2cDesignPrompt(plan: D2cProductPlan, prdMarkdown: string):
     "这是供用户确认的设计基线，不是最终生产实现：不要写入 src/d2c-output，不要调用 D2cCompare。interaction-manifest.json 必须描述可执行的页面场景、稳定 selector、点击/输入/断言步骤。",
     "interaction-manifest 必须按完整用户旅程设计，而不是随机抽查控件：列表/查询类覆盖输入条件 → 点击查询 → 结果断言 → 重置 → 恢复断言 → 分页切换；表单类覆盖打开入口 → 必填校验 → 完整输入 → 提交 → 成功或失败反馈 → 关闭恢复；大屏类覆盖筛选联动、下钻、悬停详情、时间范围和刷新；导航必须实际打开适用的一级、二级、三级菜单并验证落点。没有某类能力时不要臆造。",
     "每次点击后必须紧跟可观察的 DOM、URL、数据或请求结果断言；输入查询条件后必须触发真实查询动作，不能只依赖 input 事件；重置、取消、返回、上一页/下一页等恢复路径也必须验收。每条场景应体现业务意图，避免把互不相关的控件动作拼在一起。",
-    "interaction-manifest.json 只能使用 schemaVersion、product、deterministic、pages；page 只能包含 url、requireApi、scenarios；scenario 只能包含 id、requireApi、steps，不要写 title 或 notes。步骤仅允许 action(open/click/fill/select/hover/blur/key/wait) 或 expect(visible/hidden/not-exists/text/text-contains/attribute/class/count/value/url)。open 必须有安全的相对 url；click/hover/blur 必须有 selector；fill/select 必须有 selector 和 value；key 必须有 value；wait 必须有 0~30000 的整数 ms；除 url 外的 expect 必须有 selector，url 只写 value。不要添加这些定义之外的字段。",
+    interactionManifestSchemaGuide(),
     `已确定技术方案为前端 ${technology.frontend}、服务端 ${technology.backend}，但设计原型保持自包含 HTML。完成后汇报主要视觉方向、交互路径和文件。`,
     `已确认 PRD 摘要（用于防止上下文漂移）：\n${prdMarkdown.slice(0, 20_000)}`,
   ].join("\n");

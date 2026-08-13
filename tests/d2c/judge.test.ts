@@ -83,4 +83,16 @@ describe("D2C multimodal quality judge", () => {
     expect(prompt).toContain("fill-form");
     expect(prompt).not.toMatch(/apiKey|authorization|sk-secret/i);
   });
+
+  it("propagates evidence provenance and issue selectors into the final judgment", () => {
+    const autonomousInteraction: D2cInteractionRun = { ...interaction, evidenceMode: "autonomous" };
+    const result = finalizeD2cQualityJudgment({
+      assessment: { visualScore: 90, interactionScore: 90, confidence: "high", summary: "通过", strengths: [],
+        issues: [{ category: "visual", severity: "minor", description: "间距略大", recommendation: "收紧间距", selector: "#hero" }] },
+      report, interaction: autonomousInteraction, model: "vision-pro", passThreshold: 80,
+    });
+    expect(result.evidenceMode).toBe("autonomous");
+    expect(result.issues[0]?.selector).toBe("#hero");
+    expect(buildD2cJudgePrompt({ report, interaction: autonomousInteraction })).toContain("autonomous");
+  });
 });

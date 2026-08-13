@@ -44,4 +44,12 @@ describe("D2C autonomous interaction reviewer", () => {
     const merged = mergeInteractionManifests(seed, autonomous);
     expect(merged.pages[0]?.scenarios.map((scenario) => scenario.id)).toEqual(["open-menu", "fill-and-submit"]);
   });
+
+  it("rejects autonomous selectors that are absent from the observed DOM, and accepts observed ones", () => {
+    const raw = JSON.stringify({ summary: "覆盖导航", pageAnalyses: [{ url: "index.html", pageType: "后台", goals: ["打开菜单"], risks: [] }], manifest });
+    expect(() => parseD2cAutonomousPlanResponse(raw, { model: "vision", observedPages: ["index.html"], observedSelectors: ["#unknown"] }))
+      .toThrow(/absent from the observed DOM/);
+    expect(parseD2cAutonomousPlanResponse(raw, { model: "vision", observedPages: ["index.html"], observedSelectors: ["#menu", "#submenu"] }))
+      .toMatchObject({ model: "vision", manifest: { pages: [{ url: "index.html" }] } });
+  });
 });
