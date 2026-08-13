@@ -49,6 +49,8 @@ describe("D2C integration generation", () => {
     expect(server).toContain("FastAPI");
     expect(server).toContain('os.getenv("DATABASE_URL", "sqlite:///./data/app.db")');
     expect(server).toContain("create_engine");
+    expect(server).toContain('app.post("/_e2e/reset")');
+    expect(server).toContain('os.getenv("FLAVOR_E2E_ALLOW_RESET")');
     expect(await readFile(join(project, "server", "requirements.txt"), "utf8")).toContain("sqlalchemy");
     expect(result.files).not.toContain("mock/server.mjs");
     const pkg = JSON.parse(await readFile(join(project, "package.json"), "utf8"));

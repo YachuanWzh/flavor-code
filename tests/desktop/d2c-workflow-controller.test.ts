@@ -204,6 +204,8 @@ describe("desktop D2C workflow controller", () => {
       .toContain('"openapi": "3.1.0"');
     const generated = await controller.generateD2cIntegration("dashboard");
     expect(generated.files).toContain("server/main.py");
+    expect(generated.prompt).toContain("Seed each business table independently and idempotently");
+    expect(generated.prompt).toContain("assert meaningful response payloads and rendered records");
     expect(await readFile(join(project, "server", "main.py"), "utf8")).toContain("FastAPI");
     await controller.dispose();
   });

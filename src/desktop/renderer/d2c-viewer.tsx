@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import type { D2cElementDiff, D2cRect, D2cUnmatchedElement } from "../../d2c/types.js";
 import type { D2cReviewDecision } from "../../d2c/workflow.js";
-import { buildD2cRepairPrompt, reviewProgress } from "../../d2c/workflow-shared.js";
+import { buildD2cInteractionRepairPrompt, buildD2cRepairPrompt, reviewProgress } from "../../d2c/workflow-shared.js";
 import type { D2cApiMapping } from "../../d2c/openapi.js";
 import type { D2cInteractionRun } from "../../d2c/interaction.js";
 import type { D2cProductPhase, D2cProductPlanView } from "../../d2c/product.js";
@@ -464,6 +464,7 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
   const [interactionReview, setInteractionReview] = useState<D2cInteractionStatus["review"]>();
   const [interactionBusy, setInteractionBusy] = useState(false);
   const [interactionPlayback, setInteractionPlayback] = useState(false);
+  const [interactionRepairBusy, setInteractionRepairBusy] = useState<string>();
   const [judgeConfig, setJudgeConfig] = useState<D2cJudgeConfigView>({ configured: false });
   const [judgeBusy, setJudgeBusy] = useState(false);
   const [qualityIssueBusy, setQualityIssueBusy] = useState<string>();
@@ -795,6 +796,17 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
       setIntegration((current) => current === undefined ? current : { ...current, workflow });
     } catch (cause) { reportError(cause); }
     finally { setInteractionBusy(false); }
+  };
+
+  const repairInteractionFailures = async (scenarios: ReadonlyArray<D2cInteractionRun["scenarios"][number]>): Promise<void> => {
+    if (bundle === undefined || scenarios.length === 0 || interactionRepairBusy !== undefined || disabled) return;
+    const repairId = scenarios.length === 1 ? scenarios[0]!.id : "all";
+    setInteractionRepairBusy(repairId);
+    try {
+      const submitted = await onStartTask(buildD2cInteractionRepairPrompt(bundle.report.task, scenarios));
+      if (submitted) onLaunch(bundle.report.task, bundle.workflow.framework);
+    } catch (cause) { reportError(cause); }
+    finally { setInteractionRepairBusy(undefined); }
   };
 
   const ensureProductPreview = useCallback(async (task: string): Promise<void> => {
@@ -1372,11 +1384,20 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
                   {interactionReview.warning && <p role="alert">{interactionReview.warning}</p>}
                 </div>}
                 {interactionRun !== undefined && <div className="d2c-test-results" data-passed={interactionRun.passed}>
-                  <strong>{interactionRun.passed ? "自动验收通过" : `${interactionRun.failures} 条自动验收失败`}</strong>
-                  <span>{interactionRun.total} scenarios · {interactionRun.apiRequestCount} API requests</span>
+                  <header><div><strong>{interactionRun.passed ? "自动验收通过" : `${interactionRun.failures} 条自动验收失败`}</strong>
+                    <span>{interactionRun.total} scenarios · {interactionRun.apiRequestCount} API requests</span></div>
+                    {!interactionRun.passed && <button type="button" disabled={interactionRepairBusy !== undefined || disabled}
+                      onClick={() => void repairInteractionFailures(interactionRun.scenarios.filter((scenario) => !scenario.passed))}>
+                      {interactionRepairBusy === "all" ? "正在发起修复…" : "修复全部失败"}
+                    </button>}
+                  </header>
                   <ol>{interactionRun.scenarios.map((scenario) => <li key={scenario.id} data-passed={scenario.passed}>
                     <span>{scenario.passed ? "✓" : "×"} {scenario.id}</span><small>{scenario.apiRequestCount} API · {scenario.durationMs}ms</small>
                     {scenario.failure !== undefined && <p>{scenario.failure}</p>}
+                    {!scenario.passed && <button type="button" className="d2c-fix-scenario" disabled={interactionRepairBusy !== undefined || disabled}
+                      aria-label={`修复失败场景 ${scenario.id}`} onClick={() => void repairInteractionFailures([scenario])}>
+                      {interactionRepairBusy === scenario.id ? "正在发起修复…" : "修复此项"}
+                    </button>}
                   </li>)}</ol>
                 </div>}
                 <div className="d2c-manual-acceptance">

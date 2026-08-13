@@ -1,5 +1,6 @@
 import type { D2cElementDiff, D2cReport, D2cUnmatchedElement } from "./types.js";
 import type { D2cQualityIssue } from "./judge.js";
+import type { D2cInteractionScenarioResult } from "./interaction.js";
 
 export interface D2cReviewSummaryInput {
   reviews: readonly { decision: "pending" | "accepted" | "needs-fix" }[];
@@ -52,5 +53,28 @@ export function buildD2cQualityRepairPrompt(task: string, issue: D2cQualityIssue
     `建议：${issue.recommendation}`,
     `只修改 src/d2c-output/${task}/ 内与此问题直接相关的最小文件集合，不得修改设计稿或验收标准。`,
     verification,
+  ].join("\n");
+}
+
+export function buildD2cInteractionRepairPrompt(
+  task: string,
+  scenarios: readonly D2cInteractionScenarioResult[],
+): string {
+  const failures = scenarios.filter((scenario) => !scenario.passed);
+  if (failures.length === 0) throw new Error("No failed E2E scenarios were selected for repair");
+  return [
+    `修复 E2E 任务“${task}”的自动验收失败项。`,
+    `只允许修改 src/d2c-output/${task}/ 内与失败直接相关的前端、真实服务端和测试文件；不得修改设计稿、PRD 或 interaction-manifest.json 来绕过验收。`,
+    ...failures.map((scenario, index) => [
+      `${index + 1}. ${scenario.id}`,
+      `页面：${scenario.pageUrl}`,
+      `失败：${scenario.failure ?? "场景未通过，但没有返回失败详情"}`,
+      `观测：${scenario.apiRequestCount} 次 API 请求${scenario.requests?.length
+        ? `；${scenario.requests.slice(0, 5).map((request) => `${request.method} ${request.path} → ${request.status}`).join("；")}` : ""}`,
+    ].join("\n")),
+    "先复现并定位根因，再做最小修复。请求成功不等于数据正确：列表、表格、统计和详情必须验证服务端返回了符合 PRD 的有效业务数据，并在页面中真实可见。",
+    "若数据库存在初始化或种子数据，必须按业务表独立、幂等地补齐；部分表已有数据时不得跳过其它空表，也不得通过删除用户现有数据来恢复基线。",
+    "修复会话结束后 Flavor Code 会自动重跑全部交互场景；不要手工启动或停止长期运行的前端与后端服务，也不要声称未实际执行的验收已经通过。",
+    "完成前运行项目构建和可用的服务端单元测试。",
   ].join("\n");
 }

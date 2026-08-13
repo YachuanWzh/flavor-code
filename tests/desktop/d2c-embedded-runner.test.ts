@@ -70,6 +70,7 @@ describe("embedded Electron D2C automation", () => {
     expect(actionScripts.some((script) => script.includes("element.disabled"))).toBe(true);
     expect(actionScripts.some((script) => script.includes("clickDeadline") && script.includes("waiting for transient overlays"))).toBe(true);
     expect(actionScripts.some((script) => script.includes("scanPages") && script.includes("向后") && script.includes("向前"))).toBe(true);
+    expect(actionScripts.some((script) => script.includes('[id$="-pager-next"]') && script.includes("pageDeadline"))).toBe(true);
     expect(actionScripts.some((script) => script.includes('step.action === "wait"') && script.includes("step.ms"))).toBe(true);
     expect(actionScripts.some((script) => script.includes('step.action === "blur"') && script.includes("element.blur"))).toBe(true);
     await expect(automation.run({ schemaVersion: 1, product: "form", deterministic: true,

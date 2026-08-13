@@ -122,17 +122,23 @@ function actionScript(step: D2cInteractionActionStep, scenarioId: string, stepNu
     let element = document.querySelector(step.selector);
     if (!element && step.action === "click") {
       const pageControl = (direction) => document.querySelector(direction === "next"
-        ? '.page-next,[data-action="next"],[aria-label*="下一"],a[rel="next"]'
-        : '.page-prev,[data-action="prev"],[aria-label*="上一"],a[rel="prev"]');
+        ? '.page-next,[id$="-pager-next"],[data-action="next"],[aria-label*="下一"],a[rel="next"]'
+        : '.page-prev,[id$="-pager-prev"],[data-action="prev"],[aria-label*="上一"],a[rel="prev"]');
       const scanPages = async (direction) => {
         for (let page = 0; page < 20 && !element; page += 1) {
           const control = pageControl(direction);
           if (!control || control.disabled || control.getAttribute("aria-disabled") === "true") break;
           const before = location.href + '|' + document.body.innerText;
           await d2cPresent(control, "自动验收 · 正在" + (direction === "next" ? "向后" : "向前") + "翻页定位目标");
-          control.click(); await d2cPause(Math.max(180, d2cDelay * .55));
-          element = document.querySelector(step.selector);
-          if (!element && before === location.href + '|' + document.body.innerText) break;
+          control.click();
+          const pageDeadline = Date.now() + 3000; let after = before;
+          while (Date.now() <= pageDeadline) {
+            await d2cPause(50); element = document.querySelector(step.selector);
+            after = location.href + '|' + document.body.innerText;
+            if (element) break;
+            if (after !== before) { await d2cPause(Math.max(450, d2cDelay * .55)); element = document.querySelector(step.selector); break; }
+          }
+          if (!element && before === after) break;
         }
       };
       await scanPages("next"); if (!element) await scanPages("prev");
@@ -335,7 +341,9 @@ export function createEmbeddedD2cAutomation(
     await currentHost.mainFrame.executeJavaScript(`(() => { const frame = document.querySelector(${JSON.stringify(FRAME_SELECTOR)}); if (!frame) throw new Error("D2C interactive iframe is not mounted"); frame.src = ${JSON.stringify(targetUrl)}; return true; })()`, true);
     const deadline = Date.now() + navigationTimeoutMs;
     let observedUrl: string | undefined;
+    let observedFrames: string[] = [];
     while (Date.now() <= deadline) {
+      observedFrames = currentHost.mainFrame.framesInSubtree.filter((item) => !item.isDestroyed()).map((item) => item.url);
       const candidate = currentHost.mainFrame.framesInSubtree.find((item) => !item.isDestroyed() && hasNavigationMarker(item.url, targetUrl));
       if (candidate !== undefined) {
         observedUrl = candidate.url;
@@ -344,7 +352,9 @@ export function createEmbeddedD2cAutomation(
       }
       await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     }
-    throw new Error(`D2C embedded preview did not navigate within ${navigationTimeoutMs} ms: ${url}${observedUrl === undefined ? "" : `; last observed ${observedUrl}`}`);
+    throw new Error(`D2C embedded preview did not navigate within ${navigationTimeoutMs} ms: ${url}`
+      + `${observedUrl === undefined ? "" : `; last observed ${observedUrl}`}`
+      + `${observedFrames.length === 0 ? "; no live frames" : `; live frames ${observedFrames.join(", ")}`}`);
   };
   const visibleFrameRect = async (): Promise<{ x: number; y: number; width: number; height: number }> => {
     const rect = await host().mainFrame.executeJavaScript(`(() => { const frame = document.querySelector(${JSON.stringify(FRAME_SELECTOR)}); if (!frame) throw new Error("D2C interactive iframe is not mounted"); const rect = frame.getBoundingClientRect(); return { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }; })()`, false) as { x: number; y: number; width: number; height: number };
@@ -410,6 +420,12 @@ export function createEmbeddedD2cAutomation(
       if (!isLoopbackPreviewUrl(baseUrl) || !isLoopbackPreviewUrl(mockUrl)) throw new Error("D2C embedded automation requires loopback preview and mock URLs");
       const mockOrigin = new URL(mockUrl).origin;
       return runInteractionManifest(manifest, baseUrl, async ({ id: scenarioId }) => {
+        const reset = await fetch(new URL("/_e2e/reset", mockOrigin), {
+          method: "POST", headers: { "X-Flavor-E2E": "reset" },
+        }).catch(() => undefined);
+        if (reset !== undefined && !reset.ok && reset.status !== 404 && reset.status !== 405) {
+          throw new Error(`E2E backend reset failed with status ${reset.status}`);
+        }
         let activeUrl = baseUrl;
         let requests = 0;
         let capturedRequests: D2cApiRequest[] = [];

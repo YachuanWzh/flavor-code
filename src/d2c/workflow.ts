@@ -9,7 +9,7 @@ import type { D2cInteractionRun } from "./interaction.js";
 import { applyD2cQualityIssueDecision, normalizeD2cQualityJudgment, type D2cQualityJudgment } from "./judge.js";
 import type { D2cElementDiff, D2cReport, D2cUnmatchedElement } from "./types.js";
 
-export { buildD2cQualityRepairPrompt, buildD2cRepairPrompt, reviewProgress } from "./workflow-shared.js";
+export { buildD2cInteractionRepairPrompt, buildD2cQualityRepairPrompt, buildD2cRepairPrompt, reviewProgress } from "./workflow-shared.js";
 
 export type D2cWorkflowStage = "visual-review" | "api-mapping" | "integrating" | "interaction-review" | "quality-judge" | "completed";
 export type D2cReviewDecision = "pending" | "accepted" | "needs-fix";

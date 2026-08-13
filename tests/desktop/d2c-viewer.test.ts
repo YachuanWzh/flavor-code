@@ -131,6 +131,9 @@ describe("resultPresentation", () => {
     expect(source).toContain("runD2cInteractionTests");
     expect(source).toContain("interactionRun.apiRequestCount");
     expect(source).toContain("scenario.failure");
+    expect(source).toContain("修复全部失败");
+    expect(source).toContain("修复此项");
+    expect(source).toContain("buildD2cInteractionRepairPrompt");
   });
 
   it("exposes an independent multimodal judge configuration and final quality gate", async () => {

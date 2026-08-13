@@ -728,6 +728,11 @@ export class DesktopRuntimeController {
       ]),
       "Acceptance requirements: keep the Vite page runnable and interactive; every data-bearing module must use the generated Axios client for initial loading and user actions.",
       "Implement loading, empty, success, validation and API-error states without replacing server behavior with local-only fixtures or decorative toasts.",
+      ...(pythonServer ? [
+        "Provide representative, non-empty development data for every list, table, dashboard and selectable relation required by the PRD. Seed each business table independently and idempotently so a partially initialized SQLite database repairs missing baseline rows without deleting or overwriting user-created records.",
+        "State-changing acceptance journeys must remain repeatable. Backend initialization and tests must not leave the interactive preview with missing baseline data; assert meaningful response payloads and rendered records, not merely successful HTTP status or request count.",
+        "Implement POST /_e2e/reset for deterministic scenario isolation. It must return 404 unless FLAVOR_E2E_ALLOW_RESET=1 and the X-Flavor-E2E header equals reset; when enabled it restores only the generated development database to the approved baseline. Flavor Code invokes it before each automated scenario.",
+      ] : []),
       "Use design/interaction-manifest.json as the executable behavior contract when it exists. Preserve its selectors, exercise every scenario, and ensure required scenarios produce observable XHR/fetch traffic.",
       "Do not start or stop long-running dev servers yourself; Flavor Code owns the frontend preview and backend service lifecycles and Vite hot reload will pick up source changes.",
       "Run the project build and available unit tests before reporting completion. Only edit within the generated D2C project.",

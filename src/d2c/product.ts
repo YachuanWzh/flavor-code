@@ -410,6 +410,7 @@ export function buildD2cDesignPrompt(plan: D2cProductPlan, prdMarkdown: string):
     "这是供用户确认的设计基线，不是最终生产实现：不要写入 src/d2c-output，不要调用 D2cCompare。interaction-manifest.json 必须描述可执行的页面场景、稳定 selector、点击/输入/断言步骤。",
     "interaction-manifest 必须按完整用户旅程设计，而不是随机抽查控件：列表/查询类覆盖输入条件 → 点击查询 → 结果断言 → 重置 → 恢复断言 → 分页切换；表单类覆盖打开入口 → 必填校验 → 完整输入 → 提交 → 成功或失败反馈 → 关闭恢复；大屏类覆盖筛选联动、下钻、悬停详情、时间范围和刷新；导航必须实际打开适用的一级、二级、三级菜单并验证落点。没有某类能力时不要臆造。",
     "每次点击后必须紧跟可观察的 DOM、URL、数据或请求结果断言；输入查询条件后必须触发真实查询动作，不能只依赖 input 事件；重置、取消、返回、上一页/下一页等恢复路径也必须验收。每条场景应体现业务意图，避免把互不相关的控件动作拼在一起。",
+    "所有依赖业务数据的页面都必须包含正向数据断言：至少验证一条符合 PRD 示例的真实记录或非零统计值在页面可见。不能只检查 API 请求发生、容器存在或空状态；同时保留筛选无结果时的空状态场景。",
     interactionManifestSchemaGuide(),
     `已确定技术方案为前端 ${technology.frontend}、服务端 ${technology.backend}，但设计原型保持自包含 HTML。完成后汇报主要视觉方向、交互路径和文件。`,
     `已确认 PRD 摘要（用于防止上下文漂移）：\n${prdMarkdown.slice(0, 20_000)}`,

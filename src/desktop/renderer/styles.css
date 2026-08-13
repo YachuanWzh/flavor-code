@@ -1107,14 +1107,22 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .d2c-run-judge:disabled, .d2c-judge-config button:disabled { opacity: .45; cursor: not-allowed; }
 .d2c-test-results { display: grid; gap: 3px; padding: 8px; border-left: 3px solid #bd3c43; background: #fff; }
 .d2c-test-results[data-passed="true"] { border-left-color: #2a9b61; }
-.d2c-test-results > strong { color: #33414a; font-size: 10px; }
-.d2c-test-results > span { color: #84919b; font: 500 8px "Cascadia Code", Consolas, monospace; }
+.d2c-test-results > header { display: flex; align-items: center; gap: 8px; }
+.d2c-test-results > header > div { flex: 1; display: grid; gap: 2px; min-width: 0; }
+.d2c-test-results > header strong { color: #33414a; font-size: 10px; }
+.d2c-test-results > header span { color: #84919b; font: 500 8px "Cascadia Code", Consolas, monospace; }
+.d2c-test-results > header button { flex: 0 0 auto; min-height: 26px; padding: 0 8px; border: 1px solid #b84a50; border-radius: 4px; background: #b84a50; color: #fff; font-size: 8px; font-weight: 650; cursor: pointer; }
+.d2c-test-results > header button:hover { background: #9f363d; }
+.d2c-test-results > header button:disabled { opacity: .48; cursor: not-allowed; }
 .d2c-test-results ol { max-height: 150px; overflow: auto; display: grid; gap: 3px; margin: 4px 0 0; padding: 0; list-style: none; }
 .d2c-test-results li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 6px; padding: 5px; border-radius: 4px; background: #fff0f0; color: #96343a; font-size: 9px; }
 .d2c-test-results li[data-passed="true"] { background: #edf8f2; color: #23774d; }
 .d2c-test-results li span { min-width: 0; overflow-wrap: anywhere; }
 .d2c-test-results li small { color: #7e8a93; font: 500 8px "Cascadia Code", Consolas, monospace; }
 .d2c-test-results li p { grid-column: 1 / -1; margin: 2px 0 0; color: #a43d42; line-height: 1.4; overflow-wrap: anywhere; }
+.d2c-test-results .d2c-fix-scenario { grid-column: 1 / -1; justify-self: end; min-height: 23px; padding: 0 8px; border: 1px solid #d9a3a6; border-radius: 4px; background: #fff; color: #96343a; font-size: 8px; font-weight: 650; cursor: pointer; }
+.d2c-test-results .d2c-fix-scenario:hover { border-color: #b84a50; background: #fff8f8; }
+.d2c-test-results .d2c-fix-scenario:disabled { opacity: .48; cursor: not-allowed; }
 .d2c-manual-acceptance { display: flex; align-items: center; min-width: 0; gap: 8px; padding-top: 8px; border-top: 1px solid #dfe7eb; }
 .d2c-manual-acceptance > span { flex: 1; display: grid; gap: 2px; min-width: 0; }
 .d2c-manual-acceptance strong { color: #34434c; font-size: 10px; }

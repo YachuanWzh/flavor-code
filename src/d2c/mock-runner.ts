@@ -123,7 +123,7 @@ async function runPythonBackend(projectDir: string, options: RunD2cMockOptions):
   const child = spawn(executable, ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", String(selectedPort)], {
     cwd: serverDir, windowsHide: true, shell: false,
     env: { ...process.env, PORT: String(selectedPort), D2C_SERVER_PORT: String(selectedPort),
-      DATABASE_URL: process.env.DATABASE_URL?.trim() || "sqlite:///./data/app.db" },
+      DATABASE_URL: process.env.DATABASE_URL?.trim() || "sqlite:///./data/app.db", FLAVOR_E2E_ALLOW_RESET: "1" },
   });
   let output = "";
   let exited = false;
