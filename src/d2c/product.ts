@@ -374,6 +374,7 @@ export function buildD2cPrdPrompt(plan: D2cProductPlan): string {
   return [
     `为 D2C 任务“${plan.task}”生成可评审 PRD。原始需求：${plan.requirement}${feedback}`,
     `本任务技术方案：前端 ${technology.frontend}，服务端 ${technology.backend}。未在需求中明确的技术栈使用默认值；需求中明确指定的技术栈优先，不得被默认值覆盖。`,
+    "需求未指定数据库时，开发与联调默认使用 SQLite；服务端必须通过可迁移的数据访问层和 DATABASE_URL 配置连接，避免 SQLite 专属业务 SQL，保证后续可平滑迁移到 MySQL 或 PostgreSQL。",
     `只创建或修改 .flavor/d2c/${plan.task}/product/prd.md；此阶段不要编写产品代码或设计原型。`,
     "先检查工作区现有产品语境、设计系统和相关代码；只有会实质改变产品范围的问题才使用 AskUserQuestion。",
     "PRD 必须包含：背景与目标、目标用户与核心问题、范围与非范围、用户故事、信息架构/页面清单、关键流程、loading/empty/error/success 状态、交互规则、数据与 API 假设、可逐条验证的验收标准、风险和未决问题。",
@@ -391,6 +392,7 @@ export function buildD2cDesignPrompt(plan: D2cProductPlan, prdMarkdown: string):
     `根据已确认 PRD 为 D2C 任务“${plan.task}”生成视觉与交互原型。${feedback}`,
     `PRD 位于 .flavor/d2c/${plan.task}/product/prd.md，并以其中内容为唯一产品范围。`,
     `创建 .flavor/d2c/${plan.task}/product/prototype/index.html、必要的本地 assets、interaction-manifest.json，以及 .flavor/d2c/${plan.task}/product/openapi.json。openapi.json 必须是与已确认 PRD 一致的 OpenAPI 3.1 契约，供后续 Python 服务端与前端联调自动使用。`,
+    "后续验收将运行对应技术栈的真实服务端代码，不会用 Node mock 代替业务服务；交互清单中的数据动作必须能由 OpenAPI 契约和真实持久化行为支撑。",
     "原型必须可离线打开，不使用 CDN、远程字体或远程图片；使用真实中文产品文案，覆盖主流程和关键 loading/empty/error/success 状态，具备键盘焦点与 reduced-motion 处理。",
     "这是供用户确认的设计基线，不是最终生产实现：不要写入 src/d2c-output，不要调用 D2cCompare。interaction-manifest.json 必须描述可执行的页面场景、稳定 selector、点击/输入/断言步骤。",
     "interaction-manifest 必须按完整用户旅程设计，而不是随机抽查控件：列表/查询类覆盖输入条件 → 点击查询 → 结果断言 → 重置 → 恢复断言 → 分页切换；表单类覆盖打开入口 → 必填校验 → 完整输入 → 提交 → 成功或失败反馈 → 关闭恢复；大屏类覆盖筛选联动、下钻、悬停详情、时间范围和刷新；导航必须实际打开适用的一级、二级、三级菜单并验证落点。没有某类能力时不要臆造。",

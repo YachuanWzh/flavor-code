@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { z } from "zod";
 
 import type { D2cInteractionRun } from "./interaction.js";
@@ -31,6 +33,7 @@ export const D2cJudgeIssueSchema = z.object({
   description: z.string().trim().min(1).max(2_000),
   evidence: z.string().trim().min(1).max(2_000).optional(),
   recommendation: z.string().trim().min(1).max(2_000),
+  scoreImpact: z.number().min(0).max(30).optional(),
 }).strict();
 
 export const D2cJudgeModelAssessmentSchema = z.object({
@@ -45,10 +48,20 @@ export const D2cJudgeModelAssessmentSchema = z.object({
 export type D2cJudgeIssue = z.infer<typeof D2cJudgeIssueSchema>;
 export type D2cJudgeModelAssessment = z.infer<typeof D2cJudgeModelAssessmentSchema>;
 
-export interface D2cQualityJudgment extends D2cJudgeModelAssessment {
+export interface D2cQualityIssue extends D2cJudgeIssue {
+  id: string;
+  scoreImpact: number;
+  decision: "pending" | "skipped" | "fixing";
+  updatedAt: string;
+}
+
+export interface D2cQualityJudgment extends Omit<D2cJudgeModelAssessment, "issues"> {
   schema: 1;
   runAt: string;
   model: string;
+  rawVisualScore?: number;
+  rawInteractionScore?: number;
+  issues: D2cQualityIssue[];
   staticVisualScore: number;
   deterministicInteractionPassed: boolean;
   overallScore: number;
@@ -96,18 +109,81 @@ export function buildD2cJudgePrompt(input: { report: D2cReport; interaction: D2c
     "你是 D2C 最终质量评审员。请结合两张图片和确定性证据，分别判断视觉还原质量、表单与交互质量。",
     "第一张图片是设计稿，第二张图片是 Electron 内当前联调页面。不要因为页面看起来美观就忽略与设计稿的偏差。",
     "交互评分关注：表单可理解性、填写反馈、校验、提交状态、成功/失败反馈、键盘可用性以及真实 API 行为。",
+    "确定性交互用例是行为是否可用的最高优先级证据。全部通过时，不得仅凭静态截图推断按钮不可点击、流程未实现或反馈缺失；只有失败用例、控制台/网络证据或截图中可见的阻断才能支持此类结论。",
+    "若确定性交互全部通过且观察到真实 API 请求，interactionScore 通常应在 85-100；确有截图可见的易用性问题时可以扣分，但必须逐项给出可验证证据。",
     "视觉评分关注：布局、间距、字体、颜色、层级、图片、溢出和整体构图。只报告图片与证据能够支持的问题。",
     `静态 D2C：${report.scores.total}/100；状态 ${report.evaluation.status}；结论 ${report.evaluation.verdict}；结构化问题 ${issues.length}。`,
     ...reportEvidence(report),
     `确定性交互：${interaction.passed ? "passed" : "failed"}；${interaction.total} scenarios；${interaction.failures} failures；${interaction.apiRequestCount} API requests。`,
     ...scenarioEvidence(interaction),
     "只返回一个 JSON 对象，不要 Markdown。结构必须为：",
-    '{"visualScore":0,"interactionScore":0,"confidence":"high|medium|low","summary":"...","strengths":["..."],"issues":[{"category":"visual|interaction|accessibility|reliability","severity":"minor|major|critical","description":"...","evidence":"...","recommendation":"..."}]}',
+    "每个问题的 scoreImpact 表示该问题对所属维度造成的 0-30 分扣分，所有问题的扣分应能解释对应维度得分。",
+    '{"visualScore":0,"interactionScore":0,"confidence":"high|medium|low","summary":"...","strengths":["..."],"issues":[{"category":"visual|interaction|accessibility|reliability","severity":"minor|major|critical","description":"...","evidence":"...","recommendation":"...","scoreImpact":0}]}',
   ].join("\n").slice(0, 40_000);
 }
 
 function rounded(value: number): number {
   return Math.round(value * 10) / 10;
+}
+
+function defaultIssueImpact(severity: D2cJudgeIssue["severity"]): number {
+  return severity === "critical" ? 12 : severity === "major" ? 6 : 2;
+}
+
+function issueId(issue: D2cJudgeIssue): string {
+  return `quality-${createHash("sha256").update(`${issue.category}\0${issue.description}\0${issue.recommendation}`).digest("hex").slice(0, 20)}`;
+}
+
+function scoreJudgment(input: D2cQualityJudgment): D2cQualityJudgment {
+  const skipped = input.issues.filter((issue) => issue.decision === "skipped");
+  const visualWaiver = skipped.filter((issue) => issue.category === "visual").reduce((sum, issue) => sum + issue.scoreImpact, 0);
+  const interactionWaiver = skipped.filter((issue) => issue.category !== "visual").reduce((sum, issue) => sum + issue.scoreImpact, 0);
+  const visualScore = rounded(Math.min(100, (input.rawVisualScore ?? input.visualScore) + visualWaiver));
+  const interactionScore = rounded(Math.min(100, (input.rawInteractionScore ?? input.interactionScore) + interactionWaiver));
+  const overallScore = rounded(
+    visualScore * .4
+    + interactionScore * .3
+    + input.staticVisualScore * .2
+    + (input.deterministicInteractionPassed ? 100 : 0) * .1,
+  );
+  const unresolved = input.issues.some((issue) => issue.decision !== "skipped");
+  return {
+    ...input,
+    visualScore,
+    interactionScore,
+    overallScore,
+    verdict: input.deterministicInteractionPassed && !unresolved && overallScore >= input.threshold ? "pass" : "fail",
+  };
+}
+
+export function normalizeD2cQualityJudgment(judgment: D2cQualityJudgment): D2cQualityJudgment {
+  return scoreJudgment({
+    ...judgment,
+    rawVisualScore: judgment.rawVisualScore ?? judgment.visualScore,
+    rawInteractionScore: judgment.rawInteractionScore ?? judgment.interactionScore,
+    issues: judgment.issues.map((issue) => ({
+      ...issue,
+      id: issue.id ?? issueId(issue),
+      scoreImpact: issue.scoreImpact ?? defaultIssueImpact(issue.severity),
+      decision: issue.decision ?? "pending",
+      updatedAt: issue.updatedAt ?? judgment.runAt,
+    })),
+  });
+}
+
+export function applyD2cQualityIssueDecision(
+  judgment: D2cQualityJudgment,
+  id: string,
+  decision: "skipped" | "fixing",
+  now = new Date(),
+): D2cQualityJudgment {
+  if (!judgment.issues.some((issue) => issue.id === id)) throw new Error(`Unknown D2C quality issue: ${id}`);
+  return scoreJudgment({
+    ...judgment,
+    issues: judgment.issues.map((issue) => issue.id === id
+      ? { ...issue, decision, updatedAt: now.toISOString() }
+      : issue),
+  });
 }
 
 export function finalizeD2cQualityJudgment(input: {
@@ -120,24 +196,33 @@ export function finalizeD2cQualityJudgment(input: {
 }): D2cQualityJudgment {
   const assessment = D2cJudgeModelAssessmentSchema.parse(input.assessment);
   const threshold = Math.max(0, Math.min(100, input.passThreshold));
-  const deterministicScore = input.interaction.passed ? 100 : 0;
-  const overallScore = rounded(
-    assessment.visualScore * .4
-    + assessment.interactionScore * .3
-    + input.report.scores.total * .2
-    + deterministicScore * .1,
-  );
-  const critical = assessment.issues.some((issue) => issue.severity === "critical");
-  const verdict = input.interaction.passed && !critical && overallScore >= threshold ? "pass" : "fail";
-  return {
+  const interactionFloor = input.interaction.passed && input.interaction.total > 0
+    ? input.interaction.apiRequestCount > 0 ? 85 : 80
+    : 0;
+  const interactionScore = Math.max(assessment.interactionScore, interactionFloor);
+  const runAt = (input.now ?? new Date()).toISOString();
+  return scoreJudgment({
     schema: 1,
-    runAt: (input.now ?? new Date()).toISOString(),
+    runAt,
     model: input.model,
-    ...assessment,
+    visualScore: assessment.visualScore,
+    interactionScore,
+    rawVisualScore: assessment.visualScore,
+    rawInteractionScore: interactionScore,
+    confidence: assessment.confidence,
+    summary: assessment.summary,
+    strengths: assessment.strengths,
+    issues: assessment.issues.map((issue) => ({
+      ...issue,
+      id: issueId(issue),
+      scoreImpact: issue.scoreImpact ?? defaultIssueImpact(issue.severity),
+      decision: "pending" as const,
+      updatedAt: runAt,
+    })),
     staticVisualScore: input.report.scores.total,
     deterministicInteractionPassed: input.interaction.passed,
-    overallScore,
+    overallScore: 0,
     threshold,
-    verdict,
-  };
+    verdict: "fail",
+  });
 }

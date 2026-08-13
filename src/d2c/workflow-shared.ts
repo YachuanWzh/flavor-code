@@ -1,4 +1,5 @@
 import type { D2cElementDiff, D2cReport, D2cUnmatchedElement } from "./types.js";
+import type { D2cQualityIssue } from "./judge.js";
 
 export interface D2cReviewSummaryInput {
   reviews: readonly { decision: "pending" | "accepted" | "needs-fix" }[];
@@ -36,5 +37,20 @@ export function buildD2cRepairPrompt(report: D2cReport, fingerprints: readonly s
     ...issues.map((item, index) => `${index + 1}. [${item.fingerprint}] ${item.label}；impact ${item.impact}；selector ${repairSelector(item)}`),
     ...(instruction?.trim() ? [`用户补充要求：${instruction.trim()}`] : []),
     "完成局部修改后必须调用 D2cCompare 对整个实现重新评测，以发现跨模块布局回归；不要自动继续修复其他问题。首次新报告生成后立即停止，等待用户审阅。",
+  ].join("\n");
+}
+
+export function buildD2cQualityRepairPrompt(task: string, issue: D2cQualityIssue): string {
+  const verification = issue.category === "visual"
+    ? "完成修改后必须立即调用一次 D2cCompare，自动运行视觉验收并生成新报告；不得只凭肉眼声明已修复。"
+    : "完成修改后不要手工启动或停止服务；Flavor Code 会自动重跑与该问题相关的交互 case，并用真实服务端和数据库完成联调验收。";
+  return [
+    `修复 E2E 任务“${task}”的最终质量问题。`,
+    `类别：${issue.category}；严重度：${issue.severity}；预计影响：${issue.scoreImpact} 分。`,
+    `问题：${issue.description}`,
+    ...(issue.evidence === undefined ? [] : [`证据：${issue.evidence}`]),
+    `建议：${issue.recommendation}`,
+    `只修改 src/d2c-output/${task}/ 内与此问题直接相关的最小文件集合，不得修改设计稿或验收标准。`,
+    verification,
   ].join("\n");
 }

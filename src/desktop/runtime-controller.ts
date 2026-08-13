@@ -6,7 +6,8 @@ import { basename, join, resolve } from "node:path";
 import type { PermissionMode } from "../config/schema.js";
 import { assertPngDimensions } from "../d2c/pixel.js";
 import { importDesign, listReports, listTasks, readManifest, readReport, taskDir } from "../d2c/store.js";
-import { applyInteractionRun, applyManualInteractionDecision, applyQualityJudgment, applyReviewDecision, createWorkflow, readWorkflow, reconcileWorkflow, reviewProgress, writeWorkflow, type D2cWorkflow } from "../d2c/workflow.js";
+import { applyInteractionRun, applyManualInteractionDecision, applyQualityIssueDecision, applyQualityJudgment, applyReviewDecision, createWorkflow, readWorkflow, reconcileWorkflow, reviewProgress, writeWorkflow, type D2cWorkflow } from "../d2c/workflow.js";
+import { buildD2cQualityRepairPrompt } from "../d2c/workflow-shared.js";
 import { parseInteractionManifest, type D2cInteractionManifest, type D2cInteractionRun } from "../d2c/interaction.js";
 import { mergeInteractionManifests, type D2cAutonomousInteractionPlan, type D2cPageObservation } from "../d2c/interaction-review.js";
 import { runFrontendProject, type RunningProject } from "../d2c/runner.js";
@@ -14,7 +15,7 @@ import { confirmApiMapping, matchModulesToOperations, parseOpenApiDocument, type
 import { d2cOutputDirectory, readD2cModules } from "../d2c/modules.js";
 import { generateIntegrationArtifacts } from "../d2c/integration.js";
 import { runD2cMockServer, type D2cRunningMock } from "../d2c/mock-runner.js";
-import type { D2cJudgeConfig, D2cJudgeConfigView, D2cQualityJudgment } from "../d2c/judge.js";
+import { applyD2cQualityIssueDecision, type D2cJudgeConfig, type D2cJudgeConfigView, type D2cQualityJudgment } from "../d2c/judge.js";
 import type { D2cReport } from "../d2c/types.js";
 import {
   applyD2cProductDecision,
@@ -153,7 +154,7 @@ export interface DesktopRuntimeControllerOptions {
   observeD2cPages?(manifest: D2cInteractionManifest, baseUrl: string): Promise<D2cPageObservation[]>;
   captureD2cPreview?(url: string): Promise<Buffer>;
   d2cJudge?: D2cJudgeService;
-  /** Checks whether the managed Express mock still answers; defaults to a /_d2c/health probe. */
+  /** Checks whether the managed backend or legacy contract mock still answers. */
   probeD2cMock?(mockUrl: string): Promise<boolean>;
   emit(event: DesktopEvent): void;
 }
@@ -224,8 +225,13 @@ export class DesktopRuntimeController {
     this.#runD2cMockServer = options.runD2cMockServer ?? runD2cMockServer;
     this.#probeD2cMock = options.probeD2cMock ?? (async (mockUrl) => {
       try {
-        const response = await fetch(`${mockUrl}/_d2c/health`, { signal: AbortSignal.timeout(3_000) });
-        return response.ok;
+        for (const path of ["/_e2e/health", "/_d2c/health"]) {
+          try {
+            const response = await fetch(`${mockUrl}${path}`, { signal: AbortSignal.timeout(3_000) });
+            if (response.ok) return true;
+          } catch { /* try the compatible health endpoint */ }
+        }
+        return false;
       } catch { return false; }
     });
     this.#executeD2cInteractionTests = options.runD2cInteractionTests;
@@ -715,11 +721,15 @@ export class DesktopRuntimeController {
       ...(pythonServer ? [`Python FastAPI 服务端骨架已生成在 src/d2c-output/${task}/server/，必须按契约补全业务实现与测试。`] : []),
       ...view.mappings.map((mapping) => `- 模块 ${mapping.moduleId} → ${mapping.operationId}（${mapping.operationKey}）`),
       `只在 src/d2c-output/${task}/ 内完成模块数据加载、表单提交和响应 ViewModel 适配；统一使用 src/api/http.js，不得直接散落 axios 调用。`,
-      "先使用 npm run mock 对接内部本地契约 Mock，运行构建和可用的测试；遇到不确定字段映射时使用 AskUserQuestion，不得猜测。完成后汇报实际调用、构建与测试结果。",
+      ...(pythonServer ? [
+        "使用已生成的真实 Python FastAPI 服务端完成联调，不得改回 Node/Express mock 或本地静态夹具。开发数据库使用 SQLite；数据访问统一通过 SQLAlchemy，配置从 DATABASE_URL 读取，禁止编写 SQLite 专属业务 SQL，以便平滑迁移到 MySQL/PostgreSQL。",
+      ] : [
+        "当前任务来自已有设计稿且没有对应服务端实现，可使用本地契约服务联调。遇到不确定字段映射时使用 AskUserQuestion，不得猜测。",
+      ]),
       "Acceptance requirements: keep the Vite page runnable and interactive; every data-bearing module must use the generated Axios client for initial loading and user actions.",
       "Implement loading, empty, success, validation and API-error states without replacing server behavior with local-only fixtures or decorative toasts.",
       "Use design/interaction-manifest.json as the executable behavior contract when it exists. Preserve its selectors, exercise every scenario, and ensure required scenarios produce observable XHR/fetch traffic.",
-      "Do not start or stop long-running dev servers yourself; Flavor Code owns the preview and local contract mock lifecycles and Vite hot reload will pick up source changes.",
+      "Do not start or stop long-running dev servers yourself; Flavor Code owns the frontend preview and backend service lifecycles and Vite hot reload will pick up source changes.",
       "Run the project build and available unit tests before reporting completion. Only edit within the generated D2C project.",
     ].join("\n");
     return { workflow, document: view.document, mappings: view.mappings, files: generated.files, prompt };
@@ -729,7 +739,7 @@ export class DesktopRuntimeController {
     const existing = this.#d2cMocks.get(task);
     if (existing !== undefined) return { running: true, url: existing.url, output: existing.output() };
     const workspace = this.#workspace;
-    if (workspace === undefined) throw new Error("Open a project before starting a D2C mock server");
+    if (workspace === undefined) throw new Error("Open a project before starting the E2E backend service");
     const project = d2cOutputDirectory(workspace, task);
     const running = await this.#runD2cMockServer(project);
     this.#d2cMocks.set(task, running);
@@ -747,7 +757,7 @@ export class DesktopRuntimeController {
   }
 
   async stopD2cMock(task: string): Promise<D2cMockStatus> {
-    if (this.#d2cPreviews.has(task)) throw new Error("Stop the D2C preview before stopping its mock server");
+    if (this.#d2cPreviews.has(task)) throw new Error("Stop the D2C preview before stopping its backend service");
     const running = this.#d2cMocks.get(task);
     if (running !== undefined) { this.#d2cMocks.delete(task); await running.stop(); }
     return { running: false };
@@ -791,7 +801,7 @@ export class DesktopRuntimeController {
     const preview = this.#d2cPreviews.get(task);
     if (preview === undefined) throw new Error("Start the interactive D2C preview before running tests");
     const mock = this.#d2cMocks.get(task);
-    if (mock === undefined) throw new Error("Start the D2C Express mock before running tests");
+    if (mock === undefined) throw new Error("Start the E2E backend service before running tests");
     if (this.#executeD2cInteractionTests === undefined) throw new Error("D2C interaction runner is unavailable");
     const workflow = await readWorkflow(workspace, task);
     if (workflow === undefined) throw new Error("D2C workflow is unavailable");
@@ -802,7 +812,7 @@ export class DesktopRuntimeController {
     await this.#syncD2cRuntimeForAcceptance(task);
     const readyPreview = this.#d2cPreviews.get(task);
     const readyMock = this.#d2cMocks.get(task);
-    if (readyPreview === undefined || readyMock === undefined) throw new Error("D2C preview or mock server is unavailable after synchronization");
+    if (readyPreview === undefined || readyMock === undefined) throw new Error("D2C preview or backend service is unavailable after synchronization");
     const manifestPath = join(taskDir(workspace, task), "design", "interaction-manifest.json");
     const manifest = parseInteractionManifest(await readFile(manifestPath, "utf8"));
     let executableManifest = manifest;
@@ -994,15 +1004,43 @@ export class DesktopRuntimeController {
     const targetUrl = new URL(page, preview.url.endsWith("/") ? preview.url : `${preview.url}/`).toString();
     const implementationPng = await this.#captureD2cPreview(targetUrl);
     assertPngDimensions(implementationPng);
-    const judgment = await this.#d2cJudge.evaluate({
+    const evaluated = await this.#d2cJudge.evaluate({
       report: bundle.report,
       interaction: workflow.interaction.automated,
       designPng: Buffer.from(bundle.designPng),
       implementationPng,
     });
+    const previousIssues = new Map(workflow.quality?.issues.map((issue) => [issue.id, issue]) ?? []);
+    const waivedIssues = new Map(workflow.qualityWaivers?.map((waiver) => [waiver.issueId, waiver]) ?? []);
+    let judgment = evaluated;
+    for (const issue of evaluated.issues) {
+      const previous = previousIssues.get(issue.id);
+      const waiver = waivedIssues.get(issue.id);
+      if (previous?.decision === "skipped" || waiver !== undefined) {
+        judgment = applyD2cQualityIssueDecision(judgment, issue.id, "skipped", new Date(waiver?.updatedAt ?? previous!.updatedAt));
+      }
+    }
     const next = await writeWorkflow(workspace, applyQualityJudgment(workflow, judgment));
     await writeFile(join(taskDir(workspace, task), "quality-judge.json"), `${JSON.stringify(judgment, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     return { workflow: next, judgment };
+  }
+
+  async resolveD2cQualityIssue(
+    task: string,
+    issueId: string,
+    decision: "skipped" | "fixing",
+  ): Promise<{ workflow: D2cWorkflow; prompt?: string }> {
+    const workspace = this.#workspace;
+    if (workspace === undefined) throw new Error("Open a project before resolving D2C quality issues");
+    const current = await readWorkflow(workspace, task);
+    if (current?.quality === undefined) throw new Error("Run the D2C quality judge before resolving quality issues");
+    const issue = current.quality.issues.find((item) => item.id === issueId);
+    if (issue === undefined) throw new Error(`Unknown D2C quality issue: ${issueId}`);
+    const workflow = await writeWorkflow(workspace, applyQualityIssueDecision(current, issueId, decision));
+    return {
+      workflow,
+      ...(decision === "fixing" ? { prompt: buildD2cQualityRepairPrompt(task, issue) } : {}),
+    };
   }
 
   resolveApproval(decision: "allow" | "deny" | "always"): void {

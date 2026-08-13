@@ -45,8 +45,17 @@ describe("D2C integration generation", () => {
     await writeFile(join(project, "package.json"), "{}");
     const result = await generateIntegrationArtifacts(project, document, mappings, { pythonServer: true });
     expect(result.files).toContain("server/main.py");
-    expect(await readFile(join(project, "server", "main.py"), "utf8")).toContain("FastAPI");
-    expect(await readFile(join(project, "server", "requirements.txt"), "utf8")).toContain("uvicorn");
+    const server = await readFile(join(project, "server", "main.py"), "utf8");
+    expect(server).toContain("FastAPI");
+    expect(server).toContain('os.getenv("DATABASE_URL", "sqlite:///./data/app.db")');
+    expect(server).toContain("create_engine");
+    expect(await readFile(join(project, "server", "requirements.txt"), "utf8")).toContain("sqlalchemy");
+    expect(result.files).not.toContain("mock/server.mjs");
+    const pkg = JSON.parse(await readFile(join(project, "package.json"), "utf8"));
+    expect(pkg.scripts?.mock).toBeUndefined();
+    expect(pkg.dependencies?.express).toBeUndefined();
+    expect(JSON.parse(await readFile(join(project, "server", "flavor-runtime.json"), "utf8")))
+      .toMatchObject({ kind: "python-fastapi", developmentDatabaseUrl: "sqlite:///./data/app.db", portableDatabaseLayer: "SQLAlchemy" });
   });
 
   it("refuses unresolved mappings and paths without package.json", async () => {

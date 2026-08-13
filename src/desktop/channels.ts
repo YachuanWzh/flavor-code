@@ -55,6 +55,7 @@ export const DESKTOP_CHANNELS = {
   d2cGetJudgeConfig: "desktop:d2c-get-judge-config",
   d2cSaveJudgeConfig: "desktop:d2c-save-judge-config",
   d2cRunQualityJudge: "desktop:d2c-run-quality-judge",
+  d2cResolveQualityIssue: "desktop:d2c-resolve-quality-issue",
   d2cSetManualAcceptance: "desktop:d2c-set-manual-acceptance",
   event: "desktop:event",
 } as const;

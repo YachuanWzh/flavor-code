@@ -6,7 +6,7 @@ import { buildD2cRepairPrompt, reviewProgress } from "../../d2c/workflow-shared.
 import type { D2cApiMapping } from "../../d2c/openapi.js";
 import type { D2cInteractionRun } from "../../d2c/interaction.js";
 import type { D2cProductPhase, D2cProductPlanView } from "../../d2c/product.js";
-import type { D2cJudgeConfig, D2cJudgeConfigView } from "../../d2c/judge.js";
+import type { D2cJudgeConfig, D2cJudgeConfigView, D2cQualityIssue } from "../../d2c/judge.js";
 import type { D2cImportResult, D2cIntegrationView, D2cMockStatus, D2cPreviewStatus, D2cProductPreviewStatus, D2cReportListItem, D2cReportView } from "../contracts.js";
 import type { D2cInteractionStatus } from "../contracts.js";
 import { buildD2cAxisMeasurements, fitCanvas, focusCanvasRect, zoomCanvasAt, type CanvasTransform } from "./d2c-canvas.js";
@@ -466,12 +466,14 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
   const [interactionPlayback, setInteractionPlayback] = useState(false);
   const [judgeConfig, setJudgeConfig] = useState<D2cJudgeConfigView>({ configured: false });
   const [judgeBusy, setJudgeBusy] = useState(false);
+  const [qualityIssueBusy, setQualityIssueBusy] = useState<string>();
   const [judgeEditing, setJudgeEditing] = useState(false);
   const [judgeDraft, setJudgeDraft] = useState<D2cJudgeConfig>({
     protocol: "openai-compatible", baseURL: "", apiKey: "", model: "", passThreshold: 80,
   });
   const [previewReloadKey, setPreviewReloadKey] = useState(0);
   const automatedAfterAgentRef = useRef<string | undefined>(undefined);
+  const qualityRepairAfterAgentRef = useRef<{ task: string; category: D2cQualityIssue["category"]; armed: boolean } | undefined>(undefined);
   const [transform, setTransform] = useState<CanvasTransform>({ scale: 1, x: 0, y: 0 });
 
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -731,7 +733,8 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
       const status = await window.flavorDesktop.startD2cPreview(bundle.report.task);
       setPreviewStatus(status);
       setMockStatus({ running: status.mockUrl !== undefined, ...(status.mockUrl === undefined ? {} : { url: status.mockUrl }) });
-      const submitted = await onStartTask(`${generated.prompt}\nFlavor Code 已保持交互预览 ${status.url ?? "本地动态端口"} 与 Express Mock ${status.mockUrl ?? "本地动态端口"} 运行，.env.local 已配置 VITE_API_BASE_URL。`);
+      const serviceLabel = bundle.deliveryOrigin === "requirement" ? "真实后端服务" : "本地契约服务";
+      const submitted = await onStartTask(`${generated.prompt}\nFlavor Code 已保持交互预览 ${status.url ?? "本地动态端口"} 与${serviceLabel} ${status.mockUrl ?? "本地动态端口"} 运行，.env.local 已配置 VITE_API_BASE_URL。`);
       if (submitted) onLaunch(bundle.report.task, generated.workflow.framework);
     } catch (cause) { reportError(cause); }
     finally { setIntegrationBusy(false); }
@@ -902,8 +905,55 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
     finally { setJudgeBusy(false); }
   };
 
+  const resolveQualityIssue = async (issue: D2cQualityIssue, decision: "skipped" | "fixing"): Promise<void> => {
+    if (bundle === undefined || qualityIssueBusy !== undefined || disabled) return;
+    setQualityIssueBusy(issue.id);
+    try {
+      const result = await window.flavorDesktop.resolveD2cQualityIssue(bundle.report.task, issue.id, decision);
+      setBundle((current) => current === undefined ? current : { ...current, workflow: result.workflow });
+      setIntegration((current) => current === undefined ? current : { ...current, workflow: result.workflow });
+      if (decision === "fixing" && result.prompt !== undefined) {
+        qualityRepairAfterAgentRef.current = { task: bundle.report.task, category: issue.category, armed: false };
+        const submitted = await onStartTask(result.prompt);
+        if (submitted) onLaunch(bundle.report.task, result.workflow.framework);
+        else qualityRepairAfterAgentRef.current = undefined;
+      }
+    } catch (cause) { reportError(cause); }
+    finally { setQualityIssueBusy(undefined); }
+  };
+
   useEffect(() => {
     const task = bundle?.report.task;
+    const repair = qualityRepairAfterAgentRef.current;
+    if (repair !== undefined && task === repair.task) {
+      if (pending !== undefined && pending.task === task) repair.armed = true;
+      if (pending === undefined && repair.armed) {
+        qualityRepairAfterAgentRef.current = undefined;
+        if (repair.category === "visual") {
+          void loadReports().catch(reportError);
+        } else {
+          void (async () => {
+            setInteractionBusy(true);
+            setInteractionPlayback(true);
+            try {
+              if (!previewStatus.running) {
+                const ready = await window.flavorDesktop.startD2cPreview(task);
+                setPreviewStatus(ready);
+                setMockStatus({ running: ready.mockUrl !== undefined, ...(ready.mockUrl === undefined ? {} : { url: ready.mockUrl }) });
+              }
+              const status = await window.flavorDesktop.runD2cInteractionTests(task);
+              setInteractionRun(status.result);
+              setInteractionReview(status.review);
+              const judged = await window.flavorDesktop.runD2cQualityJudge(task);
+              setBundle((current) => current === undefined ? current : { ...current, workflow: judged.workflow });
+              setIntegration((current) => current === undefined ? current : { ...current, workflow: judged.workflow });
+            } catch (cause) { reportError(cause); }
+            finally { setInteractionPlayback(false); setInteractionBusy(false); }
+          })();
+        }
+      }
+      return;
+    }
     if (pending !== undefined && previewStatus.running && task === pending.task) {
       automatedAfterAgentRef.current = task;
       return;
@@ -1023,8 +1073,8 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
             </label>
             <div className="d2c-default-stack" aria-label="默认技术方案">
               <span>DEFAULT STACK</span>
-              <strong>Vue 3 + Python</strong>
-              <small>需求中明确写明技术栈时自动覆盖</small>
+              <strong>Vue 3 + Python + SQLite</strong>
+              <small>真实后端联调 · 可迁移至 MySQL / PostgreSQL</small>
             </div>
             <button className="d2c-start-primary" disabled={!taskValid || requirement.trim().length < 2 || productBusy || disabled}
               onClick={() => void startProduct()}><span>{productBusy ? "正在建立产品上下文…" : "生成 PRD"}</span><b aria-hidden="true">→</b></button>
@@ -1216,7 +1266,7 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
             </div>
             <div className="d2c-review-bulk">
               {!reviewState.complete && <button type="button" disabled={reviewBusy || disabled || allIssues.length === 0}
-                onClick={() => void mutateReview(allIssues.map((item) => item.fingerprint), "accepted")}>全部通过</button>}
+                onClick={() => void mutateReview(allIssues.map((item) => item.fingerprint), "accepted")}>全部跳过（不扣分）</button>}
               {!reviewState.complete && <button type="button" className="d2c-review-reject" disabled={reviewBusy || disabled || allIssues.length === 0}
                 onClick={() => void mutateReview(allIssues.map((item) => item.fingerprint), "needs-fix", "集中修复所有退回差异，仍需严格限制在各自模块文件内。")}>全部退回并修复</button>}
               {reviewState.complete && <button type="button" className="d2c-review-next" onClick={openIntegration}>进入接口联调 <span>→</span></button>}
@@ -1258,9 +1308,9 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
                   placeholder="例如：保持卡片高度，只调整内部间距" onChange={(event) => setReviewInstruction(event.target.value)} /></label>
                 <div className="d2c-review-actions">
                   <button type="button" className="d2c-accept" disabled={reviewBusy || disabled || review?.decision === "accepted"}
-                    onClick={() => void mutateReview([issue.fingerprint], "accepted")}>✓ 通过</button>
+                    onClick={() => void mutateReview([issue.fingerprint], "accepted")}>跳过（本项不扣分）</button>
                   <button type="button" className="d2c-fix" disabled={reviewBusy || disabled}
-                    onClick={() => void mutateReview([issue.fingerprint], "needs-fix", reviewInstruction || undefined)}>↻ 退回并让 AI 修复</button>
+                    onClick={() => void mutateReview([issue.fingerprint], "needs-fix", reviewInstruction || undefined)}>修复并自动视觉复验</button>
                 </div>
               </div>}
             </li>; })}
@@ -1293,7 +1343,9 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
                  <div><span>请求 {mapping.parameters.length + mapping.requestFields.length} 字段</span><span>响应 {mapping.responseFields.length} 字段</span><b>{Math.round(mapping.confidence * 100)}%</b></div>
               </li>)}</ol>
               <section className="d2c-mock-control" data-running={mockStatus.running}>
-                <div><i /><span><strong>{mockStatus.running ? "本地契约 Mock 运行中" : "本地契约 Mock 未启动"}</strong><small>{mockStatus.url ?? "生成联调代码后可启动"}</small></span></div>
+                <div><i /><span><strong>{bundle.deliveryOrigin === "requirement"
+                  ? mockStatus.running ? "真实后端服务运行中" : "真实后端服务未启动"
+                  : mockStatus.running ? "本地契约服务运行中" : "本地契约服务未启动"}</strong><small>{mockStatus.url ?? "生成联调代码后可启动"}</small></span></div>
                 {bundle.workflow.integrationFiles !== undefined && <button type="button" disabled={integrationBusy || previewStatus.running}
                   title={previewStatus.running ? "请先停止交互页面" : undefined} onClick={() => void toggleMock()}>{mockStatus.running ? "停止" : "启动"}</button>}
               </section>
@@ -1360,8 +1412,17 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
                         <span>综合得分 <b>{bundle.workflow.quality.overallScore}</b></span></div>
                       <strong>{bundle.workflow.quality.verdict === "pass" ? "质量门通过" : "质量门未通过"}</strong>
                       <p>{bundle.workflow.quality.summary}</p>
-                      {bundle.workflow.quality.issues.length > 0 && <ol>{bundle.workflow.quality.issues.map((issue, index) => <li key={`${issue.category}-${index}`} data-severity={issue.severity}>
-                        <span>{issue.description}</span><small>{issue.recommendation}</small></li>)}</ol>}
+                      {bundle.workflow.quality.issues.length > 0 && <ol>{bundle.workflow.quality.issues.map((issue) => <li key={issue.id}
+                        data-severity={issue.severity} data-decision={issue.decision}>
+                        <span>{issue.description}</span><small>{issue.recommendation}</small>
+                        <em>{issue.category} · 影响 {issue.scoreImpact} 分 · {issue.decision === "skipped" ? "已跳过，不扣分" : issue.decision === "fixing" ? "修复中，完成后自动复验" : "待处理"}</em>
+                        <div className="d2c-quality-issue-actions">
+                          <button type="button" disabled={qualityIssueBusy !== undefined || issue.decision === "skipped"}
+                            onClick={() => void resolveQualityIssue(issue, "skipped")}>跳过（不扣分）</button>
+                          <button type="button" disabled={qualityIssueBusy !== undefined || issue.decision === "fixing"}
+                            onClick={() => void resolveQualityIssue(issue, "fixing")}>修复并自动复验</button>
+                        </div>
+                      </li>)}</ol>}
                     </div>}
                     <button type="button" className="d2c-run-judge" disabled={judgeBusy || !previewStatus.running || bundle.workflow.interaction?.automated === undefined}
                       title={bundle.workflow.interaction?.automated === undefined ? "至少运行一次自动验收后可评分；验收失败也可以评分诊断" : undefined}

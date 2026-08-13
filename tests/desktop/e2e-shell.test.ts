@@ -48,7 +48,7 @@ describe("Electron E2E delivery shell", () => {
     expect(source).toContain('entryMode === "design" && <fieldset className="d2c-stack-picker"');
     expect(source).toContain('className="d2c-default-stack"');
     expect(source).toContain("Vue 3 + Python");
-    expect(source).toContain("需求中明确写明技术栈时自动覆盖");
+    expect(source).toContain("真实后端联调 · 可迁移至 MySQL / PostgreSQL");
     expect(source).toContain('createD2cProduct({ task: taskName, framework: "vue", requirement })');
     expect(css).toContain(".d2c-default-stack");
   });

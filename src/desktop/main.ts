@@ -16,6 +16,7 @@ import {
   D2cReviewInputSchema,
   D2cManualAcceptanceInputSchema,
   D2cJudgeConfigInputSchema,
+  D2cQualityIssueDecisionInputSchema,
   D2cConfirmMappingInputSchema,
   D2cTaskActionInputSchema,
   DeleteSessionInputSchema,
@@ -381,6 +382,10 @@ function installIpcHandlers(): void {
   });
   ipcMain.handle(DESKTOP_CHANNELS.d2cRunQualityJudge, async (_event, value) => {
     return controller.runD2cQualityJudge(D2cTaskActionInputSchema.parse(value).task);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.d2cResolveQualityIssue, async (_event, value) => {
+    const input = D2cQualityIssueDecisionInputSchema.parse(value);
+    return controller.resolveD2cQualityIssue(input.task, input.issueId, input.decision);
   });
 }
 

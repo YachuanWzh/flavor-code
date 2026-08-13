@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   applyInteractionRun,
   applyManualInteractionDecision,
+  applyQualityIssueDecision,
   applyQualityJudgment,
   applyReviewDecision,
   buildD2cRepairPrompt,
@@ -17,6 +18,7 @@ import {
   writeWorkflow,
 } from "../../src/d2c/workflow.js";
 import type { D2cInteractionRun } from "../../src/d2c/interaction.js";
+import { finalizeD2cQualityJudgment } from "../../src/d2c/judge.js";
 import type { D2cReport } from "../../src/d2c/types.js";
 
 const dirs: string[] = [];
@@ -177,5 +179,24 @@ describe("D2C review workflow", () => {
     expect(judged.stage).toBe("completed");
     expect(applyInteractionRun(judged, run).quality).toBeUndefined();
     expect(reconcileWorkflow(judged, report("run-20260810-030405", 15)).quality).toBeUndefined();
+  });
+
+  it("persists skip and fix decisions for final visual and interaction issues", () => {
+    const quality = finalizeD2cQualityJudgment({
+      assessment: { visualScore: 82, interactionScore: 85, confidence: "high", summary: "有待处理问题", strengths: [], issues: [
+        { category: "visual", severity: "major", description: "卡片间距不一致", recommendation: "对齐间距", scoreImpact: 6 },
+        { category: "interaction", severity: "major", description: "提交反馈不清晰", recommendation: "补充状态", scoreImpact: 5 },
+      ] },
+      report: report(),
+      interaction: { schema: 1, runAt: "2026-08-10T02:00:00.000Z", baseUrl: "http://127.0.0.1:4173/", passed: true,
+        total: 1, failures: 0, apiRequestCount: 1, scenarios: [] },
+      model: "vision", passThreshold: 80,
+    });
+    const base = { ...createWorkflow(report(), "vue"), quality };
+    const skipped = applyQualityIssueDecision(base, quality.issues[0]!.id, "skipped");
+    expect(skipped.quality?.issues[0]?.decision).toBe("skipped");
+    expect(skipped.quality!.visualScore).toBeGreaterThan(quality.visualScore);
+    const fixing = applyQualityIssueDecision(skipped, quality.issues[1]!.id, "fixing");
+    expect(fixing.quality?.issues[1]?.decision).toBe("fixing");
   });
 });

@@ -73,6 +73,7 @@ const api: FlavorDesktopApi = {
   getD2cJudgeConfig: () => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cGetJudgeConfig),
   saveD2cJudgeConfig: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cSaveJudgeConfig, input),
   runD2cQualityJudge: (task) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cRunQualityJudge, { task }),
+  resolveD2cQualityIssue: (task, issueId, decision) => ipcRenderer.invoke(DESKTOP_CHANNELS.d2cResolveQualityIssue, { task, issueId, decision }),
   onEvent(listener) {
     const handler = (_event: Electron.IpcRendererEvent, value: DesktopEvent) => listener(value);
     ipcRenderer.on(DESKTOP_CHANNELS.event, handler);

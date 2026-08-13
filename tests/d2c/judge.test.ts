@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  applyD2cQualityIssueDecision,
   buildD2cJudgePrompt,
   finalizeD2cQualityJudgment,
   parseD2cJudgeModelResponse,
@@ -59,6 +60,19 @@ describe("D2C multimodal quality judge", () => {
     });
     expect(result.verdict).toBe("fail");
     expect(result.deterministicInteractionPassed).toBe(false);
+  });
+
+  it("calibrates interaction scoring to passing deterministic evidence and waives skipped issue impact", () => {
+    const result = finalizeD2cQualityJudgment({
+      assessment: { visualScore: 95, interactionScore: 18, confidence: "high", summary: "静态截图不足", strengths: [],
+        issues: [{ category: "interaction", severity: "major", description: "按钮可能不可用", recommendation: "检查按钮", scoreImpact: 8 }] },
+      report, interaction, model: "vision-pro", passThreshold: 80,
+    });
+    expect(result.interactionScore).toBe(85);
+    expect(result.issues[0]).toMatchObject({ decision: "pending", scoreImpact: 8 });
+    const skipped = applyD2cQualityIssueDecision(result, result.issues[0]!.id, "skipped");
+    expect(skipped.interactionScore).toBe(93);
+    expect(skipped.issues[0]?.decision).toBe("skipped");
   });
 
   it("builds a bounded evidence prompt without configuration secrets", () => {

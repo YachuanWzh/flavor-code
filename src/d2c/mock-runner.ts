@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 
@@ -7,6 +7,7 @@ import { terminateProcessTree } from "./runner.js";
 
 export interface D2cRunningMock {
   url: string;
+  kind?: "contract-mock" | "real-backend";
   output(): string;
   /** True once the mock process has exited on its own (crash) or was stopped. */
   exited(): boolean;
@@ -93,6 +94,68 @@ async function install(projectDir: string, signal?: AbortSignal): Promise<void> 
   }
 }
 
+async function installPython(serverDir: string, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  const executable = process.env.FLAVOR_PYTHON?.trim() || (process.platform === "win32" ? "python" : "python3");
+  const child = spawn(executable, ["-m", "pip", "install", "-r", "requirements.txt"], {
+    cwd: serverDir, env: process.env, shell: false, windowsHide: true,
+  });
+  let output = "";
+  const append = (chunk: Buffer): void => { output = (output + chunk.toString("utf8")).slice(-8_000); };
+  child.stdout.on("data", append); child.stderr.on("data", append);
+  const abort = (): void => { void terminateProcessTree(child, true); };
+  signal?.addEventListener("abort", abort, { once: true });
+  try {
+    await waitForProcess(child, 180_000, "E2E backend dependency install");
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.message : String(error)}${output.trim() ? `\n${output.trim()}` : ""}`);
+  } finally {
+    signal?.removeEventListener("abort", abort);
+  }
+}
+
+async function runPythonBackend(projectDir: string, options: RunD2cMockOptions): Promise<D2cRunningMock> {
+  const serverDir = join(projectDir, "server");
+  if (options.installDependencies !== false) await installPython(serverDir, options.signal);
+  const selectedPort = await port();
+  const url = `http://127.0.0.1:${selectedPort}`;
+  const executable = process.env.FLAVOR_PYTHON?.trim() || (process.platform === "win32" ? "python" : "python3");
+  const child = spawn(executable, ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", String(selectedPort)], {
+    cwd: serverDir, windowsHide: true, shell: false,
+    env: { ...process.env, PORT: String(selectedPort), D2C_SERVER_PORT: String(selectedPort),
+      DATABASE_URL: process.env.DATABASE_URL?.trim() || "sqlite:///./data/app.db" },
+  });
+  let output = "";
+  let exited = false;
+  const append = (chunk: Buffer): void => { output = (output + chunk.toString("utf8")).slice(-65_536); };
+  child.stdout.on("data", append); child.stderr.on("data", append);
+  child.once("exit", () => { exited = true; });
+  const deadline = Date.now() + (options.readyTimeoutMs ?? 30_000);
+  try {
+    while (Date.now() < deadline) {
+      options.signal?.throwIfAborted();
+      if (exited) throw new Error(`E2E backend exited before readiness\n${output.slice(-4_000)}`);
+      try { const response = await fetch(`${url}/_e2e/health`); if (response.ok) break; } catch { /* keep probing */ }
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+    }
+    if (Date.now() >= deadline) throw new Error(`E2E backend readiness timed out\n${output.slice(-4_000)}`);
+  } catch (error) {
+    await terminateProcessTree(child, true);
+    throw error;
+  }
+  let stopped: Promise<void> | undefined;
+  return {
+    url, kind: "real-backend", output: () => output, exited: () => exited,
+    stop: () => stopped ??= (async () => {
+      if (exited) return;
+      await terminateProcessTree(child, false);
+      if (await waitForExit(child, 2_000)) return;
+      await terminateProcessTree(child, true);
+      await waitForExit(child, 2_000);
+    })(),
+  };
+}
+
 export function parseMockReadyLine(line: string): number | undefined {
   if (line.length > 2_048) return undefined;
   try {
@@ -103,6 +166,14 @@ export function parseMockReadyLine(line: string): number | undefined {
 }
 
 export async function runD2cMockServer(projectDir: string, options: RunD2cMockOptions = {}): Promise<D2cRunningMock> {
+  const runtimePath = join(projectDir, "server", "flavor-runtime.json");
+  if (await exists(runtimePath)) {
+    let runtime: { schema?: unknown; kind?: unknown };
+    try { runtime = JSON.parse(await readFile(runtimePath, "utf8")) as { schema?: unknown; kind?: unknown }; }
+    catch { throw new Error(`E2E backend runtime manifest is invalid at ${runtimePath}`); }
+    if (runtime.schema !== 1 || runtime.kind !== "python-fastapi") throw new Error("Unsupported E2E backend runtime manifest");
+    return runPythonBackend(projectDir, options);
+  }
   const serverPath = join(projectDir, "mock", "server.mjs");
   if (!(await exists(serverPath))) throw new Error(`D2C mock server is not generated at ${serverPath}`);
   if (options.installDependencies === false && !(await exists(join(projectDir, "node_modules", "express", "package.json")))) {
@@ -138,6 +209,7 @@ export async function runD2cMockServer(projectDir: string, options: RunD2cMockOp
   let stopped: Promise<void> | undefined;
   return {
     url,
+    kind: "contract-mock",
     output: () => output,
     exited: () => exited,
     stop: () => stopped ??= (async () => {

@@ -6,10 +6,10 @@ import { z } from "zod";
 
 import { D2C_TASK_PATTERN, taskDir } from "./store.js";
 import type { D2cInteractionRun } from "./interaction.js";
-import type { D2cQualityJudgment } from "./judge.js";
+import { applyD2cQualityIssueDecision, normalizeD2cQualityJudgment, type D2cQualityJudgment } from "./judge.js";
 import type { D2cElementDiff, D2cReport, D2cUnmatchedElement } from "./types.js";
 
-export { buildD2cRepairPrompt, reviewProgress } from "./workflow-shared.js";
+export { buildD2cQualityRepairPrompt, buildD2cRepairPrompt, reviewProgress } from "./workflow-shared.js";
 
 export type D2cWorkflowStage = "visual-review" | "api-mapping" | "integrating" | "interaction-review" | "quality-judge" | "completed";
 export type D2cReviewDecision = "pending" | "accepted" | "needs-fix";
@@ -55,6 +55,7 @@ export interface D2cWorkflow {
     updatedAt: string;
   };
   quality?: D2cQualityJudgment;
+  qualityWaivers?: Array<{ issueId: string; updatedAt: string }>;
   updatedAt: string;
 }
 
@@ -80,6 +81,7 @@ const InteractionRunSchema = z.object({
 const QualityJudgmentSchema = z.object({
   schema: z.literal(1), runAt: z.iso.datetime(), model: z.string().min(1).max(256),
   visualScore: z.number().min(0).max(100), interactionScore: z.number().min(0).max(100),
+  rawVisualScore: z.number().min(0).max(100).optional(), rawInteractionScore: z.number().min(0).max(100).optional(),
   staticVisualScore: z.number().min(0).max(100), deterministicInteractionPassed: z.boolean(),
   overallScore: z.number().min(0).max(100), threshold: z.number().min(0).max(100), verdict: z.enum(["pass", "fail"]),
   confidence: z.enum(["high", "medium", "low"]), summary: z.string().min(1).max(4_000),
@@ -88,6 +90,8 @@ const QualityJudgmentSchema = z.object({
     category: z.enum(["visual", "interaction", "accessibility", "reliability"]),
     severity: z.enum(["minor", "major", "critical"]), description: z.string().min(1).max(2_000),
     evidence: z.string().min(1).max(2_000).optional(), recommendation: z.string().min(1).max(2_000),
+    scoreImpact: z.number().min(0).max(30).optional(), id: z.string().regex(/^quality-[a-f0-9]{20}$/).optional(),
+    decision: z.enum(["pending", "skipped", "fixing"]).optional(), updatedAt: z.iso.datetime().optional(),
   }).strict()).max(100),
 }).strict();
 
@@ -101,6 +105,7 @@ const WorkflowSchema = z.object({
   mappings: z.array(z.unknown()).max(5_000).optional(), integrationFiles: z.array(z.string().min(1).max(2_048)).max(1_000).optional(),
   interaction: z.object({ manualDecision: z.enum(["pending", "accepted"]), automated: InteractionRunSchema.optional(), updatedAt: z.iso.datetime() }).strict().optional(),
   quality: QualityJudgmentSchema.optional(),
+  qualityWaivers: z.array(z.object({ issueId: z.string().regex(/^quality-[a-f0-9]{20}$/), updatedAt: z.iso.datetime() }).strict()).max(100).optional(),
   updatedAt: z.iso.datetime(),
 }).strict();
 
@@ -237,6 +242,26 @@ export function applyQualityJudgment(workflow: D2cWorkflow, quality: D2cQualityJ
     stage: interactionStage(workflow.interaction, parsed), updatedAt: now };
 }
 
+export function applyQualityIssueDecision(
+  workflow: D2cWorkflow,
+  issueId: string,
+  decision: "skipped" | "fixing",
+): D2cWorkflow {
+  if (workflow.quality === undefined) throw new Error("Run the D2C quality judge before resolving quality issues");
+  const now = new Date().toISOString();
+  const quality = applyD2cQualityIssueDecision(workflow.quality, issueId, decision, new Date(now));
+  const withoutIssue = (workflow.qualityWaivers ?? []).filter((item) => item.issueId !== issueId);
+  const qualityWaivers = decision === "skipped" ? [...withoutIssue, { issueId, updatedAt: now }] : withoutIssue;
+  return {
+    ...workflow,
+    revision: workflow.revision + 1,
+    quality,
+    qualityWaivers,
+    stage: interactionStage(workflow.interaction, quality),
+    updatedAt: now,
+  };
+}
+
 function workflowPath(workspace: string, task: string): string { return join(taskDir(workspace, task), "workflow.json"); }
 
 async function withLock<T>(key: string, action: () => Promise<T>): Promise<T> {
@@ -255,7 +280,8 @@ export async function readWorkflow(workspace: string, task: string): Promise<D2c
   try { raw = await readFile(workflowPath(workspace, task), "utf8"); }
   catch { return undefined; }
   if (Buffer.byteLength(raw) > 4 * 1024 * 1024) throw new Error("D2C workflow exceeds the supported size");
-  return WorkflowSchema.parse(JSON.parse(raw)) as D2cWorkflow;
+  const parsed = WorkflowSchema.parse(JSON.parse(raw)) as D2cWorkflow;
+  return parsed.quality === undefined ? parsed : { ...parsed, quality: normalizeD2cQualityJudgment(parsed.quality) };
 }
 
 export async function writeWorkflow(workspace: string, workflow: D2cWorkflow): Promise<D2cWorkflow> {

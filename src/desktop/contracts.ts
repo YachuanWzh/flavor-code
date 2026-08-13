@@ -164,6 +164,11 @@ export const D2cReviewInputSchema = z.object({
 }).strict();
 export const D2cTaskActionInputSchema = z.object({ task: D2cTaskInput }).strict();
 export const D2cManualAcceptanceInputSchema = z.object({ task: D2cTaskInput, accepted: z.boolean() }).strict();
+export const D2cQualityIssueDecisionInputSchema = z.object({
+  task: D2cTaskInput,
+  issueId: z.string().regex(/^quality-[a-f0-9]{20}$/),
+  decision: z.enum(["skipped", "fixing"]),
+}).strict();
 export { D2cJudgeConfigInputSchema };
 export const D2cConfirmMappingInputSchema = z.object({
   task: D2cTaskInput,
@@ -326,6 +331,11 @@ export interface D2cQualityJudgeStatus {
   judgment: D2cQualityJudgment;
 }
 
+export interface D2cQualityIssueDecisionResult {
+  workflow: D2cWorkflow;
+  prompt?: string;
+}
+
 export interface D2cReportEventPayload {
   task: string;
   reportId: string;
@@ -407,6 +417,7 @@ export interface FlavorDesktopApi {
   getD2cJudgeConfig(): Promise<D2cJudgeConfigView>;
   saveD2cJudgeConfig(input: D2cJudgeConfig): Promise<D2cJudgeConfigView>;
   runD2cQualityJudge(task: string): Promise<D2cQualityJudgeStatus>;
+  resolveD2cQualityIssue(task: string, issueId: string, decision: "skipped" | "fixing"): Promise<D2cQualityIssueDecisionResult>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
 }
 
