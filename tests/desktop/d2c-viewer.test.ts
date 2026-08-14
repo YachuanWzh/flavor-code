@@ -134,6 +134,18 @@ describe("resultPresentation", () => {
     expect(source).toContain("修复全部失败");
     expect(source).toContain("修复此项");
     expect(source).toContain("buildD2cInteractionRepairPrompt");
+    expect(source).toContain("补充修复要求");
+    expect(source).toContain("interactionRepairInstruction || undefined");
+  });
+
+  it("separates visual restoration, integration, and acceptance into explicit delivery stages", async () => {
+    const source = await import("node:fs/promises").then(({ readFile }) =>
+      readFile(new URL("../../src/desktop/renderer/d2c-viewer.tsx", import.meta.url), "utf8"));
+    expect(source).toContain("D2C 视觉还原");
+    expect(source).toContain("接口联调");
+    expect(source).toContain("验收与交付");
+    expect(source).toContain("d2c-integration-launch");
+    expect(source).toContain("进入验收与交付 →");
   });
 
   it("exposes an independent multimodal judge configuration and final quality gate", async () => {

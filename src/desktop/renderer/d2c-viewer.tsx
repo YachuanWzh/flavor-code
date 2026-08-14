@@ -461,7 +461,7 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
   const productPhaseRef = useRef<D2cProductPhase | undefined>(productView?.plan.phase);
   disabledRef.current = disabled;
   productPhaseRef.current = productView?.plan.phase;
-  const [inspectorTab, setInspectorTab] = useState<"review" | "integration">("review");
+  const [inspectorTab, setInspectorTab] = useState<"review" | "integration" | "acceptance">("review");
   const [reviewBusy, setReviewBusy] = useState(false);
   const [reviewInstruction, setReviewInstruction] = useState("");
   const [integration, setIntegration] = useState<D2cIntegrationView>();
@@ -473,6 +473,7 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
   const [interactionBusy, setInteractionBusy] = useState(false);
   const [interactionPlayback, setInteractionPlayback] = useState(false);
   const [interactionRepairBusy, setInteractionRepairBusy] = useState<string>();
+  const [interactionRepairInstruction, setInteractionRepairInstruction] = useState("");
   const [judgeConfig, setJudgeConfig] = useState<D2cJudgeConfigView>({ configured: false });
   const [judgeBusy, setJudgeBusy] = useState(false);
   const [qualityIssueBusy, setQualityIssueBusy] = useState<string>();
@@ -545,6 +546,7 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
       setCreating(false);
       setSelectedIssue(undefined);
       setReviewInstruction("");
+      setInteractionRepairInstruction("");
       setIssueLimit(INITIAL_ISSUE_LIMIT);
       if (next.workflow.stage === "visual-review") setInspectorTab("review");
     } finally {
@@ -713,6 +715,12 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
     void loadIntegration();
   };
 
+  const openAcceptance = (): void => {
+    if (bundle?.workflow.integrationFiles === undefined) return;
+    setInspectorTab("acceptance");
+    void loadIntegration();
+  };
+
   const importOpenApi = async (): Promise<void> => {
     if (bundle === undefined || integrationBusy) return;
     setIntegrationBusy(true);
@@ -813,7 +821,11 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
     const repairId = scenarios.length === 1 ? scenarios[0]!.id : "all";
     setInteractionRepairBusy(repairId);
     try {
-      const submitted = await onStartTask(buildD2cInteractionRepairPrompt(bundle.report.task, scenarios));
+      const submitted = await onStartTask(buildD2cInteractionRepairPrompt(
+        bundle.report.task,
+        scenarios,
+        interactionRepairInstruction || undefined,
+      ));
       if (submitted) onLaunch(bundle.report.task, bundle.workflow.framework);
     } catch (cause) { reportError(cause); }
     finally { setInteractionRepairBusy(undefined); }
@@ -1026,6 +1038,7 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
     }
     if (pending === undefined && task !== undefined && automatedAfterAgentRef.current === task) {
       automatedAfterAgentRef.current = undefined;
+      setInspectorTab("acceptance");
       void runInteractionTests();
     }
   }, [pending, previewStatus.running, bundle?.report.task]);
@@ -1217,7 +1230,7 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
         </section>
       </main> : viewState === "pending" && pending !== undefined
         ? <D2cProgressView pending={pending} onOpenLog={onClose} onInterrupt={onInterrupt} />
-        : inspectorTab === "integration" && previewStatus.running && previewStatus.url !== undefined
+        : (inspectorTab === "integration" || inspectorTab === "acceptance") && previewStatus.running && previewStatus.url !== undefined
           ? <main className="d2c-live-preview" aria-label="Interactive integration preview">
             <header className="d2c-live-toolbar">
               <span className="d2c-live-state"><i /> LIVE</span>
@@ -1335,7 +1348,11 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
               onClick={() => setInspectorTab("review")}><span>04</span>D2C 视觉还原</button>
             <button type="button" data-active={inspectorTab === "integration"} aria-pressed={inspectorTab === "integration"}
               disabled={reviewState === undefined || !reviewState.complete || bundle.report.evaluation.status === "invalid"}
-              title={reviewState?.complete ? "进入接口联调" : "全部差异通过后解锁"} onClick={openIntegration}><span>05—07</span>联调、验收与交付</button>
+              title={reviewState?.complete ? "进入接口联调" : "全部差异通过后解锁"} onClick={openIntegration}><span>05</span>接口联调</button>
+            <button type="button" data-active={inspectorTab === "acceptance"} aria-pressed={inspectorTab === "acceptance"}
+              disabled={bundle.workflow.integrationFiles === undefined}
+              title={bundle.workflow.integrationFiles === undefined ? "生成联调代码后解锁" : "进入验收与交付"}
+              onClick={openAcceptance}><span>06—07</span>验收与交付</button>
           </nav>
           {inspectorTab === "review" ? <>
           <section className="d2c-score-card" aria-label="分项得分" data-status={bundle.report.evaluation.status}>
@@ -1406,11 +1423,11 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
             </li>; })}
           </ol>}
           {filteredIssues.length > issueLimit && <button className="d2c-show-more" onClick={() => setIssueLimit((value) => value + INITIAL_ISSUE_LIMIT)}>再显示 {Math.min(INITIAL_ISSUE_LIMIT, filteredIssues.length - issueLimit)} 条</button>}
-          </> : <section className="d2c-integration-panel" aria-label="接口联调">
-            <header><p>API INTEGRATION</p><h2>{integration === undefined
+          </> : <section className="d2c-integration-panel" data-stage={inspectorTab} aria-label={inspectorTab === "acceptance" ? "验收与交付" : "接口联调"}>
+            <header><p>{inspectorTab === "acceptance" ? "ACCEPTANCE & DELIVERY" : "API INTEGRATION"}</p><h2>{inspectorTab === "acceptance" ? "验收与交付" : integration === undefined
               ? bundle.deliveryOrigin === "requirement" ? "自动准备接口契约" : "导入接口描述"
               : integration.document.title}</h2>
-              <span>{integration === undefined
+              <span>{inspectorTab === "acceptance" ? "通过自动回放、人工操作与多模态质量门，完成最终交付验收。" : integration === undefined
                 ? bundle.deliveryOrigin === "requirement" ? "根据已确认 PRD 与实现模块生成 OpenAPI，无需手动上传。" : "上传 Swagger / OpenAPI JSON，自动匹配页面模块和接口出入参。"
                 : `${integration.document.version}${integration.document.baseUrl ? ` · ${integration.document.baseUrl}` : ""}`}</span></header>
             {integration === undefined ? <div className="d2c-api-import" data-origin={bundle.deliveryOrigin}>
@@ -1432,6 +1449,13 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
                    onClick={() => void confirmMapping(mapping, mapping.operationKey)}>确认此映射</button>}
                  <div><span>请求 {mapping.parameters.length + mapping.requestFields.length} 字段</span><span>响应 {mapping.responseFields.length} 字段</span><b>{Math.round(mapping.confidence * 100)}%</b></div>
               </li>)}</ol>
+              <div className="d2c-integration-launch">
+                <div><span>接口映射已就绪</span><small>{integration.mappings.some((item) => item.status === "needs-confirmation")
+                  ? "仍有接口需要人工确认" : `${integration.mappings.length} 个模块将接入真实请求链路`}</small></div>
+                <button type="button" className="d2c-generate-integration" disabled={integrationBusy || integration.mappings.some((item) => item.status === "needs-confirmation")}
+                  onClick={() => void generateIntegration()}>{integrationBusy ? "正在准备联调…" : bundle.workflow.integrationFiles === undefined ? "生成并开始联调" : "重新生成联调代码"}<span>→</span></button>
+              </div>
+              {integration.mappings.some((item) => item.status === "needs-confirmation") && <p className="d2c-api-hint">确认所有标记为“需要确认”的接口后即可生成。</p>}
               <section className="d2c-mock-control" data-running={mockStatus.running}>
                 <div><i /><span><strong>{bundle.deliveryOrigin === "requirement"
                   ? mockStatus.running ? "真实后端服务运行中" : "真实后端服务未启动"
@@ -1439,6 +1463,10 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
                 {bundle.workflow.integrationFiles !== undefined && <button type="button" disabled={integrationBusy || previewStatus.running}
                   title={previewStatus.running ? "请先停止交互页面" : undefined} onClick={() => void toggleMock()}>{mockStatus.running ? "停止" : "启动"}</button>}
               </section>
+              {bundle.workflow.integrationFiles !== undefined && <section className="d2c-integration-ready" data-running={previewStatus.running}>
+                <span aria-hidden="true">✓</span><div><strong>联调环境已生成</strong><small>{previewStatus.running ? "前端页面与后端服务已连接，可进入最终验收。" : "启动联调页面后即可进入自动与人工验收。"}</small></div>
+                <button type="button" onClick={openAcceptance}>进入验收与交付 →</button>
+              </section>}
               <section className="d2c-preview-control" data-running={previewStatus.running}>
                 <header><div><p>INTERACTIVE ACCEPTANCE</p><h3>{previewStatus.running ? "可交互页面运行中" : "等待启动可交互页面"}</h3></div><i /></header>
                 <code>{previewStatus.url ?? "Vite preview not started"}</code>
@@ -1466,15 +1494,22 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
                     <span>{interactionRun.total} scenarios · {interactionRun.apiRequestCount} API requests</span></div>
                     {!interactionRun.passed && <button type="button" disabled={interactionRepairBusy !== undefined || disabled}
                       onClick={() => void repairInteractionFailures(interactionRun.scenarios.filter((scenario) => !scenario.passed))}>
-                      {interactionRepairBusy === "all" ? "正在发起修复…" : "修复全部失败"}
+                      {interactionRepairBusy === "all" ? "正在发起修复…" : interactionRepairInstruction.trim() ? "按要求修复全部" : "修复全部失败"}
                     </button>}
                   </header>
+                  {!interactionRun.passed && <label className="d2c-interaction-repair-guide">
+                    <span>补充修复要求 <small>可选</small></span>
+                    <textarea rows={3} value={interactionRepairInstruction}
+                      placeholder="例如：不要修改接口契约；优先检查登录响应的 data 包装层与会话持久化"
+                      onChange={(event) => setInteractionRepairInstruction(event.target.value)} />
+                    <small>留空则按失败证据自动修复；填写后会连同请求日志一起交给修复任务。</small>
+                  </label>}
                   <ol>{interactionRun.scenarios.map((scenario) => <li key={scenario.id} data-passed={scenario.passed}>
                     <span>{scenario.passed ? "✓" : "×"} {scenario.id}</span><small>{scenario.apiRequestCount} API · {scenario.durationMs}ms</small>
                     {scenario.failure !== undefined && <p>{scenario.failure}</p>}
                     {!scenario.passed && <button type="button" className="d2c-fix-scenario" disabled={interactionRepairBusy !== undefined || disabled}
                       aria-label={`修复失败场景 ${scenario.id}`} onClick={() => void repairInteractionFailures([scenario])}>
-                      {interactionRepairBusy === scenario.id ? "正在发起修复…" : "修复此项"}
+                      {interactionRepairBusy === scenario.id ? "正在发起修复…" : interactionRepairInstruction.trim() ? "按要求修复此项" : "修复此项"}
                     </button>}
                   </li>)}</ol>
                 </div>}
@@ -1530,9 +1565,6 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
                 </section>
                 {bundle.workflow.stage === "completed" && <p className="d2c-acceptance-complete">✓ 自动、人工与多模态质量验收均已完成</p>}
               </section>
-              <button type="button" className="d2c-generate-integration" disabled={integrationBusy || integration.mappings.some((item) => item.status === "needs-confirmation")}
-                onClick={() => void generateIntegration()}>{integrationBusy ? "正在准备联调…" : bundle.workflow.integrationFiles === undefined ? "生成代码并开始联调" : "重新生成并开始联调"}<span>→</span></button>
-              {integration.mappings.some((item) => item.status === "needs-confirmation") && <p className="d2c-api-hint">确认所有标记为“需要确认”的接口后即可生成。</p>}
             </>}
           </section>}
         </> : <div className="d2c-inspector-empty"><strong>问题检查器</strong><span>选择报告后，可按影响度逐项定位和取证。</span></div>}

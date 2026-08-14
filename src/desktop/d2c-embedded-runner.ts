@@ -219,15 +219,20 @@ function assertionScript(step: D2cInteractionExpectStep): string {
   })()`;
 }
 
-function requestRecorderScript(mockOrigin: string): string {
+function requestRecorderScript(mockOrigin: string, reset = false): string {
   return `(() => {
+    const storageKey = "__flavorD2cRequests";
+    if (${JSON.stringify(reset)}) { sessionStorage.removeItem(storageKey); window.__flavorD2cRequests = undefined; }
     if (window.__flavorD2cRequests) return;
-    window.__flavorD2cRequests = [];
+    try { window.__flavorD2cRequests = JSON.parse(sessionStorage.getItem(storageKey) || "[]"); }
+    catch { window.__flavorD2cRequests = []; }
     const record = (method, url, status) => {
       try {
         const target = new URL(url, location.href);
         if (target.origin !== ${JSON.stringify(mockOrigin)}) return;
         window.__flavorD2cRequests.push({ method: String(method || "GET").toUpperCase(), path: target.pathname, status: Number(status) || 0 });
+        window.__flavorD2cRequests = window.__flavorD2cRequests.slice(-500);
+        sessionStorage.setItem(storageKey, JSON.stringify(window.__flavorD2cRequests));
       } catch { }
     };
     const originalFetch = window.fetch;
@@ -422,6 +427,7 @@ export function createEmbeddedD2cAutomation(
       return runInteractionManifest(manifest, baseUrl, async ({ id: scenarioId }) => {
         const reset = await fetch(new URL("/_e2e/reset", mockOrigin), {
           method: "POST", headers: { "X-Flavor-E2E": "reset" },
+          signal: AbortSignal.timeout(Math.min(navigationTimeoutMs, 5_000)),
         }).catch(() => undefined);
         if (reset !== undefined && !reset.ok && reset.status !== 404 && reset.status !== 405) {
           throw new Error(`E2E backend reset failed with status ${reset.status}`);
@@ -434,7 +440,7 @@ export function createEmbeddedD2cAutomation(
           load: async (url) => {
             const loaded = await navigate(url);
             activeUrl = loaded.url;
-            await frame(activeUrl).executeJavaScript(requestRecorderScript(mockOrigin), true).catch(() => undefined);
+            await frame(activeUrl).executeJavaScript(requestRecorderScript(mockOrigin, true), true).catch(() => undefined);
             await frame(activeUrl).executeJavaScript(scenarioScript(scenarioId, visualDelayMs), true);
           },
           action: async (step) => {
@@ -444,16 +450,22 @@ export function createEmbeddedD2cAutomation(
                 const target = new URL(step.url, baseUrl).toString();
                 const loaded = await navigate(target);
                 activeUrl = loaded.url;
+                await loaded.executeJavaScript(requestRecorderScript(mockOrigin), true).catch(() => undefined);
                 await loaded.executeJavaScript(scenarioScript(scenarioId, visualDelayMs), true);
                 return;
               }
               await frame(activeUrl).executeJavaScript(actionScript(step, scenarioId, stepNumber, visualDelayMs), true);
               activeUrl = (await settleAfterAction(activeUrl)).url;
+              await frame(activeUrl).executeJavaScript(requestRecorderScript(mockOrigin), true).catch(() => undefined);
             }
             catch (error) {
               if (step.action === "click") {
                 const recovered = await settleAfterAction(activeUrl).catch(() => undefined);
-                if (recovered !== undefined && recovered.url !== activeUrl) { activeUrl = recovered.url; return; }
+                if (recovered !== undefined && recovered.url !== activeUrl) {
+                  activeUrl = recovered.url;
+                  await frame(activeUrl).executeJavaScript(requestRecorderScript(mockOrigin), true).catch(() => undefined);
+                  return;
+                }
               }
               await frame(activeUrl).executeJavaScript(assertionResultScript(false, scenarioId, visualDelayMs), true).catch(() => undefined);
               throw error;

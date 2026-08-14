@@ -207,6 +207,15 @@ function expectationDescription(step: D2cInteractionExpectStep): string {
   return `${step.selector} ${step.expect} to equal ${String(step.value)}`;
 }
 
+function isAuthenticationPrerequisite(scenario: D2cInteractionManifest["pages"][number]["scenarios"][number]): boolean {
+  return scenario.steps.some((step) => "expect" in step
+    && step.expect === "request"
+    && step.method === "POST"
+    && step.path !== undefined
+    && /(?:auth|login|sign-in|session|token)/i.test(step.path)
+    && (step.status === undefined || (step.status >= 200 && step.status < 400)));
+}
+
 export async function runInteractionManifest(
   manifest: D2cInteractionManifest,
   baseUrl: string,
@@ -215,10 +224,22 @@ export async function runInteractionManifest(
   if (!isLoopbackPreviewUrl(baseUrl)) throw new Error("D2C interaction preview must use a loopback HTTP URL");
   const origin = new URL(baseUrl).origin;
   const scenarios: D2cInteractionScenarioResult[] = [];
+  let blockedByAuthentication: { id: string; failure: string } | undefined;
   for (const page of manifest.pages) {
     const pageUrl = new URL(page.url, baseUrl).toString();
     if (new URL(pageUrl).origin !== origin) throw new Error(`D2C interaction page escaped preview origin: ${page.url}`);
     for (const scenario of page.scenarios) {
+      if (blockedByAuthentication !== undefined) {
+        scenarios.push({
+          id: scenario.id,
+          pageUrl,
+          passed: false,
+          durationMs: 0,
+          apiRequestCount: 0,
+          failure: `Blocked by failed authentication prerequisite ${blockedByAuthentication.id}: ${blockedByAuthentication.failure}`,
+        });
+        continue;
+      }
       const started = Date.now();
       let driver: D2cInteractionDriver | undefined;
       let failure: string | undefined;
@@ -251,6 +272,9 @@ export async function runInteractionManifest(
       scenarios.push({ id: scenario.id, pageUrl, passed: failure === undefined, durationMs: Date.now() - started, apiRequestCount,
         ...(failure === undefined ? {} : { failure }),
         ...(capturedRequests === undefined ? {} : { requests: capturedRequests }) });
+      if (failure !== undefined && isAuthenticationPrerequisite(scenario)) {
+        blockedByAuthentication = { id: scenario.id, failure };
+      }
     }
   }
   const failures = scenarios.filter((item) => !item.passed).length;

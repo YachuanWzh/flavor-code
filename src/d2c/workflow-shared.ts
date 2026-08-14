@@ -59,12 +59,14 @@ export function buildD2cQualityRepairPrompt(task: string, issue: D2cQualityIssue
 export function buildD2cInteractionRepairPrompt(
   task: string,
   scenarios: readonly D2cInteractionScenarioResult[],
+  instruction?: string,
 ): string {
   const failures = scenarios.filter((scenario) => !scenario.passed);
   if (failures.length === 0) throw new Error("No failed E2E scenarios were selected for repair");
   return [
     `修复 E2E 任务“${task}”的自动验收失败项。`,
     `只允许修改 src/d2c-output/${task}/ 内与失败直接相关的前端、真实服务端和测试文件；不得修改设计稿、PRD 或 interaction-manifest.json 来绕过验收。`,
+    ...(instruction?.trim() ? [`用户补充要求：${instruction.trim()}`] : []),
     ...failures.map((scenario, index) => [
       `${index + 1}. ${scenario.id}`,
       `页面：${scenario.pageUrl}`,

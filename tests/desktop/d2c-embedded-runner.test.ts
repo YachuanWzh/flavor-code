@@ -61,7 +61,11 @@ describe("embedded Electron D2C automation", () => {
     const scripts = (target.executeJavaScript as ReturnType<typeof vi.fn>).mock.calls
       .map(([script]) => String(script));
     const actionScripts = scripts.filter((script) => script.includes("step.action"));
+    const recorderScripts = scripts.filter((script) => script.includes("const originalFetch = window.fetch"));
     expect(actionScripts).toHaveLength(4);
+    expect(recorderScripts).toHaveLength(6);
+    expect(recorderScripts[0]).toContain("if (true) { sessionStorage.removeItem(storageKey)");
+    expect(recorderScripts[1]).toContain("if (false) { sessionStorage.removeItem(storageKey)");
     expect(actionScripts.every((script) => script.includes("flavor-d2c-automation-visualizer"))).toBe(true);
     expect(actionScripts.every((script) => script.includes("scrollIntoView"))).toBe(true);
     expect(actionScripts.some((script) => script.includes("自动验收"))).toBe(true);

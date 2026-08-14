@@ -38,6 +38,18 @@ Flavor Code connects to OpenAI, Anthropic, or compatible services and works with
 | 🎨 | **D2C design-to-code** | Import Pixso exports; the agent generates Vue/React implementations with automatic pixel-level visual evaluation (Electron only) |
 | 🛡️ | **Clear permission boundaries** | Independent control over read, write, Shell, network, and destructive actions; Docker supported |
 
+## 1.2.10 D2C Acceptance & Delivery
+
+1.2.10 hardens the D2C acceptance loop: failed authentication prerequisites block protected scenarios immediately, request recording survives navigation, repair prompts accept extra instructions, and the backend process restarts automatically when its source changes.
+
+| Feature | How to use |
+| --- | --- |
+| **Auth-prerequisite fail-fast** | When a login / sign-in scenario (e.g. `POST /api/v1/auth/login`) fails during interactive acceptance, later protected scenarios are reported as blocked by that failed prerequisite instead of being executed one by one, so the root cause is visible immediately. |
+| **Navigation-safe request recording** | Request recording now persists across in-app navigation through `sessionStorage` (up to 500 entries). Requests fired after a click that navigates to another page are captured too, so post-navigation behavior can still be asserted. |
+| **Extra repair instructions** | Before repairing failed interaction scenarios, type extra requirements in the “补充修复要求” box; they are injected into the repair prompt as user-supplied constraints together with the failure details. |
+| **Acceptance as a separate stage** | The D2C workbench now splits “API Integration” and “Acceptance & Delivery” into two explicit stages; after an automated repair run finishes, the workbench switches to the acceptance tab automatically. |
+| **Backend source fingerprinting** | The mock/server backend is fingerprinted when it starts. If its source files change, the runtime detects the fingerprint difference and restarts the backend before acceptance, so tests always run against the code currently on disk. |
+
 ## 1.2.9 Runtime Productivity
 
 1.2.9 adds layered project instructions, safe writes, background jobs, persistent terminals, and native web tools. Usually you can just describe the goal in natural language and the agent picks the right tool; when you need precise control, name the tool and its parameters explicitly in the prompt.

@@ -461,6 +461,13 @@ describe("desktop D2C workflow controller", () => {
     await controller.runD2cInteractionTests("dashboard");
     expect(previewStarts).toBe(2);
     expect(observedMockUrls).toEqual(["http://127.0.0.1:4302", "http://127.0.0.1:4302"]);
+
+    // A live process can still serve the pre-generation code. Source changes must invalidate it.
+    await writeFile(join(project, "mock", "server.mjs"), "export const version = 2;\n");
+    await controller.runD2cInteractionTests("dashboard");
+    expect(stoppedMocks).toEqual(["http://127.0.0.1:4301", "http://127.0.0.1:4302"]);
+    expect(previewStarts).toBe(3);
+    expect(observedMockUrls.at(-1)).toBe("http://127.0.0.1:4303");
     await controller.dispose();
   });
 

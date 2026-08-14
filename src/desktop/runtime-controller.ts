@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
@@ -77,6 +77,39 @@ async function detectD2cFramework(workspace: string, task: string): Promise<"vue
 
 function integrationDirectory(workspace: string, task: string): string {
   return join(workspace, ".flavor", "d2c", task, "integration");
+}
+
+const D2C_BACKEND_SOURCE_EXTENSIONS = new Set([".cfg", ".env", ".ini", ".js", ".json", ".lock", ".mjs", ".py", ".toml", ".txt", ".yaml", ".yml"]);
+const D2C_BACKEND_IGNORED_DIRECTORIES = new Set([".git", ".venv", "__pycache__", "data", "node_modules", "venv"]);
+
+/** A health endpoint only proves that a process is alive, not that it serves the code currently on disk. */
+async function d2cBackendSourceFingerprint(project: string): Promise<string | undefined> {
+  const runtimeManifest = join(project, "server", "flavor-runtime.json");
+  const realBackend = (await stat(runtimeManifest).catch(() => undefined))?.isFile() === true;
+  const root = realBackend ? join(project, "server") : join(project, "mock");
+  if ((await stat(root).catch(() => undefined))?.isDirectory() !== true) return undefined;
+  const files: string[] = [];
+  const visit = async (directory: string): Promise<void> => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (!D2C_BACKEND_IGNORED_DIRECTORIES.has(entry.name)) await visit(join(directory, entry.name));
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const extension = entry.name.includes(".") ? `.${entry.name.split(".").pop()!.toLowerCase()}` : "";
+      if (D2C_BACKEND_SOURCE_EXTENSIONS.has(extension)) files.push(join(directory, entry.name));
+    }
+  };
+  await visit(root);
+  const hash = createHash("sha256");
+  for (const path of files.sort()) {
+    hash.update(path.slice(root.length));
+    hash.update("\0");
+    hash.update(await readFile(path));
+    hash.update("\0");
+  }
+  return hash.digest("hex");
 }
 
 export interface RuntimeLike {
@@ -201,6 +234,8 @@ export class DesktopRuntimeController {
   readonly #d2cProductPreviews = new Map<string, RunningProject>();
   /** Mock URL each preview observed at startup; Vite only reads .env.local on boot. */
   readonly #d2cPreviewMockUrls = new Map<string, string>();
+  /** Backend source digest observed when the managed process was started. */
+  readonly #d2cMockSourceFingerprints = new Map<string, string>();
 
   constructor(options: DesktopRuntimeControllerOptions) {
     this.#home = resolve(options.home ?? homedir());
@@ -795,6 +830,8 @@ export class DesktopRuntimeController {
     const running = await this.#runD2cMockServer(project);
     this.#d2cMocks.set(task, running);
     try {
+      const fingerprint = await d2cBackendSourceFingerprint(project);
+      if (fingerprint !== undefined) this.#d2cMockSourceFingerprints.set(task, fingerprint);
       const environmentPath = join(project, ".env.local");
       const existingEnvironment = await readFile(environmentPath, "utf8").catch(() => "");
       const environment = `${existingEnvironment.split(/\r?\n/).filter((line) => !/^\s*VITE_API_BASE_URL\s*=/.test(line)).join("\n").trim()}\nVITE_API_BASE_URL=${running.url}\n`.replace(/^\n/, "");
@@ -802,6 +839,7 @@ export class DesktopRuntimeController {
       return { running: true, url: running.url, output: running.output() };
     } catch (error) {
       this.#d2cMocks.delete(task);
+      this.#d2cMockSourceFingerprints.delete(task);
       await running.stop();
       throw error;
     }
@@ -810,7 +848,7 @@ export class DesktopRuntimeController {
   async stopD2cMock(task: string): Promise<D2cMockStatus> {
     if (this.#d2cPreviews.has(task)) throw new Error("Stop the D2C preview before stopping its backend service");
     const running = this.#d2cMocks.get(task);
-    if (running !== undefined) { this.#d2cMocks.delete(task); await running.stop(); }
+    if (running !== undefined) { this.#d2cMocks.delete(task); this.#d2cMockSourceFingerprints.delete(task); await running.stop(); }
     return { running: false };
   }
 
@@ -929,14 +967,22 @@ export class DesktopRuntimeController {
     };
   }
 
-  /** Restarts a dead mock and any preview whose baked-in VITE_API_BASE_URL no longer matches it. */
+  /** Restarts a dead or source-stale backend and any preview whose baked-in API URL no longer matches it. */
   async #syncD2cRuntimeForAcceptance(task: string): Promise<void> {
     const mock = this.#d2cMocks.get(task);
     if (mock === undefined) return;
-    const healthy = await this.#probeD2cMock(mock.url);
-    if (healthy && this.#d2cPreviewMockUrls.get(task) === mock.url) return;
-    if (!healthy) {
+    const workspace = this.#workspace;
+    if (workspace === undefined) return;
+    const [healthy, currentFingerprint] = await Promise.all([
+      this.#probeD2cMock(mock.url),
+      d2cBackendSourceFingerprint(d2cOutputDirectory(workspace, task)),
+    ]);
+    const startedFingerprint = this.#d2cMockSourceFingerprints.get(task);
+    const sourceChanged = currentFingerprint !== undefined && currentFingerprint !== startedFingerprint;
+    if (healthy && !sourceChanged && this.#d2cPreviewMockUrls.get(task) === mock.url) return;
+    if (!healthy || sourceChanged) {
       this.#d2cMocks.delete(task);
+      this.#d2cMockSourceFingerprints.delete(task);
       await mock.stop().catch(() => undefined);
       await this.startD2cMock(task);
     }
@@ -1266,6 +1312,7 @@ export class DesktopRuntimeController {
   async #stopAllD2cMocks(): Promise<void> {
     const running = [...this.#d2cMocks.values()];
     this.#d2cMocks.clear();
+    this.#d2cMockSourceFingerprints.clear();
     await Promise.all(running.map((item) => item.stop().catch(() => undefined)));
   }
 

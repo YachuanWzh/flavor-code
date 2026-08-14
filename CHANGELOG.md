@@ -2,7 +2,16 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.2.9 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.2.10 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.2.10] - 2026-08-14
+
+### 新增
+- 新增认证前置失败快速阻断：D2C 交互验收中登录/认证场景失败后，后续受保护场景直接标记为被该前置场景阻断，不再逐一执行
+- 新增跨导航请求记录：交互回放请求经 `sessionStorage` 在页面导航之间持久化（上限 500 条），点击跳转后的请求也能被捕获并用于断言
+- 新增交互修复补充要求：修复失败场景前可填写“补充修复要求”，与失败详情一起作为“用户补充要求”注入修复提示词
+- 新增验收与交付独立阶段：工作台拆分“接口联调”与“验收与交付”，自动修复完成后自动进入验收页签
+- 新增后端源码指纹检测：为 mock/server 后端源码计算指纹，源码变更时自动重启后端，确保验收针对最新代码
 
 ## [1.2.9] - 2026-08-14
 
@@ -227,6 +236,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.2.10 | 2026-08-14 | D2C 验收与交付：认证前置快速阻断、跨导航请求记录、修复补充要求、后端源码指纹重启 |
 | 1.2.9 | 2026-08-14 | 运行时生产力与原生 Web：分层项目指令、安全写入、后台任务、持久终端、WebSearch/WebFetch |
 | 1.2.8 | 2026-08-13 | D2C 设计稿到代码、E2E 端到端交付、Claude 客户端支持 |
 | 1.2.7 | 2026-08-11 | 启动流程优化 |

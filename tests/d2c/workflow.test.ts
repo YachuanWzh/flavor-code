@@ -202,13 +202,14 @@ describe("D2C review workflow", () => {
       id: "movements-load", pageUrl: "http://127.0.0.1:4173/#/movements", passed: false,
       durationMs: 20, apiRequestCount: 1, failure: "Expected 8 rows; actual 0",
       requests: [{ method: "GET", path: "/api/movements", status: 200 }],
-    }]);
+    }], "不要修改接口契约，优先检查登录响应的 data 包装层");
     expect(prompt).toContain("movements-load");
     expect(prompt).toContain("Expected 8 rows; actual 0");
     expect(prompt).toContain("GET /api/movements");
     expect(prompt).toContain("不得修改设计稿、PRD 或 interaction-manifest.json");
     expect(prompt).toContain("按业务表独立、幂等地补齐");
     expect(prompt).toContain("请求成功不等于数据正确");
+    expect(prompt).toContain("用户补充要求：不要修改接口契约，优先检查登录响应的 data 包装层");
   });
 
   it("invalidates an old quality judgment when visual or interaction evidence changes", () => {

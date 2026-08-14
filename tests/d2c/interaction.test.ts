@@ -190,6 +190,29 @@ describe("D2C interaction acceptance", () => {
     expect(closes.every((close) => close.mock.calls.length === 1)).toBe(true);
   });
 
+  it("stops protected scenarios immediately after the authentication prerequisite fails", async () => {
+    const manifest = parseInteractionManifest(JSON.stringify({
+      schemaVersion: 1, product: "protected", deterministic: true,
+      pages: [{ url: "index.html#/login", scenarios: [{ id: "login-success", steps: [
+        { action: "click", selector: "#login" },
+        { expect: "request", method: "POST", path: "/api/v1/auth/login", status: 200 },
+      ] }] }, { url: "index.html#/dashboard", scenarios: [{ id: "dashboard-loads", steps: [
+        { expect: "visible", selector: "#dashboard" },
+      ] }] }],
+    }));
+    let created = 0;
+    const result = await runInteractionManifest(manifest, "http://localhost:5173/", async () => {
+      created += 1;
+      return { load: async () => undefined, action: async () => undefined,
+        assertion: async () => ({ passed: false, actual: "0 matching / 0 requests" }),
+        apiRequestCount: () => 0, close: async () => undefined };
+    });
+    expect(created).toBe(1);
+    expect(result).toMatchObject({ passed: false, total: 2, failures: 2 });
+    expect(result.scenarios[1]).toMatchObject({ id: "dashboard-loads", durationMs: 0, apiRequestCount: 0 });
+    expect(result.scenarios[1]?.failure).toMatch(/blocked by failed authentication prerequisite login-success/i);
+  });
+
   it("supports request-level assertions and records the observed requests", async () => {
     const requestManifest = parseInteractionManifest(JSON.stringify({
       schemaVersion: 1, product: "api", deterministic: true,

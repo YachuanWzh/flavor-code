@@ -1224,7 +1224,7 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .d2c-inspector-verdict[data-verdict="fail"]::before, .d2c-inspector-verdict[data-verdict="invalid"]::before { background: #c23b43; }
 .d2c-inspector-verdict[data-verdict="fail"] .d2c-verdict-mark, .d2c-inspector-verdict[data-verdict="invalid"] .d2c-verdict-mark { border-color: #edc7c9; background: #fdebec; color: #ad3138; }
 .d2c-inspector-verdict[data-verdict="fail"] h2, .d2c-inspector-verdict[data-verdict="invalid"] h2 { color: #5d2a2d; }
-.d2c-stage-tabs { position: sticky; z-index: 5; top: 0; display: grid; grid-template-columns: 1fr 1fr; padding: 7px 8px; gap: 5px; border-bottom: 1px solid #dfe6ea; background: rgba(245,247,248,.96); backdrop-filter: blur(10px); }
+.d2c-stage-tabs { position: sticky; z-index: 5; top: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 7px 8px; gap: 4px; border-bottom: 1px solid #dfe6ea; background: rgba(245,247,248,.96); backdrop-filter: blur(10px); }
 .d2c-stage-tabs button { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 31px; border: 1px solid #dbe3e7; border-radius: 6px; background: #fff; color: #61717b; font-size: 9px; font-weight: 650; cursor: pointer; }
 .d2c-stage-tabs button span { color: #9aa6ad; font: 700 7.5px "Cascadia Code", Consolas, monospace; }
 .d2c-stage-tabs button[data-active="true"] { border-color: #253740; background: #253740; color: #fff; box-shadow: 0 4px 12px rgba(34,52,63,.12); }
@@ -1316,6 +1316,14 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .d2c-inspector-empty { display: grid; gap: 5px; padding: 24px 18px; color: #8a969f; font-size: 11px; }
 .d2c-inspector-empty strong { color: #3a4650; }
 .d2c-integration-panel { min-height: 100%; padding-bottom: 14px; }
+.d2c-integration-panel[data-stage="integration"] .d2c-preview-control { display: none; }
+.d2c-integration-panel[data-stage="acceptance"] .d2c-api-summary,
+.d2c-integration-panel[data-stage="acceptance"] .d2c-mapping-list,
+.d2c-integration-panel[data-stage="acceptance"] .d2c-integration-launch,
+.d2c-integration-panel[data-stage="acceptance"] .d2c-api-hint,
+.d2c-integration-panel[data-stage="acceptance"] .d2c-mock-control,
+.d2c-integration-panel[data-stage="acceptance"] .d2c-integration-ready { display: none; }
+.d2c-integration-panel[data-stage="acceptance"] .d2c-preview-control { margin: 10px; }
 .d2c-integration-panel > header { padding: 17px 14px 13px; border-bottom: 1px solid #e0e7ea; background: #fff; }
 .d2c-integration-panel > header h2 { margin: 0; overflow: hidden; color: #24353f; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
 .d2c-integration-panel > header > span { display: block; margin-top: 6px; overflow-wrap: anywhere; color: #78868e; font-size: 9px; line-height: 1.5; }
@@ -1339,6 +1347,11 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .d2c-mapping-list .d2c-confirm-mapping:disabled { opacity: .55; cursor: not-allowed; }
 .d2c-mapping-list li > div { display: flex; align-items: center; gap: 8px; margin-top: 7px; color: #89959c; font-size: 7.5px; }
 .d2c-mapping-list li > div b { margin-left: auto; color: #4c6978; font: 700 8px "Cascadia Code", Consolas, monospace; }
+.d2c-integration-launch { position: sticky; z-index: 4; bottom: 8px; display: grid; gap: 8px; margin: 0 10px 9px; padding: 10px; border: 1px solid #b8cbd4; border-radius: 8px; background: rgba(245,250,252,.97); box-shadow: 0 8px 24px rgba(31,49,60,.14); backdrop-filter: blur(10px); }
+.d2c-integration-launch > div { display: grid; gap: 2px; }
+.d2c-integration-launch > div span { color: #2e424d; font-size: 9.5px; font-weight: 700; }
+.d2c-integration-launch > div small { color: #73848e; font-size: 8px; line-height: 1.4; }
+.d2c-integration-launch .d2c-generate-integration { width: 100%; margin: 0; }
 .d2c-mock-control { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 10px 8px; padding: 9px; border: 1px solid #dce4e8; border-radius: 6px; background: #fff; }
 .d2c-mock-control > div { display: flex; align-items: center; min-width: 0; gap: 8px; }
 .d2c-mock-control i { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: #adb7bc; }
@@ -1347,9 +1360,21 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .d2c-mock-control strong { color: #40515a; font-size: 8.5px; }
 .d2c-mock-control small { overflow: hidden; color: #89969d; font: 7.5px "Cascadia Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .d2c-mock-control button { padding: 4px 7px; border: 1px solid #ced9de; border-radius: 4px; background: #f8fafb; color: #52636d; font-size: 8px; cursor: pointer; }
+.d2c-integration-ready { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; margin: 0 10px 8px; padding: 10px; border: 1px solid #b9d8c7; border-radius: 7px; background: #f2faf6; }
+.d2c-integration-ready > span { display: grid; place-items: center; width: 23px; height: 23px; border-radius: 50%; background: #daf1e4; color: #1f8050; font: 800 10px "Cascadia Code", Consolas, monospace; }
+.d2c-integration-ready > div { display: grid; gap: 2px; min-width: 0; }
+.d2c-integration-ready strong { color: #276044; font-size: 9.5px; }
+.d2c-integration-ready small { color: #658071; font-size: 8px; line-height: 1.4; }
+.d2c-integration-ready button { grid-column: 1 / -1; min-height: 30px; border: 1px solid #263b46; border-radius: 5px; background: #263b46; color: #fff; font-size: 8.5px; font-weight: 680; cursor: pointer; }
 .d2c-generate-integration { display: flex; align-items: center; justify-content: space-between; width: calc(100% - 20px); margin: 12px 10px 0; padding-inline: 11px; }
 .d2c-generate-integration:disabled, .d2c-api-import > button:disabled { border-color: #d5dde1; background: #e9edef; color: #9ca7ad; cursor: not-allowed; }
 .d2c-api-hint { margin: 7px 12px 0; color: #9b6c25; font-size: 8px; line-height: 1.45; }
+.d2c-interaction-repair-guide { display: grid; gap: 5px; margin: 6px 0 3px; padding: 8px; border: 1px solid #ead0d2; border-radius: 6px; background: #fff8f8; }
+.d2c-interaction-repair-guide > span { color: #7e3d42; font-size: 8.5px; font-weight: 700; }
+.d2c-interaction-repair-guide > span small { margin-left: 4px; color: #a98789; font-weight: 500; }
+.d2c-interaction-repair-guide textarea { width: 100%; min-height: 56px; resize: vertical; padding: 7px 8px; border: 1px solid #dec3c5; border-radius: 5px; outline: none; background: #fff; color: #47383a; font-size: 9px; line-height: 1.45; }
+.d2c-interaction-repair-guide textarea:focus { border-color: #b84a50; box-shadow: 0 0 0 2px rgba(184,74,80,.1); }
+.d2c-interaction-repair-guide > small { color: #8f7779; font-size: 7.5px; line-height: 1.4; }
 .d2c-v2 .d2c-empty, .d2c-v2 .d2c-running { grid-row: 1 / -1; color: #81909a; }
 .d2c-v2 .d2c-empty h2, .d2c-v2 .d2c-running h2 { color: #d1d9de; }
 .d2c-v2 .d2c-loading { grid-row: 1 / -1; background: rgba(16,22,27,.72); color: #d5dde2; }
