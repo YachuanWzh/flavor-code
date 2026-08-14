@@ -38,47 +38,6 @@ Flavor Code connects to OpenAI, Anthropic, or compatible services and works with
 | 🎨 | **D2C design-to-code** | Import Pixso exports; the agent generates Vue/React implementations with automatic pixel-level visual evaluation (Electron only) |
 | 🛡️ | **Clear permission boundaries** | Independent control over read, write, Shell, network, and destructive actions; Docker supported |
 
-## 1.2.10 D2C Acceptance & Delivery
-
-1.2.10 hardens the D2C acceptance loop: failed authentication prerequisites block protected scenarios immediately, request recording survives navigation, repair prompts accept extra instructions, and the backend process restarts automatically when its source changes.
-
-| Feature | How to use |
-| --- | --- |
-| **Auth-prerequisite fail-fast** | When a login / sign-in scenario (e.g. `POST /api/v1/auth/login`) fails during interactive acceptance, later protected scenarios are reported as blocked by that failed prerequisite instead of being executed one by one, so the root cause is visible immediately. |
-| **Navigation-safe request recording** | Request recording now persists across in-app navigation through `sessionStorage` (up to 500 entries). Requests fired after a click that navigates to another page are captured too, so post-navigation behavior can still be asserted. |
-| **Extra repair instructions** | Before repairing failed interaction scenarios, type extra requirements in the “补充修复要求” box; they are injected into the repair prompt as user-supplied constraints together with the failure details. |
-| **Acceptance as a separate stage** | The D2C workbench now splits “API Integration” and “Acceptance & Delivery” into two explicit stages; after an automated repair run finishes, the workbench switches to the acceptance tab automatically. |
-| **Backend source fingerprinting** | The mock/server backend is fingerprinted when it starts. If its source files change, the runtime detects the fingerprint difference and restarts the backend before acceptance, so tests always run against the code currently on disk. |
-
-## 1.2.9 Runtime Productivity
-
-1.2.9 adds layered project instructions, safe writes, background jobs, persistent terminals, and native web tools. Usually you can just describe the goal in natural language and the agent picks the right tool; when you need precise control, name the tool and its parameters explicitly in the prompt.
-
-| Feature | How to use |
-| --- | --- |
-| **Layered project instructions** | Put `AGENTS.md` / `CLAUDE.md` in the project root or subdirectories; use `AGENTS.local.md` / `CLAUDE.local.md` for local additions in the same directory. Root rules load at startup; subdirectory rules load automatically when the agent touches files there. |
-| **Per-turn change summary** | No configuration needed. After a successful `Write`, `Edit`, or `ApplyPatch`, the turn shows a color-coded `CHANGESET` receipt with workspace-relative paths, `CREATE` / `UPDATE` / `DELETE` operations, per-file line counts, and a total. At most 8 files are shown, with an explicit shown/total footer when more changed. |
-| **File version protection** | No configuration needed. If the IDE, a formatter, or another process modifies a file after the agent read it, the next write fails with `Stale file`; ask the agent to re-read before editing. |
-| **Standard tool presentation protocol** | Tool authors can declare `outputSchema`, `renderForModel`, `presentCall`, and `presentResult`, so the same result can use an appropriate form in the model context, CLI, and desktop. The CLI visually separates file diffs, web evidence, job receipts, foreground `COMMAND` output, and persistent `TERMINAL` output from the final answer. |
-| **Background Shell / Jobs** | Say "start the dev server in the background" and the agent calls `Shell` with `background: true`. Use `JobList` to view jobs, `JobRead` for incremental output, `JobWait` to wait, and `JobKill` to stop. The CLI shows a color-bordered `JOB` receipt separating job metadata, logs, and the final answer; logs show at most the latest 12 lines and lists at most 8 items. Windows prefers UTF-8 and falls back automatically on GBK/GB18030 system diagnostics. |
-| **Foreground command results** | Foreground `Shell` calls render as state-colored `COMMAND` receipts with separate command, stdout, stderr, and exit regions. Long output keeps the first and last 8 lines and explicitly folds the middle; persistent PTY output uses the distinct `TERMINAL` label. |
-| **Desktop background status** | Electron automatically shows the number of running jobs in the session title bar, updated live on start, output, exit, or cancel. |
-| **Persistent PTY** | Say "open a persistent terminal and keep interacting". The agent uses `TerminalOpen` to create a terminal, `TerminalWrite` for input, `TerminalRead` for incremental output, and `TerminalClose` to close it. |
-| **Unified D2C/E2E process lifecycle** | No usage change. Preview and backend services still start/stop from the E2E/D2C workbench, but the underlying layer unifies output limits, process-tree termination, and idempotent cleanup. |
-| **Native WebSearch** | Say "search the web for ...", or explicitly ask for `WebSearch`. It uses keyless DuckDuckGo Lite by default and degrades to Bing on connection failure, HTTP rejection, or no parseable results; up to 20 results per call. The CLI puts the top 5 into a bordered `WEB SEARCH` evidence block with titles and compact sources in search order. |
-| **Native WebFetch** | Say "read this page: `https://...`", or explicitly ask for `WebFetch`. Supports HTTP(S), redirects, HTML-to-text, timeouts, and response size limits, and is compatible with Clash/TUN Fake-IP DNS. Direct access to Fake-IP, intranet, or cloud metadata addresses is still blocked; network operations still follow Flavor permission approval. |
-
-Common precise usage:
-
-```text
-Start npm run dev with Shell in background mode, then use JobRead to inspect the startup logs.
-Open a persistent terminal, run a Python REPL in it, execute two snippets, then close the terminal.
-Use WebSearch to find the official TypeScript 7 migration notes, then WebFetch the most relevant official page.
-This directory has its own conventions; follow src/payments/AGENTS.md before modifying code here.
-```
-
-See [Technical Design Report §38](./技术方案报告.md#38-129-运行时生产力与原生-web-能力) for tool parameters, state machines, security boundaries, and extension interfaces; acceptance criteria are in the [Runtime productivity spec](./docs/specs/2026-08-13-runtime-productivity-waves.md).
-
 ## Quick Start
 
 > [!IMPORTANT]
