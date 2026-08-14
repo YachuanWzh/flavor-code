@@ -35,7 +35,7 @@ Flavor Code 接入 OpenAI、Anthropic 或兼容服务，在受控工作区内使
 | 🧭 | **复杂任务可控推进** | 任务计划、子 Agent、steering、follow-up、`/loop` 和 `/goal` |
 | ⏪ | **结果可追溯、可恢复** | 完整时间线、checkpoint、rewind、trace、Diff 和失败审计 |
 | 🧠 | **本地长期上下文** | 记忆、Skill、插件和项目指南均保存在本机 |
-| 🎨 | **D2C 设计转代码** | 导入 Pixso 导出结果，由 Agent 生成 Vue/React 实现并自动进行像素级视觉评估（仅 Electron） |
+| 🎨 | **E2E 需求到交付** | 从粗需求或设计稿到可交付产品：PRD、交互原型、视觉还原、接口联调、自主验收与评分交付（仅 Electron） |
 | 🛡️ | **明确的权限边界** | 分别控制读、写、Shell、网络和破坏性操作，也可使用 Docker |
 
 ## 快速开始
@@ -167,6 +167,8 @@ npm run desktop:dist     # Windows NSIS 安装包
 ```
 
 桌面端提供项目和会话切换、流式 Markdown、工具与 Diff 展示、权限确认、任务状态，以及 Skill、MCP、记忆和模型管理。
+
+侧栏的 **E2E** 模块覆盖从粗需求到可验收成果物的完整交付链路：从粗需求生成 PRD 与可交互原型（支持审阅与退回），确认后进入 D2C 视觉还原（Vue 3 / React），自动启动 Vite dev server 进行像素级对比，输出视觉还原度评分与结构化差异报告，并提供叠加、帘幕、闪烁与热力图等对比模式、SVG 标注层和按严重度排序的问题列表；视觉审阅通过后，自动生成或导入 Swagger/OpenAPI 契约以创建 Axios 封装与 Express mock 服务，随后进行自主交互验收，最终完成评分与成果物交付。
 
 ### VS Code / Qoder
 
@@ -340,6 +342,7 @@ npm run build
 - [控制面、沙箱与 VS Code 规范](./docs/specs/2026-07-29-control-plane-sandbox-vscode.md)
 - [多模态图片规范](./docs/specs/2026-07-30-multimodal-image-attachments.md)
 - [VS Code 后续规划](./docs/specs/2026-08-01-flavor-code-vscode-next.md)
+- [E2E 需求到交付规范](./docs/specs/2026-08-12-e2e-requirement-to-delivery.md)
 
 ## 安全提示
 

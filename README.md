@@ -35,7 +35,7 @@ Flavor Code connects to OpenAI, Anthropic, or compatible services and works with
 | 🧭 | **Controlled progress on complex tasks** | Task plans, sub-agents, steering, follow-ups, `/loop`, and `/goal` |
 | ⏪ | **Traceable, resumable results** | Full timeline, checkpoints, rewind, traces, diffs, and failure audits |
 | 🧠 | **Local long-term context** | Memory, Skills, plugins, and project guides stored on your machine |
-| 🎨 | **D2C design-to-code** | Import Pixso exports; the agent generates Vue/React implementations with automatic pixel-level visual evaluation (Electron only) |
+| 🎨 | **E2E requirement-to-delivery** | From a rough requirement or a design export to a delivered product: PRD, interactive prototype, visual implementation, API integration, autonomous acceptance, and scored delivery (Electron only) |
 | 🛡️ | **Clear permission boundaries** | Independent control over read, write, Shell, network, and destructive actions; Docker supported |
 
 ## Quick Start
@@ -168,7 +168,7 @@ npm run desktop:dist     # Windows NSIS installer
 
 The desktop app provides project and session switching, streaming Markdown, tool and diff views, permission confirmations, task status, and management of Skills, MCP, memory, and models.
 
-The **D2C** module in the sidebar supports a complete design-to-code loop: import a Pixso-exported HTML directory, choose a target framework (Vue 3 / React), and submit the generation task to the current session. The agent implements it under `src/d2c-output/<task>/` following the `d2c-pixso` skill (SOP); a Vite dev server then starts automatically for pixel-level comparison, producing a visual-fidelity score and a structured diff report (region offsets, color deviations, font differences). The results workbench offers overlay, curtain, flicker, and heatmap comparison modes, an SVG annotation layer, and a severity-sorted issue list, so each diff can be accepted or rejected individually and trigger module-level fixes. Once visual review passes, you can import a Swagger/OpenAPI document to auto-generate Axios wrappers and an Express mock server, moving into API integration and interactive acceptance.
+The **E2E** module in the sidebar drives a rough requirement or an existing design export through the full delivery pipeline: it generates a PRD and an interactive prototype for review, then moves into D2C visual implementation (Vue 3 / React) under `src/d2c-output/<task>/`. A Vite dev server starts automatically for pixel-level comparison, producing a visual-fidelity score and a structured diff report (region offsets, color deviations, font differences); the results workbench offers overlay, curtain, flicker, and heatmap modes, an SVG annotation layer, and a severity-sorted issue list. After visual review, a Swagger/OpenAPI contract is generated or imported to auto-create Axios wrappers and an Express mock server, followed by autonomous interactive acceptance and scored delivery.
 
 ### VS Code / Qoder
 
@@ -343,6 +343,7 @@ npm run build
 - [Multimodal image attachments spec](./docs/specs/2026-07-30-multimodal-image-attachments.md)
 - [D2C design-to-code spec](./docs/specs/2026-08-09-d2c-design-to-code.md)
 - [D2C review & integration spec](./docs/specs/2026-08-10-d2c-review-and-integration.md)
+- [E2E requirement-to-delivery spec](./docs/specs/2026-08-12-e2e-requirement-to-delivery.md)
 - [1.2.9 runtime productivity spec](./docs/specs/2026-08-13-runtime-productivity-waves.md)
 - [VS Code next steps](./docs/specs/2026-08-01-flavor-code-vscode-next.md)
 
