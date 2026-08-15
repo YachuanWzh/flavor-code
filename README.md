@@ -153,9 +153,38 @@ Common commands:
 | `/mcp` | View and manage MCP servers |
 | `/loop <goal>` | Run an autonomous loop with verification |
 | `/goal <objective>` | Run the plan, execute, adversarial-review workflow |
+| `/pals`, `/chat`, `/co-work` | Discover and collaborate with other local CLI instances |
 | `/audit` | View tool failure audits |
 
 You can submit steering or queue follow-ups while a run is in progress; once the current model response finishes, the task picks up new instructions at safe boundaries.
+
+#### CLI pals and cross-project work
+
+Interactive CLI instances on the same Windows or macOS user account can collaborate over local-only IPC (Windows named pipes or Unix sockets; no TCP fallback). Give each window a memorable alias:
+
+```bash
+# terminal A, in project A
+flavor --pal-name A
+
+# terminal B, in project B
+flavor --pal-name B
+```
+
+Useful commands:
+
+```text
+/pals                              # aliases and per-process UUIDs
+/pals --verbose                    # also show project paths and timestamps
+/pals rename api                   # rename this active instance
+/chat B Update the API and tests   # deliver to B and start its agent safely
+/co-work B Upgrade B, then adapt A # negotiate one plan before parallel work
+/co-work status [co-work-uuid]
+/co-work cancel <co-work-uuid> [reason]
+```
+
+`/chat` is bidirectional and task-oriented. If B is idle, the attributed message starts a normal model turn; if B is already running, it becomes steering, or a follow-up when another local submission is pending. Remote text is converted to a safe non-slash prompt, so `/exit`-like text is not dispatched as a local command. B can answer with `/chat A ...`.
+
+`/co-work` first places both agents in planning and waits for both to accept the same hashed plan and declare READY. Early READY intents are retained, and only the broker's exactly-once START event opens parallel execution. Each agent works only in its own project, receives only its assigned tasks, and reports bounded completion evidence. The broker-selected integration owner verifies all assertions and emits END or FAIL through `CoWorkIntegrate`. Communication uses authenticated, bounded local IPC with no TCP listener; peer input cannot approve tools or access the other workspace. UUID/alias routing and the protocol already support a third active client; durable artifact exchange, broker-restart journaling/recovery, and large-group coordination are later hardening work. See the [CLI pals specification](./docs/specs/2026-08-14-cli-pals-cowork.md).
 
 ### Electron Desktop
 

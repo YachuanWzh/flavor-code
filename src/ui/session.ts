@@ -15,6 +15,7 @@ import {
   type ModelMessage,
 } from "../models/types.js";
 import type { IdeEditorContext } from "../ide/client.js";
+import { buildPalCoWorkPlanningPrompt, buildPalCoWorkPrompt, buildPalTaskPrompt } from "../pals/prompt.js";
 
 export interface SessionApprovalRequest {
   id: string;
@@ -29,7 +30,10 @@ export interface SessionApprovalRequest {
 
 export type SessionOutput = AgentEvent
   | { type: "notice"; message: string }
+  | ({ type: "pal-task"; status: "received" } & PalTaskDelivery)
+  | ({ type: "cowork-event" } & PalCoWorkDelivery)
   | { type: "queued-prompt"; prompt: string }
+  | { type: "queued-remote-prompt"; prompt: string; senderId: string; senderAlias: string; context?: "CO-WORK PLANNING" | "CO-WORK EXECUTION" }
   | { type: "write-start"; id: string; path: string; before: string; totalBytes: number }
   | { type: "write-delta"; id: string; delta: string }
   | { type: "write-ready"; id: string }
@@ -38,6 +42,38 @@ export type SessionOutput = AgentEvent
   | { type: "approval-cleared"; id?: string }
   | { type: "clear" }
   | { type: "exit" };
+
+export interface PalTaskDelivery {
+  readonly senderId: string;
+  readonly senderAlias: string;
+  readonly messageId: string;
+  readonly taskId: string;
+  readonly goal: string;
+}
+
+interface PalCoWorkDeliveryBase {
+  readonly senderId: string;
+  readonly senderAlias: string;
+  readonly localId?: string;
+  readonly coWorkId: string;
+  readonly epoch: number;
+  readonly snapshot: unknown;
+}
+
+export type PalCoWorkDelivery = PalCoWorkDeliveryBase & (
+  | { readonly action: "START"; readonly planHash: string }
+  | { readonly action: "PROPOSE" | "PLAN" | "END" | "FAIL" | "CANCEL"; readonly planHash: string | null }
+);
+
+export interface PalSessionServices {
+  list(verbose: boolean): Promise<unknown>;
+  rename(alias: string): Promise<unknown>;
+  info(target: string): Promise<unknown>;
+  sendTask(target: string, goal: string): Promise<unknown>;
+  startCoWork(target: string, goal: string): Promise<unknown>;
+  coWorkStatus(coWorkId?: string): Promise<unknown>;
+  cancelCoWork(coWorkId: string, reason?: string): Promise<unknown>;
+}
 
 export interface SessionServices {
   hooks: HookBus;
@@ -91,6 +127,7 @@ export interface SessionServices {
   output(event: SessionOutput): void;
   questions: QuestionBridge;
   login(): Promise<string>;
+  pals?: PalSessionServices;
 }
 
 export interface MultimodalSessionInput {
@@ -102,7 +139,17 @@ type NormalizedSubmission = {
   text: string;
   displayText: string;
   initialUserMessage?: Extract<ModelMessage, { role: "user" }>;
+  remoteOrigin?: {
+    senderId: string;
+    senderAlias: string;
+    prompt: string;
+    context?: "CO-WORK PLANNING" | "CO-WORK EXECUTION";
+  };
+  coWorkPlanningKey?: string;
+  controlOnly?: boolean;
 };
+
+type CoWorkFlow = { epoch: number; status: "planning" | "started" | "terminal" };
 
 const HELP = [
   "/model <main|subagent> <provider:model>  switch any configured model",
@@ -116,6 +163,9 @@ const HELP = [
   "/goal <objective>                       run a goal pipeline with adversarial verification",
   "/mcp [status|tools|reconnect|enable|disable]  manage MCP servers",
   "/ide                                     show VS Code connection and cursor/selection",
+  "/pals [--verbose|rename <alias>|info <alias-or-uuid>]",
+  "/chat <alias-or-uuid> <goal>             send a task that starts on the receiving pal",
+  "/co-work <pal> <goal> | status [id] | cancel <id> [reason]",
 ].join("\n");
 
 export class FlavorSession {
@@ -126,31 +176,157 @@ export class FlavorSession {
   #interrupted = false;
   #startPromise: Promise<void> | undefined;
   #submissionTail: Promise<void> = Promise.resolve();
+  #coWorkEventTail: Promise<void> = Promise.resolve();
   #pendingSubmissions = 0;
   #closePromise: Promise<void> | undefined;
   readonly #queue = new AgentMessageQueue();
+  readonly #queuedSubmissions: Record<"steer" | "followUp", NormalizedSubmission[]> = { steer: [], followUp: [] };
+  readonly #seenPalTasks = new Set<string>();
+  readonly #seenCoWorkEvents = new Set<string>();
+  readonly #coWorkFlows = new Map<string, CoWorkFlow>();
+  readonly #planningMembers = new Set<string>();
+  readonly #activePlanning = new Set<string>();
+  readonly #planningIdleWaiters = new Set<() => void>();
+  readonly #pendingCoWorkStarts: NormalizedSubmission[] = [];
+  #permissionBaseline: PermissionMode | undefined;
+  #activeSubmission: NormalizedSubmission | undefined;
 
   constructor(services: SessionServices) { this.#services = services; }
 
   get active(): boolean { return this.#active !== undefined; }
   queueSnapshot(): AgentQueueSnapshot { return this.#queue.snapshot(); }
-  clearQueue(): AgentQueueSnapshot { return this.#queue.clear(); }
-  whenIdle(): Promise<void> { return this.#submissionTail; }
+  clearQueue(): AgentQueueSnapshot {
+    const snapshot = this.#queue.clear();
+    this.#queuedSubmissions.steer.length = 0;
+    this.#queuedSubmissions.followUp.length = 0;
+    return snapshot;
+  }
+  async whenIdle(): Promise<void> {
+    await this.#coWorkEventTail.catch(() => {});
+    await this.#submissionTail;
+  }
 
   steer(input: string): void {
     if (this.#closed) throw new Error("Session is closed");
     if (this.active || this.#pendingSubmissions > 0) {
-      this.#queue.enqueue("steer", input);
+      this.#enqueueMessage("steer", normalizeRequiredSubmission(input));
       this.#notice(`Steering queued (${this.#queue.snapshot().steering.length} pending).`);
-    } else void this.submit(input);
+    } else this.#submitFireAndForget(input);
   }
 
   followUp(input: string): void {
     if (this.#closed) throw new Error("Session is closed");
     if (this.active || this.#pendingSubmissions > 0) {
-      this.#queue.enqueue("followUp", input);
+      this.#enqueueMessage("followUp", normalizeRequiredSubmission(input));
       this.#notice(`Follow-up queued (${this.#queue.snapshot().followUp.length} pending).`);
-    } else void this.submit(input);
+    } else this.#submitFireAndForget(input);
+  }
+
+  #submitFireAndForget(input: string): void {
+    // Unattended submissions must never surface as unhandled rejections:
+    // hook timeouts (e.g. slow Stop-hook work) would otherwise crash the process.
+    this.submit(input).catch((error) => {
+      this.#services.output({ type: "error", error: { code: "unknown", message: message(error) } });
+    });
+  }
+
+  receivePalTask(input: PalTaskDelivery): void {
+    if (this.#closed) return;
+    if (!this.#rememberEvent(this.#seenPalTasks, input.messageId)) return;
+    this.#services.output({ type: "pal-task", status: "received", ...input });
+    this.#enqueueRemotePrompt(buildPalTaskPrompt({
+      senderId: input.senderId,
+      senderAlias: input.senderAlias,
+      messageId: input.messageId,
+      remoteText: input.goal,
+    }), {
+      senderId: input.senderId, senderAlias: input.senderAlias, prompt: input.goal,
+    });
+  }
+
+  receivePalCoWorkEvent(input: PalCoWorkDelivery): Promise<void> {
+    if (this.#closed) return Promise.resolve();
+    const operation = this.#coWorkEventTail.catch(() => {}).then(() => this.#processPalCoWorkEvent(input));
+    this.#coWorkEventTail = operation;
+    return operation;
+  }
+
+  async #processPalCoWorkEvent(input: PalCoWorkDelivery): Promise<void> {
+    if (this.#closed) return;
+    const eventIdentity = `${input.coWorkId}:${input.epoch}:${input.action}:${input.planHash ?? "none"}`;
+    if (!this.#rememberEvent(this.#seenCoWorkEvents, eventIdentity)) return;
+    this.#services.output({ type: "cowork-event", ...input });
+    const current = this.#coWorkFlows.get(input.coWorkId);
+    if (current !== undefined && input.epoch < current.epoch) return;
+    if (current !== undefined && input.epoch > current.epoch) {
+      this.#planningMembers.delete(coWorkKey(input.coWorkId, current.epoch));
+      this.#coWorkFlows.delete(input.coWorkId);
+    }
+    const existing = this.#coWorkFlows.get(input.coWorkId);
+    if (input.action === "END" || input.action === "FAIL" || input.action === "CANCEL") {
+      const key = coWorkKey(input.coWorkId, input.epoch);
+      if (existing?.epoch === input.epoch && existing.status === "terminal") return;
+      this.#coWorkFlows.set(input.coWorkId, { epoch: input.epoch, status: "terminal" });
+      this.#planningMembers.delete(key);
+      if (this.#activeSubmission?.coWorkPlanningKey === key) {
+        this.#stopActivePlanning(input, key);
+        await this.#waitForPlanningIdle(key);
+      }
+      await this.#releasePlanningGateIfSafe();
+      return;
+    }
+    if (input.action === "PROPOSE" || input.action === "PLAN") {
+      if (existing?.epoch === input.epoch && existing.status !== "planning") return;
+      const key = coWorkKey(input.coWorkId, input.epoch);
+      this.#coWorkFlows.set(input.coWorkId, { epoch: input.epoch, status: "planning" });
+      if (!isRequiredCoWorkParticipant(input.snapshot, input.localId)) return;
+      this.#planningMembers.add(key);
+      const planningPrompt = buildPalCoWorkPlanningPrompt({ ...input, action: input.action });
+      const submission: NormalizedSubmission = {
+        text: planningPrompt,
+        displayText: planningPrompt,
+        remoteOrigin: {
+          senderId: input.senderId, senderAlias: input.senderAlias,
+          prompt: coWorkDisplayPrompt(input.snapshot), context: "CO-WORK PLANNING",
+        },
+        coWorkPlanningKey: key,
+      };
+      if (this.#activeSubmission?.coWorkPlanningKey === key) this.#enqueueMessage("steer", submission);
+      else this.#queueOrSubmitRemote(submission, "followUp");
+      return;
+    }
+    if (input.action !== "START" || input.planHash === null) return;
+    if (existing?.epoch === input.epoch && existing.status !== "planning") return;
+    const key = coWorkKey(input.coWorkId, input.epoch);
+    this.#coWorkFlows.set(input.coWorkId, { epoch: input.epoch, status: "started" });
+    this.#planningMembers.delete(key);
+    if (!isRequiredCoWorkParticipant(input.snapshot, input.localId)) {
+      await this.#releasePlanningGateIfSafe();
+      return;
+    }
+    const startPrompt = buildPalCoWorkPrompt({
+      senderId: input.senderId,
+      senderAlias: input.senderAlias,
+      messageId: `cowork:${eventIdentity}`,
+      coWorkId: input.coWorkId,
+      epoch: input.epoch,
+      planHash: input.planHash,
+      snapshot: input.snapshot,
+      ...(input.localId === undefined ? {} : { localId: input.localId }),
+    });
+    this.#pendingCoWorkStarts.push({
+      text: startPrompt,
+      displayText: startPrompt,
+      remoteOrigin: {
+        senderId: input.senderId, senderAlias: input.senderAlias,
+        prompt: coWorkDisplayPrompt(input.snapshot), context: "CO-WORK EXECUTION",
+      },
+    });
+    if (this.#activeSubmission?.coWorkPlanningKey === key) {
+      this.#stopActivePlanning(input, key);
+      await this.#waitForPlanningIdle(key);
+    }
+    await this.#releasePlanningGateIfSafe();
   }
 
   async start(): Promise<void> {
@@ -168,6 +344,10 @@ export class FlavorSession {
     if (this.#closed) throw new Error("Session is closed");
     const submission = normalizeSubmission(input);
     if (submission === undefined) return;
+    return this.#enqueueNormalizedSubmission(submission);
+  }
+
+  #enqueueNormalizedSubmission(submission: NormalizedSubmission): Promise<void> {
     this.#pendingSubmissions += 1;
     const operation = this.#submissionTail.catch(() => {}).then(() => this.#runSubmissionChain(submission))
       .finally(() => { this.#pendingSubmissions -= 1; });
@@ -180,12 +360,14 @@ export class FlavorSession {
     let initial = true;
     while (pending.length > 0) {
       const submission = pending.shift()!;
-      if (!initial) this.#services.output({ type: "queued-prompt", prompt: submission.displayText });
+      if (!this.#isSubmissionCurrent(submission) || submission.controlOnly === true) {
+        pending.push(...this.#drainMessages("steer"), ...this.#drainMessages("followUp"));
+        continue;
+      }
+      if (!initial) this.#outputQueuedSubmission(submission);
       initial = false;
       await this.#runSubmission(submission);
-      pending.push(...[...this.#queue.drain("steer"), ...this.#queue.drain("followUp")]
-        .map((prompt) => normalizeSubmission(prompt))
-        .filter((item): item is NormalizedSubmission => item !== undefined));
+      pending.push(...this.#drainMessages("steer"), ...this.#drainMessages("followUp"));
     }
   }
 
@@ -193,8 +375,13 @@ export class FlavorSession {
     const prompt = submission.text;
     await this.start();
     if (this.#closed) throw new Error("Session is closed");
+    if (!this.#isSubmissionCurrent(submission)) return;
+    if (submission.coWorkPlanningKey !== undefined) {
+      if (!await this.#activatePlanningGate(submission.coWorkPlanningKey)) return;
+    }
     const controller = new AbortController();
     this.#active = controller;
+    this.#activeSubmission = submission;
     this.#interrupted = false;
     let outcome = "completed";
     try {
@@ -214,7 +401,7 @@ export class FlavorSession {
       const command = parseSlashCommand(prompt, this.#services.pluginCommands(), skillNames);
       if (command !== null) await this.#dispatch(command, controller.signal);
       else for await (const event of this.#services.run(prompt, controller.signal, {
-        getSteeringMessages: () => this.#queue.drain("steer"),
+        getSteeringMessages: () => this.#drainMessages("steer").map((item) => item.text),
         ...(decision.additionalContext === undefined
           ? {}
           : { additionalContext: decision.additionalContext }),
@@ -241,7 +428,17 @@ export class FlavorSession {
         }
       } finally {
         this.#active = undefined;
-        await this.#services.hooks.emit({ version: 1, type: "Stop", payload: { outcome } });
+        this.#activeSubmission = undefined;
+        if (submission.coWorkPlanningKey !== undefined) this.#finishActivePlanning(submission.coWorkPlanningKey);
+        try {
+          await this.#services.hooks.emit({ version: 1, type: "Stop", payload: { outcome } });
+        } catch (error) {
+          // Stop-hook failures (e.g. handler timeouts) must not reject the
+          // submission chain — remote submissions are fire-and-forget, and an
+          // escaping TimeoutError would crash the process.
+          try { this.#services.output({ type: "error", error: { code: "unknown", message: message(error) } }); }
+          catch { /* Never let cleanup failures escape. */ }
+        }
       }
     }
   }
@@ -263,12 +460,20 @@ export class FlavorSession {
 
   async #close(): Promise<void> {
     this.#closed = true;
+    this.#planningMembers.clear();
+    this.#pendingCoWorkStarts.length = 0;
     this.#active?.abort(new Error("Session closed"));
+    await this.#coWorkEventTail.catch(() => {});
     await this.#submissionTail.catch(() => {});
+    if (this.#permissionBaseline !== undefined) {
+      const baseline = this.#permissionBaseline;
+      await this.#services.setPermissionMode(baseline);
+      this.#permissionBaseline = undefined;
+    }
     await this.#startPromise?.catch(() => {});
     if (this.#started) await this.#services.hooks.emit({
       version: 1, type: "SessionEnd", payload: { workspace: this.#services.workspace },
-    });
+    }).catch(() => { /* Shutdown hooks are best-effort; never fail close(). */ });
   }
 
   async #dispatch(command: SlashCommand, signal: AbortSignal): Promise<void> {
@@ -293,6 +498,22 @@ export class FlavorSession {
       for await (const event of this.#services.runGoal(command.goal, signal)) this.#services.output(event);
     } else if (command.name === "mcp") {
       this.#notice(await this.#services.mcp(command, signal));
+    } else if (command.name === "pals") {
+      const pals = requiredPals(this.#services.pals);
+      if (command.action === "list") this.#collaborationNotice(format(await pals.list(command.verbose)));
+      else if (command.action === "rename") this.#collaborationNotice(format(await pals.rename(command.alias)));
+      else this.#collaborationNotice(format(await pals.info(command.target)));
+    } else if (command.name === "chat") {
+      this.#collaborationNotice(format(await requiredPals(this.#services.pals).sendTask(command.target, command.goal)));
+    } else if (command.name === "co-work") {
+      const pals = requiredPals(this.#services.pals);
+      if (command.action === "start") {
+        this.#collaborationNotice(format(await pals.startCoWork(command.target, command.goal)));
+      } else if (command.action === "status") {
+        this.#collaborationNotice(format(await pals.coWorkStatus(command.coWorkId)));
+      } else {
+        this.#collaborationNotice(format(await pals.cancelCoWork(command.coWorkId, command.reason)));
+      }
     } else if (command.name === "ide") {
       this.#notice(await required(this.#services.ide, "ide")());
     } else if (command.name === "memory") {
@@ -343,6 +564,120 @@ export class FlavorSession {
   }
 
   #notice(message: string): void { this.#services.output({ type: "notice", message }); }
+  #collaborationNotice(message: string): void {
+    const limit = 8_192;
+    this.#notice(message.length <= limit ? message : `${message.slice(0, limit - 1)}…`);
+  }
+
+  #enqueueRemotePrompt(prompt: string, remoteOrigin: NonNullable<NormalizedSubmission["remoteOrigin"]>): void {
+    this.#queueOrSubmitRemote({ text: prompt, displayText: prompt, remoteOrigin }, "steer");
+  }
+
+  #queueOrSubmitRemote(submission: NormalizedSubmission, activeKind: "steer" | "followUp"): void {
+    if (this.#closed) return;
+    if (this.active) {
+      this.#enqueueMessage(activeKind, submission);
+      return;
+    }
+    if (this.#pendingSubmissions > 0) {
+      this.#enqueueMessage("followUp", submission);
+      return;
+    }
+    this.#enqueueNormalizedSubmission(submission).catch((error) => {
+      this.#services.output({ type: "error", error: { code: "unknown", message: message(error) } });
+    });
+  }
+
+  #enqueueMessage(kind: "steer" | "followUp", submission: NormalizedSubmission): void {
+    this.#queue.enqueue(kind, submission.text);
+    this.#queuedSubmissions[kind].push(submission);
+  }
+
+  #drainMessages(kind: "steer" | "followUp"): NormalizedSubmission[] {
+    const prompts = this.#queue.drain(kind);
+    return prompts.map((prompt) => this.#queuedSubmissions[kind].shift() ?? normalizeRequiredSubmission(prompt));
+  }
+
+  #outputQueuedSubmission(submission: NormalizedSubmission): void {
+    const origin = submission.remoteOrigin;
+    if (origin === undefined) {
+      this.#services.output({ type: "queued-prompt", prompt: submission.displayText });
+      return;
+    }
+    this.#services.output({
+      type: "queued-remote-prompt",
+      prompt: origin.prompt,
+      senderId: origin.senderId,
+      senderAlias: origin.senderAlias,
+      ...(origin.context === undefined ? {} : { context: origin.context }),
+    });
+  }
+
+  #isSubmissionCurrent(submission: NormalizedSubmission): boolean {
+    const key = submission.coWorkPlanningKey;
+    if (key === undefined) return true;
+    const [coWorkId, epochText] = splitCoWorkKey(key);
+    const flow = this.#coWorkFlows.get(coWorkId);
+    return flow?.epoch === Number(epochText) && flow.status === "planning";
+  }
+
+  async #activatePlanningGate(key: string): Promise<boolean> {
+    if (!this.#planningMembers.has(key)) return false;
+    if (this.#permissionBaseline === undefined) this.#permissionBaseline = this.#services.permissionMode();
+    if (this.#services.permissionMode() !== "plan") await this.#services.setPermissionMode("plan");
+    if (!this.#planningMembers.has(key)) return false;
+    this.#activePlanning.add(key);
+    return true;
+  }
+
+  #finishActivePlanning(key: string): void {
+    this.#activePlanning.delete(key);
+    const waiters = [...this.#planningIdleWaiters];
+    this.#planningIdleWaiters.clear();
+    for (const waiter of waiters) waiter();
+  }
+
+  #waitForPlanningIdle(key: string): Promise<void> {
+    if (!this.#activePlanning.has(key)) return Promise.resolve();
+    return new Promise((resolve) => {
+      const check = (): void => {
+        if (!this.#activePlanning.has(key)) resolve();
+        else this.#planningIdleWaiters.add(check);
+      };
+      this.#planningIdleWaiters.add(check);
+    });
+  }
+
+  #stopActivePlanning(input: PalCoWorkDelivery, key: string): void {
+    if (this.#activeSubmission?.coWorkPlanningKey !== key || this.#active === undefined) return;
+    const alias = input.senderAlias.slice(0, 120);
+    const stop = `PAL co-work ${input.action} from ${alias} (${input.coWorkId.slice(0, 8)}): stop this planning turn; do not execute stale work.`;
+    this.#enqueueMessage("steer", { text: stop, displayText: stop, controlOnly: true });
+    this.#active.abort(new Error(stop));
+  }
+
+  async #releasePlanningGateIfSafe(): Promise<void> {
+    if (this.#planningMembers.size > 0 || this.#activePlanning.size > 0) return;
+    if (this.#permissionBaseline !== undefined) {
+      const baseline = this.#permissionBaseline;
+      await this.#services.setPermissionMode(baseline);
+      this.#permissionBaseline = undefined;
+    }
+    const starts = this.#pendingCoWorkStarts.splice(0);
+    for (const submission of starts) this.#queueOrSubmitRemote(submission, "followUp");
+  }
+
+  #rememberEvent(seen: Set<string>, identity: string): boolean {
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    const limit = 2_048;
+    while (seen.size > limit) {
+      const oldest = seen.values().next().value as string | undefined;
+      if (oldest === undefined) break;
+      seen.delete(oldest);
+    }
+    return true;
+  }
 }
 
 function normalizeSubmission(input: string | MultimodalSessionInput): NormalizedSubmission | undefined {
@@ -362,6 +697,37 @@ function normalizeSubmission(input: string | MultimodalSessionInput): Normalized
   };
 }
 
+function normalizeRequiredSubmission(input: string): NormalizedSubmission {
+  const normalized = normalizeSubmission(input);
+  if (normalized === undefined) throw new Error("Cannot queue an empty message");
+  return normalized;
+}
+
+function coWorkKey(coWorkId: string, epoch: number): string { return `${coWorkId}:${epoch}`; }
+
+function splitCoWorkKey(key: string): [string, string] {
+  const separator = key.lastIndexOf(":");
+  return [key.slice(0, separator), key.slice(separator + 1)];
+}
+
+function coWorkDisplayPrompt(snapshot: unknown): string {
+  if (typeof snapshot !== "object" || snapshot === null) return "Co-work update";
+  const goal = (snapshot as { goal?: unknown }).goal;
+  return typeof goal === "string" && goal.length > 0 ? goal : "Co-work update";
+}
+
+function isRequiredCoWorkParticipant(snapshot: unknown, localId: string | undefined): boolean {
+  if (localId === undefined) return true;
+  if (typeof snapshot !== "object" || snapshot === null) return false;
+  const participants = (snapshot as { participants?: unknown }).participants;
+  if (!Array.isArray(participants)) return true;
+  return participants.some((participant) => {
+    if (typeof participant !== "object" || participant === null) return false;
+    const value = participant as { palId?: unknown; required?: unknown };
+    return value.palId === localId && value.required === true;
+  });
+}
+
 function format(value: unknown): string {
   if (Array.isArray(value) && value.length === 0) return "None registered.";
   return JSON.stringify(value, null, 2) ?? String(value);
@@ -369,6 +735,11 @@ function format(value: unknown): string {
 
 function required<T extends (...args: never[]) => unknown>(service: T | undefined, name: string): T {
   if (service === undefined) throw new Error(`Session history command /${name} is unavailable`);
+  return service;
+}
+
+function requiredPals(service: PalSessionServices | undefined): PalSessionServices {
+  if (service === undefined) throw new Error("Pal collaboration commands are unavailable");
   return service;
 }
 

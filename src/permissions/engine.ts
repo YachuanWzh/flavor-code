@@ -29,6 +29,8 @@ export interface PermissionEngineOptions {
 }
 
 const CONTROL_TOOLS = new Set(["TaskPlan", "TaskUpdate", "AskUserQuestion", "TodoWrite", "TaskOutput", "JobList", "JobRead", "JobWait", "JobKill", "TerminalRead", "TerminalList"]);
+const COLLABORATION_CONTROL_TOOLS = new Set(["PalsList", "CoWorkState", "CoWorkReady"]);
+const COLLABORATION_SHARE_TOOLS = new Set(["PalSend", "CoWorkPlan", "CoWorkProgress", "CoWorkComplete", "CoWorkIntegrate"]);
 const READ_TOOLS = new Set(["Read", "Glob", "Grep", "Search", "List", "SkillResource", "LspFindRefs", "LspHover", "LspDiagnostics", "ListRegisteredTools"]);
 const WRITE_TOOLS = new Set(["Write", "Edit", "ApplyPatch", "Copy", "Mkdir", "RegisterTool"]);
 const DESTRUCTIVE_TOOLS = new Set(["Delete", "Move", "RemoveTool"]);
@@ -86,6 +88,15 @@ export class PermissionEngine {
       ? { decision: "allow" }
       : { decision: "deny", reason: "Task delegation is restricted to the main agent" };
     if (CONTROL_TOOLS.has(request.tool)) return { decision: "allow" };
+    if (COLLABORATION_CONTROL_TOOLS.has(request.tool)) return request.agent === "main"
+      ? { decision: "allow" }
+      : { decision: "deny", reason: "Cross-instance collaboration is restricted to the main agent" };
+    if (COLLABORATION_SHARE_TOOLS.has(request.tool)) {
+      if (request.agent !== "main") return { decision: "deny", reason: "Cross-instance collaboration is restricted to the main agent" };
+      return this.#mode === "bypassPermissions"
+        ? { decision: "allow" }
+        : { decision: "ask", reason: "Sharing content with another local Flavor instance requires approval", allowAlways: false };
+    }
     const paths = request.paths ?? [];
     if (PATH_REQUIRED_TOOLS.has(request.tool) && paths.length === 0) {
       return { decision: "deny", reason: `${request.tool} requires at least one path` };

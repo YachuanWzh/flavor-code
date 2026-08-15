@@ -18,6 +18,12 @@ export interface TranscriptTurn {
   blocks: TranscriptBlock[];
   taskSnapshot?: TaskSnapshot;
   suppressedTaskIds?: string[];
+  source?: {
+    kind: "pal";
+    alias: string;
+    instanceId: string;
+    context?: "CO-WORK PLANNING" | "CO-WORK EXECUTION";
+  };
 }
 
 export interface TranscriptHistoryMessage {
@@ -115,6 +121,14 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
       prompt: event.prompt,
     });
   }
+  if (event.type === "queued-remote-prompt") {
+    return createPalTurn(state.active === undefined ? state : finishActive(state), {
+      alias: event.senderAlias,
+      instanceId: event.senderId,
+      prompt: event.prompt,
+      ...(event.context === undefined ? {} : { context: event.context }),
+    });
+  }
   if (event.type === "tasks-cleared") {
     const { taskSnapshot: _taskSnapshot, ...rest } = state;
     return rest;
@@ -127,6 +141,8 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
       ...(active === undefined ? {} : { active }),
     };
   }
+  if (event.type === "pal-task") return applyPalTaskEvent(state, event);
+  if (event.type === "cowork-event") return applyCoWorkEvent(state, event);
   if (event.type === "exit" || state.active === undefined) return state;
   if (event.type === "model-start") return upsertStatus({
     ...state,
@@ -242,6 +258,116 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
       kind: "status", id: `limit:${state.active.blocks.length}`, state: event.extended ? "info" : "failed",
       text: `◆ Iteration limit ${event.maxIterations} reached at round ${event.iteration}${suffix}`,
     });
+  }
+  return state;
+}
+
+const MAX_PEER_PRESENTATION_CHARS = 240;
+
+function boundedPeerText(value: unknown, fallback: string): string {
+  const text = typeof value === "string" && value.length > 0 ? value : fallback;
+  return text.length <= MAX_PEER_PRESENTATION_CHARS
+    ? text
+    : `${text.slice(0, MAX_PEER_PRESENTATION_CHARS - 1)}…`;
+}
+
+function palLabel(alias: string, instanceId: string): string {
+  return `PAL · ${boundedPeerText(alias, "unknown")} (${instanceId.slice(0, 8)})`;
+}
+
+function createPalTurn(
+  state: TranscriptState,
+  input: { alias: string; instanceId: string; prompt: string; context?: "CO-WORK PLANNING" | "CO-WORK EXECUTION" },
+): TranscriptState {
+  const active: TranscriptTurn = {
+    id: state.nextId,
+    submittedAt: new Date().toISOString(),
+    prompt: boundedPeerText(input.prompt, "Peer collaboration update"),
+    assistantText: "",
+    statusLines: [],
+    blocks: [],
+    source: {
+      kind: "pal",
+      alias: boundedPeerText(input.alias, "unknown"),
+      instanceId: input.instanceId,
+      ...(input.context === undefined ? {} : { context: input.context }),
+    },
+    ...(state.taskSnapshot === undefined ? {} : { taskSnapshot: state.taskSnapshot }),
+  };
+  return { ...state, active, nextId: state.nextId + 1 };
+}
+
+function applyPalTaskEvent(
+  state: TranscriptState,
+  event: Extract<SessionOutput, { type: "pal-task" }>,
+): TranscriptState {
+  if (state.active === undefined) {
+    return createPalTurn(state, {
+      alias: event.senderAlias,
+      instanceId: event.senderId,
+      prompt: event.goal,
+    });
+  }
+  return upsertStatus(state, {
+    kind: "status",
+    id: `pal-task:${event.taskId}`,
+    state: "info",
+    text: `${palLabel(event.senderAlias, event.senderId)} · task received`,
+    details: boundedPeerText(event.goal, "Peer task"),
+  });
+}
+
+function applyCoWorkEvent(
+  initial: TranscriptState,
+  event: Extract<SessionOutput, { type: "cowork-event" }>,
+): TranscriptState {
+  const snapshot = typeof event.snapshot === "object" && event.snapshot !== null
+    ? event.snapshot as Record<string, unknown>
+    : {};
+  const goal = boundedPeerText(snapshot.goal, "Co-work update");
+  const context = event.action === "START" ? "CO-WORK EXECUTION" : "CO-WORK PLANNING";
+  const wasIdle = initial.active === undefined;
+  let state = wasIdle
+    ? createPalTurn(initial, { alias: event.senderAlias, instanceId: event.senderId, prompt: goal, context })
+    : initial;
+
+  if (event.action === "START" && state.active?.source?.kind === "pal") {
+    state = { ...state, active: { ...state.active, source: { ...state.active.source, context: "CO-WORK EXECUTION" } } };
+  }
+
+  const integration = typeof snapshot.integration === "object" && snapshot.integration !== null
+    ? snapshot.integration as Record<string, unknown>
+    : undefined;
+  const failedAssertion = Array.isArray(snapshot.completionAssertions)
+    ? snapshot.completionAssertions.find((assertion) => typeof assertion === "object" && assertion !== null
+      && (assertion as Record<string, unknown>).passed === false) as Record<string, unknown> | undefined
+    : undefined;
+  const passed = integration?.passed;
+  const details = event.action === "END" || event.action === "FAIL"
+    ? boundedPeerText(integration?.evidence ?? failedAssertion?.detail, goal)
+    : goal;
+  const stateByAction = event.action === "PROPOSE" || event.action === "START" ? "running"
+    : event.action === "END" ? (passed === false ? "failed" : "completed")
+    : event.action === "FAIL" ? "failed"
+    : event.action === "CANCEL" ? "cancelled"
+    : "info";
+  const textByAction = event.action === "PROPOSE" ? "Co-work proposal received"
+    : event.action === "PLAN" ? "Co-work plan updated"
+    : event.action === "START" ? "Co-work execution started"
+    : event.action === "END" ? (passed === false ? "× Co-work ended · integration failed" : "✓ Co-work ended")
+    : event.action === "FAIL" ? "× Co-work failed"
+    : "× Co-work cancelled";
+  state = upsertStatus(state, {
+    kind: "status",
+    id: `cowork:${event.coWorkId}:${event.action}`,
+    state: stateByAction,
+    text: `${palLabel(event.senderAlias, event.senderId)} · ${textByAction}`,
+    details,
+  });
+
+  if ((event.action === "END" || event.action === "FAIL" || event.action === "CANCEL")
+    && (wasIdle || state.active?.source?.kind === "pal")) {
+    return finishActive(state);
   }
   return state;
 }

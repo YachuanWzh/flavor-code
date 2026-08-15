@@ -1,7 +1,7 @@
 ﻿import { readFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
-import { homedir, release as osRelease, version as osVersion } from "node:os";
-import { join, relative, resolve, sep } from "node:path";
+import { homedir, release as osRelease, tmpdir, version as osVersion } from "node:os";
+import { basename, join, relative, resolve, sep } from "node:path";
 
 import {
   parseFinalSubagentMessage,
@@ -89,6 +89,11 @@ import { JobRegistry, type JobSnapshot } from "./jobs/registry.js";
 import { TerminalService } from "./terminal/service.js";
 import { createJobTools } from "./tools/jobs.js";
 import { createTerminalTools } from "./tools/terminal.js";
+import { palSocketAddress } from "./pals/address.js";
+import { ensurePalBrokerRunning } from "./pals/broker-cli.js";
+import { PalClient } from "./pals/client.js";
+import { CollaborationShareGuard, createPalsTools, type PalClientLike } from "./pals/tools.js";
+import { MIN_UUID_PREFIX_LENGTH, normalizePalIdentity, PalAliasSchema, PalTargetSchema, type BrokerEvent, type PalPresence } from "./pals/protocol.js";
 
 const INTERRUPTED_TASK_PLAN_CONTEXT = [
   "The previous turn's task plan was cancelled and archived, so it is no longer active.",
@@ -114,6 +119,13 @@ export interface ProductionRuntimeOptions {
   mcpClientFactory?: McpClientFactory;
   /** Additional tools provided by embedders (e.g. desktop-only D2C tools). */
   extraTools?: readonly ToolDefinition<unknown>[];
+  /** Explicitly opt into CLI-local collaboration. Omit for print/RPC/eval callers. */
+  collaboration?: {
+    instanceId: string;
+    alias?: string;
+    client?: PalClientLike;
+    createClient?: (input: { instanceId: string; alias: string; projectPath: string }) => PalClientLike;
+  };
 }
 
 export interface ProductionRuntime {
@@ -440,7 +452,104 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   });
   await pluginHost.loadAll();
   let sleepScheduler: ProjectSleepScheduler | undefined;
+  let collaborationClient: PalClientLike | undefined;
+  let unsubscribeCollaboration: (() => void) | undefined;
+  let collaborationSession: FlavorSession | undefined;
+  let deliverCollaborationEvent: ((event: BrokerEvent) => Promise<void>) | undefined;
+  let latestCoWorkId: string | undefined;
+  const pendingCollaborationEvents: BrokerEvent[] = [];
+  let collaborationEventPump: Promise<void> | undefined;
+  let collaborationEventsOpen = true;
+  const pumpCollaborationEvents = (): void => {
+    if (collaborationEventPump !== undefined || collaborationSession === undefined || deliverCollaborationEvent === undefined) return;
+    collaborationEventPump = (async () => {
+      while (pendingCollaborationEvents.length > 0) {
+        const event = pendingCollaborationEvents.shift()!;
+        try { await deliverCollaborationEvent!(event); }
+        catch (error) { diagnostics.push(`Pal event failed: ${message(error)}`); }
+      }
+    })().finally(() => {
+      collaborationEventPump = undefined;
+      if (collaborationEventsOpen && pendingCollaborationEvents.length > 0) pumpCollaborationEvents();
+    });
+  };
+  const enqueueCollaborationEvent = (event: BrokerEvent): void => {
+    if (!collaborationEventsOpen) return;
+    if (pendingCollaborationEvents.length >= 256) {
+      diagnostics.push("Pal event queue is full; newest event was rejected");
+      return;
+    }
+    pendingCollaborationEvents.push(event);
+    pumpCollaborationEvents();
+  };
   try {
+  if (options.collaboration !== undefined) {
+    const collaboration = options.collaboration;
+    const defaultAlias = `${basename(workspace) || "flavor"}-${collaboration.instanceId.slice(0, 8)}`.slice(0, 64);
+    const alias = PalAliasSchema.parse(collaboration.alias?.trim() || defaultAlias);
+    const address = palSocketAddress({
+      platform: process.platform,
+      userScope: home,
+      runtimeDir: join(tmpdir(), `flavor-code-pals-${createHash("sha256").update(home).digest("hex").slice(0, 16)}`),
+    });
+    collaborationClient = collaboration.client ?? collaboration.createClient?.({
+      instanceId: collaboration.instanceId, alias, projectPath: workspace,
+    }) ?? new PalClient({
+      address,
+      authHome: home,
+      registration: { id: collaboration.instanceId, alias, projectPath: workspace },
+      startBroker: () => ensurePalBrokerRunning({ address }),
+    });
+    deliverCollaborationEvent = async (event: BrokerEvent): Promise<void> => {
+      const session = collaborationSession;
+      const client = collaborationClient;
+      if (session === undefined || client === undefined) return;
+      const senderId = event.type === "cowork-event" ? event.actorId
+        : event.type === "chat-event" || event.type === "task-event" ? event.senderId : undefined;
+      if (senderId === undefined) return;
+      let senderAlias = senderId.slice(0, 8);
+      try {
+        senderAlias = (await client.list()).find(({ id }) => id === senderId)?.alias ?? senderAlias;
+      } catch { /* Disconnected senders retain a safe short UUID fallback. */ }
+      if (event.type === "task-event") {
+        if (event.status !== "accepted" || event.detail === undefined) return;
+        session.receivePalTask({
+          senderId, senderAlias, messageId: event.messageId, taskId: event.taskId, goal: event.detail,
+        });
+        return;
+      }
+      if (event.type === "chat-event") {
+        session.receivePalTask({
+          senderId, senderAlias, messageId: event.messageId, taskId: event.messageId, goal: event.message,
+        });
+        return;
+      }
+      if (event.type === "cowork-event") {
+        latestCoWorkId = event.coWorkId;
+        if (event.action === "PROPOSE"
+          && event.snapshot.participants.some(({ palId, required }) => palId === collaboration.instanceId && required)
+          && !event.snapshot.acceptedParticipantIds.includes(collaboration.instanceId)) {
+          await client.coWorkAction({ type: "cowork-accept", coWorkId: event.coWorkId, epoch: event.epoch });
+        }
+        const deliveryBase = {
+          senderId, senderAlias, localId: collaboration.instanceId,
+          coWorkId: event.coWorkId, epoch: event.epoch, snapshot: event.snapshot,
+        };
+        if (event.action === "START") {
+          if (event.planHash === null) return;
+          await session.receivePalCoWorkEvent({ ...deliveryBase, action: "START", planHash: event.planHash });
+        } else {
+          await session.receivePalCoWorkEvent({ ...deliveryBase, action: event.action, planHash: event.planHash });
+        }
+      }
+    };
+    unsubscribeCollaboration = collaborationClient.subscribe(enqueueCollaborationEvent);
+    tools.push(...createPalsTools(collaborationClient, {
+      selfId: collaboration.instanceId,
+      shareGuard: new CollaborationShareGuard({ redact: (value) => redactSecrets(value, secrets) }),
+    }));
+    await collaborationClient.start();
+  }
   const syncMcpTools = (): void => {
     for (const tool of mcpTools) remove(tools, tool);
     mcpTools.length = 0;
@@ -875,12 +984,17 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     emitOutput({ type: "tasks-cleared" });
     await persist();
     return { decision: "allow" };
+  }, {
+    // This handler awaits long-term-memory model calls; the 10s default timeout
+    // would abort them mid-flight and surface a TimeoutError through the Stop hook.
+    timeoutMs: 300_000,
+    failurePolicy: "allow",
   });
   hooks.on("SessionEnd", async () => {
     await memoryCoordinator?.flush();
     await persist();
     return { decision: "allow" };
-  });
+  }, { timeoutMs: 300_000, failurePolicy: "allow" });
   hooks.on("AfterModelCall", (event) => {
     const {
       modelId, agent, providerError, errorCode, errorMessage, attempt, maxAttempts,
@@ -1085,12 +1199,60 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     restoreContext: (snapshot) => harness.main.context.restore(snapshot),
   });
 
+  const collaborationId = options.collaboration?.instanceId;
+  const resolveCollaborationTarget = async (target: string): Promise<PalPresence> => {
+    const pals = await collaborationClient!.list();
+    const parsedTarget = PalTargetSchema.safeParse(target);
+    if (!parsedTarget.success) throw new Error("Invalid pal target");
+    const normalized = normalizePalIdentity(parsedTarget.data);
+    const exact = pals.find((pal) => pal.id.toLowerCase() === normalized || normalizePalIdentity(pal.alias) === normalized);
+    if (exact !== undefined) return exact;
+    const prefixed = normalized.length < MIN_UUID_PREFIX_LENGTH
+      ? []
+      : pals.filter((pal) => pal.id.toLowerCase().startsWith(normalized));
+    if (prefixed.length === 1) return prefixed[0]!;
+    throw new Error(prefixed.length > 1 ? `Pal target '${target}' is ambiguous` : `Pal '${target}' is not active`);
+  };
+  const palServices: SessionServices["pals"] = collaborationClient === undefined || collaborationId === undefined ? undefined : {
+    list: async (verbose) => (await collaborationClient!.list()).map((presence) => verbose ? {
+      id: presence.id, alias: presence.alias, projectPath: presence.projectPath,
+      connectedAt: presence.connectedAt, lastSeenAt: presence.lastSeenAt,
+    } : {
+      id: presence.id, alias: presence.alias,
+      connectedAt: presence.connectedAt, lastSeenAt: presence.lastSeenAt,
+    }),
+    rename: (alias) => collaborationClient!.rename(alias),
+    info: (target) => resolveCollaborationTarget(target),
+    sendTask: (target, goal) => collaborationClient!.sendTask(target, goal),
+    startCoWork: async (target, goal) => {
+      const recipient = await resolveCollaborationTarget(target);
+      if (recipient.id.toLowerCase() === collaborationId.toLowerCase()) {
+        throw new Error("A co-work target cannot be the local instance itself");
+      }
+      const snapshot = await collaborationClient!.startCoWork({
+        goal,
+        participants: [{ palId: collaborationId, required: true }, { palId: recipient.id, required: true }],
+      });
+      latestCoWorkId = snapshot.coWorkId;
+      return snapshot;
+    },
+    coWorkStatus: (coWorkId) => {
+      const selected = coWorkId ?? latestCoWorkId;
+      if (selected === undefined) throw new Error("No co-work has been selected");
+      return collaborationClient!.coWorkStatus(selected);
+    },
+    cancelCoWork: (coWorkId, reason) => collaborationClient!.cancelCoWork(
+      coWorkId, reason?.trim() || "cancelled by local user",
+    ),
+  };
+
   const services: SessionServices = {
     hooks, workspace,
     mainModel: () => harness.mainModelId,
     subagentModel: () => harness.subagentModelId,
     llmServiceName: () => effectiveLlm?.serviceName,
     permissionMode: () => harness.permissionMode,
+    ...(palServices === undefined ? {} : { pals: palServices }),
     run: (prompt, signal, runOptions) => {
       interruptedTaskPlanNeedsReassessment = false;
       return persistAndCheckpointAfter(runMain(
@@ -1423,6 +1585,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     sleepScheduler.start();
   }
   const session = new FlavorSession(services);
+  collaborationSession = session;
+  pumpCollaborationEvents();
   const authorization = {
     permissionProfile: () => harness.permissionProfile,
     setPermissionProfile: (profile: PermissionProfile) => harness.setPermissionProfile(profile),
@@ -1436,6 +1600,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     async dispose() {
       if (disposed) return;
       disposed = true;
+      collaborationEventsOpen = false;
+      unsubscribeCollaboration?.();
+      await collaborationEventPump;
       mcpDiscarded = true;
       await sleepScheduler?.dispose();
       await memoryCoordinator?.flush();
@@ -1447,10 +1614,12 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       await jobs.dispose();
       auditLogger.close();
       memoryReviews.dispose();
+      await collaborationClient?.close();
       await cleanupProduction(approvals, questions, pluginHost, mcpManager, harness);
     },
   };
   } catch (primaryError) {
+    collaborationEventsOpen = false;
     mcpDiscarded = true;
     memoryReviews.dispose();
     try {
@@ -1459,6 +1628,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       await executionEnvironment?.dispose();
       terminals.dispose();
       await jobs.dispose();
+      unsubscribeCollaboration?.();
+      pendingCollaborationEvents.length = 0;
+      await collaborationEventPump;
+      await collaborationClient?.close();
       await cleanupProduction(approvals, questions, pluginHost, mcpManager, harnessCreated ? harness : undefined);
     }
     catch (cleanupError) { attachCleanupError(primaryError, cleanupError); }

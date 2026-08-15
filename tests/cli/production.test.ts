@@ -10,11 +10,307 @@ import { SessionStore } from "../../src/session/store.js";
 import { writeFile, mkdir } from "node:fs/promises";
 import { createFileTokenStore } from "../../src/auth/store.js";
 import { oauthCredentialId } from "../../src/auth/oauth-config.js";
+import type { PalClientLike } from "../../src/pals/tools.js";
+import type { BrokerEvent, CoWorkSnapshot, DeliveryReceipt, PalPresence } from "../../src/pals/protocol.js";
+
+const PAL_A = "10000000-0000-4000-8000-000000000001";
+const PAL_B = "10000000-0000-4000-8000-000000000002";
+
+class FakeProductionPalClient implements PalClientLike {
+  readonly order: string[] = [];
+  readonly listeners = new Set<(event: BrokerEvent) => void>();
+  readonly close = vi.fn(async () => undefined);
+  readonly start = vi.fn(async () => { this.order.push("start"); return this.presences[0]!; });
+  readonly list = vi.fn(async () => this.presences);
+  readonly rename = vi.fn(async (alias: string) => ({ ...this.presences[0]!, alias }));
+  readonly sendTask = vi.fn(async (): Promise<DeliveryReceipt> => ({ version: 1, type: "delivery-receipt", messageId: crypto.randomUUID(), status: "delivered", recipientIds: [PAL_B] }));
+  readonly sendChat = this.sendTask;
+  readonly startCoWork = vi.fn(async (): Promise<CoWorkSnapshot> => { throw new Error("not used"); });
+  readonly coWorkAction = vi.fn(async (): Promise<CoWorkSnapshot> => { throw new Error("not used"); });
+  readonly coWorkStatus = vi.fn(async (): Promise<CoWorkSnapshot> => { throw new Error("not used"); });
+  readonly integrateCoWork = vi.fn(async (): Promise<CoWorkSnapshot> => { throw new Error("not used"); });
+  readonly cancelCoWork = vi.fn(async (): Promise<CoWorkSnapshot> => { throw new Error("not used"); });
+  constructor(readonly presences: PalPresence[] = [
+    { version: 1, id: PAL_A, alias: "app", projectPath: "/work/app", connectedAt: new Date(0).toISOString(), lastSeenAt: new Date(0).toISOString() },
+    { version: 1, id: PAL_B, alias: "api", projectPath: "/work/api", connectedAt: new Date(0).toISOString(), lastSeenAt: new Date(0).toISOString() },
+  ]) {}
+  subscribe(listener: (event: BrokerEvent) => void): () => void {
+    this.order.push("subscribe"); this.listeners.add(listener); return () => this.listeners.delete(listener);
+  }
+  emit(event: BrokerEvent): void { for (const listener of this.listeners) listener(event); }
+}
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("production runtime", () => {
+  it("delivers collaboration events in broker socket order even when an earlier event awaits", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pals-order-")); roots.push(workspace);
+    const client = new FakeProductionPalClient();
+    let releaseFirstList!: () => void;
+    const firstList = new Promise<void>((resolve) => { releaseFirstList = resolve; });
+    client.list.mockImplementationOnce(async () => {
+      await firstList;
+      return client.presences;
+    });
+    const actions: string[] = [];
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {},
+      output: (event) => { if (event.type === "cowork-event") actions.push(event.action); },
+      collaboration: { instanceId: PAL_A, client },
+    });
+    const coWorkId = "40000000-0000-4000-8000-000000000001";
+    const planHash = "a".repeat(64);
+    const snapshot = {
+      version: 1 as const, coWorkId, epoch: 1, phase: "planning" as const, goal: "coordinate",
+      participants: [{ palId: PAL_A, required: true }, { palId: PAL_B, required: true }],
+      integrationOwnerId: PAL_A,
+      acceptedParticipantIds: [PAL_A, PAL_B], planHash,
+      plan: {
+        version: 1 as const, coWorkId, epoch: 1, goal: "coordinate",
+        participants: [{ palId: PAL_A, required: true }, { palId: PAL_B, required: true }],
+        tasks: [{ id: "a", assigneeId: PAL_A, description: "adapt", dependsOn: [] }],
+      },
+      planAcceptedParticipantIds: [], readyParticipantIds: [], completedParticipantIds: [],
+      completionAssertions: [], integration: null,
+    } satisfies CoWorkSnapshot;
+    const event = (action: "PROPOSE" | "PLAN" | "START"): BrokerEvent => ({
+      version: 1, type: "cowork-event", action, actorId: PAL_B, coWorkId, epoch: 1,
+      planHash: action === "PROPOSE" ? null : planHash,
+      snapshot: { ...snapshot, phase: action === "START" ? "running" : "planning" },
+    });
+
+    client.emit(event("PROPOSE"));
+    client.emit(event("PLAN"));
+    client.emit(event("START"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(actions).toEqual([]);
+    releaseFirstList();
+    await vi.waitFor(() => expect(actions).toEqual(["PROPOSE", "PLAN", "START"]));
+
+    await runtime.session.whenIdle();
+    await runtime.dispose();
+  });
+
+  it("records one collaboration event failure and continues pumping later events", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pals-pump-error-")); roots.push(workspace);
+    const client = new FakeProductionPalClient();
+    const outputs: unknown[] = [];
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, output: (event) => outputs.push(event),
+      collaboration: { instanceId: PAL_A, client },
+    });
+    const coWorkId = "40000000-0000-4000-8000-000000000009";
+    client.emit({
+      version: 1, type: "cowork-event", action: "PROPOSE", actorId: PAL_B, coWorkId, epoch: 1, planHash: null,
+      snapshot: {
+        version: 1, coWorkId, epoch: 1, phase: "proposed", goal: "fail acceptance",
+        participants: [{ palId: PAL_A, required: true }, { palId: PAL_B, required: true }],
+        integrationOwnerId: PAL_A,
+        acceptedParticipantIds: [PAL_B], planHash: null, plan: null,
+        planAcceptedParticipantIds: [], readyParticipantIds: [], completedParticipantIds: [], completionAssertions: [], integration: null,
+      },
+    });
+    client.emit({
+      version: 1, type: "chat-event", messageId: "20000000-0000-4000-8000-000000000009",
+      senderId: PAL_B, recipientId: PAL_A, message: "continue after failure",
+    });
+
+    await vi.waitFor(() => expect(outputs).toContainEqual(expect.objectContaining({
+      type: "pal-task", goal: "continue after failure",
+    })));
+    expect(runtime.diagnostics).toContainEqual(expect.stringMatching(/Pal event failed: not used/));
+    await runtime.session.whenIdle();
+    await runtime.dispose();
+  });
+
+  it("delivers proposals to optional observers without making them join the required acceptance barrier", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pals-observer-")); roots.push(workspace);
+    const client = new FakeProductionPalClient();
+    const outputs: unknown[] = [];
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, output: (event) => outputs.push(event),
+      collaboration: { instanceId: PAL_A, client },
+    });
+    const coWorkId = "40000000-0000-4000-8000-000000000008";
+    client.emit({
+      version: 1, type: "cowork-event", action: "PROPOSE", actorId: PAL_B, coWorkId, epoch: 1, planHash: null,
+      snapshot: {
+        version: 1, coWorkId, epoch: 1, phase: "proposed", goal: "observe required peer coordination",
+        participants: [{ palId: PAL_B, required: true }, { palId: PAL_A, required: false }],
+        integrationOwnerId: PAL_B,
+        acceptedParticipantIds: [PAL_B], planHash: null, plan: null,
+        planAcceptedParticipantIds: [], readyParticipantIds: [], completedParticipantIds: [], completionAssertions: [], integration: null,
+      },
+    });
+
+    await vi.waitFor(() => expect(outputs).toContainEqual(expect.objectContaining({
+      type: "cowork-event", action: "PROPOSE", coWorkId,
+    })));
+    expect(client.coWorkAction).not.toHaveBeenCalled();
+    await runtime.session.whenIdle();
+    await runtime.dispose();
+  });
+
+  it("keeps collaboration opt-in and wires subscribed inbound tasks to the session exactly once", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pals-")); roots.push(workspace);
+    const disabled = await createProductionRuntime({ workspace, home: workspace, environment: {}, output: () => {} });
+    expect(disabled.services.pals).toBeUndefined();
+    await disabled.dispose();
+
+    const client = new FakeProductionPalClient();
+    const outputs: unknown[] = [];
+    const incoming = {
+      version: 1 as const, type: "task-event" as const,
+      messageId: "20000000-0000-4000-8000-000000000001", taskId: "30000000-0000-4000-8000-000000000001",
+      senderId: PAL_B, recipientId: PAL_A, status: "accepted" as const, detail: "update the API",
+    };
+    client.start.mockImplementationOnce(async () => {
+      client.order.push("start");
+      client.emit(incoming);
+      return client.presences[0]!;
+    });
+    const createClient = vi.fn(() => client);
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, output: (event) => outputs.push(event),
+      collaboration: { instanceId: PAL_A, alias: "app", createClient },
+    });
+    expect(createClient).toHaveBeenCalledWith({ instanceId: PAL_A, alias: "app", projectPath: workspace });
+    expect(runtime.sessionId).not.toBe(PAL_A);
+    expect(client.order.slice(0, 2)).toEqual(["subscribe", "start"]);
+    expect(runtime.services.pals).toBeDefined();
+    client.emit(incoming);
+    await vi.waitFor(() => expect(outputs.filter((event) => (event as { type?: string }).type === "pal-task")).toHaveLength(1));
+    await runtime.session.whenIdle();
+    expect(outputs.filter((event) => (event as { type?: string }).type === "pal-task")).toEqual([
+      expect.objectContaining({ senderAlias: "api", goal: "update the API" }),
+    ]);
+    await runtime.services.clearContext();
+    expect(runtime.sessionId).not.toBe(PAL_A);
+    expect(createClient).toHaveBeenCalledTimes(1);
+    expect(client.start).toHaveBeenCalledTimes(1);
+    await runtime.dispose();
+    expect(client.close).toHaveBeenCalledOnce();
+  });
+
+  it("uses a safe UUID fallback for unknown senders and closes collaboration after construction failure", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pals-failure-")); roots.push(workspace);
+    const unknown = new FakeProductionPalClient([{
+      version: 1, id: PAL_A, alias: "app", projectPath: "/work/app", connectedAt: new Date(0).toISOString(), lastSeenAt: new Date(0).toISOString(),
+    }]);
+    const outputs: unknown[] = [];
+    const runtime = await createProductionRuntime({ workspace, home: workspace, environment: {}, output: (event) => outputs.push(event), collaboration: { instanceId: PAL_A, client: unknown } });
+    unknown.emit({
+      version: 1, type: "task-event", messageId: "20000000-0000-4000-8000-000000000002",
+      taskId: "30000000-0000-4000-8000-000000000002", senderId: PAL_B, recipientId: PAL_A, status: "accepted", detail: "hello",
+    });
+    await runtime.session.whenIdle();
+    expect(outputs).toContainEqual(expect.objectContaining({ type: "pal-task", senderAlias: "10000000" }));
+    await runtime.dispose();
+
+    const failing = new FakeProductionPalClient();
+    await expect(createProductionRuntime({
+      workspace, home: workspace, environment: {}, output: () => {}, collaboration: { instanceId: PAL_A, client: failing },
+      extraTools: [{ name: "Broken", description: "broken", inputSchema: {} as never, paths: () => [], execute: async () => undefined }],
+    })).rejects.toThrow();
+    expect(failing.close).toHaveBeenCalledOnce();
+  });
+
+  it("registers collaboration tools with the main harness only when collaboration is enabled", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pals-tools-")); roots.push(workspace);
+    const pluginRoot = join(workspace, ".flavor", "plugins", "capture-pals-tools");
+    await mkdir(pluginRoot, { recursive: true });
+    await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
+      providers: { capture: { type: "plugin", defaultModel: "main", cheapModel: "child" } },
+      agents: { main: { model: "capture:main" }, subagent: { model: "capture:child" } },
+    }));
+    await writeFile(join(pluginRoot, "flavor-plugin.json"), JSON.stringify({
+      name: "capture-pals-tools", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
+      contributes: { commands: [], tools: [], hooks: [], skillRoots: [], modelAdapters: [{ name: "capture" }] },
+    }));
+    await writeFile(join(pluginRoot, "index.mjs"), `export function activate(ctx) {
+      ctx.registerModelAdapter("capture", { async *stream(request) {
+        globalThis.__flavorPalsTools ??= [];
+        globalThis.__flavorPalsTools.push(request.tools.map((tool) => tool.name));
+        yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
+      }});
+    }`);
+    const state = globalThis as typeof globalThis & { __flavorPalsTools?: string[][] };
+    delete state.__flavorPalsTools;
+    const disabled = await createProductionRuntime({ workspace, home: workspace, environment: {}, output: () => {} });
+    await disabled.session.submit("list tools");
+    await disabled.dispose();
+    const enabled = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, output: () => {},
+      collaboration: { instanceId: PAL_A, client: new FakeProductionPalClient() },
+    });
+    await enabled.session.submit("list tools again");
+    await enabled.dispose();
+    expect(state.__flavorPalsTools?.[0]).not.toContain("PalsList");
+    expect(state.__flavorPalsTools?.[1]).toEqual(expect.arrayContaining([
+      "PalsList", "PalSend", "CoWorkState", "CoWorkPlan", "CoWorkReady", "CoWorkProgress", "CoWorkComplete",
+      "CoWorkIntegrate",
+    ]));
+    delete state.__flavorPalsTools;
+  });
+
+  it("redacts configured secrets before a model collaboration tool reaches the client", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pals-redact-")); roots.push(workspace);
+    const pluginRoot = join(workspace, ".flavor", "plugins", "pals-redact-model");
+    await mkdir(pluginRoot, { recursive: true });
+    await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
+      providers: { capture: { type: "plugin", defaultModel: "main", cheapModel: "child" } },
+      agents: { main: { model: "capture:main" }, subagent: { model: "capture:child" } },
+      permissionMode: "bypassPermissions",
+    }));
+    await writeFile(join(pluginRoot, "flavor-plugin.json"), JSON.stringify({
+      name: "pals-redact-model", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
+      contributes: { commands: [], tools: [], hooks: [], skillRoots: [], modelAdapters: [{ name: "capture" }] },
+    }));
+    const secret = "sk-production-sharing-secret";
+    await writeFile(join(pluginRoot, "index.mjs"), `export function activate(ctx) {
+      let calls = 0;
+      ctx.registerModelAdapter("capture", { async *stream() {
+        if (calls++ === 0) yield { type: "tool-call", id: "share-1", name: "PalSend", input: { target: "api", message: ${JSON.stringify(`credential=${secret}`)} } };
+        yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
+      }});
+    }`);
+    const client = new FakeProductionPalClient();
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: { OPENAI_API_KEY: secret }, output: () => {},
+      collaboration: { instanceId: PAL_A, client },
+    });
+    await runtime.session.submit("share status");
+    expect(client.sendChat).toHaveBeenCalledWith(PAL_B, "credential=[redacted]");
+    await runtime.dispose();
+  });
+
+  it("rejects /co-work when the resolved target is the local CLI instance", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pals-self-")); roots.push(workspace);
+    const client = new FakeProductionPalClient();
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, output: () => {},
+      collaboration: { instanceId: PAL_A, client },
+    });
+
+    await expect(runtime.services.pals!.startCoWork("app", "coordinate"))
+      .rejects.toThrow(/itself|local instance|self/i);
+    expect(client.startCoWork).not.toHaveBeenCalled();
+    await runtime.dispose();
+  });
+
+  it("does not resolve UUID prefixes shorter than the shared minimum", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pals-prefix-")); roots.push(workspace);
+    const client = new FakeProductionPalClient([{
+      version: 1, id: PAL_A, alias: "app", projectPath: "/work/app",
+      connectedAt: new Date(0).toISOString(), lastSeenAt: new Date(0).toISOString(),
+    }]);
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, output: () => {}, collaboration: { instanceId: PAL_A, client },
+    });
+    await expect(runtime.services.pals!.info("1000")).rejects.toThrow(/not active/i);
+    await runtime.dispose();
+  });
   it("uses PKCE runtime metadata instead of stale project model fields", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pkce-")); roots.push(workspace);
     await mkdir(join(workspace, ".flavor"), { recursive: true });

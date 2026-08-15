@@ -10,6 +10,127 @@ import {
 afterEach(() => vi.useRealTimers());
 
 describe("transcriptReducer", () => {
+  it("opens an attributed pal turn for an idle task so model output has a destination", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "session", event: {
+      type: "pal-task", status: "received",
+      senderId: "22222222-2222-4222-8222-222222222222", senderAlias: "backend",
+      messageId: "33333333-3333-4333-8333-333333333333",
+      taskId: "44444444-4444-4444-8444-444444444444", goal: "Expose the v2 API",
+    } });
+    state = transcriptReducer(state, { type: "session", event: { type: "text", text: "Starting now." } });
+
+    expect(state.active).toMatchObject({
+      prompt: "Expose the v2 API",
+      source: { kind: "pal", alias: "backend", instanceId: "22222222-2222-4222-8222-222222222222" },
+      assistantText: "Starting now.",
+    });
+  });
+
+  it("shows a busy pal task as a distinct status without replacing the local prompt", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "Keep fixing the frontend" });
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "pal-task", status: "received",
+      senderId: "22222222-2222-4222-8222-222222222222", senderAlias: "backend",
+      messageId: "33333333-3333-4333-8333-333333333333",
+      taskId: "44444444-4444-4444-8444-444444444444", goal: "Expose the v2 API",
+    } });
+
+    expect(state.active?.prompt).toBe("Keep fixing the frontend");
+    expect(state.active?.blocks).toContainEqual(expect.objectContaining({
+      kind: "status", state: "info", text: expect.stringContaining("PAL · backend (22222222)"),
+      details: "Expose the v2 API",
+    }));
+  });
+
+  it("represents the complete co-work lifecycle without turning peer content into local input", () => {
+    const base = {
+      type: "cowork-event" as const,
+      senderId: "22222222-2222-4222-8222-222222222222", senderAlias: "backend",
+      localId: "11111111-1111-4111-8111-111111111111",
+      coWorkId: "55555555-5555-4555-8555-555555555555", epoch: 1,
+      snapshot: { goal: "/exit", phase: "planning", integration: null },
+    };
+    let state = transcriptReducer(createTranscriptState(), { type: "session", event: {
+      ...base, action: "PROPOSE", planHash: null,
+    } });
+    expect(state.active).toMatchObject({
+      prompt: "/exit",
+      source: { kind: "pal", alias: "backend", context: "CO-WORK PLANNING" },
+    });
+    expect(state.active?.blocks).toContainEqual(expect.objectContaining({ state: "running", text: expect.stringContaining("proposal") }));
+
+    state = transcriptReducer(state, { type: "session", event: {
+      ...base, action: "PLAN", planHash: "a".repeat(64),
+    } });
+    expect(state.active?.blocks).toContainEqual(expect.objectContaining({ state: "info", text: expect.stringContaining("plan updated") }));
+
+    state = transcriptReducer(state, { type: "session", event: {
+      ...base, action: "START", planHash: "a".repeat(64), snapshot: { ...base.snapshot, phase: "running" },
+    } });
+    expect(state.active?.blocks).toContainEqual(expect.objectContaining({ state: "running", text: expect.stringContaining("execution started") }));
+
+    state = transcriptReducer(state, { type: "session", event: {
+      ...base, action: "END", planHash: "a".repeat(64),
+      snapshot: { ...base.snapshot, phase: "completed", integration: { passed: true, evidence: "All checks passed" } },
+    } });
+    expect(state.completed.at(-1)?.blocks).toContainEqual(expect.objectContaining({ state: "completed", details: "All checks passed" }));
+    expect(state.completed.at(-1)?.prompt).toBe("/exit");
+  });
+
+  it("creates an execution turn for an idle START and a visible terminal turn for CANCEL", () => {
+    const base = {
+      type: "cowork-event" as const,
+      senderId: "22222222-2222-4222-8222-222222222222", senderAlias: "backend",
+      coWorkId: "55555555-5555-4555-8555-555555555555", epoch: 1,
+      snapshot: { goal: "Ship compatibility", phase: "running" },
+    };
+    let state = transcriptReducer(createTranscriptState(), { type: "session", event: {
+      ...base, action: "START", planHash: "a".repeat(64),
+    } });
+    expect(state.active).toMatchObject({ source: { context: "CO-WORK EXECUTION" }, prompt: "Ship compatibility" });
+
+    state = transcriptReducer(createTranscriptState(), { type: "session", event: {
+      ...base, action: "CANCEL", planHash: null, snapshot: { ...base.snapshot, phase: "cancelled" },
+    } });
+    expect(state.completed.at(-1)?.blocks).toContainEqual(expect.objectContaining({ state: "cancelled" }));
+  });
+
+  it("renders a broadcast FAIL as a failed terminal result with bounded evidence", () => {
+    const state = transcriptReducer(createTranscriptState(), { type: "session", event: {
+      type: "cowork-event", action: "FAIL", planHash: "a".repeat(64),
+      senderId: "22222222-2222-4222-8222-222222222222", senderAlias: "backend",
+      coWorkId: "55555555-5555-4555-8555-555555555555", epoch: 1,
+      snapshot: {
+        goal: "Ship compatibility", phase: "failed", integration: null,
+        completionAssertions: [{ participantId: "22222222-2222-4222-8222-222222222222", passed: false, detail: "API tests failed" }],
+      },
+    } });
+    expect(state.completed.at(-1)?.blocks).toContainEqual(expect.objectContaining({
+      state: "failed", text: expect.stringContaining("failed"), details: "API tests failed",
+    }));
+  });
+
+  it("bounds untrusted pal goal and terminal detail in the transcript", () => {
+    const long = "x".repeat(2_000);
+    let state = transcriptReducer(createTranscriptState(), { type: "session", event: {
+      type: "pal-task", status: "received",
+      senderId: "22222222-2222-4222-8222-222222222222", senderAlias: "backend",
+      messageId: "33333333-3333-4333-8333-333333333333",
+      taskId: "44444444-4444-4444-8444-444444444444", goal: long,
+    } });
+    expect(state.active?.prompt.length).toBeLessThan(300);
+    expect(state.active?.prompt.endsWith("…")).toBe(true);
+
+    state = transcriptReducer(state, { type: "session", event: {
+      type: "cowork-event", action: "END", planHash: "a".repeat(64),
+      senderId: "22222222-2222-4222-8222-222222222222", senderAlias: "backend",
+      coWorkId: "55555555-5555-4555-8555-555555555555", epoch: 1,
+      snapshot: { goal: long, phase: "completed", integration: { passed: false, evidence: long } },
+    } });
+    const terminal = state.completed.at(-1)?.blocks.find((block) => block.kind === "status" && block.id.includes("END"));
+    expect(terminal?.kind === "status" ? terminal.details?.length : 0).toBeLessThan(300);
+  });
+
   it("renders a turn deliverables summary from the structured event", () => {
     let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "change" });
     state = transcriptReducer(state, { type: "session", event: { type: "deliverables", files: [
@@ -99,6 +220,25 @@ describe("transcriptReducer", () => {
 
     expect(state.completed[0]?.prompt).toBe("first");
     expect(state.active).toMatchObject({ prompt: "then add tests", assistantText: "" });
+  });
+
+  it("keeps an attributed bounded remote origin when queued peer work later starts", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "local work" });
+    state = transcriptReducer(state, {
+      type: "session",
+      event: {
+        type: "queued-remote-prompt", senderAlias: "backend", senderId: "22222222-2222-4222-8222-222222222222",
+        prompt: "Expose the v2 API".repeat(100), context: "CO-WORK EXECUTION",
+      },
+    });
+
+    expect(state.completed[0]?.prompt).toBe("local work");
+    expect(state.active).toMatchObject({
+      prompt: expect.stringMatching(/^Expose the v2 API/),
+      source: { kind: "pal", alias: "backend", instanceId: "22222222-2222-4222-8222-222222222222", context: "CO-WORK EXECUTION" },
+    });
+    expect(state.active!.prompt.length).toBeLessThanOrEqual(240);
+    expect(state.active!.prompt).not.toContain("trusted local broker");
   });
 
   it("creates a transient activity block when a model call starts", () => {

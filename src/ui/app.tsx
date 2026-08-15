@@ -15,7 +15,7 @@ import { useHasSelection, useSelection } from "../claude-ink/hooks/use-selection
 import { useTerminalTitle } from "../claude-ink/hooks/use-terminal-title.js";
 import type { ClickEvent } from "../claude-ink/events/click-event.js";
 
-import { createProductionRuntime, type ProductionRuntime } from "../production.js";
+import { createProductionRuntime, type ProductionRuntime, type ProductionRuntimeOptions } from "../production.js";
 import { isDestructiveTool } from "../permissions/engine.js";
 import { AssistantText } from "./assistant-text.js";
 import type { SessionOutput } from "./session.js";
@@ -246,9 +246,33 @@ export function slashKeyAction(
   return completionKeyAction(key, completion !== null);
 }
 
-export interface FlavorAppProps { workspace: string; home?: string; resumeSession?: string | true }
+export interface FlavorAppProps {
+  workspace: string;
+  home?: string;
+  resumeSession?: string | true;
+  instanceId: string;
+  palAlias?: string;
+}
 
-export function App({ workspace, home, resumeSession }: FlavorAppProps): React.JSX.Element {
+export function appRuntimeOptions(
+  props: FlavorAppProps,
+  output: (event: SessionOutput) => void,
+  onApprovalChange: () => void,
+): ProductionRuntimeOptions {
+  return {
+    workspace: props.workspace,
+    ...(props.home === undefined ? {} : { home: props.home }),
+    ...(props.resumeSession === undefined ? {} : { resumeSession: props.resumeSession }),
+    collaboration: {
+      instanceId: props.instanceId,
+      ...(props.palAlias === undefined ? {} : { alias: props.palAlias }),
+    },
+    output,
+    onApprovalChange,
+  };
+}
+
+export function App({ workspace, home, resumeSession, instanceId, palAlias }: FlavorAppProps): React.JSX.Element {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [runtime, setRuntime] = useState<ProductionRuntime>();
@@ -336,13 +360,12 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
       flushText();
       dispatch({ type: "session", event });
     };
-    void createProductionRuntime({
-      workspace,
+    void createProductionRuntime(appRuntimeOptions({
+      workspace, instanceId,
       ...(home === undefined ? {} : { home }),
       ...(resumeSession === undefined ? {} : { resumeSession }),
-      output: receive,
-      onApprovalChange: () => setRevision((value) => value + 1),
-    }).then(async (created) => {
+      ...(palAlias === undefined ? {} : { palAlias }),
+    }, receive, () => setRevision((value) => value + 1))).then(async (created) => {
       if (disposed) { await created.dispose(); return; }
       dispatch({ type: "restore", state: created.restoredTranscript });
       runtimeRef.current = created;
@@ -366,7 +389,7 @@ export function App({ workspace, home, resumeSession }: FlavorAppProps): React.J
       flushText();
       void closeAndDisposeRuntime(runtimeRef.current, (error) => process.stderr.write(`flavor cleanup: ${error}\n`));
     };
-  }, [workspace, home, resumeSession]);
+  }, [workspace, home, resumeSession, instanceId, palAlias]);
 
   useEffect(() => installSigintHandler(process, interrupt), [interrupt]);
 
@@ -1145,6 +1168,22 @@ function TurnView({
       {turn.blocks.map((block, index) => block.kind === "status"
         ? <StatusBlockView key={block.id} block={block} interactive={interactive} workspaceName={workspaceName} />
         : <Box key={`${turn.id}-text-${index}`}><AssistantText text={block.text} /></Box>)}
+    </Box>;
+  }
+  if (turn.source?.kind === "pal") {
+    const context = turn.source.context === undefined ? "" : ` · ${turn.source.context}`;
+    return <Box flexDirection="column" marginBottom={1}>
+      <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
+        <Text color="cyanBright" bold>
+          PAL · {turn.source.alias} ({turn.source.instanceId.slice(0, 8)}){context}
+        </Text>
+        <Text color="ansi:whiteBright">{turn.prompt}</Text>
+      </Box>
+      <Box flexDirection="column" paddingLeft={2} marginTop={1}>
+        {turn.blocks.map((block, index) => block.kind === "status"
+          ? <StatusBlockView key={block.id} block={block} interactive={interactive} workspaceName={workspaceName} />
+          : <Box key={`${turn.id}-text-${index}`} marginBottom={1}><AssistantText text={block.text} /></Box>)}
+      </Box>
     </Box>;
   }
   return <Box flexDirection="column" marginBottom={1}>

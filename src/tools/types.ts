@@ -121,6 +121,8 @@ export interface ToolDefinition<T, O = unknown> {
   /** Renderer-neutral presentation of a completed call. */
   presentResult?(output: O, input: T): ToolPresentation | undefined;
   permissions?(input: T): ToolPermissionMetadata;
+  /** Sanitized input shown to PermissionRequest hooks; omit raw secrets/content. */
+  permissionInput?(input: T): unknown;
   execute(input: T, signal: AbortSignal, context?: ToolContext): Promise<O>;
 }
 

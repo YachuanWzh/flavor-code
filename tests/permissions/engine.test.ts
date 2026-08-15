@@ -139,6 +139,26 @@ describe("PermissionEngine", () => {
     }
   });
 
+  it("auto-allows collaboration reads and token-only readiness but asks once for outbound content", () => {
+    for (const mode of ["default", "acceptEdits", "plan", "auto"] as const) {
+      const engine = new PermissionEngine({ workspace: process.cwd(), mode });
+      for (const tool of ["PalsList", "CoWorkState", "CoWorkReady"]) {
+        expect(engine.decide({ agent: "main", tool }).decision, `${mode} ${tool}`).toBe("allow");
+      }
+      for (const tool of ["PalSend", "CoWorkPlan", "CoWorkProgress", "CoWorkComplete", "CoWorkIntegrate"]) {
+        expect(engine.decide({ agent: "main", tool }), `${mode} ${tool}`).toMatchObject({
+          decision: "ask", allowAlways: false,
+        });
+      }
+    }
+    const bypass = new PermissionEngine({ workspace: process.cwd(), mode: "bypassPermissions" });
+    expect(bypass.decide({ agent: "main", tool: "PalSend" }).decision).toBe("allow");
+    for (const tool of ["PalsList", "PalSend", "CoWorkState", "CoWorkPlan", "CoWorkReady", "CoWorkProgress", "CoWorkComplete", "CoWorkIntegrate"]) {
+      const engine = new PermissionEngine({ workspace: process.cwd(), mode: "plan" });
+      expect(engine.decide({ agent: "subagent", tool }).decision, `${tool} subagent`).toBe("deny");
+    }
+  });
+
   it("never permits a subagent write outside the workspace", () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-workspace-"));
     const outside = mkdtempSync(join(tmpdir(), "flavor-outside-"));

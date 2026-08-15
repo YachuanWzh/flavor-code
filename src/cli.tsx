@@ -1,8 +1,9 @@
+import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { posix, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { Command } from "commander";
+import { Command, Option } from "commander";
 
 import { createProductionRuntime, type ProductionRuntime } from "./production.js";
 import { initializeFlavor } from "./init/project.js";
@@ -17,8 +18,25 @@ import { FlavorRpcServer } from "./rpc/server.js";
 import { RpcWriteStreamBridge } from "./rpc/write-stream.js";
 import { TraceRecorder } from "./trace/recorder.js";
 import { runEvaluationFile } from "./eval/cli.js";
+import { runPalBroker } from "./pals/broker-cli.js";
+import { MAX_ALIAS_LENGTH } from "./pals/protocol.js";
 
-export function createProgram(): Command {
+export interface InteractiveCliProps {
+  workspace: string;
+  home: string;
+  resumeSession?: string | true;
+  instanceId: string;
+  palAlias?: string;
+}
+
+export interface CliDependencies {
+  isTTY?(): boolean;
+  randomUUID?(): string;
+  runBroker?: typeof runPalBroker;
+  runInteractive?(props: InteractiveCliProps): Promise<void>;
+}
+
+export function createProgram(dependencies: CliDependencies = {}): Command {
   const program = new Command()
     .name("flavor")
     .description("Interactive coding agent")
@@ -29,7 +47,9 @@ export function createProgram(): Command {
     .option("--workspace <path>", "workspace path (RPC mode)")
     .option("--rpc-approvals", "allow an RPC client to resolve interactive tool approvals")
     .option("--rpc-streamed-writes", "stream proposed file writes to an RPC client before committing them")
-    .option("--trace <path>", "write a redacted JSONL execution trace");
+    .option("--trace <path>", "write a redacted JSONL execution trace")
+    .option("--pal-name <alias>", "name this interactive Flavor instance for /pals and /chat")
+    .addOption(new Option("--pals-broker <address>").hideHelp());
 
   program
     .command("init [directory]")
@@ -82,7 +102,16 @@ export function createProgram(): Command {
 
   program.action(async (options: {
     print?: string; resume?: string | boolean; mode?: string; workspace?: string; trace?: string; rpcApprovals?: boolean; rpcStreamedWrites?: boolean;
+    palName?: string; palsBroker?: string;
   }) => {
+    if (options.palsBroker !== undefined) {
+      if (!isLocalPalBrokerAddress(options.palsBroker, process.platform)) {
+        throw new Error("Invalid local pals broker address");
+      }
+      const broker = await (dependencies.runBroker ?? runPalBroker)({ address: options.palsBroker });
+      await broker.closed;
+      return;
+    }
     const resumeSession = options.resume === true ? true : typeof options.resume === "string" ? options.resume : undefined;
     if (options.mode === "rpc") {
       process.exitCode = await runRpcMode({
@@ -103,23 +132,57 @@ export function createProgram(): Command {
       process.exitCode = await runPrint(options.print, {}, resumeSession);
       return;
     }
-    if (!process.stdin.isTTY) {
+    if (!(dependencies.isTTY?.() ?? process.stdin.isTTY)) {
       process.stderr.write("Interactive mode needs a TTY. Use --print <prompt> for scripts.\n");
       process.exitCode = 2;
       return;
     }
+    const palAlias = options.palName === undefined ? undefined : parsePalAlias(options.palName);
     setInteractiveProcessTitle();
+    const props: InteractiveCliProps = {
+      workspace: process.cwd(),
+      home: homedir(),
+      ...(resumeSession === undefined ? {} : { resumeSession }),
+      instanceId: (dependencies.randomUUID ?? randomUUID)(),
+      ...(palAlias === undefined ? {} : { palAlias }),
+    };
+    if (dependencies.runInteractive !== undefined) {
+      await dependencies.runInteractive(props);
+      return;
+    }
+    await runInteractiveCli(props);
+  });
+
+  return program;
+}
+
+async function runInteractiveCli(props: InteractiveCliProps): Promise<void> {
     const [{ render, AlternateScreen }, { createElement }, { App }] = await Promise.all([
       import("./claude-ink/index.js"), import("react"), import("./ui/app.js"),
     ]);
     const instance = await render(createElement(AlternateScreen, { mouseTracking: true },
-      createElement(App, {
-        workspace: process.cwd(), home: homedir(), ...(resumeSession === undefined ? {} : { resumeSession }),
-      })), { exitOnCtrlC: false });
+      createElement(App, props)), { exitOnCtrlC: false });
     await instance.waitUntilExit();
-  });
+}
 
-  return program;
+function parsePalAlias(value: string): string {
+  const alias = value.trim();
+  if (alias.length < 1 || alias.length > MAX_ALIAS_LENGTH) {
+    throw new Error(`Pal name must be between 1 and ${MAX_ALIAS_LENGTH} characters`);
+  }
+  return alias;
+}
+
+export function isLocalPalBrokerAddress(address: string, platform: NodeJS.Platform): boolean {
+  if (platform === "win32") {
+    const prefix = "\\\\.\\pipe\\flavor-code-pals-u-";
+    if (!address.startsWith(prefix) || !address.endsWith("-v1")) return false;
+    return /^[a-f0-9]{16}$/u.test(address.slice(prefix.length, -3));
+  }
+  if (!address.startsWith("/") || address.startsWith("//") || address.includes("\0")) return false;
+  return posix.normalize(address) === address
+    && posix.basename(address) === "pals-v1.sock"
+    && posix.dirname(address) !== "/";
 }
 
 export async function runRpcMode(options: {

@@ -201,11 +201,13 @@ export class ToolRuntime {
         ...(tool.permissions?.(input) ?? { paths: tool.paths(input) }),
       };
       let permission = this.#permissions.decide(request);
+      const nonCacheableApproval = request.allowAlways === false || permission.allowAlways === false;
       if (permission.decision === "deny") {
         return this.#fail(tool.name, input, context.agent, "permission_denied", permission.reason ?? "Tool use denied");
       }
       if (
         permission.decision === "ask" && context.agent === "main"
+        && !nonCacheableApproval
         && this.#permissions.mode === "auto" && this.#permissions.profile === "standard"
         && this.#classify !== undefined
       ) {
@@ -227,14 +229,14 @@ export class ToolRuntime {
       // whole approval round-trip — including the PermissionRequest hook
       // relay, so a connected approval UI is not re-prompted for every
       // same-type call.
-      const sessionAllowed = this.#alwaysAllowed.has(getToolCategory(tool.name));
+      const sessionAllowed = !nonCacheableApproval && this.#alwaysAllowed.has(getToolCategory(tool.name));
       if (!sessionAllowed && (pre.decision === "ask" || permission.decision === "ask")) {
         const reason = [pre.reason, permission.reason].filter((value): value is string => value !== undefined).join("\n") || "Approval required";
-        const allowAlways = permission.allowAlways !== false;
+        const allowAlways = !nonCacheableApproval;
         const requestDecision = await this.#hooks.emit({
           version: 1,
           type: "PermissionRequest",
-          payload: { tool: tool.name, input, agent: context.agent, reason },
+          payload: { tool: tool.name, input: tool.permissionInput?.(input) ?? input, agent: context.agent, reason },
         });
         if (requestDecision.decision === "deny") {
           return this.#fail(tool.name, input, context.agent, "permission_denied", requestDecision.reason ?? "Permission request denied");

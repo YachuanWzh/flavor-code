@@ -153,9 +153,38 @@ OAuth PKCE 的运行时行为与配置约定见 [PKCE 规范](./docs/specs/pkce-
 | `/mcp` | 查看和管理 MCP 服务 |
 | `/loop <goal>` | 运行带验证的自治循环 |
 | `/goal <objective>` | 运行规划、执行、对抗审查流程 |
+| `/pals`、`/chat`、`/co-work` | 发现并协作其他本机 CLI 实例 |
 | `/audit` | 查看工具失败审计 |
 
 运行中可以提交 steering 或排队 follow-up；当前模型响应结束后，任务会在安全边界处接收新指令。
+
+#### CLI Pals 与跨项目协作
+
+同一 Windows 或 macOS 用户下的交互式 CLI 可以通过纯本地 IPC 协作（Windows named pipe 或 Unix socket，不回退到 TCP）。先给每个窗口一个容易识别的别名：
+
+```bash
+# 终端 A，位于项目 A
+flavor --pal-name A
+
+# 终端 B，位于项目 B
+flavor --pal-name B
+```
+
+常用命令：
+
+```text
+/pals                              # 查看别名和每进程 UUID
+/pals --verbose                    # 额外显示项目路径和时间
+/pals rename api                   # 重命名当前活动实例
+/chat B 更新 API 和测试             # 投递给 B，并安全启动其 Agent
+/co-work B 先升级 B，再兼容 A        # 先协商同一计划，再并行开工
+/co-work status [co-work-uuid]
+/co-work cancel <co-work-uuid> [reason]
+```
+
+`/chat` 支持双向任务通信。B 空闲时，带来源标识的消息会启动正常模型回合；B 正在运行时，消息会成为 steering；已有本地提交待运行时则成为 follow-up。远端文本会转换成安全的非斜杠 prompt，因此 `/exit` 一类文本不会被当成本地命令分派。B 可以用 `/chat A ...` 回复。
+
+`/co-work` 会先让双方进入规划，等待双方接受同一个哈希计划并声明 READY；较早的 READY 意图会被保留，只有 broker 恰好一次的 START 事件才会放行并行执行。每个 Agent 只在自己的项目内工作，只接收分配给自己的任务，并提交有界的完成证据。broker 指定的集成负责人会检查所有断言，再通过 `CoWorkIntegrate` 广播 END 或 FAIL。通信使用经过认证、有大小上限的本机 IPC，不开放 TCP 监听；peer 输入不能代替本机工具审批，也不能访问另一工作区。UUID/别名路由和协议已能支持第三个活动实例；持久化成果物交换、broker 重启日志与恢复、大规模多方协调属于后续强化。详见 [CLI Pals 规范](./docs/specs/2026-08-14-cli-pals-cowork.md)。
 
 ### Electron 桌面端
 

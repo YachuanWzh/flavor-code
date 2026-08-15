@@ -1,8 +1,8 @@
 import React from "react";
 import { renderToString } from "ink";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { ideFooterPresentation, MentionMenu, TerminalLayout, statusLineColor } from "../../src/ui/app.js";
+import { appRuntimeOptions, ideFooterPresentation, MentionMenu, TerminalLayout, statusLineColor } from "../../src/ui/app.js";
 import {
   COMPACT_PROGRESS_COMPLETE,
   COMPACT_PROGRESS_REMAINING,
@@ -26,6 +26,54 @@ const turn = (id: number, prompt: string, assistantText: string): TranscriptTurn
 const stripAnsi = (value: string): string => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/gu, "");
 
 describe("TerminalLayout", () => {
+  it("passes the CLI instance identity into the production runtime", () => {
+    const output = vi.fn();
+    const onApprovalChange = vi.fn();
+    const options = appRuntimeOptions({
+      workspace: "/work/api",
+      home: "/home/alice",
+      resumeSession: "session-1",
+      instanceId: "11111111-1111-4111-8111-111111111111",
+      palAlias: "api-team",
+    }, output, onApprovalChange);
+
+    expect(options).toMatchObject({
+      workspace: "/work/api",
+      home: "/home/alice",
+      resumeSession: "session-1",
+      collaboration: {
+        instanceId: "11111111-1111-4111-8111-111111111111",
+        alias: "api-team",
+      },
+      output,
+      onApprovalChange,
+    });
+  });
+
+  it("renders peer work with a PAL attribution instead of a local prompt marker", () => {
+    const peer: TranscriptTurn = {
+      id: 1,
+      prompt: "Expose the v2 API",
+      assistantText: "Starting now.",
+      statusLines: [],
+      blocks: [{ kind: "text", text: "Starting now." }],
+      source: {
+        kind: "pal",
+        alias: "backend",
+        instanceId: "22222222-2222-4222-8222-222222222222",
+        context: "CO-WORK EXECUTION",
+      },
+    };
+    const output = stripAnsi(renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={[peer]}
+      input="" promptCursor={0} columns={90} activeSession={false}
+    />, { columns: 90 }));
+
+    expect(output).toContain("PAL · backend (22222222) · CO-WORK EXECUTION");
+    expect(output).toContain("Expose the v2 API");
+    expect(output).not.toContain("❯ Expose the v2 API");
+  });
+
   it("shows the active IDE file at the bottom right when there is no selection", () => {
     const output = stripAnsi(renderToString(<TerminalLayout
       model="model"

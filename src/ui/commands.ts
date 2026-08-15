@@ -5,6 +5,7 @@ export const MVP_COMMANDS = [
   "ide",
   "memory", "remember", "forget", "forget-cold",
   "checkpoint", "tree", "rewind", "unrevert", "fork",
+  "pals", "chat", "co-work",
 ] as const;
 
 export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string> = {
@@ -37,6 +38,9 @@ export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string>
   rewind: "Restore a prior session node",
   unrevert: "Undo the most recent rewind",
   fork: "Continue context from a prior session node",
+  pals: "List, rename, or inspect active Flavor pals",
+  chat: "Send a task to another Flavor pal",
+  "co-work": "Coordinate a shared goal with another Flavor pal",
 };
 
 export type PermissionCommandMode = PermissionMode;
@@ -45,6 +49,16 @@ export type McpSlashCommand =
   | { name: "mcp"; action: "status" }
   | { name: "mcp"; action: "tools" | "reconnect"; target: string }
   | { name: "mcp"; action: "enable" | "disable"; target: string };
+
+export type PalsSlashCommand =
+  | { name: "pals"; action: "list"; verbose: boolean }
+  | { name: "pals"; action: "rename"; alias: string }
+  | { name: "pals"; action: "info"; target: string };
+
+export type CoWorkSlashCommand =
+  | { name: "co-work"; action: "start"; target: string; goal: string }
+  | { name: "co-work"; action: "status"; coWorkId?: string }
+  | { name: "co-work"; action: "cancel"; coWorkId: string; reason?: string };
 
 export type SlashCommand =
   | { name: "model"; role: ModelRole; modelId: string }
@@ -58,7 +72,10 @@ export type SlashCommand =
   | { name: "checkpoint"; label?: string }
   | { name: "rewind" | "fork"; nodeId: string }
   | McpSlashCommand
-  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop" | "goal" | "mcp" | "remember" | "forget" | "checkpoint" | "rewind" | "fork"> }
+  | PalsSlashCommand
+  | { name: "chat"; target: string; goal: string }
+  | CoWorkSlashCommand
+  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop" | "goal" | "mcp" | "remember" | "forget" | "checkpoint" | "rewind" | "fork" | "pals" | "chat" | "co-work"> }
   | { name: "audit"; toolFilter?: string | undefined }
   | { name: "unknown"; input: string; suggestions: string[] }
   | { name: "invalid"; command: string; message: string };
@@ -146,8 +163,58 @@ export function parseSlashCommand(
     }
     return { name: "invalid", command: name, message: usage };
   }
+  if (name === "pals") {
+    const usage = "Use /pals [--verbose|rename <alias>|info <alias-or-uuid>].";
+    if (args.length === 0) return { name, action: "list", verbose: false };
+    if (args.length === 1 && args[0] === "--verbose") return { name, action: "list", verbose: true };
+    if (args.length === 2 && args[0] === "rename" && validTarget(args[1])) {
+      return { name, action: "rename", alias: args[1] };
+    }
+    if (args.length === 2 && args[0] === "info" && validTarget(args[1])) {
+      return { name, action: "info", target: args[1] };
+    }
+    return { name: "invalid", command: name, message: usage };
+  }
+  if (name === "chat") {
+    const [target, ...goalParts] = args;
+    const goal = goalParts.join(" ").trim();
+    return !validTarget(target) || !validText(goal)
+      ? { name: "invalid", command: name, message: "Use /chat <alias-or-uuid> <goal>." }
+      : { name, target, goal };
+  }
+  if (name === "co-work") {
+    const usage = "Use /co-work <alias-or-uuid> <goal> | status [id] | cancel <id> [reason].";
+    const [first, second, ...rest] = args;
+    if (first === "status") {
+      if (rest.length > 0 || (second !== undefined && !validTarget(second))) {
+        return { name: "invalid", command: name, message: usage };
+      }
+      return second === undefined ? { name, action: "status" } : { name, action: "status", coWorkId: second };
+    }
+    if (first === "cancel") {
+      const reason = rest.join(" ").trim();
+      if (!validTarget(second) || (reason.length > 0 && !validText(reason))) {
+        return { name: "invalid", command: name, message: usage };
+      }
+      return reason.length === 0
+        ? { name, action: "cancel", coWorkId: second }
+        : { name, action: "cancel", coWorkId: second, reason };
+    }
+    const goal = [second, ...rest].filter((item): item is string => item !== undefined).join(" ").trim();
+    return !validTarget(first) || !validText(goal)
+      ? { name: "invalid", command: name, message: usage }
+      : { name, action: "start", target: first, goal };
+  }
   if (args.length > 0) return { name: "invalid", command: name, message: `/${name} does not accept arguments.` };
   return { name } as SlashCommand;
+}
+
+function validTarget(value: string | undefined): value is string {
+  return value !== undefined && value.length > 0 && value.length <= MAX_ALIAS_LENGTH;
+}
+
+function validText(value: string): boolean {
+  return value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_MESSAGE_BYTES;
 }
 
 function suggestionsFor(input: string): string[] {
@@ -176,3 +243,4 @@ function editDistance(left: string, right: string): number {
 }
 import { normalizePermissionMode, PERMISSION_MODES, type PermissionMode } from "../config/schema.js";
 import { MEMORY_TYPES, type MemoryType } from "../memory/types.js";
+import { MAX_ALIAS_LENGTH, MAX_MESSAGE_BYTES } from "../pals/protocol.js";

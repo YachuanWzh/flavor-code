@@ -233,6 +233,66 @@ describe("ToolRuntime", () => {
     expect(approvals).toBe(2);
   });
 
+  it("requires once-only approval for non-cacheable collaboration sharing despite auto and session allow-all", async () => {
+    const f = fixture();
+    const sharingTools = ["PalSend", "CoWorkPlan", "CoWorkProgress", "CoWorkComplete", "CoWorkIntegrate"];
+    const tools = sharingTools.map((name): ToolDefinition<{ value: string }> => ({
+      name,
+      description: "share collaboration content",
+      inputSchema: z.object({ value: z.string() }),
+      paths: () => [],
+      permissions: () => ({ allowAlways: false }),
+      execute: async () => "done",
+    }));
+    let approvals = 0;
+    let classifications = 0;
+    const runtime = new ToolRuntime({
+      tools,
+      hooks: f.hooks,
+      permissions: new PermissionEngine({ workspace: f.workspace, mode: "auto" }),
+      alwaysAllowed: ["unknown"],
+      classify: async () => { classifications += 1; return { decision: "allow" }; },
+      approve: async (request) => {
+        approvals += 1;
+        expect(request.allowAlways).toBe(false);
+        return "always" as const;
+      },
+    });
+
+    for (const name of sharingTools) {
+      const call = { name, input: { value: "shared content" } };
+      await expect(runtime.execute(call, { agent: "main" })).resolves.toMatchObject({ ok: true });
+      await expect(runtime.execute(call, { agent: "main" })).resolves.toMatchObject({ ok: true });
+      await expect(runtime.execute(call, { agent: "subagent" }))
+        .resolves.toMatchObject({ ok: false, error: { code: "permission_denied" } });
+    }
+
+    expect(classifications).toBe(0);
+    expect(approvals).toBe(sharingTools.length * 2);
+  });
+
+  it("honors explicit bypassPermissions for non-cacheable collaboration sharing", async () => {
+    const f = fixture();
+    let approvals = 0;
+    const tool: ToolDefinition<{ value: string }> = {
+      name: "PalSend",
+      description: "share collaboration content",
+      inputSchema: z.object({ value: z.string() }),
+      paths: () => [],
+      permissions: () => ({ allowAlways: false }),
+      execute: async () => "done",
+    };
+    const runtime = new ToolRuntime({
+      tools: [tool], hooks: f.hooks,
+      permissions: new PermissionEngine({ workspace: f.workspace, mode: "bypassPermissions" }),
+      approve: async () => { approvals += 1; return "once" as const; },
+    });
+
+    await expect(runtime.execute({ name: "PalSend", input: { value: "shared" } }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: true });
+    expect(approvals).toBe(0);
+  });
+
   it("falls back to normal approval when auto classification is unavailable", async () => {
     const f = fixture();
     const tool = { ...f.tool, name: "WebFetch" };
