@@ -408,7 +408,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   syncManagedTools();
   const pluginSkillRoots: string[] = [];
   const pluginHooks: HookEventName[] = [];
-  const pluginCommands = new Map<string, PluginCommandHandler>();
+  const pluginCommands = new Map<string, { handler: PluginCommandHandler; description?: string }>();
   const mcpTools: ToolDefinition<unknown>[] = [];
   let mcpManager: McpManager | undefined;
 
@@ -421,14 +421,15 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     projectPluginDirs: [join(workspace, ".flavor", "plugins")],
     config,
     registrations: {
-      command(name, handler) {
+      command(name, handler, description) {
         if (typeof handler !== "function") throw new Error(`Plugin command "${name}" must be a function.`);
         if (name !== name.toLowerCase()) throw new Error(`Plugin command "${name}" must be lowercase.`);
         if ((MVP_COMMANDS as readonly string[]).includes(name) || name === "ide" || pluginCommands.has(name)) {
           throw new Error(`Plugin command "${name}" conflicts with a built-in or registered command.`);
         }
-        pluginCommands.set(name, handler);
-        return () => { if (pluginCommands.get(name) === handler) pluginCommands.delete(name); };
+        const desc = typeof description === "string" && description.trim().length > 0 ? description.trim() : undefined;
+        pluginCommands.set(name, desc === undefined ? { handler } : { handler, description: desc });
+        return () => { if (pluginCommands.get(name)?.handler === handler) pluginCommands.delete(name); };
       },
       tool(name, tool) {
         if (tools.some((candidate) => candidate.name === tool.name)) throw new Error(`Tool contribution "${name}" conflicts with ${tool.name}`);
@@ -1474,9 +1475,11 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         : `Forgot ${removed} cold memory ${removed === 1 ? "entry" : "entries"} and removed ${filesRemoved} task ${filesRemoved === 1 ? "file" : "files"}.`;
     },
     finishTask: () => finalizeMemoryTask(true),
-    pluginCommands: () => [...pluginCommands.keys()].sort(),
+    pluginCommands: () => [...pluginCommands.entries()]
+      .map(([name, entry]) => entry.description === undefined ? { name } : { name, description: entry.description })
+      .sort((left, right) => left.name.localeCompare(right.name)),
     runPluginCommand: async (name, args, signal) => {
-      const handler = pluginCommands.get(name);
+      const handler = pluginCommands.get(name)?.handler;
       if (handler === undefined) throw new Error(`Plugin command /${name} is no longer registered.`);
       signal.throwIfAborted();
       return awaitWithSignal(Promise.resolve(handler(args, { workspace, signal })), signal);

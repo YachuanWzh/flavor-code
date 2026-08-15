@@ -35,6 +35,7 @@ Flavor Code connects to OpenAI, Anthropic, or compatible services and works with
 | 🧭 | **Controlled progress on complex tasks** | Task plans, sub-agents, steering, follow-ups, `/loop`, and `/goal` |
 | ⏪ | **Traceable, resumable results** | Full timeline, checkpoints, rewind, traces, diffs, and failure audits |
 | 🧠 | **Local long-term context** | Memory, Skills, plugins, and project guides stored on your machine |
+| 🔎 | **Code graph navigation** | A local AST code-graph index (`.flavor/astgraph/`) powers `ast_search`/`ast_callers`/`ast_impact` queries for precise symbol lookup and reachability tracing |
 | 🎨 | **E2E requirement-to-delivery** | From a rough requirement or a design export to a delivered product: PRD, interactive prototype, visual implementation, API integration, autonomous acceptance, and scored delivery (Electron only) |
 | 🛡️ | **Clear permission boundaries** | Independent control over read, write, Shell, network, and destructive actions; Docker supported |
 

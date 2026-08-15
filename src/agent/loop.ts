@@ -2,7 +2,7 @@ import type { ContextManager } from "../context/manager.js";
 import type { HallucinationGuard } from "../hallucination/guard.js";
 import type { HookBus } from "../hooks/bus.js";
 import type { ModelRegistry } from "../models/registry.js";
-import { withStructuredOutput } from "../models/structured.js";
+import { coerceByJsonSchema, strictJsonSchema, withStructuredOutput } from "../models/structured.js";
 import { normalizeProviderError, type ModelMessage, type ModelTool, type ProviderError } from "../models/types.js";
 import type { ToolRuntime } from "../tools/runtime.js";
 import type { ToolResult } from "../tools/types.js";
@@ -369,6 +369,17 @@ export class AgentLoop {
         if (validation.ok) {
           toolCalls.push({ id: collected.id, name: collected.name, input: validation.input });
           continue;
+        }
+        if (collected.kind === "valid") {
+          // Providers may serialize typed fields as JSON strings ("10" for an
+          // integer). Normalize against the tool's JSON schema and re-validate
+          // before paying for a repair model call.
+          const coerced = coerceByJsonSchema(collected.input, strictJsonSchema(definition.inputSchema));
+          const revalidation = this.#options.runtime.validate({ ...collected, input: coerced });
+          if (revalidation.ok) {
+            toolCalls.push({ id: collected.id, name: collected.name, input: revalidation.input });
+            continue;
+          }
         }
 
         const repairModelId = this.#options.fallbackModelId ?? this.#options.modelId;

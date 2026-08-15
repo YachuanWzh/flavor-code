@@ -41,6 +41,18 @@ describe("PermissionEngine", () => {
     expect(bubble.decide({ agent: "subagent", tool: "Read", paths: [join(workspace, "x")] }).decision).toBe("allow");
     expect(bubble.decide({ agent: "subagent", tool: "Write", paths: [join(workspace, "x")] }).decision).toBe("ask");
   });
+  it("grants declared read-only plugin tools the same treatment as Read", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-readonly-permissions-"));
+    const readOnly = (agent: "main" | "subagent") => ({ agent, tool: "ast_search", readOnly: true });
+
+    expect(new PermissionEngine({ workspace, mode: "default" }).decide(readOnly("main")).decision).toBe("allow");
+    expect(new PermissionEngine({ workspace, mode: "default" }).decide({ agent: "main", tool: "ast_search" }).decision).toBe("ask");
+    expect(new PermissionEngine({ workspace, mode: "plan" }).decide(readOnly("main")).decision).toBe("allow");
+    expect(new PermissionEngine({ workspace, mode: "plan" }).decide({ agent: "main", tool: "ast_search" }).decision).toBe("deny");
+    expect(new PermissionEngine({ workspace, mode: "bubble" }).decide(readOnly("subagent")).decision).toBe("allow");
+    expect(new PermissionEngine({ workspace, mode: "auto", profile: "d2c" }).decide(readOnly("main")).decision).toBe("allow");
+  });
+
   it("updates the main permission mode for subsequent decisions", () => {
     const engine = new PermissionEngine({ workspace: process.cwd(), mode: "safe" });
     const request = { agent: "main" as const, tool: "Shell", command: "npm", args: ["test"], cwd: process.cwd() };

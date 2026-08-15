@@ -199,6 +199,7 @@ export class ToolRuntime {
         agent: context.agent,
         tool: tool.name,
         ...(tool.permissions?.(input) ?? { paths: tool.paths(input) }),
+        ...(tool.readOnly === true ? { readOnly: true } : {}),
       };
       let permission = this.#permissions.decide(request);
       const nonCacheableApproval = request.allowAlways === false || permission.allowAlways === false;

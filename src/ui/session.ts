@@ -122,7 +122,7 @@ export interface SessionServices {
   forget(query: string): Promise<string>;
   forgetCold(): Promise<string>;
   finishTask(): Promise<string>;
-  pluginCommands(): readonly string[];
+  pluginCommands(): readonly { name: string; description?: string }[];
   runPluginCommand(name: string, args: readonly string[], signal: AbortSignal): Promise<unknown>;
   output(event: SessionOutput): void;
   questions: QuestionBridge;
@@ -398,7 +398,7 @@ export class FlavorSession {
         try { skillNames = (await this.#services.skills()).map(({ name }) => name); }
         catch { /* Built-in and plugin commands remain available when skill discovery fails. */ }
       }
-      const command = parseSlashCommand(prompt, this.#services.pluginCommands(), skillNames);
+      const command = parseSlashCommand(prompt, this.#services.pluginCommands().map(({ name }) => name), skillNames);
       if (command !== null) await this.#dispatch(command, controller.signal);
       else for await (const event of this.#services.run(prompt, controller.signal, {
         getSteeringMessages: () => this.#drainMessages("steer").map((item) => item.text),

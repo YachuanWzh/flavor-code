@@ -20,6 +20,8 @@ export interface PermissionRequest {
   args?: readonly string[];
   cwd?: string;
   allowAlways?: false;
+  /** Declared read-only by the tool definition; granted the same treatment as READ_TOOLS. */
+  readOnly?: boolean;
 }
 
 export interface PermissionEngineOptions {
@@ -113,13 +115,14 @@ export class PermissionEngine {
     }
 
     const inside = paths.every((path) => classifyPath(this.#lexicalWorkspace, this.#workspace, path).inside);
+    const isRead = READ_TOOLS.has(request.tool) || request.readOnly === true;
     if (this.#profile === "d2c") return this.#d2cDecision(request, inside);
     if (this.#mode === "plan") {
-      return READ_TOOLS.has(request.tool)
+      return isRead
         ? { decision: "allow" }
         : { decision: "deny", reason: "Plan mode is read-only" };
     }
-    if (READ_TOOLS.has(request.tool)) {
+    if (isRead) {
       return { decision: "allow" };
     }
     if (DESTRUCTIVE_TOOLS.has(request.tool)) {
@@ -145,7 +148,7 @@ export class PermissionEngine {
     if ((request.paths?.length ?? 0) > 0 && !inside) {
       return { decision: "deny", reason: "D2C tools must remain in the workspace" };
     }
-    if (READ_TOOLS.has(request.tool)) return { decision: "allow" };
+    if (READ_TOOLS.has(request.tool) || request.readOnly === true) return { decision: "allow" };
     if (isDeletionTool(request.tool)) {
       return { decision: "ask", reason: "Deletion requires approval", allowAlways: false };
     }

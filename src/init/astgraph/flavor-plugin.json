@@ -1,0 +1,25 @@
+{
+  "name": "astgraph",
+  "version": "0.1.0",
+  "apiVersion": "1",
+  "main": "index.js",
+  "permissions": [],
+  "contributes": {
+    "commands": [
+      { "name": "ast" }
+    ],
+    "tools": [
+      { "name": "ast_search" },
+      { "name": "ast_callers" },
+      { "name": "ast_callees" },
+      { "name": "ast_impact" },
+      { "name": "ast_context" }
+    ],
+    "skillRoots": [],
+    "modelAdapters": [],
+    "hooks": [
+      { "name": "SessionStart" },
+      { "name": "PostToolUse" }
+    ]
+  }
+}

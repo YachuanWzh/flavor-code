@@ -1,6 +1,6 @@
 {
   "name": "flavor-code",
-  "version": "1.2.12",
+  "version": "1.2.13",
   "author": "YachuanWzh",
   "type": "module",
   "publishConfig": {
@@ -31,7 +31,7 @@
   "scripts": {
     "build": "npm run build:icons && npm run build:cli && npm run build:desktop",
     "build:icons": "node scripts/build-icons.mjs",
-    "build:cli": "tsup && tsc -p tsconfig.sdk.json && node -e \"require('fs').cpSync('src/init/codeisland','dist/codeisland',{recursive:true})\"",
+    "build:cli": "tsup && tsc -p tsconfig.sdk.json && node -e \"require('fs').cpSync('src/init/codeisland','dist/codeisland',{recursive:true});require('fs').cpSync('src/init/astgraph','dist/astgraph',{recursive:true})\"",
     "build:desktop": "npm run build:desktop:main && npm run build:desktop:renderer",
     "build:desktop:main": "tsup --config tsup.desktop.config.ts",
     "build:desktop:renderer": "vite build --config vite.desktop.config.ts",
@@ -127,9 +127,11 @@
     "electron-builder": "^26.15.3",
     "playwright-core": "^1.62.1",
     "sharp": "^0.35.3",
+    "tree-sitter-wasms": "0.1.13",
     "tsup": "^8.5.1",
     "vite": "^8.1.5",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "web-tree-sitter": "0.25.10"
   },
   "allowScripts": {
     "electron-winstaller@5.4.0": true,

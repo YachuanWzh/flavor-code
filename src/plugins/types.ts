@@ -64,7 +64,7 @@ export interface PluginContext {
   readonly config: unknown;
   readonly logger: PluginLogger;
   readonly services: PluginServices;
-  registerCommand(name: string, command: PluginCommandHandler): PluginDisposer;
+  registerCommand(name: string, command: PluginCommandHandler, description?: string): PluginDisposer;
   registerTool(name: string, tool: ToolDefinition<unknown>): PluginDisposer;
   registerHook(name: HookEventName, hook: HookHandler, options?: HookHandlerOptions): PluginDisposer;
   registerSkillRoot(name: string, root: string): PluginDisposer;
@@ -90,7 +90,7 @@ export interface LoadedPlugin {
 }
 
 export interface PluginRegistrationCallbacks {
-  command(name: string, command: PluginCommandHandler): PluginDisposer;
+  command(name: string, command: PluginCommandHandler, description?: string): PluginDisposer;
   tool(name: string, tool: ToolDefinition<unknown>): PluginDisposer;
   hook(name: HookEventName, hook: HookHandler, options?: HookHandlerOptions): PluginDisposer;
   /** Consumers must revalidate identity before access, or delegate reading to SkillRegistry. */

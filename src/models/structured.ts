@@ -98,6 +98,7 @@ export function withStructuredOutput<T>(options: StructuredOutputOptions<T>): St
 
   const tool = modelToolFromZod(options.name, options.description, options.schema);
   const maxAttempts = retry.maxRetries + 1;
+  const jsonSchema = tool.inputSchema;
 
   const model: StructuredModel<T> = {
     async *stream(request) {
@@ -135,6 +136,7 @@ export function withStructuredOutput<T>(options: StructuredOutputOptions<T>): St
         candidate = undefined;
         rawCandidate = undefined;
         let candidateCount = 0;
+        let textCandidate = "";
         let attemptError: ProviderError | undefined;
         let usage: { inputTokens: number; outputTokens: number } | undefined;
 
@@ -153,6 +155,8 @@ export function withStructuredOutput<T>(options: StructuredOutputOptions<T>): St
             rawCandidate = event.rawInput;
             secrets.add(event.rawInput);
             attemptError = event.error;
+          } else if (event.type === "text") {
+            textCandidate += event.text;
           } else if (event.type === "usage") {
             usage = { inputTokens: event.inputTokens, outputTokens: event.outputTokens };
           } else if (event.type === "done") {
@@ -165,6 +169,21 @@ export function withStructuredOutput<T>(options: StructuredOutputOptions<T>): St
         if (usage !== undefined) yield { type: "usage", ...usage };
 
         if (attemptError === undefined) {
+          if (candidateCount === 0 && textCandidate.trim() !== "") {
+            // Some providers answer the repair prompt with JSON as plain text
+            // instead of a tool call. Accept it as the candidate.
+            const extracted = extractJsonObject(textCandidate);
+            if (extracted !== undefined) {
+              candidate = extracted;
+              candidateCount = 1;
+              rawCandidate = textCandidate;
+            }
+          }
+          if (candidateCount === 1 && candidate !== null && typeof candidate === "object") {
+            // Providers may serialize typed fields as strings; normalize before
+            // schema validation so a coercible payload does not burn a retry.
+            candidate = coerceByJsonSchema(candidate, jsonSchema);
+          }
           if (candidateCount !== 1) {
             attemptError = {
               code: "invalid_tool_arguments",
@@ -241,6 +260,100 @@ export function withStructuredOutput<T>(options: StructuredOutputOptions<T>): St
 
 export function strictJsonSchema(schema: z.ZodType<unknown>): Record<string, unknown> {
   return ensureStrictSchema(z.toJSONSchema(schema) as Record<string, unknown>);
+}
+
+/**
+ * Extract the first JSON object or array from free-form model text (plain JSON,
+ * fenced ```json blocks, or JSON embedded in prose). Returns undefined when no
+ * parseable object is found.
+ */
+export function extractJsonObject(text: string): unknown {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/u);
+  const candidates = fenced !== null && fenced[1] !== undefined ? [fenced[1].trim(), trimmed] : [trimmed];
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      if (parsed !== null && typeof parsed === "object") return parsed;
+    } catch { /* try the next candidate */ }
+  }
+  const start = trimmed.indexOf("{");
+  if (start >= 0) {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < trimmed.length; index += 1) {
+      const char = trimmed[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === "\"") inString = false;
+        continue;
+      }
+      if (char === "\"") inString = true;
+      else if (char === "{") depth += 1;
+      else if (char === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          try {
+            const parsed = JSON.parse(trimmed.slice(start, index + 1)) as unknown;
+            if (parsed !== null && typeof parsed === "object") return parsed;
+          } catch { return undefined; }
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Best-effort type coercion guided by a JSON schema. Some providers serialize
+ * typed fields as strings (`"10"` for an integer). This rewrites string→number /
+ * string→boolean where the schema demands those types, recursing into object
+ * properties and anyOf branches. Values already matching the schema are
+ * returned unchanged, so a valid payload is a no-op.
+ */
+export function coerceByJsonSchema(value: unknown, schema: unknown): unknown {
+  if (schema === null || schema === undefined || typeof schema !== "object") return value;
+  const node = schema as Record<string, unknown>;
+  const branches = [
+    ...(Array.isArray(node.anyOf) ? node.anyOf : []) as unknown[],
+    ...(Array.isArray(node.allOf) ? node.allOf : []) as unknown[],
+  ].filter((branch): branch is Record<string, unknown> => branch !== null && typeof branch === "object");
+
+  const types: string[] = [];
+  const pushTypes = (candidate: Record<string, unknown>) => {
+    if (typeof candidate.type === "string") types.push(candidate.type);
+    else if (Array.isArray(candidate.type)) types.push(...(candidate.type as string[]));
+  };
+  pushTypes(node);
+  for (const branch of branches) pushTypes(branch);
+
+  if (types.includes("null") && (value === null || value === undefined)) return value;
+
+  if ((types.includes("number") || types.includes("integer")) && typeof value === "string" && value.trim() !== "") {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric;
+  }
+  if (types.includes("boolean") && typeof value === "string") {
+    const lowered = value.trim().toLowerCase();
+    if (lowered === "true") return true;
+    if (lowered === "false") return false;
+  }
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const properties = (node.properties ?? branches.find((branch) => branch.properties)?.properties) as Record<string, unknown> | undefined;
+    if (properties !== undefined) {
+      const output: Record<string, unknown> = {};
+      for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+        output[key] = properties[key] !== undefined ? coerceByJsonSchema(child, properties[key]) : child;
+      }
+      return output;
+    }
+  }
+  if (types.includes("array") && Array.isArray(value) && node.items !== undefined) {
+    return value.map((item) => coerceByJsonSchema(item, node.items));
+  }
+  return value;
 }
 
 export function modelToolFromZod(

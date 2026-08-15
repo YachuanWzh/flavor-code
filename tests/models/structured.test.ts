@@ -133,6 +133,54 @@ describe("withStructuredOutput", () => {
     await expect(run).rejects.not.toThrow(/original-secret-payload/);
   });
 
+  it("accepts a text-only JSON answer from the repair model and coerces string numbers", async () => {
+    const requests: ModelRequest[] = [];
+    const registry = registryWith(fakeAdapter([[
+      { type: "text", text: "Sure, here are the repaired arguments:\n{\"query\":\"ast 实现\",\"limit\":\"10\"}" },
+      { type: "usage", inputTokens: 3, outputTokens: 2 },
+      { type: "done", usage: { inputTokens: 3, outputTokens: 2 } },
+    ]], requests));
+    const model = withStructuredOutput({
+      registry,
+      modelId: "cheap:model",
+      name: "ast_search",
+      description: "Search",
+      schema: z.object({
+        query: z.string(),
+        limit: z.number().int().min(1).max(50).optional(),
+      }),
+    });
+
+    const result = await model.invoke({
+      messages: [{ role: "user", content: "Repair the invalid arguments for tool \"ast_search\"." }],
+      invalidOutput: "{\"query\":\"ast 实现\",\"limit\":\"10\"}",
+      validationError: "Expected number, received string",
+    });
+
+    expect(result).toEqual({
+      value: { query: "ast 实现", limit: 10 },
+      usage: { inputTokens: 3, outputTokens: 2 },
+      attempts: 1,
+    });
+  });
+
+  it("coerces string-serialized numbers against the tool JSON schema", async () => {
+    const { coerceByJsonSchema } = await import("../../src/models/structured.js");
+    const schema = {
+      type: "object",
+      additionalProperties: false,
+      required: ["query", "limit"],
+      properties: {
+        query: { type: "string" },
+        limit: { anyOf: [{ type: "integer" }, { type: "null" }] },
+      },
+    };
+    expect(coerceByJsonSchema({ query: "x", limit: "10" }, schema)).toEqual({ query: "x", limit: 10 });
+    expect(coerceByJsonSchema({ query: "x", limit: 5 }, schema)).toEqual({ query: "x", limit: 5 });
+    expect(coerceByJsonSchema({ query: "x", limit: null }, schema)).toEqual({ query: "x", limit: null });
+    expect(coerceByJsonSchema({ query: "x", limit: "ten" }, schema)).toEqual({ query: "x", limit: "ten" });
+  });
+
   it("cancels during backoff without making another model call", async () => {
     vi.useFakeTimers();
     const requests: ModelRequest[] = [];

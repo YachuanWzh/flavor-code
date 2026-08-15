@@ -2,7 +2,24 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.2.10 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.2.13 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.2.13] - 2026-08-15
+
+### 新增
+- 新增 astgraph 代码图索引：项目初始化时安装基于 tree-sitter 的代码图插件，生成 `.flavor/astgraph/index.db`，提供 `ast_search` / `ast_callers` / `ast_callees` / `ast_impact` / `ast_context` 查询定位符号与追踪可达性；`FLAVOR.md` 自动生成 Search 章节
+- 新增结构化输出强健化：模型以纯文本（含 ```json 代码块）返回 JSON 时自动提取；按 JSON Schema 对字符串形式的数字/布尔字段做类型强制转换后再校验，减少无效的修复模型调用
+- 新增只读工具声明：工具可声明 `readOnly`，只读工具在默认模式与 plan 模式下自动放行，与 Read/Glob/Grep 同等对待
+
+## [1.2.12] - 2026-08-15
+
+### 改进
+- Shell 工具 `background` 与 Terminal 工具 `enter` 参数接受字符串形式的布尔值（`"true"` / `"false"`），弱类型模型输出可被标准化为布尔类型
+
+## [1.2.11] - 2026-08-15
+
+### 新增
+- 新增 CLI Pals 与跨项目协作：同一用户下的多个 CLI 实例通过本地 IPC（Windows named pipe / Unix socket）发现与通信，支持 `/pals`、`/chat`、`/co-work` 命令，内置身份认证、消息路由、协作权限控制与内容共享保护
 
 ## [1.2.10] - 2026-08-14
 
@@ -236,6 +253,9 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.2.13 | 2026-08-15 | astgraph 代码图索引、结构化输出类型强转与纯文本 JSON 提取、只读工具声明 |
+| 1.2.12 | 2026-08-15 | Shell/Terminal 字符串布尔值输入标准化 |
+| 1.2.11 | 2026-08-15 | CLI Pals 跨项目协作、本地 IPC 与 /co-work |
 | 1.2.10 | 2026-08-14 | D2C 验收与交付：认证前置快速阻断、跨导航请求记录、修复补充要求、后端源码指纹重启 |
 | 1.2.9 | 2026-08-14 | 运行时生产力与原生 Web：分层项目指令、安全写入、后台任务、持久终端、WebSearch/WebFetch |
 | 1.2.8 | 2026-08-13 | D2C 设计稿到代码、E2E 端到端交付、Claude 客户端支持 |

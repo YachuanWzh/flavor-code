@@ -18,7 +18,7 @@ describe("slash completion", () => {
       { name: "deploy", description: "Deploy the current project" },
       { name: "help", description: "Show available commands" },
     ],
-    ["deploy", "doctor"],
+    [{ name: "deploy" }, { name: "doctor", description: "Run plugin diagnostics" }],
     [{ name: "frontend-design", description: "Design interfaces", source: "project" }],
   );
 
@@ -30,6 +30,7 @@ describe("slash completion", () => {
       ["frontend-design", "skill"],
     ]);
     expect(candidates[0]?.description).toBe("Deploy the current project");
+    expect(candidates.find(({ name }) => name === "doctor")?.description).toBe("Run plugin diagnostics");
   });
 
   it("activates only inside the leading slash token and ranks prefixes first", () => {

@@ -108,6 +108,8 @@ export interface ToolDefinition<T, O = unknown> {
   modelInputSchema?: Record<string, unknown>;
   /** Whether providers should enforce strict function arguments. Defaults to true. */
   modelStrict?: boolean;
+  /** Declared read-only: allowed without approval, same as Read/Glob/Grep (including plan mode). */
+  readOnly?: boolean;
   paths(input: T): string[];
   /**
    * Optional short human-readable parameter summary, rendered dimmed next to the tool name.

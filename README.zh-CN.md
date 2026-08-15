@@ -35,6 +35,7 @@ Flavor Code 接入 OpenAI、Anthropic 或兼容服务，在受控工作区内使
 | 🧭 | **复杂任务可控推进** | 任务计划、子 Agent、steering、follow-up、`/loop` 和 `/goal` |
 | ⏪ | **结果可追溯、可恢复** | 完整时间线、checkpoint、rewind、trace、Diff 和失败审计 |
 | 🧠 | **本地长期上下文** | 记忆、Skill、插件和项目指南均保存在本机 |
+| 🔎 | **代码图导航** | 本地 AST 代码图索引（`.flavor/astgraph/`），通过 `ast_search`/`ast_callers`/`ast_impact` 等查询精确定位符号、追踪可达性 |
 | 🎨 | **E2E 需求到交付** | 从粗需求或设计稿到可交付产品：PRD、交互原型、视觉还原、接口联调、自主验收与评分交付（仅 Electron） |
 | 🛡️ | **明确的权限边界** | 分别控制读、写、Shell、网络和破坏性操作，也可使用 Docker |
 

@@ -262,7 +262,7 @@ export class PluginHost {
           return writeFile(allowed, data);
         },
       }) }),
-      registerCommand: (name: string, value: unknown) => register("command", name, [value]),
+      registerCommand: (name: string, value: unknown, description?: unknown) => register("command", name, [value, description]),
       registerTool: (name: string, value: unknown) => register("tool", name, [value]),
       registerHook: (name: string, value: unknown, options?: unknown) => register("hook", name, [value, options]),
       registerSkillRoot: (name: string, root: string) => {

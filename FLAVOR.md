@@ -10,6 +10,10 @@
 - `src`
 - `tests`
 
+## Search
+
+- A code graph index is available (`.flavor/astgraph/index.db`): pair `ast_search` with `grep`/`glob` to locate symbols, and use `ast_callers`/`ast_callees`/`ast_impact`/`ast_context` to trace reachability instead of reading files broadly.
+
 ## Build
 
 - `npm run build`

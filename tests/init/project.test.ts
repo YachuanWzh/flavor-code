@@ -227,6 +227,28 @@ it("generates deterministic concise instructions without reading environment fil
   expect(secondContent.length).toBeLessThan(2_500);
 });
 
+it("advises pairing ast_search with grep/glob only when a code graph index exists", async () => {
+  const cwd = await createRepository();
+  await writeFile(join(cwd, "package.json"), JSON.stringify({ name: "graph-app" }));
+
+  const withoutGraph = await initializeFlavor(cwd);
+
+  expect(withoutGraph.facts.hasCodeGraph).toBe(false);
+  expect(withoutGraph.content).not.toContain("## Search");
+  expect(withoutGraph.content).not.toContain("ast_search");
+
+  await mkdir(join(cwd, ".flavor", "astgraph"), { recursive: true });
+  await writeFile(join(cwd, ".flavor", "astgraph", "index.db"), "");
+
+  const withGraph = await initializeFlavor(cwd);
+
+  expect(withGraph.facts.hasCodeGraph).toBe(true);
+  expect(withGraph.content).toContain("## Search");
+  expect(withGraph.content).toContain("ast_search");
+  expect(withGraph.content).toMatch(/ast_search.*`grep`\/`glob`/);
+  expect(withGraph.content.match(/## Search/g)).toHaveLength(1);
+});
+
 it("replaces only its marker-bounded CRLF section and preserves user content", async () => {
   const cwd = await createRepository();
   await writeFile(

@@ -1,5 +1,5 @@
 import { lstat, mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -75,6 +75,8 @@ export interface ProjectFacts {
   instructionFiles: string[];
   configFiles: string[];
   gitignorePath?: string;
+  /** True when an astgraph code-graph index (`.flavor/astgraph/index.db`) exists. */
+  hasCodeGraph: boolean;
   cautions: string[];
 }
 
@@ -372,6 +374,8 @@ export async function inspectProject(cwd: string): Promise<ProjectFacts> {
 
   const gitignorePath =
     (await pathKind(join(cwd, ".gitignore"), root)) === "file" ? ".gitignore" : undefined;
+  const hasCodeGraph =
+    (await pathKind(join(cwd, ".flavor", "astgraph", "index.db"), root)) === "file";
   return {
     cwd,
     projectName,
@@ -387,6 +391,7 @@ export async function inspectProject(cwd: string): Promise<ProjectFacts> {
     instructionFiles,
     configFiles,
     ...(gitignorePath === undefined ? {} : { gitignorePath }),
+    hasCodeGraph,
     cautions,
   };
 }
@@ -409,6 +414,14 @@ function renderGeneratedSection(facts: ProjectFacts, newline: string): string {
     "Do not inspect dependency directories or generated output unless explicitly required.",
     ...facts.cautions,
   ];
+  const searchSection = facts.hasCodeGraph
+    ? [
+        "",
+        "## Search",
+        "",
+        "- A code graph index is available (`.flavor/astgraph/index.db`): pair `ast_search` with `grep`/`glob` to locate symbols, and use `ast_callers`/`ast_callees`/`ast_impact`/`ast_context` to trace reachability instead of reading files broadly.",
+      ]
+    : [];
   return [
     GENERATED_START,
     "## Overview",
@@ -420,6 +433,7 @@ function renderGeneratedSection(facts: ProjectFacts, newline: string): string {
     "## Layout",
     "",
     bulletList(facts.sourceDirectories, "No conventional source directories detected.", true, newline),
+    ...searchSection,
     "",
     "## Build",
     "",
@@ -584,9 +598,38 @@ async function copyCodeIslandPlugin(cwd: string): Promise<void> {
   }
 }
 
+const ASTGRAPH_SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), "astgraph");
+
+/**
+ * Copy the astgraph plugin (runtime + vendored WASM grammars + zod) into the
+ * workspace's project plugin directory. Mirrors the codeisland distribution
+ * pattern: an existing installation is never overwritten.
+ */
+export async function copyAstgraphPlugin(cwd: string): Promise<void> {
+  const pluginDir = join(cwd, ".flavor", "plugins", "astgraph");
+  try {
+    await lstat(pluginDir);
+    return; // already exists, leave user modifications alone
+  } catch (error) {
+    if (!isMissingPathError(error)) throw error;
+  }
+  copyDirectory(ASTGRAPH_SRC_DIR, pluginDir);
+}
+
+function copyDirectory(from: string, to: string): void {
+  mkdirSync(to, { recursive: true, mode: 0o700 });
+  for (const entry of readdirSync(from, { withFileTypes: true })) {
+    const source = join(from, entry.name);
+    const target = join(to, entry.name);
+    if (entry.isDirectory()) copyDirectory(source, target);
+    else if (entry.isFile()) copyFileSync(source, target);
+  }
+}
+
 export async function initializeFlavor(cwd: string): Promise<InitResult> {
   await ensureFlavorDirectories(cwd);
   await copyCodeIslandPlugin(cwd);
+  await copyAstgraphPlugin(cwd);
   await createExampleFlavorConfig(cwd);
   const facts = await inspectProject(cwd);
   const path = join(cwd, "FLAVOR.md");

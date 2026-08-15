@@ -30,15 +30,19 @@ export function slashCandidatePresentation(selected: boolean): SlashCandidatePre
 
 export function buildSlashCandidates(
   commands: readonly { name: string; description: string }[],
-  plugins: readonly string[],
+  plugins: readonly { name: string; description?: string }[],
   skills: readonly { name: string; description: string; source: string }[],
 ): SlashCandidate[] {
   const candidates = new Map<string, SlashCandidate>();
   for (const command of commands) {
     candidates.set(command.name, { name: command.name, kind: "command", description: command.description });
   }
-  for (const name of plugins) {
-    if (!candidates.has(name)) candidates.set(name, { name, kind: "plugin" });
+  for (const plugin of plugins) {
+    if (!candidates.has(plugin.name)) {
+      candidates.set(plugin.name, plugin.description === undefined
+        ? { name: plugin.name, kind: "plugin" }
+        : { name: plugin.name, kind: "plugin", description: plugin.description });
+    }
   }
   for (const skill of skills) {
     if (!candidates.has(skill.name)) {
