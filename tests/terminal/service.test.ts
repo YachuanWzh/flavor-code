@@ -70,4 +70,28 @@ describe("TerminalService", () => {
     });
     service.dispose();
   });
+
+  it("normalizes string-form enter flags from weak-typed models", async () => {
+    const root = mkdtempSync(join(tmpdir(), "flavor-terminal-"));
+    const backend = new FakePty();
+    const service = new TerminalService(root, { factory: () => backend });
+    const tools = createTerminalTools(service, root);
+    const context = { agent: "main" as const };
+    const signal = new AbortController().signal;
+    const open = tools.find((tool) => tool.name === "TerminalOpen");
+    const write = tools.find((tool) => tool.name === "TerminalWrite");
+    if (open === undefined || write === undefined) throw new Error("terminal tools missing");
+    const opened = await open.execute({}, signal, context) as { id: string };
+
+    const parsed = write.inputSchema.safeParse({ id: opened.id, data: "ls", enter: "true" });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect((parsed.data as { enter: unknown }).enter).toBe("true");
+    expect(write.inputSchema.safeParse({ id: opened.id, data: "ls", enter: "yes" }).success).toBe(false);
+    await write.execute({ id: opened.id, data: "ls", enter: "true" }, signal, context);
+    // "false" is truthy as a string, so it must normalize to a plain newline-less write.
+    await write.execute({ id: opened.id, data: "pwd", enter: "false" }, signal, context);
+
+    expect(backend.writes).toEqual(["ls\r", "pwd"]);
+    service.dispose();
+  });
 });

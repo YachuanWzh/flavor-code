@@ -19,7 +19,9 @@ const ShellInput = z.object({
   args: z.array(z.string()),
   cwd: z.string().min(1).nullable().optional(),
   timeoutMs: z.coerce.number().int().positive().max(86_400_000).nullable().optional(),
-  background: z.boolean().optional(),
+  // Accepts booleans and their string forms (weak-typed models emit "true");
+  // kept transform-free so the schema converts to JSON Schema for providers.
+  background: z.union([z.boolean(), z.string().refine((value) => value === "true" || value === "false")]).optional(),
 });
 
 export interface ShellToolOptions {
@@ -61,7 +63,7 @@ export function createShellTool(
     inputSchema: ShellInput,
     paths: (input) => [workingDirectory(root, input.cwd ?? undefined)],
     summarize: (input) => [input.command, ...input.args].join(" "),
-    presentCall: (input) => ({ kind: "terminal", variant: "command", title: input.background ? "Starting background command" : "Running command", command: [input.command, ...input.args].join(" "), state: "running" }),
+    presentCall: (input) => ({ kind: "terminal", variant: "command", title: backgroundFlag(input.background) ? "Starting background command" : "Running command", command: [input.command, ...input.args].join(" "), state: "running" }),
     permissions: (input) => ({
       paths: [workingDirectory(root, input.cwd ?? undefined)],
       command: input.command,
@@ -76,7 +78,7 @@ export function createShellTool(
       : { kind: "terminal", variant: "command", title: [input.command, ...input.args].join(" "), command: [input.command, ...input.args].join(" "), stdout: output.stdout, stderr: output.stderr, exitCode: output.exitCode, state: output.terminationReason === "cancelled" ? "cancelled" : output.exitCode === 0 ? "completed" : "failed", truncated: output.truncated },
     execute: async (input, signal, context) => {
       const timeoutMs = input.timeoutMs ?? defaultTimeoutMs;
-      if (input.background === true) {
+      if (backgroundFlag(input.background)) {
         if (options.jobs === undefined) throw new Error("Background shell requires a JobRegistry");
         const cancellation = new AbortController();
         const job = options.jobs.create({
@@ -339,6 +341,10 @@ class AdaptiveOutputDecoder {
     this.#pending = Buffer.alloc(0);
     return text;
   }
+}
+
+function backgroundFlag(value: boolean | string | undefined): boolean {
+  return value === true || value === "true";
 }
 
 function workingDirectory(root: string, cwd = "."): string {

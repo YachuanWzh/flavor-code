@@ -24,6 +24,22 @@ describe("Shell", () => {
     await jobs.wait(result.jobId, "main");
     expect(jobs.read(result.jobId, "main").output).toContain("ready");
   });
+  it("accepts string-form booleans for background (weak-typed models emit \"true\")", async () => {
+    const jobs = new JobRegistry();
+    const tool = createShellTool(process.cwd(), { jobs });
+    expect(tool.inputSchema.parse({ command: node, args: [], background: true }).background).toBe(true);
+    expect(tool.inputSchema.parse({ command: node, args: [], background: "true" }).background).toBe("true");
+    expect(tool.inputSchema.parse({ command: node, args: [], background: "false" }).background).toBe("false");
+    expect(() => tool.inputSchema.parse({ command: node, args: [], background: "yes" })).toThrow();
+
+    const result = await tool.execute({
+      command: node, args: ["-e", "process.stdout.write('up')"], background: "true",
+    }, signal, { agent: "main" });
+    expect(result).toMatchObject({ state: "running", jobId: expect.stringMatching(/^job-/) });
+    expect(tool.presentCall?.({ command: node, args: [], background: "true" })).toMatchObject({ title: "Starting background command" });
+    if (!("jobId" in result)) throw new Error("expected background result");
+    await jobs.wait(result.jobId, "main");
+  });
   it("passes argument arrays without shell parsing and uses a workspace cwd", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor shell "));
     const result = await createShellTool(workspace).execute({

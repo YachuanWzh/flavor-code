@@ -7,7 +7,10 @@ import type { ToolDefinition } from "./types.js";
 
 const Id = z.string().regex(/^term-[a-f0-9-]+$/);
 const OpenInput = z.object({ cwd: z.string().optional(), shell: z.string().optional(), args: z.array(z.string()).optional(), columns: z.coerce.number().int().min(10).max(500).optional(), rows: z.coerce.number().int().min(2).max(300).optional() });
-const WriteInput = z.object({ id: Id, data: z.string().max(100_000), enter: z.boolean().optional() });
+// Accepts booleans and their string forms (weak-typed models emit "true");
+// kept transform-free so the schema converts to JSON Schema for providers.
+const OptionalBoolean = z.union([z.boolean(), z.string().refine((value) => value === "true" || value === "false")]);
+const WriteInput = z.object({ id: Id, data: z.string().max(100_000), enter: OptionalBoolean.optional() });
 const ReadInput = z.object({ id: Id, cursor: z.coerce.number().int().min(0).optional() });
 const ResizeInput = z.object({ id: Id, columns: z.coerce.number().int().min(10).max(500), rows: z.coerce.number().int().min(2).max(300) });
 const CloseInput = z.object({ id: Id });
@@ -33,7 +36,11 @@ export function createTerminalTools(terminals: TerminalService, workspace = proc
       name: "TerminalWrite", description: "Write text or a command to a persistent terminal",
       inputSchema: WriteInput, paths: () => [],
       permissions: (input) => ({ paths: [], command: input.data, args: [] }),
-      execute: async (input, _signal, context) => { terminals.write(input.id, owner(context), input.data + (input.enter ? "\r" : "")); return { id: input.id, written: input.data.length + (input.enter ? 1 : 0) }; },
+      execute: async (input, _signal, context) => {
+        const enter = input.enter === true || input.enter === "true";
+        terminals.write(input.id, owner(context), input.data + (enter ? "\r" : ""));
+        return { id: input.id, written: input.data.length + (enter ? 1 : 0) };
+      },
     } satisfies ToolDefinition<z.infer<typeof WriteInput>>,
     {
       name: "TerminalRead", description: "Read output produced by a persistent terminal since a cursor",
