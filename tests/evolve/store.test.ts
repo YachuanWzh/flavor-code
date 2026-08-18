@@ -6,9 +6,9 @@ import { describe, expect, it } from "vitest";
 
 import { EvolveStore, argKeys, fingerprint, normalizeError } from "../../src/evolve/store.js";
 
-async function fixture(maxSignals = 400) {
+async function fixture(maxSignals = 400, maxRules = 20) {
   const workspace = await mkdtemp(join(tmpdir(), "flavor-evolve-store-"));
-  return { workspace, store: new EvolveStore({ workspace, maxSignals }) };
+  return { workspace, store: new EvolveStore({ workspace, maxSignals, maxRules }) };
 }
 
 describe("normalizeError / fingerprint / argKeys", () => {
@@ -245,5 +245,50 @@ describe("EvolveStore", () => {
     const raw = await readFile(join(workspace, ".flavor", "evolve", "signals.jsonl"), "utf8");
     expect(raw).not.toContain("file one");
     expect(raw).not.toContain("file two");
+  });
+});
+
+describe("guardrail rules", () => {
+  it("adds, dedupes, lists, and removes rules", async () => {
+    const { store } = await fixture();
+    expect(await store.listRules()).toEqual([]);
+    const first = await store.addRule({ text: "  Never   commit on main  " });
+    expect(first.added).toBe(true);
+    expect(first.rule.text).toBe("Never commit on main");
+    // Equivalent text (different whitespace) dedupes to the same rule.
+    const dupe = await store.addRule({ text: "Never commit on main" });
+    expect(dupe.added).toBe(false);
+    expect(dupe.rule.id).toBe(first.rule.id);
+
+    const second = await store.addRule({ text: "Run tests before pushing", sourceId: "abc123" });
+    expect(second.rule.sourceId).toBe("abc123");
+    expect((await store.listRules()).map((rule) => rule.id)).toEqual([first.rule.id, second.rule.id]);
+
+    expect(await store.removeRule(first.rule.id)).toEqual({ removed: true });
+    expect(await store.removeRule(first.rule.id)).toEqual({ removed: false });
+    expect(await store.listRules()).toHaveLength(1);
+  });
+
+  it("bounds the rule set at maxRules, dropping the oldest", async () => {
+    const { store } = await fixture(400, 3);
+    for (let index = 0; index < 5; index += 1) {
+      await store.addRule({ text: `rule number ${index}` });
+    }
+    const rules = await store.listRules();
+    expect(rules).toHaveLength(3);
+    expect(rules.map((rule) => rule.text)).toEqual(["rule number 2", "rule number 3", "rule number 4"]);
+  });
+
+  it("rejects blank rule text", async () => {
+    const { store } = await fixture();
+    await expect(store.addRule({ text: "   " })).rejects.toThrow(/must not be empty/u);
+  });
+
+  it("keeps reading when the rules file is corrupt", async () => {
+    const { workspace, store } = await fixture();
+    await store.addRule({ text: "valid rule" });
+    const { writeFile: overwrite } = await import("node:fs/promises");
+    await overwrite(join(workspace, ".flavor", "evolve", "rules.json"), "not-json", "utf8");
+    expect(await store.listRules()).toEqual([]);
   });
 });

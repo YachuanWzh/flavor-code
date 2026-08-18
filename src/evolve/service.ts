@@ -7,7 +7,9 @@
 //   3. MODIFY   evolve_improve (model side) and /evolve improve (human side)
 //               scaffold a fix-<tool>/ plugin dir + PLAN.md. Implementation
 //               happens through the normal tool loop (Write/Edit + reload),
-//               which goes through the permission system.
+//               which goes through the permission system. Alternatively a
+//               suggestion can be closed as a prompt guardrail rule that is
+//               injected into future system prompts (kind: prompt_rule).
 //   4. VERIFY   /evolve verify dry-runs the plugin in a shadow PluginHost
 //               sandbox; /evolve test runs the suite; /evolve revert restores
 //               the last good snapshot; /evolve done closes a suggestion.
@@ -77,8 +79,15 @@ without running the test suite afterwards.
 
 `;
 
+const GUARDRAILS_SECTION_HEADER = `# learned guardrails (evolve)
+
+These rules were distilled from repeated tool failures in this workspace.
+Follow them unless the current task or the user explicitly contradicts one.
+
+`;
+
 const USAGE = [
-  "usage: /evolve <signals|suggest|improve <id>|verify <name>|reload <name>|test|revert <name>|done <id>|verified|clear>",
+  "usage: /evolve <signals|suggest|improve <id>|verify <name>|reload <name>|test|revert <name>|done <id>|verified|trends [n]|rule <list|add|remove>|clear>",
   "  signals   list recent failing tool results",
   "  suggest   aggregate repeated failures into fix suggestions (trend-aware ordering)",
   "  improve   scaffold a fix-<tool>/ plugin dir + PLAN.md for one suggestion",
@@ -88,6 +97,8 @@ const USAGE = [
   "  revert    restore the last good snapshot of a plugin",
   "  done      mark a suggestion as handled (no longer proposed)",
   "  verified  list suggestions auto-verified by improving failure trends",
+  "  trends    cross-run dashboard: tool calls, failures, signalDelta, per-tool movement",
+  "  rule      manage learned guardrails injected into system prompts (list/add <text>/remove <id>)",
   "  clear     reset signals, done markers, and verified markers",
 ].join("\n");
 
@@ -191,10 +202,15 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
 
   async function refreshPromptCache(): Promise<void> {
     try {
-      const suggestions = await openWithTrends(promptTop);
-      promptCache = suggestions.length === 0
-        ? undefined
-        : `${SUGGEST_SECTION_HEADER}${suggestions.map((suggestion) => `- [${suggestion.id}] ${suggestion.hint}`).join("\n")}\n`;
+      const [suggestions, rules] = await Promise.all([openWithTrends(promptTop), store.listRules()]);
+      const sections: string[] = [];
+      if (rules.length > 0) {
+        sections.push(`${GUARDRAILS_SECTION_HEADER}${rules.map((rule) => `- ${rule.text}`).join("\n")}\n`);
+      }
+      if (suggestions.length > 0) {
+        sections.push(`${SUGGEST_SECTION_HEADER}${suggestions.map((suggestion) => `- [${suggestion.id}] ${suggestion.hint}`).join("\n")}\n`);
+      }
+      promptCache = sections.length === 0 ? undefined : sections.join("\n");
     } catch (error) {
       logger.warn(`prompt section failed — ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -406,6 +422,47 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
         }).join("\n");
       }
 
+      if (arg === "trends" || arg.startsWith("trends ")) {
+        const requested = Number.parseInt(arg.slice(6).trim(), 10);
+        const count = Number.isNaN(requested) ? 5 : Math.min(Math.max(requested, 1), 50);
+        const reflections = await store.reflections(count); // newest first
+        if (reflections.length === 0) return "no reflections recorded yet — trends appear after runs end";
+        const sign = (value: number) => (value > 0 ? `+${value}` : String(value));
+        const lines: string[] = [`evolve trends (last ${reflections.length} run(s), newest first)`];
+        for (const reflection of reflections) {
+          lines.push(`${reflection.at.replace("T", " ").slice(0, 19)}  ${reflection.reason}: model calls ${reflection.iterations}, tool calls ${reflection.toolCalls} (${reflection.toolErrors} failed), failures ${reflection.totalFailures} (delta ${sign(reflection.signalDelta)})`);
+          const moved = Object.entries(reflection.perTool ?? {}).filter(([, trend]) => trend.delta !== 0);
+          for (const [tool, trend] of moved) {
+            lines.push(`    - ${tool}: ${trend.failures} failure(s) this run (${sign(trend.delta)} vs previous)`);
+          }
+        }
+        return lines.join("\n");
+      }
+
+      if (arg === "rule" || arg === "rule list") {
+        const rules = await store.listRules();
+        if (rules.length === 0) return "no guardrail rules yet — add one with /evolve rule add <text>";
+        return rules.map((rule) => `[${rule.id}] ${rule.text}`).join("\n");
+      }
+
+      if (arg.startsWith("rule add ")) {
+        const text = arg.slice(9).trim();
+        if (text === "") return "usage: /evolve rule add <text>";
+        const { added, rule } = await store.addRule({ text });
+        await refreshPromptCache();
+        return added
+          ? `added guardrail [${rule.id}]: ${rule.text}`
+          : `guardrail already exists [${rule.id}]: ${rule.text}`;
+      }
+
+      if (arg.startsWith("rule remove ")) {
+        const id = arg.slice(12).trim();
+        if (id === "") return "usage: /evolve rule remove <id>";
+        const { removed } = await store.removeRule(id);
+        await refreshPromptCache();
+        return removed ? `removed guardrail ${id}` : `no guardrail with id "${id}"`;
+      }
+
       if (arg.startsWith("improve ")) {
         const suggestionId = arg.slice(8).trim();
         const suggestions = await openWithTrends(100);
@@ -483,21 +540,36 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
     toolDefinition(): ToolDefinition<unknown> {
       const inputSchema = z.object({
         suggestionId: z.string().min(1).describe("Signal id from the evolve suggestions"),
-        implementation: z.string().min(1).describe("Concise description of the plugin fix to implement"),
+        implementation: z.string().min(1).describe("Concise description of the fix to implement (plugin plan, or the guardrail rule text when kind is prompt_rule)"),
+        kind: z.enum(["plugin", "prompt_rule"]).optional().describe(
+          "plugin (default): scaffold a fix plugin; prompt_rule: store a guardrail rule that is injected into future system prompts",
+        ),
       });
       return {
         name: "evolve_improve",
         description:
-          "Implement a fix for one repeated tool failure as a flavor-code plugin: scaffolds the fix-<tool>/ plugin dir, " +
-          "writes PLAN.md, and returns instructions for implementing, verifying, reloading, and testing it. " +
-          "Use when the model proposes a concrete plugin-level fix for a suggestion in the system prompt.",
+          "Implement a fix for one repeated tool failure. Default kind=plugin scaffolds the fix-<tool>/ plugin dir and " +
+          "writes PLAN.md with instructions for implementing, verifying, reloading, and testing it. " +
+          "kind=prompt_rule instead stores a concise guardrail rule (from `implementation`) that is injected into future " +
+          "system prompts and closes the suggestion. Use when the model proposes a concrete fix for a suggestion in the system prompt.",
         inputSchema,
         paths: () => [],
         execute: async (input) => {
-          const { suggestionId, implementation } = input as { suggestionId: string; implementation: string };
+          const { suggestionId, implementation, kind } = input as { suggestionId: string; implementation: string; kind?: "plugin" | "prompt_rule" };
           const suggestions = await openWithTrends(100);
           const suggestion = suggestions.find((item) => item.id === suggestionId);
           if (suggestion === undefined) throw new Error(`No open suggestion with id "${suggestionId}".`);
+
+          if (kind === "prompt_rule") {
+            const { added, rule } = await store.addRule({ text: implementation, sourceId: suggestionId });
+            await store.markSuggestionDone(suggestionId);
+            await refreshPromptCache();
+            return [
+              added ? `Stored guardrail rule [${rule.id}]: ${rule.text}` : `Guardrail already exists [${rule.id}]: ${rule.text}`,
+              `Suggestion [${suggestion.id}] marked done. The rule is injected into the system prompt of future runs.`,
+              "Review rules with /evolve rule list; remove one with /evolve rule remove <id>.",
+            ].join("\n");
+          }
 
           const name = sanitizePluginName(suggestion.tool);
           const dir = await scaffoldFixPlugin(workspace, name);

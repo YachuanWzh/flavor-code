@@ -53,6 +53,10 @@ import { createProductionRuntime } from "../production.js";
 import { DesktopRuntimeController } from "./runtime-controller.js";
 import { isSafeExternalUrl, isTrustedNavigation, normalizePersistedWorkspace } from "./security.js";
 import { desktopWindowChrome } from "./window-options.js";
+import { installCrashGuard } from "../utils/crash-guard.js";
+
+// Record uncaught failures to .flavor/crash-*.log instead of dying silently.
+installCrashGuard();
 
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const developmentUrl = process.env.FLAVOR_DESKTOP_DEV_URL;

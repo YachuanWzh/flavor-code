@@ -8,6 +8,9 @@ export const TaskNodeSchema = z.object({
   dependencies: z.array(z.string().trim().min(1)),
   expectedOutputs: z.array(z.string().trim().min(1)),
   verification: z.array(z.string().trim().min(1)),
+  files: z.array(z.string().trim().min(1)).describe(
+    "Workspace files this task owns for writing. Tasks whose files overlap are never run in parallel, so declare every file this task may create or modify.",
+  ).optional(),
 }).strict();
 
 export const TaskGraphSchema = z.object({

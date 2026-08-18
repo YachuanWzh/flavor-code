@@ -269,6 +269,102 @@ describe("SubagentScheduler", () => {
     expect(outcome.states).toEqual({ a: "failed", b: "completed" });
     expect(outcome.results.a?.summary).toContain("stop hook broke");
   });
+
+  it("never runs tasks with overlapping owned files in parallel", async () => {
+    const filesOf: Record<string, readonly string[]> = {
+      a: ["src/a.ts"], b: ["src/a.ts"], c: ["src/c.ts"],
+    };
+    const running = new Set<string>();
+    const violations: string[] = [];
+    let peak = 0;
+    const scheduler = new SubagentScheduler({
+      maxSubagents: 3,
+      hooks: new HookBus(),
+      execute: async (task) => {
+        const own = filesOf[task.id] ?? [];
+        for (const id of running) {
+          if ((filesOf[id] ?? []).some((file) => own.includes(file))) violations.push(`${id}+${task.id}`);
+        }
+        running.add(task.id);
+        peak = Math.max(peak, running.size);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        running.delete(task.id);
+        return result(task.id);
+      },
+    });
+
+    const outcome = await scheduler.run(TaskGraphSchema.parse({ nodes: [
+      { ...node("a"), files: [...filesOf.a!] }, { ...node("b"), files: [...filesOf.b!] }, { ...node("c"), files: [...filesOf.c!] },
+    ] }));
+
+    // a and b share a file so they serialize; c is disjoint and overlaps them.
+    expect(violations).toEqual([]);
+    expect(peak).toBeGreaterThanOrEqual(2);
+    expect(outcome.states).toEqual({ a: "completed", b: "completed", c: "completed" });
+  });
+
+  it("treats directory prefixes and mixed path separators as file conflicts", async () => {
+    const filesOf: Record<string, readonly string[]> = {
+      a: ["src"], b: ["src/util.ts"], c: ["docs\\readme.md"], d: ["docs/readme.md"],
+    };
+    const normalize = (value: string) => value.replace(/\\/g, "/");
+    const conflicts = (left: readonly string[], right: readonly string[]): boolean => {
+      const hits = (one: string, other: readonly string[]) => other.some((item) => {
+        const a = normalize(one);
+        const b = normalize(item);
+        return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+      });
+      return left.some((file) => hits(file, right));
+    };
+    const running = new Set<string>();
+    const violations: string[] = [];
+    const scheduler = new SubagentScheduler({
+      maxSubagents: 4,
+      hooks: new HookBus(),
+      execute: async (task) => {
+        const own = filesOf[task.id] ?? [];
+        for (const id of running) {
+          if (conflicts(filesOf[id] ?? [], own)) violations.push(`${id}+${task.id}`);
+        }
+        running.add(task.id);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        running.delete(task.id);
+        return result(task.id);
+      },
+    });
+
+    const outcome = await scheduler.run(TaskGraphSchema.parse({ nodes: [
+      { ...node("a"), files: [...filesOf.a!] }, { ...node("b"), files: [...filesOf.b!] },
+      { ...node("c"), files: [...filesOf.c!] }, { ...node("d"), files: [...filesOf.d!] },
+    ] }));
+
+    expect(violations).toEqual([]);
+    expect(outcome.states).toEqual({ a: "completed", b: "completed", c: "completed", d: "completed" });
+  });
+
+  it("still starts tasks without owned files alongside any running task", async () => {
+    let running = 0;
+    let peak = 0;
+    const scheduler = new SubagentScheduler({
+      maxSubagents: 3,
+      hooks: new HookBus(),
+      execute: async (task) => {
+        running += 1;
+        peak = Math.max(peak, running);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        running -= 1;
+        return result(task.id);
+      },
+    });
+
+    // Read-only tasks declare no files and must never be gated by ownership.
+    const outcome = await scheduler.run(TaskGraphSchema.parse({ nodes: [
+      { ...node("a"), files: ["src/a.ts"] }, node("b"), node("c"),
+    ] }));
+
+    expect(peak).toBe(3);
+    expect(outcome.states).toEqual({ a: "completed", b: "completed", c: "completed" });
+  });
 });
 
 describe("LocalHarness", () => {

@@ -32,12 +32,13 @@ Flavor Code 接入 OpenAI、Anthropic 或兼容服务，在受控工作区内使
 | | 能力 | 你得到什么 |
 | --- | --- | --- |
 | 🖥️ | **一个运行时，三个入口** | CLI、Electron 与 VS Code 共享模型配置、会话和工具能力 |
-| 🧭 | **复杂任务可控推进** | 任务计划、子 Agent、steering、follow-up、`/loop` 和 `/goal` |
+| 🧭 | **复杂任务可控推进** | 任务计划、子 Agent、steering、follow-up、`/loop`、`/goal`，并行任务自动避免写冲突（拥有重叠文件的任务串行执行） |
 | ⏪ | **结果可追溯、可恢复** | 完整时间线、checkpoint、rewind、trace、Diff 和失败审计 |
 | 🧠 | **本地长期上下文** | 记忆、Skill、插件和项目指南均保存在本机 |
 | 🔎 | **代码图导航** | 本地 AST 代码图索引（`.flavor/astgraph/`），通过 `ast_search`/`ast_callers`/`ast_impact` 等查询精确定位符号、追踪可达性 |
+| 🌿 | **Git 原生工作流** | `/commit` 为暂存改动生成 Conventional Commits 提交信息并确认提交；`/review` 审查未提交改动；只读 `GitHistory` 工具回答“这段代码为什么是这样” |
 | 🎨 | **E2E 需求到交付** | 从粗需求或设计稿到可交付产品：PRD、交互原型、视觉还原、接口联调、自主验收与评分交付（仅 Electron） |
-| 🔁 | **有界自进化** | 重复的工具失败被捕获、去重并形成建议；修复以插件形式落地，必须通过沙箱验证与测试套件后才能热重载（`/evolve`） |
+| 🔁 | **有界自进化** | 重复的工具失败被捕获、去重并形成建议；修复以沙箱验证过的插件形式落地，或沉淀为注入后续提示词的 guardrail 规则，并支持运行趋势与规则管理（`/evolve`） |
 | 🛡️ | **明确的权限边界** | 分别控制读、写、Shell、网络和破坏性操作，也可使用 Docker |
 
 ## 快速开始
@@ -155,11 +156,15 @@ OAuth PKCE 的运行时行为与配置约定见 [PKCE 规范](./docs/specs/pkce-
 | `/mcp` | 查看和管理 MCP 服务 |
 | `/loop <goal>` | 运行带验证的自治循环 |
 | `/goal <objective>` | 运行规划、执行、对抗审查流程 |
-| `/evolve <signals\|suggest\|improve ...>` | 自进化循环：查看重复工具失败、脚手架修复插件、验证并热重载 |
+| `/commit [hint]` | 为暂存改动生成 Conventional Commits 提交信息，确认后提交 |
+| `/review [focus]` | 提交前审查未提交改动的缺陷与风险 |
+| `/evolve <signals\|suggest\|improve ...>` | 自进化循环：查看重复工具失败、脚手架修复插件、管理运行趋势与 guardrail 规则、验证并热重载 |
 | `/pals`、`/chat`、`/co-work` | 发现并协作其他本机 CLI 实例 |
 | `/audit` | 查看工具失败审计 |
 
 运行中可以提交 steering 或排队 follow-up；当前模型响应结束后，任务会在安全边界处接收新指令。
+
+`/commit` 与 `/review` 使用廉价子 Agent 模型，模型不可用时优雅降级。会话 checkpoint 会标记当前 git 状态（`branch@sha`），`/tree` 可以看到每个节点对应的工作区现场。
 
 #### CLI Pals 与跨项目协作
 

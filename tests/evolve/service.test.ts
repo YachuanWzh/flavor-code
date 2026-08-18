@@ -297,6 +297,60 @@ describe("REPEAT (beginRun/endRun)", () => {
     expect(output).toContain("Read");
     expect(output).toContain("verified");
   });
+
+  it("renders a cross-run trends dashboard", async () => {
+    const { hooks, service } = await fixture();
+    expect(await service.handleCommand(["trends"])).toContain("no reflections recorded yet");
+
+    service.beginRun();
+    await failTool(hooks, "Read", "ENOENT", "missing");
+    await failTool(hooks, "Read", "ENOENT", "missing");
+    await service.endRun("finished");
+    service.beginRun();
+    await service.endRun("finished");
+
+    const output = await service.handleCommand(["trends"]);
+    expect(output).toContain("evolve trends (last 2 run(s), newest first)");
+    expect(output).toContain("Read: 0 failure(s) this run (-2 vs previous)");
+    expect(await service.handleCommand(["trends", "1"])).toContain("last 1 run(s)");
+  });
+});
+
+describe("GUARDRAILS (prompt rules)", () => {
+  it("adds, lists, and removes rules and injects them into the prompt section", async () => {
+    const { service } = await fixture();
+    expect(await service.handleCommand(["rule"])).toContain("no guardrail rules yet");
+    expect(service.promptSection()).toBeUndefined();
+
+    const added = await service.handleCommand(["rule", "add", "Always stage files before committing"]);
+    expect(added).toContain("added guardrail");
+    const section = service.promptSection();
+    expect(section).toContain("# learned guardrails (evolve)");
+    expect(section).toContain("Always stage files before committing");
+
+    // Duplicate add dedupes instead of stacking.
+    expect(await service.handleCommand(["rule", "add", "Always stage files before committing"]))
+      .toContain("already exists");
+    expect(await service.store.listRules()).toHaveLength(1);
+
+    expect(await service.handleCommand(["rule", "list"])).toContain("Always stage files before committing");
+    const id = (await service.store.listRules())[0]!.id;
+    expect(await service.handleCommand(["rule", "remove", id])).toContain("removed guardrail");
+    expect(await service.handleCommand(["rule", "remove", id])).toContain(`no guardrail with id "${id}"`);
+    expect(service.promptSection()).toBeUndefined();
+  });
+
+  it("combines guardrails and suggestions in one prompt section", async () => {
+    const { hooks, service } = await fixture();
+    await service.handleCommand(["rule", "add", "Prefer staged commits"]);
+    await failTool(hooks, "Read", "ENOENT", "missing");
+    await failTool(hooks, "Read", "ENOENT", "missing");
+
+    const section = service.promptSection();
+    expect(section).toContain("# learned guardrails (evolve)");
+    expect(section).toContain("# self-improvement suggestions (evolve)");
+    expect(section!.indexOf("guardrails")).toBeLessThan(section!.indexOf("suggestions"));
+  });
 });
 
 describe("COMMANDS", () => {
@@ -460,5 +514,30 @@ describe("evolve_improve TOOL", () => {
     await expect(
       tool.execute({ suggestionId: "deadbeef", implementation: "x" }, new AbortController().signal),
     ).rejects.toThrow(/no open suggestion/i);
+  });
+
+  it("closes a suggestion as a prompt guardrail with kind=prompt_rule", async () => {
+    const { hooks, service } = await fixture();
+    await failTool(hooks, "Shell", "tool_error", "command failed");
+    await failTool(hooks, "Shell", "tool_error", "command failed");
+    const [suggestion] = await service.store.openSuggestions({ threshold: 2, limit: 10 });
+
+    const tool = service.toolDefinition();
+    const output = String(await tool.execute({
+      suggestionId: suggestion!.id,
+      implementation: "Check that the binary exists before invoking it",
+      kind: "prompt_rule",
+    }, new AbortController().signal));
+
+    expect(output).toContain("Stored guardrail rule");
+    expect(output).toContain("marked done");
+    // The suggestion is closed and the rule lands in the prompt section.
+    expect(await service.store.openSuggestions({ threshold: 2, limit: 10 })).toEqual([]);
+    const rules = await service.store.listRules();
+    expect(rules).toHaveLength(1);
+    expect(rules[0]).toMatchObject({
+      text: "Check that the binary exists before invoking it", sourceId: suggestion!.id,
+    });
+    expect(service.promptSection()).toContain("Check that the binary exists before invoking it");
   });
 });

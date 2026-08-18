@@ -90,6 +90,9 @@ export class SubagentScheduler {
     const states = new Map<string, SubagentState>(graph.nodes.map((task) => [task.id, "pending"]));
     const results = new Map<string, SubagentResult>();
     const running = new Map<string, Promise<Completion>>();
+    // Write-conflict protection: files owned by currently running tasks. A task
+    // whose declared files overlap never starts until the owner finishes.
+    const runningFiles = new Map<string, readonly string[]>();
     const started = new Set<Promise<Completion>>();
 
     try {
@@ -99,7 +102,9 @@ export class SubagentScheduler {
         for (const task of graph.nodes) {
           if (running.size >= this.#options.maxSubagents) break;
           if (states.get(task.id) !== "pending" || !isReady(task, states)) continue;
+          if (conflictsWithRunning(task, runningFiles)) continue;
           states.set(task.id, "running");
+          if (task.files !== undefined) runningFiles.set(task.id, task.files.map(normalizeOwnedFile));
           const execution = this.#runTask(task, signal);
           running.set(task.id, execution);
           started.add(execution);
@@ -114,6 +119,7 @@ export class SubagentScheduler {
         const completion = await Promise.race(running.values());
         signal.throwIfAborted();
         running.delete(completion.id);
+        runningFiles.delete(completion.id);
         results.set(completion.id, completion.result);
         states.set(completion.id, completion.result.status);
         await this.#options.onResult?.(completion.result);
@@ -199,6 +205,34 @@ export class SubagentScheduler {
 
 function isReady(task: TaskNode, states: ReadonlyMap<string, SubagentState>): boolean {
   return task.dependencies.every((dependency) => states.get(dependency) === "completed");
+}
+
+/** Normalize separators so `src\a.ts` and `src/a.ts` compare equal. */
+function normalizeOwnedFile(value: string): string {
+  return value.replace(/\\/g, "/");
+}
+
+function ownedFilesConflict(left: readonly string[], right: readonly string[]): boolean {
+  for (const one of left) {
+    for (const other of right) {
+      if (one === other) return true;
+      // Directory ownership: owning "src" conflicts with owning "src/a.ts".
+      if (other.startsWith(`${one}/`) || one.startsWith(`${other}/`)) return true;
+    }
+  }
+  return false;
+}
+
+function conflictsWithRunning(
+  task: TaskNode,
+  runningFiles: ReadonlyMap<string, readonly string[]>,
+): boolean {
+  if (task.files === undefined || task.files.length === 0) return false;
+  const owned = task.files.map(normalizeOwnedFile);
+  for (const files of runningFiles.values()) {
+    if (ownedFilesConflict(owned, files)) return true;
+  }
+  return false;
 }
 
 function statesHaveWork(states: ReadonlyMap<string, SubagentState>): boolean {

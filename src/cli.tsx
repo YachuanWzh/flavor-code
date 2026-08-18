@@ -7,6 +7,7 @@ import { Command, Option } from "commander";
 
 import { createProductionRuntime, type ProductionRuntime } from "./production.js";
 import { initializeFlavor } from "./init/project.js";
+import { installCrashGuard } from "./utils/crash-guard.js";
 import { message } from "./utils/error.js";
 import { redactErrorText } from "./utils/redact.js";
 import { packageVersion } from "./utils/version.js";
@@ -292,6 +293,9 @@ function safeError(error: unknown): string {
 if (process.argv[1]) {
   const scriptPath = fileURLToPath(import.meta.url);
   if (realpathSync(scriptPath) === realpathSync(process.argv[1])) {
+    // Escape hatch for any uncaught failure: write a crash log and restore the
+    // terminal instead of dying silently with ANSI garbage on screen.
+    installCrashGuard();
     try {
       await createProgram().parseAsync(process.argv);
     } catch (error) {

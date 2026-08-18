@@ -64,6 +64,17 @@ import { createGlobTool, createGrepTool } from "./tools/search.js";
 import { createShellTool } from "./tools/shell.js";
 import { createWebFetchTool, createWebSearchTool } from "./tools/web.js";
 import { createLspTools } from "./tools/lsp.js";
+import {
+  changeSummary,
+  commit as gitCommitChange,
+  gitMarker,
+  isGitRepository,
+  stageAll,
+  stagedDiff,
+  uncommittedDiff,
+} from "./git/service.js";
+import { formatReviewReport, reviewDiff, suggestCommitMessage } from "./git/insights.js";
+import { createGitHistoryTool } from "./git/tools.js";
 import { createAskUserQuestionTool, hookAnswersFromUpdatedInput, QuestionBridge, type AskUserQuestionHandler } from "./tools/ask-user-question.js";
 import { createTaskOutputTool } from "./tools/task-output.js";
 import { createTodoWriteTool } from "./tools/todo-write.js";
@@ -365,7 +376,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     createWriteTool(workspace, fileMutationOptions),
     createEditTool(workspace, fileMutationOptions),
     createApplyPatchTool(workspace, fileMutationOptions),
-    createGlobTool(workspace), createGrepTool(workspace), createShellTool(workspace, {
+    createGlobTool(workspace), createGrepTool(workspace), createGitHistoryTool(workspace), createShellTool(workspace, {
       jobs,
       ...(executionEnvironment === undefined ? {} : { executionEnvironment }),
     }),
@@ -709,7 +720,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
 
   const taskTool: ToolDefinition<unknown> = {
     name: "Task",
-    description: "Validate a task graph and execute its nodes with isolated child agents",
+    description: "Validate a task graph and execute its nodes with isolated child agents. " +
+      "Declare each node's `files` (the workspace files it may create or modify) whenever a task writes files; " +
+      "nodes with overlapping files are serialized automatically to prevent concurrent write conflicts.",
     inputSchema: TaskGraphSchema,
     paths: () => [],
     execute: async (input, signal) => {
@@ -1371,6 +1384,16 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     hooksStatus: () => HOOK_EVENT_NAMES.map((name) => ({ name, pluginHandlers: pluginHooks.filter((item) => item === name).length })),
     tasks: () => ({ plan: taskPlan, graph: taskGraph, states: taskStates, results: taskResults }),
     evolve: (args: readonly string[]) => evolveService.handleCommand(args),
+    gitCommit: (hint, signal) => runGitCommit({
+      workspace, registry, questions,
+      modelId: () => harness.subagentModelId,
+      notify: (message) => emitOutput({ type: "notice", message }),
+    }, hint, signal),
+    gitReview: (focus, signal) => runGitReview({
+      workspace, registry,
+      modelId: () => harness.subagentModelId,
+      notify: (message) => emitOutput({ type: "notice", message }),
+    }, focus, signal),
     audit: async (toolFilter?: string) => {
       try {
         const raw = await readFile(auditLogger.path, "utf8");
@@ -1460,7 +1483,13 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     },
     ide: () => ide.status(),
     ideContext: () => ide.editorContext(),
-    checkpoint: (label) => sessionHistory.checkpoint(label, harness.main.context.snapshot()),
+    checkpoint: async (label) => {
+      // Tag checkpoints with the git state so /tree shows what the workspace
+      // looked like at each node.
+      const marker = await gitMarker(workspace);
+      const tagged = marker === undefined ? label : label === undefined ? `git: ${marker}` : `${label} (git: ${marker})`;
+      return sessionHistory.checkpoint(tagged, harness.main.context.snapshot());
+    },
     tree: () => sessionHistory.tree(),
     rewind: async (nodeId) => {
       await sessionHistory.rewind(nodeId, harness.main.context.snapshot());
@@ -1914,6 +1943,80 @@ async function* persistEach<T>(source: AsyncIterable<T>, persist: () => Promise<
   }
 }
 
+interface GitCommandDeps {
+  workspace: string;
+  registry: ModelRegistry;
+  questions?: QuestionBridge;
+  /** Cheap model id provider; evaluated lazily so /model switches apply. */
+  modelId(): string;
+  notify?(message: string): void;
+}
+
+async function runGitCommit(deps: GitCommandDeps, hint: string | undefined, signal: AbortSignal): Promise<string> {
+  if (!(await isGitRepository(deps.workspace))) return "Not a git repository — /commit needs git.";
+  let summary = await changeSummary(deps.workspace);
+  if (summary.statusLines.length === 0) return "Working tree clean — nothing to commit.";
+  if (summary.stagedFiles.length === 0) {
+    if (deps.questions === undefined) throw new Error("Nothing is staged. Run `git add` on the files you want to commit first.");
+    const stageAnswers = await deps.questions.ask([{
+      header: "Staging",
+      question: `Nothing is staged, but ${summary.statusLines.length} change(s) exist. Stage everything before committing?`,
+      options: [
+        { label: "Stage all", description: "Run git add -A, then generate the commit message." },
+        { label: "Cancel", description: "Abort /commit and leave the working tree as-is." },
+      ],
+    }], signal);
+    if (stageAnswers[0] !== "Stage all") return "/commit cancelled — nothing was staged.";
+    await stageAll(deps.workspace);
+    summary = await changeSummary(deps.workspace);
+    if (summary.stagedFiles.length === 0) return "Nothing ended up staged — /commit aborted.";
+  }
+  const staged = await stagedDiff(deps.workspace);
+  signal.throwIfAborted();
+  deps.notify?.("Generating commit message…");
+  let commitMessage: string;
+  try {
+    commitMessage = await suggestCommitMessage(
+      { registry: deps.registry, modelId: deps.modelId },
+      { stat: staged.stat, diff: staged.diff, ...(hint === undefined ? {} : { hint }) },
+      signal,
+    );
+  } catch (error) {
+    signal.throwIfAborted();
+    const scope = summary.stagedFiles.length === 1 ? (summary.stagedFiles[0] ?? "1 file") : `${summary.stagedFiles.length} files`;
+    commitMessage = `chore: update ${scope}`;
+    deps.notify?.(`Commit message generation failed (${message(error)}); using a fallback message.`);
+  }
+  deps.notify?.(`Proposed commit message:\n${commitMessage}`);
+  if (deps.questions !== undefined) {
+    const confirmAnswers = await deps.questions.ask([{
+      header: "Commit",
+      question: `Commit ${summary.stagedFiles.length} staged file(s) on ${summary.branch} with the message above?`,
+      options: [
+        { label: "Commit", description: "Run git commit with the proposed message." },
+        { label: "Cancel", description: "Abort; the staged changes stay as-is." },
+      ],
+    }], signal);
+    if (confirmAnswers[0] !== "Commit") return "/commit cancelled — staged changes left untouched.";
+  }
+  const result = await gitCommitChange(deps.workspace, commitMessage);
+  return `Committed: ${result}`;
+}
+
+async function runGitReview(deps: GitCommandDeps, focus: string | undefined, signal: AbortSignal): Promise<string> {
+  if (!(await isGitRepository(deps.workspace))) return "Not a git repository — /review needs git.";
+  const changes = await uncommittedDiff(deps.workspace);
+  if (changes.diff.trim() === "" && changes.untracked.length === 0) return "No uncommitted changes to review.";
+  signal.throwIfAborted();
+  deps.notify?.("Reviewing uncommitted changes…");
+  const report = await reviewDiff(
+    { registry: deps.registry, modelId: deps.modelId },
+    { stat: changes.stat, diff: changes.diff, untracked: changes.untracked, ...(focus === undefined ? {} : { focus }) },
+    signal,
+  );
+  return formatReviewReport(report);
+}
+
 async function runChild(
   harness: LocalHarness, skills: SkillRegistry, task: TaskNode, attempt: 1 | 2, signal: AbortSignal,
   parentContext: ContextManager,
@@ -1928,6 +2031,9 @@ async function runChild(
       `Complete task ${task.id}: ${task.description}`,
       `Expected outputs: ${task.expectedOutputs.join("; ")}`,
       `Verification: ${task.verification.join("; ")}`,
+      ...(task.files === undefined || task.files.length === 0
+        ? []
+        : [`Owned files: ${task.files.join(", ")}. Restrict your file writes to these paths; concurrent tasks own everything else.`]),
       `For completed work, finish by calling TaskOutput. Otherwise return only JSON matching these fields: ${Object.keys(SubagentResultSchema.shape).join(", ")}.${repair}`,
     ].join("\n");
     for await (const event of child.loop.run({ prompt, signal: childSignal })) {

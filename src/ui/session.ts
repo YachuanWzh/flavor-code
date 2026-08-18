@@ -109,6 +109,8 @@ export interface SessionServices {
   tasks(): unknown;
   audit(toolFilter?: string): string | Promise<string>;
   evolve(args: readonly string[]): string | Promise<string>;
+  gitCommit?(hint: string | undefined, signal: AbortSignal): Promise<string>;
+  gitReview?(focus: string | undefined, signal: AbortSignal): Promise<string>;
   usage(): string | Promise<string>;
   cancelActiveTask(): void | Promise<void>;
   clearContext(): void | Promise<void>;
@@ -162,6 +164,8 @@ const HELP = [
   "/compact  /clear  /help  /exit",
   "/loop <goal>                            run a verified autonomous loop",
   "/goal <objective>                       run a goal pipeline with adversarial verification",
+  "/commit [hint]                          draft a commit message for staged changes and commit",
+  "/review [focus]                         review uncommitted changes before committing",
   "/evolve <signals|suggest|improve <id>|verify <name>|reload <name>|test|revert <name>|done <id>>  self-improvement loop",
   "/mcp [status|tools|reconnect|enable|disable]  manage MCP servers",
   "/ide                                     show VS Code connection and cursor/selection",
@@ -498,6 +502,10 @@ export class FlavorSession {
       for await (const event of this.#services.runLoop(command.goal, signal)) this.#services.output(event);
     } else if (command.name === "goal") {
       for await (const event of this.#services.runGoal(command.goal, signal)) this.#services.output(event);
+    } else if (command.name === "commit") {
+      this.#notice(await required(this.#services.gitCommit, "commit")(command.hint, signal));
+    } else if (command.name === "review") {
+      this.#notice(await required(this.#services.gitReview, "review")(command.focus, signal));
     } else if (command.name === "mcp") {
       this.#notice(await this.#services.mcp(command, signal));
     } else if (command.name === "pals") {

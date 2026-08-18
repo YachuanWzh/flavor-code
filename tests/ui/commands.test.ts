@@ -36,6 +36,10 @@ describe("parseSlashCommand", () => {
     ["/rewind turn-123", { name: "rewind", nodeId: "turn-123" }],
     ["/fork turn-456", { name: "fork", nodeId: "turn-456" }],
     ["/unrevert", { name: "unrevert" }],
+    ["/commit", { name: "commit" }],
+    ["/commit fix the parser", { name: "commit", hint: "fix the parser" }],
+    ["/review", { name: "review" }],
+    ["/review error handling", { name: "review", focus: "error handling" }],
     ["/help", { name: "help" }], ["/exit", { name: "exit" }],
   ])("parses %s", (input, expected) => expect(parseSlashCommand(input)).toEqual(expected));
 

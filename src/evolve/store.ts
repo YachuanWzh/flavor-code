@@ -5,6 +5,7 @@
 //   signals.jsonl      aggregated tool-failure signals (deduped by fingerprint)
 //   reflections.jsonl  one line per agent run (loop end)
 //   done.json          suggestion ids the operator/model already acted on
+//   rules.json         learned guardrail rules injected into system prompts
 
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -58,9 +59,18 @@ export interface EvolveReflection extends EvolveReflectionInput {
   perTool: Record<string, ToolTrend>;
 }
 
+export interface EvolveRule {
+  id: string;
+  text: string;
+  addedAt: string;
+  /** Signal id that motivated this rule, when it came from a suggestion. */
+  sourceId?: string;
+}
+
 export interface EvolveStoreOptions {
   workspace: string;
   maxSignals?: number;
+  maxRules?: number;
 }
 
 /** Collapse whitespace and quoted values so equivalent messages coalesce. */
@@ -123,25 +133,52 @@ async function readJsonArray(file: string): Promise<string[]> {
   }
 }
 
+async function readRules(file: string): Promise<EvolveRule[]> {
+  try {
+    const parsed = JSON.parse(await readFile(file, "utf8")) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item): item is Record<string, unknown> => item !== null && typeof item === "object")
+      .filter((item) => typeof item.id === "string" && typeof item.text === "string")
+      .map((item): EvolveRule => ({
+        id: item.id as string,
+        text: item.text as string,
+        addedAt: typeof item.addedAt === "string" ? item.addedAt : "",
+        ...(typeof item.sourceId === "string" ? { sourceId: item.sourceId } : {}),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+async function writeRules(file: string, rules: readonly EvolveRule[]): Promise<void> {
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  await writeFile(file, JSON.stringify(rules, null, 2), { encoding: "utf8", mode: 0o600 });
+}
+
 export class EvolveStore {
   readonly dir: string;
   readonly signalsFile: string;
   readonly reflectionsFile: string;
   readonly doneFile: string;
   readonly verifiedFile: string;
+  readonly rulesFile: string;
   readonly maxSignals: number;
+  readonly maxRules: number;
 
   // Serialize file mutations: tool hooks may fire in bursts.
   #queue: Promise<unknown> = Promise.resolve();
 
   constructor(options: EvolveStoreOptions) {
-    const { workspace, maxSignals = 400 } = options;
+    const { workspace, maxSignals = 400, maxRules = 20 } = options;
     this.dir = join(workspace, ".flavor", "evolve");
     this.signalsFile = join(this.dir, "signals.jsonl");
     this.reflectionsFile = join(this.dir, "reflections.jsonl");
     this.doneFile = join(this.dir, "done.json");
     this.verifiedFile = join(this.dir, "verified.json");
+    this.rulesFile = join(this.dir, "rules.json");
     this.maxSignals = maxSignals;
+    this.maxRules = maxRules;
   }
 
   #enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -307,6 +344,46 @@ export class EvolveStore {
         verified.push(id);
         await writeFile(this.verifiedFile, JSON.stringify(verified, null, 2), { encoding: "utf8", mode: 0o600 });
       }
+    });
+  }
+
+  /** Learned guardrail rules, oldest first. */
+  listRules(): Promise<EvolveRule[]> {
+    return this.#enqueue(() => readRules(this.rulesFile));
+  }
+
+  /**
+   * Add one guardrail rule. Dedupes by fingerprint of the normalized text and
+   * keeps at most maxRules entries (oldest dropped first).
+   */
+  addRule(input: { text: string; sourceId?: string }): Promise<{ added: boolean; rule: EvolveRule }> {
+    return this.#enqueue(async () => {
+      const text = input.text.replace(/\s+/g, " ").trim().slice(0, 300);
+      if (text === "") throw new Error("rule text must not be empty");
+      const id = fingerprint("rule", undefined, text);
+      const rules = await readRules(this.rulesFile);
+      const existing = rules.find((rule) => rule.id === id);
+      if (existing !== undefined) return { added: false, rule: existing };
+      const rule: EvolveRule = {
+        id,
+        text,
+        addedAt: new Date().toISOString(),
+        ...(input.sourceId === undefined ? {} : { sourceId: input.sourceId }),
+      };
+      rules.push(rule);
+      if (rules.length > this.maxRules) rules.splice(0, rules.length - this.maxRules);
+      await writeRules(this.rulesFile, rules);
+      return { added: true, rule };
+    });
+  }
+
+  removeRule(id: string): Promise<{ removed: boolean }> {
+    return this.#enqueue(async () => {
+      const rules = await readRules(this.rulesFile);
+      const next = rules.filter((rule) => rule.id !== id);
+      if (next.length === rules.length) return { removed: false };
+      await writeRules(this.rulesFile, next);
+      return { removed: true };
     });
   }
 }
