@@ -11,6 +11,8 @@ coverage/
 *.temp
 .cache/
 .npm/
+# npm auth token (project-level)
+.npmrc
 .DS_Store
 Thumbs.db
 .worktrees/
