@@ -2,7 +2,24 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.2.14 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.2.15 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.2.15] - 2026-08-18
+
+### 新增
+- 新增原生 Git 工作流命令：`/commit [hint]` 为暂存变更生成 Conventional Commits 风格提交信息，确认后执行提交；`/review [focus]` 对未提交变更做结构化审查，输出 verdict（ship / ship-with-fixes / needs-work）、严重级别 finding（critical / warning / nit）与修复建议
+  - 两者都使用廉价子代理模型，模型不可用时优雅降级：`/commit` 回退为确定性消息（`chore: update <scope>`），`/review` 明确报错而非静默通过
+  - `/commit` 在无暂存内容时先询问是否 `git add -A`；`/review` 会额外提示 diff 之外的未跟踪文件，支持 `focus` 聚焦关注点
+  - 新增只读 GitHistory 工具：查看仓库或单文件提交历史（跟随重命名，默认 20 条、上限 50），无需拼写裸 git 命令
+  - 会话检查点自动附带 git 状态标记（`branch@sha`，工作区脏时加 `-dirty`），`/tree` 各节点显示对应的工作区 git 快照
+- 新增 evolve 学习型护栏规则（guardrail rules）：`/evolve rule list|add <text>|remove <id>` 管理规则，持久化到 `.flavor/evolve/rules.json`，按文本指纹去重（上限 20 条），以 `# learned guardrails (evolve)` 章节注入未来系统提示词
+  - `evolve_improve` 工具新增 `kind=prompt_rule`：把重复失败建议直接沉淀为护栏规则并标记完成，无需编写修复插件
+  - 新增 `/evolve trends [n]` 跨运行仪表盘：展示最近 n 次运行的模型/工具调用数、失败数与 signalDelta，以及按工具拆分的移动明细（默认 5 次、最多 50 次）
+- 新增子代理写入冲突防护：Task 节点可声明 `files`（拥有的文件，路径分隔符归一化比较），声明文件重叠的任务绝不并行执行，防止并发写坏同一文件
+- 新增全局崩溃防护：CLI 与桌面端安装 crash guard，未处理 rejection/异常时写入脱敏崩溃日志 `.flavor/crash-*.log`（仅当前用户可读），尽力恢复终端（恢复光标与主屏）并以诊断信息退出
+
+### 改进
+- 安全：将 `.npmrc` 加入 `.gitignore`，避免项目级 npm 认证令牌被误提交到版本库
 
 ## [1.2.14] - 2026-08-18
 
@@ -275,6 +292,8 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.2.15 | 2026-08-18 | 原生 Git 工作流（/commit、/review、GitHistory）、evolve 护栏规则与 trends 仪表盘、子代理写冲突防护、崩溃防护 |
+| 1.2.14 | 2026-08-18 | 内置自进化闭环（evolve）：信号捕获去重、建议排序、修复插件生命周期、自动验证；Shell 命令失败旁路捕获 |
 | 1.2.13 | 2026-08-15 | astgraph 代码图索引、结构化输出类型强转与纯文本 JSON 提取、只读工具声明 |
 | 1.2.12 | 2026-08-15 | Shell/Terminal 字符串布尔值输入标准化 |
 | 1.2.11 | 2026-08-15 | CLI Pals 跨项目协作、本地 IPC 与 /co-work |
