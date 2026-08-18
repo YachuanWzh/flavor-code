@@ -3,11 +3,55 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
-import { createShellTool } from "../../src/tools/shell.js";
+import { createShellTool, normalizeShellCommand } from "../../src/tools/shell.js";
 import { JobRegistry } from "../../src/jobs/registry.js";
 
 const node = process.execPath;
 const signal = new AbortController().signal;
+
+describe("normalizeShellCommand", () => {
+  it("splits a whole command line stuffed into command when the head is a bare command name", () => {
+    expect(normalizeShellCommand({ command: "dir /b", args: [] })).toEqual({ command: "dir", args: ["/b"] });
+    expect(normalizeShellCommand({ command: "git log --oneline -3", args: [] })).toEqual({
+      command: "git", args: ["log", "--oneline", "-3"],
+    });
+    expect(normalizeShellCommand({ command: "npm run build", args: [] })).toEqual({
+      command: "npm", args: ["run", "build"],
+    });
+  });
+
+  it("respects double quotes so quoted arguments keep their meaning", () => {
+    expect(normalizeShellCommand({ command: 'echo "a b" c', args: [] })).toEqual({
+      command: "echo", args: ["a b", "c"],
+    });
+    expect(normalizeShellCommand({ command: 'node -e "process.stdout.write(\'hi\')"', args: [] })).toEqual({
+      command: "node", args: ["-e", "process.stdout.write('hi')"],
+    });
+  });
+
+  it("leaves explicit program paths with spaces untouched", () => {
+    expect(normalizeShellCommand({ command: "C:\\Program Files\\node.exe --version", args: [] })).toEqual({
+      command: "C:\\Program Files\\node.exe --version", args: [],
+    });
+    expect(normalizeShellCommand({ command: "/usr/local/bin/my tool --flag", args: [] })).toEqual({
+      command: "/usr/local/bin/my tool --flag", args: [],
+    });
+  });
+
+  it("keeps existing arg arrays untouched and merges extras from a stuffed command", () => {
+    expect(normalizeShellCommand({ command: node, args: ["-e", "1"] })).toEqual({ command: node, args: ["-e", "1"] });
+    expect(normalizeShellCommand({ command: node, args: [] })).toEqual({ command: node, args: [] });
+    expect(normalizeShellCommand({ command: "git log", args: ["--oneline"] })).toEqual({
+      command: "git", args: ["log", "--oneline"],
+    });
+  });
+
+  it("does not split a single token even when quoted", () => {
+    expect(normalizeShellCommand({ command: '"C:\\Program Files\\node.exe"', args: [] })).toEqual({
+      command: '"C:\\Program Files\\node.exe"', args: [],
+    });
+  });
+});
 
 describe("Shell", () => {
   it("returns immediately for background commands and exposes incremental job output", async () => {
@@ -52,6 +96,20 @@ describe("Shell", () => {
     expect(result.signal).toBeNull();
   });
 
+  it("runs a whole command line stuffed into command (Windows-friendly)", async () => {
+    const result = await createShellTool(process.cwd()).execute({
+      command: `node -e "process.stdout.write('compat-ok')"`, args: [],
+    }, signal);
+    expect(result).toMatchObject({ exitCode: 0, stdout: "compat-ok" });
+  });
+
+  it("normalizes command and args together when both are supplied", async () => {
+    const result = await createShellTool(process.cwd()).execute({
+      command: `node -e`, args: ["process.stdout.write('merged-ok')"],
+    }, signal);
+    expect(result).toMatchObject({ exitCode: 0, stdout: "merged-ok" });
+  });
+
   it("reports non-zero exits", async () => {
     const result = await createShellTool(process.cwd()).execute({
       command: node, args: ["-e", "process.stderr.write('bad'); process.exit(7)"],
@@ -76,7 +134,8 @@ describe("Shell", () => {
     const invalid = await createShellTool(process.cwd()).execute({
       command: "npm view node dist-tags --json", args: [],
     }, signal);
-    expect(invalid.exitCode).not.toBe(0);
+    // The compatibility layer splits the whole line into npm + args, so it may
+    // actually succeed; this assertion only guards against replacement chars.
     expect(`${invalid.stdout}${invalid.stderr}`).not.toContain("�");
   });
 

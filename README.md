@@ -37,6 +37,7 @@ Flavor Code connects to OpenAI, Anthropic, or compatible services and works with
 | 🧠 | **Local long-term context** | Memory, Skills, plugins, and project guides stored on your machine |
 | 🔎 | **Code graph navigation** | A local AST code-graph index (`.flavor/astgraph/`) powers `ast_search`/`ast_callers`/`ast_impact` queries for precise symbol lookup and reachability tracing |
 | 🎨 | **E2E requirement-to-delivery** | From a rough requirement or a design export to a delivered product: PRD, interactive prototype, visual implementation, API integration, autonomous acceptance, and scored delivery (Electron only) |
+| 🔁 | **Bounded self-improvement** | Repeated tool failures are captured, deduped, and proposed as suggestions; fixes ship as plugins that must pass sandbox verification and the test suite before hot-reload (`/evolve`) |
 | 🛡️ | **Clear permission boundaries** | Independent control over read, write, Shell, network, and destructive actions; Docker supported |
 
 ## Quick Start
@@ -154,6 +155,7 @@ Common commands:
 | `/mcp` | View and manage MCP servers |
 | `/loop <goal>` | Run an autonomous loop with verification |
 | `/goal <objective>` | Run the plan, execute, adversarial-review workflow |
+| `/evolve <signals\|suggest\|improve ...>` | Self-improvement loop: review repeated tool failures, scaffold fix plugins, verify and hot-reload them |
 | `/pals`, `/chat`, `/co-work` | Discover and collaborate with other local CLI instances |
 | `/audit` | View tool failure audits |
 
@@ -261,6 +263,7 @@ Project runtime data lives under `.flavor/`:
 ├── memory/           # Long-term memory
 ├── traces/           # Optional execution traces
 ├── audit.jsonl       # Tool failure audits
+├── evolve/           # Self-improvement signals and run reflections
 ├── skills/           # Project skills
 └── plugins/          # Project plugins
 ```

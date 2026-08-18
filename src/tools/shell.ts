@@ -46,6 +46,48 @@ type ShellTool = Omit<ToolDefinition<z.infer<typeof ShellInput>, ShellResult | S
   execute(input: z.infer<typeof ShellInput>, signal: AbortSignal, context?: import("./types.js").ToolContext): Promise<ShellResult | ShellBackgroundResult>;
 };
 
+/**
+ * Normalize weak model calls that stuff a whole command line into `command`
+ * (e.g. `command: "git log --oneline"`). Splits only when the first token is a
+ * bare command name (no path separators), so explicit paths with spaces —
+ * `command: "C:\\Program Files\\node.exe"` — are left untouched.
+ */
+export function normalizeShellCommand(input: { command: string; args: readonly string[] }): { command: string; args: string[] } {
+  const { command, args } = input;
+  if (!/\s/.test(command)) return { command, args: [...args] };
+  const tokens = tokenizeCommandLine(command);
+  if (tokens.length <= 1) return { command, args: [...args] };
+  const head = unquoteToken(tokens[0]!);
+  // A path with spaces must stay whole; quoteArg re-quotes it as a single token.
+  if (head.includes("/") || head.includes("\\")) return { command, args: [...args] };
+  return { command: head, args: [...tokens.slice(1).map(unquoteToken), ...args] };
+}
+
+function tokenizeCommandLine(command: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let inQuote = false;
+  for (const char of command) {
+    if (char === '"') {
+      inQuote = !inQuote;
+      current += char;
+    } else if (char === " " && !inQuote) {
+      if (current !== "") {
+        tokens.push(current);
+        current = "";
+      }
+    } else {
+      current += char;
+    }
+  }
+  if (current !== "") tokens.push(current);
+  return tokens;
+}
+
+function unquoteToken(token: string): string {
+  return token.length >= 2 && token.startsWith("\"") && token.endsWith("\"") ? token.slice(1, -1) : token;
+}
+
 export function createShellTool(
   workspace: string,
   options: ShellToolOptions = {},
@@ -64,12 +106,15 @@ export function createShellTool(
     paths: (input) => [workingDirectory(root, input.cwd ?? undefined)],
     summarize: (input) => [input.command, ...input.args].join(" "),
     presentCall: (input) => ({ kind: "terminal", variant: "command", title: backgroundFlag(input.background) ? "Starting background command" : "Running command", command: [input.command, ...input.args].join(" "), state: "running" }),
-    permissions: (input) => ({
-      paths: [workingDirectory(root, input.cwd ?? undefined)],
-      command: input.command,
-      args: input.args,
-      cwd: workingDirectory(root, input.cwd ?? undefined),
-    }),
+    permissions: (input) => {
+      const normalized = normalizeShellCommand(input);
+      return {
+        paths: [workingDirectory(root, input.cwd ?? undefined)],
+        command: normalized.command,
+        args: normalized.args,
+        cwd: workingDirectory(root, input.cwd ?? undefined),
+      };
+    },
     presentResult: (output, input) => output && "jobId" in output
       ? ({
         kind: "job", action: "start", id: output.jobId, jobKind: "shell",
@@ -77,22 +122,24 @@ export function createShellTool(
       } satisfies JobToolPresentation)
       : { kind: "terminal", variant: "command", title: [input.command, ...input.args].join(" "), command: [input.command, ...input.args].join(" "), stdout: output.stdout, stderr: output.stderr, exitCode: output.exitCode, state: output.terminationReason === "cancelled" ? "cancelled" : output.exitCode === 0 ? "completed" : "failed", truncated: output.truncated },
     execute: async (input, signal, context) => {
-      const timeoutMs = input.timeoutMs ?? defaultTimeoutMs;
-      if (backgroundFlag(input.background)) {
+      const normalized = normalizeShellCommand(input);
+      const effective = { ...input, command: normalized.command, args: normalized.args };
+      const timeoutMs = effective.timeoutMs ?? defaultTimeoutMs;
+      if (backgroundFlag(effective.background)) {
         if (options.jobs === undefined) throw new Error("Background shell requires a JobRegistry");
         const cancellation = new AbortController();
         const job = options.jobs.create({
-          kind: "shell", owner: owner(context), label: [input.command, ...input.args].join(" "),
+          kind: "shell", owner: owner(context), label: [effective.command, ...effective.args].join(" "),
           cancel: () => cancellation.abort(new Error("Background job cancelled")),
         });
         void (async () => {
           try {
             let result: ShellResult;
             if (options.executionEnvironment === undefined) {
-              result = await executeShell(root, { ...input, timeoutMs }, cancellation.signal, maxBytes, (stream, text) => job.append(stream === "stderr" ? `[stderr] ${text}` : text));
+              result = await executeShell(root, { ...effective, timeoutMs }, cancellation.signal, maxBytes, (stream, text) => job.append(stream === "stderr" ? `[stderr] ${text}` : text));
             } else {
               const raw = await options.executionEnvironment.exec({
-                command: input.command, args: input.args, cwd: workingDirectory(root, input.cwd ?? undefined), timeoutMs,
+                command: effective.command, args: effective.args, cwd: workingDirectory(root, effective.cwd ?? undefined), timeoutMs,
               }, cancellation.signal);
               job.append(raw.stdout);
               if (raw.stderr !== "") job.append(`[stderr] ${raw.stderr}`);
@@ -102,7 +149,7 @@ export function createShellTool(
           } catch (error) { job.fail(error); }
         })();
         return {
-          jobId: job.id, state: "running", command: [input.command, ...input.args].join(" "),
+          jobId: job.id, state: "running", command: [effective.command, ...effective.args].join(" "),
           exitCode: null, signal: null, stdout: "", stderr: "", truncated: false,
           truncation: {
             stdout: { truncated: false, originalBytes: 0, limitBytes: maxBytes },
@@ -112,12 +159,12 @@ export function createShellTool(
         };
       }
       if (options.executionEnvironment === undefined) {
-        return executeShell(root, { ...input, timeoutMs }, signal, maxBytes);
+        return executeShell(root, { ...effective, timeoutMs }, signal, maxBytes);
       }
       const result = await options.executionEnvironment.exec({
-        command: input.command,
-        args: input.args,
-        cwd: workingDirectory(root, input.cwd ?? undefined),
+        command: effective.command,
+        args: effective.args,
+        cwd: workingDirectory(root, effective.cwd ?? undefined),
         timeoutMs,
       }, signal);
       const stdout = new BoundedOutput(maxBytes);

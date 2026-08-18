@@ -60,6 +60,22 @@ export class PluginHost {
     for (const plugin of [...this.#active].reverse()) await this.unload(plugin.metadata.name);
   }
 
+  /**
+   * Reload one plugin from disk: unloads the active instance (if any), then
+   * re-discovers and activates the current version. Used by the evolve loop to
+   * hot-load fix plugins after verification.
+   */
+  async reload(name: string): Promise<{ ok: boolean; error?: string }> {
+    await this.unload(name);
+    const candidate = (await this.#discover()).find((item) => item.manifest.name === name);
+    if (candidate === undefined) return { ok: false, error: `Plugin "${name}" not found.` };
+    const diagnosticCount = this.#diagnostics.length;
+    await this.#activate(candidate);
+    if (this.#active.some(({ metadata }) => metadata.name === name)) return { ok: true };
+    const diagnostic = this.#diagnostics.slice(diagnosticCount).find((item) => item.plugin === name);
+    return { ok: false, error: diagnostic?.message ?? `Plugin "${name}" failed to activate.` };
+  }
+
   async unload(name: string): Promise<void> {
     const index = this.#active.findIndex(({ metadata }) => metadata.name === name);
     if (index < 0) return;
@@ -155,7 +171,9 @@ export class PluginHost {
     let activation: Promise<unknown> | undefined;
     try {
       await verifyEntry(candidate.root, candidate.entry, candidate.entrySnapshot);
-      const imported = import(`${pathToFileURL(candidate.entrySnapshot.physicalPath).href}?flavor=${encodeURIComponent(plugin)}`);
+      // A fresh query on every activation busts Node's ESM cache so reload()
+      // picks up on-disk changes instead of serving the previous module.
+      const imported = import(`${pathToFileURL(candidate.entrySnapshot.physicalPath).href}?flavor=${encodeURIComponent(plugin)}&v=${Date.now()}`);
       const module = await bounded(imported, this.#activationTimeoutMs, "Plugin import") as {
         activate?: (context: PluginContext) => unknown | Promise<unknown>;
       };

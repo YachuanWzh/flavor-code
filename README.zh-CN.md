@@ -37,6 +37,7 @@ Flavor Code 接入 OpenAI、Anthropic 或兼容服务，在受控工作区内使
 | 🧠 | **本地长期上下文** | 记忆、Skill、插件和项目指南均保存在本机 |
 | 🔎 | **代码图导航** | 本地 AST 代码图索引（`.flavor/astgraph/`），通过 `ast_search`/`ast_callers`/`ast_impact` 等查询精确定位符号、追踪可达性 |
 | 🎨 | **E2E 需求到交付** | 从粗需求或设计稿到可交付产品：PRD、交互原型、视觉还原、接口联调、自主验收与评分交付（仅 Electron） |
+| 🔁 | **有界自进化** | 重复的工具失败被捕获、去重并形成建议；修复以插件形式落地，必须通过沙箱验证与测试套件后才能热重载（`/evolve`） |
 | 🛡️ | **明确的权限边界** | 分别控制读、写、Shell、网络和破坏性操作，也可使用 Docker |
 
 ## 快速开始
@@ -154,6 +155,7 @@ OAuth PKCE 的运行时行为与配置约定见 [PKCE 规范](./docs/specs/pkce-
 | `/mcp` | 查看和管理 MCP 服务 |
 | `/loop <goal>` | 运行带验证的自治循环 |
 | `/goal <objective>` | 运行规划、执行、对抗审查流程 |
+| `/evolve <signals\|suggest\|improve ...>` | 自进化循环：查看重复工具失败、脚手架修复插件、验证并热重载 |
 | `/pals`、`/chat`、`/co-work` | 发现并协作其他本机 CLI 实例 |
 | `/audit` | 查看工具失败审计 |
 
@@ -261,6 +263,7 @@ Skill 是带有 YAML 头信息的 `SKILL.md`，放在 `.flavor/skills/<name>/` �
 ├── memory/           # 长期记忆
 ├── traces/           # 可选执行 trace
 ├── audit.jsonl       # 工具失败审计
+├── evolve/           # 自进化信号与运行评估记录
 ├── skills/           # 项目 Skill
 └── plugins/          # 项目插件
 ```

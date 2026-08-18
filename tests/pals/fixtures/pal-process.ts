@@ -116,6 +116,7 @@ async function runPeerFixture(args: string[]): Promise<void> {
     hooksStatus: () => [],
     tasks: () => [],
     audit: () => "",
+    evolve: () => "",
     usage: () => "",
     cancelActiveTask: () => undefined,
     clearContext: async () => undefined,

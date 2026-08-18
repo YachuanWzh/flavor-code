@@ -108,6 +108,7 @@ export interface SessionServices {
   hooksStatus(): readonly unknown[];
   tasks(): unknown;
   audit(toolFilter?: string): string | Promise<string>;
+  evolve(args: readonly string[]): string | Promise<string>;
   usage(): string | Promise<string>;
   cancelActiveTask(): void | Promise<void>;
   clearContext(): void | Promise<void>;
@@ -161,6 +162,7 @@ const HELP = [
   "/compact  /clear  /help  /exit",
   "/loop <goal>                            run a verified autonomous loop",
   "/goal <objective>                       run a goal pipeline with adversarial verification",
+  "/evolve <signals|suggest|improve <id>|verify <name>|reload <name>|test|revert <name>|done <id>>  self-improvement loop",
   "/mcp [status|tools|reconnect|enable|disable]  manage MCP servers",
   "/ide                                     show VS Code connection and cursor/selection",
   "/pals [--verbose|rename <alias>|info <alias-or-uuid>]",
@@ -550,6 +552,7 @@ export class FlavorSession {
     else if (command.name === "hooks") this.#notice(format(this.#services.hooksStatus()));
     else if (command.name === "tasks") this.#notice(format(this.#services.tasks()));
     else if (command.name === "audit") this.#notice(await this.#services.audit(command.toolFilter));
+    else if (command.name === "evolve") this.#notice(await this.#services.evolve(command.args));
     else if (command.name === "usage") this.#notice(await this.#services.usage());
     else if (command.name === "clear") {
       await this.#services.clearContext();

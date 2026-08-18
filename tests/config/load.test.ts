@@ -130,6 +130,29 @@ it("uses the hallucination evaluation timeout default and validates overrides", 
   }
 });
 
+it("uses evolve loop defaults and validates overrides", () => {
+  expect(FlavorConfigSchema.parse({}).evolve).toEqual({
+    promptTop: 3,
+    minRepeats: 2,
+    testCommand: "npm test",
+    testTimeoutMs: 120_000,
+  });
+  expect(FlavorConfigSchema.parse({ evolve: {
+    promptTop: 5,
+    minRepeats: 3,
+    testCommand: "npm run test",
+    testTimeoutMs: 60_000,
+  } }).evolve).toEqual({
+    promptTop: 5,
+    minRepeats: 3,
+    testCommand: "npm run test",
+    testTimeoutMs: 60_000,
+  });
+  for (const value of [{ promptTop: 0 }, { minRepeats: 1 }, { testTimeoutMs: 0 }, { testCommand: "" }]) {
+    expect(() => FlavorConfigSchema.parse({ evolve: value })).toThrow();
+  }
+});
+
 it("defaults MCP servers to an empty record", () => {
   expect(FlavorConfigSchema.parse({}).mcpServers).toEqual({});
 });

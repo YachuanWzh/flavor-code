@@ -22,6 +22,7 @@ import { LocalHarness } from "./harness/local.js";
 import { HookBus } from "./hooks/bus.js";
 import { HOOK_EVENT_NAMES, type HookDecision, type HookEventName } from "./hooks/types.js";
 import { createIncidentReporter } from "./incidents/reporter.js";
+import { createEvolveService } from "./evolve/service.js";
 import { initializeFlavor } from "./init/project.js";
 import { LoopOrchestrator, type LoopRuntimeEvent } from "./loop/orchestrator.js";
 import { GoalOrchestrator } from "./goal/orchestrator.js";
@@ -452,6 +453,17 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     emitLifecycle: async (type, plugin) => { await hooks.emit({ version: 1, type, payload: { name: plugin.name, version: plugin.version } }); },
   });
   await pluginHost.loadAll();
+  const evolveService = createEvolveService({
+    workspace,
+    hooks,
+    pluginHost,
+    config: config.evolve,
+    logger: {
+      warn: (warning) => emitOutput({ type: "notice", message: `[evolve] ${warning}` }),
+      notice: (message) => emitOutput({ type: "notice", message: `[evolve] ${message}` }),
+    },
+  });
+  tools.push(evolveService.toolDefinition());
   let sleepScheduler: ProjectSleepScheduler | undefined;
   let collaborationClient: PalClientLike | undefined;
   let unsubscribeCollaboration: (() => void) | undefined;
@@ -768,13 +780,18 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       return parentContext.fork({ summarize, onCompactProgress, hooks });
     }
     return new ContextManager({
-      system: () => buildSystemPrompt({
-        agent,
-        languageInstruction: languageInstruction(language),
-        workspace,
-        toolNames: new Set(agentTools.map((tool) => tool.name)),
-        environment: promptEnvironment,
-      }),
+      system: () => {
+        const sections = buildSystemPrompt({
+          agent,
+          languageInstruction: languageInstruction(language),
+          workspace,
+          toolNames: new Set(agentTools.map((tool) => tool.name)),
+          environment: promptEnvironment,
+        });
+        const evolveSection = evolveService.promptSection();
+        if (evolveSection !== undefined) sections.push(evolveSection);
+        return sections;
+      },
       volatileSystem: () => [
         buildCurrentDateSection(promptEnvironment.date),
         buildRuntimeEnvironmentSection({
@@ -1058,6 +1075,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         onStatus: (status) => emitOutput({ type: "notice", message: status }),
       }),
       createTodoWriteTool(),
+      evolveService.toolDefinition(),
       ...mcpTools,
     ];
     const loopFlavor = await optionalText(join(input.workspace, "FLAVOR.md"));
@@ -1076,13 +1094,18 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       const language = resolveLanguage(config.language);
       const { compactAtChars, toolOutputChars, ...compaction } = config.context;
       return new ContextManager({
-        system: () => buildSystemPrompt({
-          agent,
-          languageInstruction: languageInstruction(language),
-          workspace: input.workspace,
-          toolNames: new Set(agentTools.map((tool) => tool.name)),
-          environment: loopEnvironment,
-        }),
+        system: () => {
+          const sections = buildSystemPrompt({
+            agent,
+            languageInstruction: languageInstruction(language),
+            workspace: input.workspace,
+            toolNames: new Set(agentTools.map((tool) => tool.name)),
+            environment: loopEnvironment,
+          });
+          const evolveSection = evolveService.promptSection();
+          if (evolveSection !== undefined) sections.push(evolveSection);
+          return sections;
+        },
         volatileSystem: () => [
           buildCurrentDateSection(loopEnvironment.date),
           buildRuntimeEnvironmentSection({
@@ -1121,7 +1144,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       afterToolSuccess: async (_tool, paths, _input, _output, context) => loopInstructions.discover(paths, context.ownerId ?? context.agent),
       approve: resolveToolApproval,
     });
+    let runReason = "finished";
     try {
+      evolveService.beginRun();
       yield* loopHarness.main.loop.run({ prompt: input.prompt, signal: input.signal });
       if (compactionInputTokens > 0 || compactionOutputTokens > 0) {
         yield {
@@ -1132,7 +1157,11 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
           totalOutputTokens: compactionOutputTokens,
         };
       }
+    } catch (error) {
+      runReason = input.signal.aborted ? "cancelled" : "error";
+      throw error;
     } finally {
+      await evolveService.endRun(runReason);
       loopHarness.dispose();
       await loopExecutionEnvironment?.dispose();
     }
@@ -1341,6 +1370,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     plugins: () => pluginHost.loadedPlugins,
     hooksStatus: () => HOOK_EVENT_NAMES.map((name) => ({ name, pluginHandlers: pluginHooks.filter((item) => item === name).length })),
     tasks: () => ({ plan: taskPlan, graph: taskGraph, states: taskStates, results: taskResults }),
+    evolve: (args: readonly string[]) => evolveService.handleCommand(args),
     audit: async (toolFilter?: string) => {
       try {
         const raw = await readFile(auditLogger.path, "utf8");
@@ -1616,6 +1646,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       terminals.dispose();
       await jobs.dispose();
       auditLogger.close();
+      evolveService.dispose();
       memoryReviews.dispose();
       await collaborationClient?.close();
       await cleanupProduction(approvals, questions, pluginHost, mcpManager, harness);

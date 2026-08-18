@@ -2,7 +2,29 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.2.13 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.2.14 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.2.14] - 2026-08-18
+
+### 新增
+- 新增内置自进化闭环（evolve）：捕获 → 评估 → 修改 → 验证 → 重复五步循环，有界且人机共同把关
+  - `/evolve <signals|suggest|improve <id>|verify <name>|reload <name>|test|revert <name>|done <id>|clear>` 命令族
+  - `evolve_improve` 工具：模型侧按建议脚手架 `fix-<工具>/` 插件目录并写入 PLAN.md，实现走普通工具循环与权限系统
+  - 失败信号按（工具、错误码、规范化错误）去重聚合，上限 400 条；只记录参数键名不记值，引号内容脱敏，敏感信息不落盘
+  - 重复 ≥2 次（minRepeats）的失败以建议形式注入系统提示词（最多 promptTop=3 条），由模型自行判断是否值得修
+  - `/evolve verify` 在影子 PluginHost 沙箱中干跑插件（复制到临时目录加载，不触碰真实宿主）；`/evolve test` 运行测试套件（默认 120s 超时）；`/evolve revert` 回滚到 `.versions/` 中最后一份良好快照
+  - `PluginHost.reload` 公开方法：支持修复插件热重载，每次激活带新鲜查询参数绕过 Node ESM 模块缓存
+  - 每次 loop 运行结束追加 reflection（iterations / toolCalls / toolErrors / steers / totalFailures / signalDelta / perTool），signalDelta 为负表示修复生效，正数表示恶化
+  - 按工具维度评估（perTool）：记录每个工具当次运行的失败数与相对上次运行的 delta，工具失败减少（delta<0）时其建议自动标记 verified 不再提议；工具再次恶化（delta>0）时已验证的建议重新开放并标注 worsening
+  - `/evolve suggest` 与提示词注入按趋势排序：恶化优先于稳定、稳定优先于改善；新增 `/evolve verified` 查看已自动验证的建议
+  - 用户可见反馈：某信号首次达到重复阈值时弹出一次提示（指向 `/evolve suggest`）；每次 loop 运行结束输出一行摘要（toolErrors、失败总数变化 delta、按工具 improved/worsening 与建议自动验证/重开状态）；无错误时仅一行静默摘要
+  - `/evolve`（无参数）显示当前状态概览：信号数、开放建议数、已验证数、总失败数、最近信号
+  - 新增 `LoopEnd` hook 事件与 `evolve` 配置段（promptTop / minRepeats / testCommand / testTimeoutMs）
+
+### 修复
+
+- Shell 工具兼容弱类型模型的命令调用：当 `command` 字段被塞入整条命令行（如 `dir /b`、`git log --oneline`、`npm view node --json`）时，自动按引号感知分词拆成 `command + args`，避免 Windows 下被整体加引号导致 `'"dir' is not recognized` 或 `File Not Found`；显式含空格的可执行文件路径（`C:\Program Files\node.exe`）保持原样不被误拆；`permissions` 与 `execute` 使用归一化后的命令，后台任务与执行环境分支同样生效
+- evolve 捕获 Shell 命令失败：Shell 工具对命令失败（exit ≠ 0）刻意返回结果而非抛异常，从不触发 PostToolUseFailure。evolve 现在从 PostToolUse 的输出旁路捕获非零退出与超时（cancelled 除外），错误码记为 `shell_exit_<code>` / `shell_exit_timeout`，与工具失败信号一起参与去重、建议与趋势统计
 
 ## [1.2.13] - 2026-08-15
 

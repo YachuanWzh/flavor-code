@@ -167,6 +167,14 @@ export const FlavorConfigSchema = z.object({
       webhookUrl: z.string().url().optional(),
     })
     .prefault({}),
+  evolve: z
+    .object({
+      promptTop: z.number().int().min(1).max(10).default(3),
+      minRepeats: z.number().int().min(2).max(100).default(2),
+      testCommand: z.string().trim().min(1).default("npm test"),
+      testTimeoutMs: z.number().int().min(1_000).max(600_000).default(120_000),
+    })
+    .prefault({}),
 });
 
 export type FlavorConfig = z.infer<typeof FlavorConfigSchema>;

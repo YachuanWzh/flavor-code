@@ -5,7 +5,7 @@ export const HOOK_EVENT_NAMES = [
   "BeforePlan", "AfterPlan", "SubagentStart", "SubagentStop",
   "BeforeModelCall", "AfterModelCall", "PreToolUse", "PermissionRequest",
   "PostToolUse", "PostToolUseFailure", "PreCompact", "PostCompact",
-  "PluginLoad", "PluginUnload", "Notification",
+  "PluginLoad", "PluginUnload", "Notification", "LoopEnd",
 ] as const;
 
 const PayloadSchema = z.record(z.string(), z.unknown());
@@ -25,7 +25,7 @@ export const HookEventSchema = z.discriminatedUnion("type", [
   eventSchema("PostToolUse"), eventSchema("PostToolUseFailure"),
   eventSchema("PreCompact"), eventSchema("PostCompact"),
   eventSchema("PluginLoad"), eventSchema("PluginUnload"),
-  eventSchema("Notification"),
+  eventSchema("Notification"), eventSchema("LoopEnd"),
 ]);
 
 export const HookDecisionSchema = z.object({

@@ -30,7 +30,7 @@ function services(events: string[], outputs: string[]): SessionServices {
     setModel: () => {}, setPermissionMode: () => {}, compact: async () => false,
     initialize: async () => ({ path: "/work/FLAVOR.md", created: true }),
     config: () => ({ providers: { openai: { apiKey: "top-secret", token: "also-secret" } } }),
-    skills: async () => [], plugins: () => [], hooksStatus: () => [], tasks: () => [], audit: async () => "", usage: async () => "", cancelActiveTask: async () => {},
+    skills: async () => [], plugins: () => [], hooksStatus: () => [], tasks: () => [], audit: async () => "", evolve: async () => "", usage: async () => "", cancelActiveTask: async () => {},
     clearContext: async () => {},
     memory: async () => "memory contents",
     remember: async () => "remembered",

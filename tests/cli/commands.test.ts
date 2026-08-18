@@ -3,6 +3,30 @@ import { describe, expect, it } from "vitest";
 import { MAX_ALIAS_LENGTH, MAX_MESSAGE_BYTES } from "../../src/pals/protocol.js";
 import { parseSlashCommand } from "../../src/ui/commands.js";
 
+describe("evolve slash commands", () => {
+  it.each([
+    ["/evolve", { name: "evolve", args: [] }],
+    ["/evolve signals", { name: "evolve", args: ["signals"] }],
+    ["/evolve suggest", { name: "evolve", args: ["suggest"] }],
+    ["/evolve improve abc123def456", { name: "evolve", args: ["improve", "abc123def456"] }],
+    ["/evolve verify fix-read", { name: "evolve", args: ["verify", "fix-read"] }],
+    ["/evolve reload fix-read", { name: "evolve", args: ["reload", "fix-read"] }],
+    ["/evolve test", { name: "evolve", args: ["test"] }],
+    ["/evolve revert fix-read", { name: "evolve", args: ["revert", "fix-read"] }],
+    ["/evolve done abc123def456", { name: "evolve", args: ["done", "abc123def456"] }],
+    ["/evolve clear", { name: "evolve", args: ["clear"] }],
+    ["/evolve verify fix-read extra", { name: "evolve", args: ["verify", "fix-read", "extra"] }],
+  ])("parses %s", (input, expected) => {
+    expect(parseSlashCommand(input)).toEqual(expected);
+  });
+
+  it("keeps built-in evolve ahead of plugins and skills", () => {
+    expect(parseSlashCommand("/evolve signals", ["evolve"], ["evolve"])).toEqual({
+      name: "evolve", args: ["signals"],
+    });
+  });
+});
+
 describe("pal slash commands", () => {
   it.each([
     ["/pals", { name: "pals", action: "list", verbose: false }],

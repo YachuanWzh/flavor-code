@@ -1,7 +1,7 @@
 export const MVP_COMMANDS = [
   "model", "init", "config", "login", "permissions", "skills", "plugins", "hooks",
   "tasks", "finish", "compact", "clear", "help", "exit", "audit", "usage",
-  "loop", "goal", "mcp",
+  "loop", "goal", "evolve", "mcp",
   "ide",
   "memory", "remember", "forget", "forget-cold",
   "checkpoint", "tree", "rewind", "unrevert", "fork",
@@ -27,6 +27,7 @@ export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string>
   usage: "Show cache hit statistics for this session",
   loop: "Run a verified autonomous loop toward a goal",
   goal: "Run a goal pipeline with adversarial verification",
+  evolve: "Self-improvement loop: capture failures, suggest fixes, verify with tests",
   mcp: "Manage MCP servers",
   ide: "Show the connected IDE and editor context",
   memory: "Show long-term project memory",
@@ -75,8 +76,9 @@ export type SlashCommand =
   | PalsSlashCommand
   | { name: "chat"; target: string; goal: string }
   | CoWorkSlashCommand
-  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop" | "goal" | "mcp" | "remember" | "forget" | "checkpoint" | "rewind" | "fork" | "pals" | "chat" | "co-work"> }
+  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop" | "goal" | "evolve" | "mcp" | "remember" | "forget" | "checkpoint" | "rewind" | "fork" | "pals" | "chat" | "co-work"> }
   | { name: "audit"; toolFilter?: string | undefined }
+  | { name: "evolve"; args: string[] }
   | { name: "unknown"; input: string; suggestions: string[] }
   | { name: "invalid"; command: string; message: string };
 
@@ -116,6 +118,9 @@ export function parseSlashCommand(
   if (name === "audit") {
     const toolFilter = args.length > 0 ? args.join(" ") : undefined;
     return { name, toolFilter };
+  }
+  if (name === "evolve") {
+    return { name, args };
   }
   if (name === "loop") {
     const goal = args.join(" ").trim();

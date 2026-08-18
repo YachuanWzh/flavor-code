@@ -398,4 +398,57 @@ describe("PluginHost", () => {
     expect(host.diagnostics).toHaveLength(4);
     expect(host.diagnostics.map(({ message }) => message).join(" ")).toMatch(/entry|unrecognized|unexpected/i);
   });
+
+  it("reloads a plugin created after initial discovery", async () => {
+    const f = await fixture();
+    const r = registrations();
+    const host = new PluginHost({ projectPluginDirs: [f.project], registrations: r.callbacks });
+    await host.loadAll();
+    expect(host.loadedPlugins).toEqual([]);
+
+    await plugin(f.project, "fix-read", "export function activate(ctx) { ctx.registerCommand('read-fix', {}); }", {
+      contributes: { ...baseManifest.contributes, commands: [{ name: "read-fix" }] },
+    });
+    const result = await host.reload("fix-read");
+    expect(result.ok).toBe(true);
+    expect(host.loadedPlugins.map(({ name }) => name)).toEqual(["fix-read"]);
+    expect(r.active).toEqual(["read-fix"]);
+  });
+
+  it("reload replaces a broken version after the source is fixed", async () => {
+    const f = await fixture();
+    const root = await plugin(f.project, "fix-shell", "export function activate(ctx) { ctx.registerCommand('shell-fix', {}); }", {
+      contributes: { ...baseManifest.contributes, commands: [{ name: "shell-fix" }] },
+    });
+    const r = registrations();
+    const host = new PluginHost({ projectPluginDirs: [f.project], registrations: r.callbacks });
+    await host.loadAll();
+    expect(host.loadedPlugins.map(({ name }) => name)).toEqual(["fix-shell"]);
+
+    await writeFile(join(root, "index.mjs"), "export function activate() { throw new Error('boom'); }\n");
+    const broken = await host.reload("fix-shell");
+    expect(broken.ok).toBe(false);
+    expect(broken.error).toContain("boom");
+    expect(host.loadedPlugins.map(({ name }) => name)).toEqual([]);
+    expect(r.active).toEqual([]);
+
+    await writeFile(join(root, "index.mjs"), "export function activate(ctx) { ctx.registerCommand('shell-fix-v2', {}); }\n");
+    await writeFile(join(root, "flavor-plugin.json"), JSON.stringify({
+      ...baseManifest, name: "fix-shell",
+      contributes: { ...baseManifest.contributes, commands: [{ name: "shell-fix-v2" }] },
+    }));
+    const fixed = await host.reload("fix-shell");
+    expect(fixed.ok).toBe(true);
+    expect(host.loadedPlugins.map(({ name }) => name)).toEqual(["fix-shell"]);
+    expect(r.active).toEqual(["shell-fix-v2"]);
+  });
+
+  it("reload reports failure for an unknown plugin", async () => {
+    const f = await fixture();
+    const host = new PluginHost({ projectPluginDirs: [f.project], registrations: registrations().callbacks });
+    await host.loadAll();
+    const result = await host.reload("fix-missing");
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/not found/i);
+  });
 });
