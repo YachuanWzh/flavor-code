@@ -35,7 +35,7 @@ import { assertApprovedPrd, updatePrdSectionFile } from "../e2e/prd-governance.j
 import { captureAcceptanceBaseline, createAcceptanceEvidence, verifyAcceptanceArtifact, verifyAcceptanceBaseline, verifyRequirementCoverage,
   type AcceptanceBaseline, type AcceptanceBaselinePaths } from "../e2e/acceptance-baseline.js";
 import { artifactRef, beginDeliveryNode, completeDeliveryNode, createDeliveryRun, initializeDeliveryRun,
-  readDeliveryRun, updateDeliveryRun } from "../e2e/delivery-run.js";
+  readDeliveryRun, updateDeliveryRun, type E2eDeliveryRun } from "../e2e/delivery-run.js";
 import { createProductionRuntime, type ProductionRuntimeOptions } from "../production.js";
 import { SessionStore } from "../session/store.js";
 import {
@@ -813,8 +813,10 @@ export class DesktopRuntimeController {
     ].join("\n");
     const delivery = await readDeliveryRun(workspace, task);
     if (delivery?.nodes.api.status === "running") {
+      const apiArtifacts = await Promise.all(generated.files.map(async (file) =>
+        artifactRef(file, await readFile(join(project, file)))));
       const completed = await updateDeliveryRun(workspace, task, delivery.revision,
-        (run) => completeDeliveryNode(run, "api", generated.files.map((file) => artifactRef(file, file))));
+        (run) => completeDeliveryNode(run, "api", apiArtifacts));
       await updateDeliveryRun(workspace, task, completed.revision,
         (run) => beginDeliveryNode(run, "acceptance", run.nodes.api.outputs));
     }
@@ -1050,6 +1052,13 @@ export class DesktopRuntimeController {
     await writeD2cProductPlan(workspace, { ...current.plan, revision: current.plan.revision + 1,
       prd: { path: "product/prd.md", updatedAt: now, contentHash: updated.hash }, updatedAt: now });
     return readD2cProductPlanView(workspace, task).then((view) => view!);
+  }
+
+  /** Read-only snapshot of the seven-node E2E delivery run; undefined when the task never started a delivery. */
+  async getE2eDeliveryRun(task: string): Promise<E2eDeliveryRun | undefined> {
+    const workspace = this.#workspace;
+    if (workspace === undefined) return undefined;
+    return readDeliveryRun(workspace, task);
   }
 
   async #assertProductPrdLocked(workspace: string, task: string): Promise<void> {

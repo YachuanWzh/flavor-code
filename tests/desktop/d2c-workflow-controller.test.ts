@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -260,6 +261,55 @@ describe("desktop D2C workflow controller", () => {
     });
     expect(JSON.parse(await readFile(join(workspace, ".flavor", "d2c", "dashboard", "quality-judge.json"), "utf8"))).toMatchObject({ verdict: "pass" });
     expect(JSON.parse(await readFile(join(workspace, ".flavor", "d2c", "dashboard", "integration", "interaction-results.json"), "utf8"))).toMatchObject({ passed: true });
+    await controller.dispose();
+  });
+
+  it("records generated API artifacts with real file content hashes, not file names", async () => {
+    const { workspace, report } = await seedWorkspace();
+    let run = createDeliveryRun("dashboard", artifactRef("requirement.txt", "dashboard"));
+    for (const node of ["prd", "design", "d2c"] as const) {
+      run = beginDeliveryNode(run, node, []);
+      run = completeDeliveryNode(run, node, [artifactRef(`${node}.json`, node)]);
+    }
+    run = beginDeliveryNode(run, "api", run.nodes.d2c.outputs);
+    await initializeDeliveryRun(workspace, run);
+    const project = join(workspace, "src", "d2c-output", "dashboard");
+    await writeFile(join(project, "d2c.modules.json"), JSON.stringify({ schema: 1, modules: [{ id: "stats", label: "统计", sourceFiles: ["src/Stats.jsx"], keywords: ["metrics"] }] }));
+    const controller = createController({ home: workspace });
+    await controller.openWorkspace(workspace);
+    await controller.updateD2cReview("dashboard", report.reportId, [report.diffs[0]!.fingerprint], "accepted");
+    const spec = join(workspace, "swagger.json");
+    await writeSpec(spec);
+    const imported = await controller.importD2cOpenApi("dashboard", spec);
+    const selected = imported.mappings[0]!;
+    if (selected.status === "needs-confirmation") await controller.confirmD2cMapping("dashboard", selected.moduleId, selected.operationKey);
+    const generated = await controller.generateD2cIntegration("dashboard");
+
+    const stored = await readDeliveryRun(workspace, "dashboard");
+    expect(stored?.nodes.api.status).toBe("succeeded");
+    expect(stored?.nodes.api.outputs.length).toBe(generated.files.length);
+    for (const output of stored!.nodes.api.outputs) {
+      const content = await readFile(join(project, output.path));
+      expect(createHash("sha256").update(content).digest("hex")).toBe(output.hash);
+      expect(output.bytes).toBe(content.byteLength);
+    }
+    expect(stored?.nodes.acceptance.status).toBe("running");
+    await controller.dispose();
+  });
+
+  it("exposes the delivery run as a read-only snapshot through the controller", async () => {
+    const workspace = await seedWorkspace().then((seeded) => seeded.workspace);
+    await seedDeliveryAtAcceptance(workspace, "dashboard");
+    const controller = createController({ home: workspace });
+    await controller.openWorkspace(workspace);
+    const snapshot = await controller.getE2eDeliveryRun("dashboard");
+    expect(snapshot).toMatchObject({
+      task: "dashboard",
+      nodes: { api: { status: "succeeded" }, acceptance: { status: "running" }, delivery: { status: "pending" } },
+    });
+    const revision = snapshot!.revision;
+    expect(await controller.getE2eDeliveryRun("dashboard")).toMatchObject({ revision });
+    expect(await controller.getE2eDeliveryRun("missing-task")).toBeUndefined();
     await controller.dispose();
   });
 

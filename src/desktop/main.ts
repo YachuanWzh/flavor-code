@@ -402,6 +402,9 @@ function installIpcHandlers(): void {
     const input = D2cQualityIssueDecisionInputSchema.parse(value);
     return controller.resolveD2cQualityIssue(input.task, input.issueId, input.decision);
   });
+  ipcMain.handle(DESKTOP_CHANNELS.e2eGetDeliveryRun, async (_event, value) => {
+    return controller.getE2eDeliveryRun(D2cTaskActionInputSchema.parse(value).task);
+  });
 }
 
 function applicationMenu(): Menu {

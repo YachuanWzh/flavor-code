@@ -7,6 +7,7 @@ import type { D2cApiMapping } from "../../d2c/openapi.js";
 import type { D2cInteractionRun } from "../../d2c/interaction.js";
 import type { D2cProductPhase, D2cProductPlanView } from "../../d2c/product.js";
 import type { PrdSection } from "../../e2e/prd-governance.js";
+import type { DeliveryNodeId, E2eDeliveryRun } from "../../e2e/delivery-run.js";
 import type { D2cJudgeConfig, D2cJudgeConfigView, D2cQualityIssue } from "../../d2c/judge.js";
 import type { D2cImportResult, D2cIntegrationView, D2cMockStatus, D2cPreviewStatus, D2cProductPreviewStatus, D2cReportListItem, D2cReportView } from "../contracts.js";
 import type { D2cInteractionStatus } from "../contracts.js";
@@ -32,6 +33,35 @@ const PRODUCT_PREVIEW_VIEWPORT = { width: 1280, height: 800 } as const;
 
 function prdSectionMarkdown(section: PrdSection): string {
   return section.level === 0 ? section.body : `${"#".repeat(section.level)} ${section.title}\n\n${section.body}`;
+}
+
+export type E2eDeliveryStageStatus = "done" | "active" | "waiting" | "stale" | "failed";
+
+const E2E_DELIVERY_NODES: readonly DeliveryNodeId[] = ["requirement", "prd", "design", "d2c", "api", "acceptance", "delivery"];
+const E2E_DELIVERY_LABELS: Record<DeliveryNodeId, string> = {
+  requirement: "需求", prd: "PRD", design: "交互设计", d2c: "D2C",
+  api: "API 联调", acceptance: "自主验收", delivery: "成果交付",
+};
+const E2E_DELIVERY_STAGE_HINTS: Record<DeliveryNodeId, string> = {
+  requirement: "粗需求输入", prd: "产品定义", design: "原型确认", d2c: "视觉还原",
+  api: "Swagger", acceptance: "多模态测试", delivery: "评分与工件",
+};
+
+/** Maps the persisted delivery state machine onto pipeline chip states; undefined until a delivery exists. */
+export function e2eDeliveryStageStatuses(
+  run: E2eDeliveryRun | undefined,
+): Record<DeliveryNodeId, E2eDeliveryStageStatus> | undefined {
+  if (run === undefined) return undefined;
+  const statuses = {} as Record<DeliveryNodeId, E2eDeliveryStageStatus>;
+  for (const id of E2E_DELIVERY_NODES) {
+    const status = run.nodes[id].status;
+    statuses[id] = status === "succeeded" ? "done"
+      : status === "running" || status === "waiting-approval" ? "active"
+      : status === "failed" ? "failed"
+      : status === "stale" ? "stale"
+      : "waiting";
+  }
+  return statuses;
 }
 
 export function shouldDeferD2cProductReview(
@@ -451,6 +481,7 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
   const [entryMode, setEntryMode] = useState<"requirement" | "design">("requirement");
   const [requirement, setRequirement] = useState("");
   const [productView, setProductView] = useState<D2cProductPlanView>();
+  const [deliveryRun, setDeliveryRun] = useState<E2eDeliveryRun>();
   const [productPreview, setProductPreview] = useState<D2cProductPreviewStatus>({ running: false });
   const [productFeedback, setProductFeedback] = useState("");
   const [prdQuery, setPrdQuery] = useState("");
@@ -836,13 +867,18 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
     setProductPreview(status);
   }, []);
 
+  const refreshDelivery = useCallback(async (task: string): Promise<void> => {
+    setDeliveryRun(await window.flavorDesktop.getE2eDeliveryRun(task));
+  }, []);
+
   const refreshProduct = useCallback(async (task: string): Promise<D2cProductPlanView | undefined> => {
     const next = await window.flavorDesktop.getD2cProduct(task);
     if (next !== undefined && !shouldDeferD2cProductReview(
       productPhaseRef.current, next.plan.phase, disabledRef.current,
     )) setProductView(next);
+    void refreshDelivery(task).catch(() => undefined);
     return next;
-  }, []);
+  }, [refreshDelivery]);
 
   useEffect(() => {
     if (productView === undefined) return;
@@ -872,6 +908,7 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
         )) {
           setProductView(next);
           setFramework(next.plan.framework);
+          void refreshDelivery(taskName).catch(() => undefined);
         }
       }).catch(reportError);
     }, 350);
@@ -885,6 +922,7 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
       const result = await window.flavorDesktop.createD2cProduct({ task: taskName, framework: "vue", requirement });
       setProductView(result.view);
       setProductFeedback("");
+      void refreshDelivery(taskName).catch(() => undefined);
       await onStartTask(result.prompt);
     } catch (cause) { reportError(cause); }
     finally { setProductBusy(false); }
@@ -900,6 +938,7 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
       );
       setProductView(result.view);
       setProductFeedback("");
+      void refreshDelivery(productView.plan.task).catch(() => undefined);
       if (result.prompt !== undefined) await onStartTask(result.prompt);
       if (result.imported !== undefined) {
         await dispatchD2cTask(
@@ -1061,6 +1100,7 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
   const reviewFor = (fingerprint: string) => bundle?.workflow.reviews.find((item) => item.fingerprint === fingerprint
     && item.pageId === (bundle.report.page?.id ?? "index"));
   const viewState = pending !== undefined ? "pending" : creating || bundle === undefined ? "create" : "report";
+  const deliveryStatuses = e2eDeliveryStageStatuses(deliveryRun);
 
   return <section className="d2c-workbench d2c-v2" aria-label="E2E 端到端交付" data-state={viewState}>
     <header className="d2c-workbench-header">
@@ -1099,13 +1139,14 @@ export function E2eViewer({ onClose, onInterrupt, onError, refreshKey, onStartTa
           <h2>让一个想法沿着<br />可确认的轨道成为产品</h2>
           <p>从粗需求出发，先确认 PRD，再确认可交互设计；每一次确认都会成为后续生成、联调和验收的真实基线。</p>
           <ol className="e2e-pipeline" aria-label="E2E 从需求到成果物流程">
-            <li><b>01</b><span><strong>需求</strong><small>粗需求输入</small></span></li>
-            <li><b>02</b><span><strong>PRD</strong><small>产品定义</small></span></li>
-            <li><b>03</b><span><strong>交互设计</strong><small>原型确认</small></span></li>
-            <li data-module="d2c"><b>04</b><span><strong>D2C</strong><small>视觉还原</small></span></li>
-            <li><b>05</b><span><strong>API 联调</strong><small>Swagger</small></span></li>
-            <li><b>06</b><span><strong>自主验收</strong><small>多模态测试</small></span></li>
-            <li><b>07</b><span><strong>成果交付</strong><small>评分与工件</small></span></li>
+            {E2E_DELIVERY_NODES.map((id, index) => <li key={id}
+              data-module={id === "d2c" ? "d2c" : undefined}
+              data-node={id} data-delivery={deliveryStatuses?.[id] ?? "waiting"}
+              aria-label="E2E 交付节点状态" title={deliveryStatuses?.[id] === undefined ? undefined
+                : `${E2E_DELIVERY_LABELS[id]} · ${deliveryStatuses[id]}`}>
+              <b>{String(index + 1).padStart(2, "0")}</b>
+              <span><strong>{E2E_DELIVERY_LABELS[id]}</strong><small>{E2E_DELIVERY_STAGE_HINTS[id]}</small></span>
+            </li>)}
           </ol>
           {catalogReports.length > 0 && <div className="d2c-start-reports">
             <header><strong>最近结果</strong><span>{catalogReports.length} 个批次</span></header>

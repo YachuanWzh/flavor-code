@@ -4,7 +4,8 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
-import { E2eViewer as D2cE2eViewer } from "../../src/desktop/renderer/d2c-viewer.js";
+import { artifactRef, beginDeliveryNode, completeDeliveryNode, createDeliveryRun } from "../../src/e2e/delivery-run.js";
+import { e2eDeliveryStageStatuses, E2eViewer as D2cE2eViewer } from "../../src/desktop/renderer/d2c-viewer.js";
 import { E2eViewer } from "../../src/desktop/renderer/e2e-viewer.js";
 
 function renderE2eShell(): string {
@@ -67,5 +68,37 @@ describe("Electron E2E delivery shell", () => {
     expect(source).toContain('bundle.deliveryOrigin === "requirement"');
     expect(source).toContain("正在根据 PRD 与模块准备 OpenAPI 契约");
     expect(source).toContain("接入已有 Swagger / OpenAPI");
+  });
+});
+
+describe("E2E delivery pipeline statuses", () => {
+  it("maps live delivery node statuses into pipeline states", () => {
+    expect(e2eDeliveryStageStatuses(undefined)).toBeUndefined();
+    const run = beginDeliveryNode(
+      createDeliveryRun("demo", artifactRef("requirement.txt", "粗需求")), "prd", [],
+    );
+    expect(e2eDeliveryStageStatuses(run)).toEqual({
+      requirement: "done", prd: "active", design: "waiting", d2c: "waiting",
+      api: "waiting", acceptance: "waiting", delivery: "waiting",
+    });
+  });
+
+  it("marks downstream nodes stale and failed nodes explicitly", () => {
+    let run = createDeliveryRun("demo", artifactRef("requirement.txt", "粗需求"));
+    run = completeDeliveryNode(beginDeliveryNode(run, "prd", []), "prd", [artifactRef("prd.md", "v1")]);
+    run = completeDeliveryNode(beginDeliveryNode(run, "design", run.nodes.prd.outputs), "design", [artifactRef("index.html", "v1")]);
+    run = completeDeliveryNode(beginDeliveryNode(run, "prd", []), "prd", [artifactRef("prd.md", "v2")]);
+    const stale = e2eDeliveryStageStatuses(run);
+    expect(stale).toMatchObject({ prd: "done", design: "stale" });
+    const failed = structuredClone(run);
+    failed.nodes.d2c.status = "failed";
+    expect(e2eDeliveryStageStatuses(failed)!.d2c).toBe("failed");
+  });
+
+  it("renders the pipeline from the live delivery state machine", async () => {
+    const source = await readFile(new URL("../../src/desktop/renderer/d2c-viewer.tsx", import.meta.url), "utf8");
+    expect(source).toContain("getE2eDeliveryRun");
+    expect(source).toContain("data-delivery={");
+    expect(source).toContain('aria-label="E2E 交付节点状态"');
   });
 });

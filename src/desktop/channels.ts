@@ -59,5 +59,6 @@ export const DESKTOP_CHANNELS = {
   d2cRunQualityJudge: "desktop:d2c-run-quality-judge",
   d2cResolveQualityIssue: "desktop:d2c-resolve-quality-issue",
   d2cSetManualAcceptance: "desktop:d2c-set-manual-acceptance",
+  e2eGetDeliveryRun: "desktop:e2e-get-delivery-run",
   event: "desktop:event",
 } as const;

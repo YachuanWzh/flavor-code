@@ -7,6 +7,7 @@ import type { D2cInteractionRun } from "../d2c/interaction.js";
 import type { D2cAutonomousInteractionPlan } from "../d2c/interaction-review.js";
 import type { CreateD2cProductPlanInput, D2cProductPlanView, D2cProductStage } from "../d2c/product.js";
 import type { D2cApiMapping, D2cOpenApiDocument } from "../d2c/openapi.js";
+import type { E2eDeliveryRun } from "../e2e/delivery-run.js";
 import { D2cJudgeConfigInputSchema, type D2cJudgeConfig, type D2cJudgeConfigView, type D2cQualityJudgment } from "../d2c/judge.js";
 import { McpServerConfigSchema, McpServerNameSchema, type PermissionMode } from "../config/schema.js";
 import type { TranscriptState } from "../ui/transcript.js";
@@ -432,6 +433,8 @@ export interface FlavorDesktopApi {
   saveD2cJudgeConfig(input: D2cJudgeConfig): Promise<D2cJudgeConfigView>;
   runD2cQualityJudge(task: string): Promise<D2cQualityJudgeStatus>;
   resolveD2cQualityIssue(task: string, issueId: string, decision: "skipped" | "fixing"): Promise<D2cQualityIssueDecisionResult>;
+  /** Read-only snapshot of the E2E delivery state machine; undefined when the task never started a delivery. */
+  getE2eDeliveryRun(task: string): Promise<E2eDeliveryRun | undefined>;
   onEvent(listener: (event: DesktopEvent) => void): () => void;
 }
 
