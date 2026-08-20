@@ -39,7 +39,7 @@ import { modelContentText, type ModelAdapter, type ModelMessage } from "./models
 import { connectMcpServers, McpManager, type McpClientFactory, type McpServerSummary } from "./mcp/client.js";
 import { connectSdkMcpClient } from "./mcp/sdk.js";
 import { OAuthCallbackAuthProvider } from "./auth/oauth.js";
-import { createFileTokenStore } from "./auth/store.js";
+import { createFileTokenStore, retainOnlyCredentials } from "./auth/store.js";
 import { oauthCredentialId } from "./auth/oauth-config.js";
 import type { AuthResult, OAuthLlmConfig } from "./auth/types.js";
 import type { PermissionProfile, PermissionRequest } from "./permissions/engine.js";
@@ -658,7 +658,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       states: { ...taskStates },
       results: { ...taskResults },
     },
-    models: { main: harness.mainModelId, subagent: harness.subagentModelId }, permissionMode: harness.permissionMode,
+    // Persist the resolved decision, not the harness snapshot: after logout the
+    // harness may still hold the old login model, and resuming from that stale
+    // value is what made the welcome card show a previous service.
+    models: { main: mainModel, subagent: childModel }, permissionMode: harness.permissionMode,
     memory: memoryLifecycle,
     timeline: { version: 1, state: timelineState },
   });
@@ -1291,8 +1294,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
 
   const services: SessionServices = {
     hooks, workspace,
-    mainModel: () => harness.mainModelId,
-    subagentModel: () => harness.subagentModelId,
+    mainModel: () => mainModel,
+    subagentModel: () => childModel,
     llmServiceName: () => effectiveLlm?.serviceName,
     permissionMode: () => harness.permissionMode,
     ...(palServices === undefined ? {} : { pals: palServices }),
@@ -1363,7 +1366,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
           throw new Error(`Model "${id}" is not allowed by the current PKCE configuration.`);
         }
       }
-      harness.setModel(role, id); await persist();
+      harness.setModel(role, id);
+      if (role === "main") mainModel = id;
+      else childModel = id;
+      await persist();
     },
     setPermissionMode: async (mode) => { harness.setPermissionMode(mode); await persist(); },
     compact: async (signal) => { const changed = await harness.main.context.compact(signal); if (changed) await persist(); return changed; },
@@ -1617,12 +1623,58 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         goalOrchestrator.setModels(mainModel, mainModel);
         delete selectedModels.mainError;
         delete selectedModels.childError;
+        // `/login` switches the active service: drop tokens from previous
+        // logins so the next startup cannot surface a stale service name.
+        await retainOnlyCredentials(tokenStore, credentialId);
         if (!secrets.includes(next.accessToken)) secrets.push(next.accessToken);
         await persist();
         return `Authenticated to "${next.serviceName}". Main model ${mainModel}; subagent ${childModel}; gateway ${next.baseURL}. Configuration is active now.`;
       } catch (error) {
         return `Login failed: ${message(error)}`;
       }
+    },
+    async logout() {
+      const tokenStore = createFileTokenStore(join(home, ".flavor-code", "auth.json"));
+      const tokens = await tokenStore.load();
+      const hadCredentials = Object.keys(tokens).length > 0 || effectiveLlm !== undefined;
+      if (!hadCredentials) {
+        return "Not authenticated — no stored OAuth credentials to clear.";
+      }
+
+      // Drop OAuth-managed adapters and registrations, then clear the token file.
+      for (let i = registeredProviders.length - 1; i >= 0; i -= 1) {
+        const provider = registeredProviders[i];
+        if (provider !== undefined && provider.pkceManaged === true) {
+          registry.unregister(provider.name);
+          registeredProviders.splice(i, 1);
+        }
+      }
+      if (effectiveLlm !== undefined) {
+        registry.unregister(effectiveLlm.providerId);
+        effectiveLlm = undefined;
+      }
+      await tokenStore.save({});
+
+      // Fall back to apiKey/env-configured providers.
+      const fallback = selectModels(config, registeredProviders, diagnostics);
+      mainModel = fallback.main;
+      childModel = fallback.child;
+      if (fallback.mainError === undefined) delete selectedModels.mainError;
+      else selectedModels.mainError = fallback.mainError;
+      if (fallback.childError === undefined) delete selectedModels.childError;
+      else selectedModels.childError = fallback.childError;
+      if (fallback.mainError === undefined
+        && registry.has(safeProvider(mainModel))
+        && registry.has(safeProvider(childModel))) {
+        harness.setModel("main", mainModel);
+        harness.setModel("subagent", childModel);
+        hallucinationGuard.setModel(childModel);
+        goalOrchestrator.setModels(mainModel, mainModel);
+      }
+      await persist();
+      return fallback.mainError === undefined
+        ? `Logged out. Cleared OAuth credentials. Main model ${mainModel}; subagent ${childModel}.`
+        : `Logged out. Cleared OAuth credentials. ${fallback.mainError}`;
     },
   };
   if (config.sleep) {

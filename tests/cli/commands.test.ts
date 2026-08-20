@@ -85,3 +85,16 @@ describe("pal slash commands", () => {
     }
   });
 });
+
+describe("login and logout slash commands", () => {
+  it.each([
+    ["/login", { name: "login" }],
+    ["/logout", { name: "logout" }],
+  ])("parses %s", (input, expected) => {
+    expect(parseSlashCommand(input)).toEqual(expected);
+  });
+
+  it("rejects arguments for /logout", () => {
+    expect(parseSlashCommand("/logout extra")).toMatchObject({ name: "invalid" });
+  });
+});

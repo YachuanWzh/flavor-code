@@ -130,6 +130,7 @@ export interface SessionServices {
   output(event: SessionOutput): void;
   questions: QuestionBridge;
   login(): Promise<string>;
+  logout(): Promise<string>;
   pals?: PalSessionServices;
 }
 
@@ -158,6 +159,7 @@ const HELP = [
   "/model <main|subagent> <provider:model>  switch any configured model",
   "/permissions <default|acceptEdits|plan|bypassPermissions|auto|bubble>",
   "/login                                  authenticate via OAuth PKCE",
+  "/logout                                 clear stored OAuth credentials",
   "/init  /config  /skills  /plugins  /hooks  /tasks",
   "/memory  /remember [type] <text>  /forget <text-or-id>  /forget-cold  /finish",
   "/checkpoint [label]  /tree  /rewind <node>  /unrevert  /fork <node>",
@@ -569,6 +571,9 @@ export class FlavorSession {
     else if (command.name === "login") {
       this.#notice("Opening browser for authentication...");
       this.#notice(await this.#services.login());
+    }
+    else if (command.name === "logout") {
+      this.#notice(await this.#services.logout());
     }
     else if (command.name === "help") this.#notice(HELP);
     else if (command.name === "exit") this.#services.output({ type: "exit" });

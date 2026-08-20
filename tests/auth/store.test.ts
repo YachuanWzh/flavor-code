@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 
-import { createFileTokenStore, type StoredToken } from "../../src/auth/store.js";
+import { createFileTokenStore, retainOnlyCredentials, type StoredToken } from "../../src/auth/store.js";
 
 const alpha: StoredToken = {
   accessToken: "alpha-access-secret",
@@ -50,6 +50,30 @@ it("preserves replacement semantics for providers removed from a loaded snapshot
   const tokens = await store.load();
   delete tokens.alpha;
   await store.save(tokens);
+
+  await expect(createFileTokenStore(path).load()).resolves.toEqual({ beta });
+});
+
+it("clears every provider when the loaded snapshot is saved empty", async () => {
+  const root = await mkdtemp(join(tmpdir(), "flavor-auth-clear-"));
+  const path = join(root, "auth.json");
+  const seed = createFileTokenStore(path);
+  await seed.save({ alpha, beta });
+
+  const store = createFileTokenStore(path);
+  await store.load();
+  await store.save({});
+
+  await expect(createFileTokenStore(path).load()).resolves.toEqual({});
+});
+
+it("retains only the requested credential when switching login", async () => {
+  const root = await mkdtemp(join(tmpdir(), "flavor-auth-retain-"));
+  const path = join(root, "auth.json");
+  const store = createFileTokenStore(path);
+  await store.save({ alpha, beta });
+
+  await retainOnlyCredentials(store, "beta");
 
   await expect(createFileTokenStore(path).load()).resolves.toEqual({ beta });
 });

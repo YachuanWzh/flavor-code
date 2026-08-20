@@ -1,5 +1,5 @@
 export const MVP_COMMANDS = [
-  "model", "init", "config", "login", "permissions", "skills", "plugins", "hooks",
+  "model", "init", "config", "login", "logout", "permissions", "skills", "plugins", "hooks",
   "tasks", "finish", "compact", "clear", "help", "exit", "audit", "usage",
   "loop", "goal", "evolve", "mcp",
   "commit", "review",
@@ -14,6 +14,7 @@ export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string>
   init: "Initialize Flavor project files",
   config: "Show the resolved configuration",
   login: "Authenticate via OAuth PKCE",
+  logout: "Clear stored OAuth credentials and restore configured models",
   permissions: "Change the tool permission mode",
   skills: "List discovered skills",
   plugins: "List loaded plugins",

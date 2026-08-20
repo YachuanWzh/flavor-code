@@ -41,6 +41,7 @@ function services(events: string[], outputs: string[]): SessionServices {
     output: (event) => outputs.push(event.type === "text" ? event.text : event.type === "notice" ? event.message : event.type),
     questions,
     login: async () => "authenticated",
+    logout: async () => "logged out",
   };
 }
 
@@ -77,6 +78,20 @@ describe("FlavorSession", () => {
     expect(pals.coWorkStatus).toHaveBeenCalledWith("work-1");
     expect(pals.cancelCoWork).toHaveBeenCalledWith("work-1", "obsolete plan");
     expect(outputs.join("\n")).toContain("delivered");
+  });
+
+  it("dispatches /logout through the logout service", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const logout = vi.fn(async () => "Logged out. Cleared OAuth credentials.");
+    base.logout = logout;
+    base.run = async function* () { throw new Error("ordinary run must not be called"); };
+    const session = new FlavorSession(base);
+
+    await session.submit("/logout");
+
+    expect(logout).toHaveBeenCalledTimes(1);
+    expect(outputs.join("\n")).toContain("Logged out. Cleared OAuth credentials.");
   });
 
   it("bounds collaboration notices returned by services", async () => {

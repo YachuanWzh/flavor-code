@@ -19,6 +19,18 @@ export interface OAuthTokenStore {
   save(tokens: Record<string, StoredToken>): Promise<void>;
 }
 
+/**
+ * Reduce the token store to a single credential. `/login` is a switch-to
+ * operation: keeping tokens from earlier services made the runtime pick the
+ * active provider by registration order, so the welcome card could show a
+ * stale service (e.g. a previous "Token Plan") instead of the one just logged in.
+ */
+export async function retainOnlyCredentials(store: OAuthTokenStore, keepCredentialId: string): Promise<void> {
+  const tokens = await store.load();
+  const retained = Object.fromEntries(Object.entries(tokens).filter(([id]) => id === keepCredentialId));
+  await store.save(retained);
+}
+
 export function createFileTokenStore(filePath: string): OAuthTokenStore {
   let baseline: Record<string, StoredToken> = {};
   const store: OAuthTokenStore = {

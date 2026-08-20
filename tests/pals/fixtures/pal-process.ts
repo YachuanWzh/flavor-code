@@ -130,6 +130,7 @@ async function runPeerFixture(args: string[]): Promise<void> {
     output: () => undefined,
     questions: new QuestionBridge(),
     login: async () => "",
+    logout: async () => "",
   };
 
   const session = new FlavorSession(services);
