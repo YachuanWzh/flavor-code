@@ -2,7 +2,29 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.2.15 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.2.17 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.2.17] - 2026-08-20
+
+### 新增
+- 新增 `/logout` 命令：清除本地存储的 OAuth 凭据（`auth.json`），注销所有 PKCE 托管的认证提供者与模型注册，回退到 apiKey/env 配置的模型并同步更新 main/subagent 模型、幻觉防护与目标编排器；未登录时给出明确提示而非报错
+- `/login` 切换为“单凭据”语义：登录成功后仅保留当前服务的令牌，避免重启后欢迎卡片显示上一次登录的服务名
+
+### 改进
+- 模型选择持久化改为保存解析后的决策而非 harness 快照：登出后从旧会话恢复时，不再把已注销服务的模型当作当前模型
+- 会话状态恢复使用当前解析的模型：`/login` 后即生效，且令牌泄露面更小（旧服务的刷新令牌随登出一并清除）
+
+## [1.2.16] - 2026-08-20
+
+### 新增
+- 桌面端新增 E2E 交付运行状态查看：工作台按七节点流水线（需求 → PRD → 交互设计 → D2C → API 联调 → 自主验收 → 成果交付）实时展示每个节点的状态（done / active / waiting / stale / failed），并通过新增的 `getE2eDeliveryRun` IPC 通道以只读快照方式读取交付状态机
+- 优化 API 联调完成记录：生成文件产物改为记录真实文件内容指纹（artifactRef），而非仅记录文件名
+
+### 改进
+- Shell 工具优化 Windows 平台命令执行：按能力自动选择 shell（PowerShell 7 → Windows PowerShell → cmd.exe 回退），通过 `-EncodedCommand`（UTF-16LE base64）原样传递含空格、引号与 `&` 的参数，`exit $LASTEXITCODE` 保留子进程真实退出码，`chcp 65001` 统一 UTF-8 输出解码
+
+### 配置
+- OAuth 配置中的授权与令牌 URL 从局域网地址（192.168.x.x）改为回环地址（127.0.0.1）
 
 ## [1.2.15] - 2026-08-18
 
@@ -292,6 +314,8 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.2.17 | 2026-08-20 | /logout 登出命令、OAuth 单凭据登录语义、模型决策持久化改进 |
+| 1.2.16 | 2026-08-20 | 桌面端 E2E 交付运行状态查看、Windows Shell 命令执行优化、OAuth 回环地址配置 |
 | 1.2.15 | 2026-08-18 | 原生 Git 工作流（/commit、/review、GitHistory）、evolve 护栏规则与 trends 仪表盘、子代理写冲突防护、崩溃防护 |
 | 1.2.14 | 2026-08-18 | 内置自进化闭环（evolve）：信号捕获去重、建议排序、修复插件生命周期、自动验证；Shell 命令失败旁路捕获 |
 | 1.2.13 | 2026-08-15 | astgraph 代码图索引、结构化输出类型强转与纯文本 JSON 提取、只读工具声明 |

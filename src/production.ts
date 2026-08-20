@@ -917,7 +917,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     const messages = allMessages.slice(memoryLifecycle.messageStart ?? 0);
     const transcriptHash = memoryTranscriptHash(messages);
     if (memoryLifecycle.status === "completed" && memoryLifecycle.transcriptHash === transcriptHash) {
-      return "Task was already completed and evaluated for long-term memory.";
+      return "This conversation segment was already evaluated for long-term memory.";
     }
     if (!manual && memoryBehavior.autoExtractPaused) {
       return "Automatic long-term-memory extraction is paused after repeated dismissals; use /finish, /remember, or an explicit “remember” request to store memory manually.";
@@ -927,7 +927,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       ? { evaluated: true, candidates: false, stored: 0 }
       : await memoryCoordinator.finalize(memoryLifecycle.taskId ?? sessionId, messages);
     if (!finalization.evaluated) {
-      return "Task memory evaluation failed and was not marked complete; retry /finish after checking diagnostics.";
+      return "Long-term-memory evaluation failed; retry /finish after checking diagnostics.";
     }
     memoryLifecycle = {
       status: "completed", taskId: memoryLifecycle.taskId ?? sessionId,
@@ -936,11 +936,11 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     await persist();
     if (finalization.candidates && finalization.stored > 0) {
       const storedText = autoStoredContents[0] ?? "a high-confidence memory";
-      return `Task completed. Stored high-confidence long-term memory directly: "${storedText}". Run /forget to remove it if undesired.`;
+      return `Long-term memory updated. Stored high-confidence entry: "${storedText}". Run /forget to remove it if undesired.`;
     }
     return finalization.candidates
-      ? "Task completed. Review the generated long-term-memory candidates before anything is stored."
-      : "Task completed; no durable long-term-memory candidates passed the threshold.";
+      ? "Long-term-memory evaluation completed. Review the generated candidates before anything is stored."
+      : "Long-term-memory evaluation completed; no durable candidates passed the threshold.";
   };
   let explicitMemoryRequest: { taskId: string; messageStart: number } | undefined;
   let automaticMemoryTask = false;
@@ -954,9 +954,12 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     // foreground submission open for automatic long-term-memory extraction.
     automaticMemoryTask = !prompt.startsWith("/") && harness.permissionProfile !== "d2c";
     if (automaticMemoryTask) memoryReviews.dismissAll();
-    if (!prompt.startsWith("/") && memoryLifecycle.status === "completed") {
+    if (!prompt.startsWith("/")) {
       memoryLifecycle = {
-        status: "active", taskId: createMemoryTaskId(),
+        status: "active",
+        taskId: memoryLifecycle.status === "completed"
+          ? createMemoryTaskId()
+          : memoryLifecycle.taskId ?? createMemoryTaskId(),
         messageStart: harness.main.context.snapshot().messages.length,
       };
     }
@@ -999,9 +1002,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       && memoryCoordinator !== undefined && config.memory.autoExtract && options.approvalPolicy !== "deny"
       && !memoryBehavior.autoExtractPaused) {
       const result = await finalizeMemoryTask();
-      if (result.startsWith("Task memory evaluation failed")) {
+      if (result.startsWith("Long-term-memory evaluation failed")) {
         emitOutput({ type: "notice", message: "Automatic long-term-memory evaluation failed; use /finish to retry after checking diagnostics." });
-      } else if (result.startsWith("Task completed. Review") || result.startsWith("Task completed. Stored")) {
+      } else if (result.startsWith("Long-term-memory evaluation completed. Review")
+        || result.startsWith("Long-term memory updated.")) {
         emitOutput({ type: "notice", message: result });
       }
     }

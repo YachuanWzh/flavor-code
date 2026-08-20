@@ -19,7 +19,10 @@ describe("AgentLoop", () => {
       adapter: fakeAdapter([[
         { type: "tool-call", id: "write", name: "Write", input: { value: "one" } },
         { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
-      ], [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }]]),
+      ], [
+        { type: "text", text: "done" },
+        { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      ]]),
       execute: async () => withToolPresentation({ path }, {
         kind: "file-change", operation: "update", path, added: 2, removed: 1, lines: [],
       }),
@@ -37,7 +40,10 @@ describe("AgentLoop", () => {
       adapter: fakeAdapter([[
         { type: "tool-call", id: "read", name: "Read", input: { value: "x" } },
         { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
-      ], [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }]], requests),
+      ], [
+        { type: "text", text: "done" },
+        { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      ]], requests),
     });
     await collect(fixture.loop.run({ prompt: "read" }));
     expect(requests[1]?.messages).toContainEqual({ role: "system", content: expect.stringContaining("nested rule") });
@@ -46,7 +52,10 @@ describe("AgentLoop", () => {
     const requests: ModelRequest[] = [];
     const fixture = createLoop({
       adapter: fakeAdapter([
-        [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
+        [
+          { type: "text", text: "done" },
+          { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+        ],
       ], requests),
     });
     const userMessage = {
@@ -74,8 +83,8 @@ describe("AgentLoop", () => {
   it("switches models without replacing its context", async () => {
     const requests: ModelRequest[] = [];
     const fixture = createLoop({ adapter: fakeAdapter([
-      [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
-      [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
+      [{ type: "text", text: "first" }, { type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
+      [{ type: "text", text: "second" }, { type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
     ], requests) });
     await collect(fixture.loop.run({ prompt: "first" }));
     fixture.loop.setModel("fake:other");
@@ -88,8 +97,8 @@ describe("AgentLoop", () => {
   it("adds transient skill context for one run without persisting it", async () => {
     const requests: ModelRequest[] = [];
     const fixture = createLoop({ adapter: fakeAdapter([
-      [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
-      [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
+      [{ type: "text", text: "first" }, { type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
+      [{ type: "text", text: "second" }, { type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
     ], requests) });
     await collect(fixture.loop.run({ prompt: "first", additionalContext: "Skill body" }));
     await collect(fixture.loop.run({ prompt: "second" }));
@@ -147,6 +156,7 @@ describe("AgentLoop", () => {
         { type: "tool-call", id: "grep", name: "Grep", input: { value: "grep" } },
         { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
       ], [
+        { type: "text", text: "done" },
         { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
       ]], requests),
       toolNames: ["Read", "Grep"],
@@ -182,6 +192,7 @@ describe("AgentLoop", () => {
         { type: "tool-call", id: "hover", name: "LspHover", input: { value: "hover" } },
         { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
       ], [
+        { type: "text", text: "done" },
         { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
       ]]),
       toolNames: ["Read", "Glob", "Write", "Grep", "LspHover"],
@@ -525,7 +536,10 @@ describe("AgentLoop", () => {
           { type: "tool-call", id: "call-schema", name: "echo", input: { value: 42 } },
           { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
         ],
-        [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
+        [
+          { type: "text", text: "done" },
+          { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+        ],
       ]),
       fallbackAdapter: fakeAdapter([[
         { type: "tool-call", id: "cheap-id", name: "echo", input: { value: "42" } },
@@ -576,7 +590,10 @@ describe("AgentLoop", () => {
         ], requests),
         fallbackAdapter: fakeAdapter([
           [{ type: "error", error: { code: "network", message: "cheap-1" } }],
-          [{ type: "done", usage: { inputTokens: 2, outputTokens: 1 } }],
+          [
+            { type: "text", text: "recovered" },
+            { type: "done", usage: { inputTokens: 2, outputTokens: 1 } },
+          ],
         ], requests),
         fallbackModelId: "cheap:small",
       });
@@ -635,7 +652,10 @@ describe("AgentLoop", () => {
       const fixture = createLoop({
         adapter: fakeAdapter([[], [], []], requests),
         fallbackAdapter: fakeAdapter([
-          [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
+          [
+            { type: "text", text: "recovered" },
+            { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+          ],
         ], requests),
         fallbackModelId: "cheap:small",
       });
@@ -648,6 +668,73 @@ describe("AgentLoop", () => {
       expect(events.filter((event) => event.type === "model-retry")).toHaveLength(3);
       expect(events.some((event) => event.type === "error")).toBe(false);
       expect(events.at(-1)?.type).toBe("done");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries completed streams that contain neither visible text nor tool calls", async () => {
+    vi.useFakeTimers();
+    try {
+      const requests: ModelRequest[] = [];
+      const fixture = createLoop({
+        adapter: fakeAdapter([
+          [{ type: "done", usage: { inputTokens: 1, outputTokens: 0 } }],
+          [
+            { type: "text", text: "   \n" },
+            { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+          ],
+          [{ type: "done", usage: { inputTokens: 1, outputTokens: 0 } }],
+        ], requests),
+        fallbackAdapter: fakeAdapter([
+          [
+            { type: "text", text: "Recovered with a substantive response." },
+            { type: "done", usage: { inputTokens: 2, outputTokens: 5 } },
+          ],
+        ], requests),
+        fallbackModelId: "cheap:small",
+      });
+
+      const eventsPromise = collect(fixture.loop.run({ prompt: "recover empty response" }));
+      await vi.runAllTimersAsync();
+      const events = await eventsPromise;
+
+      expect(requests.map(({ model }) => model)).toEqual(["model", "model", "model", "small"]);
+      expect(events.filter((event) => event.type === "model-retry")).toHaveLength(3);
+      expect(events.filter((event) => event.type === "text").map((event) => event.text.trim()))
+        .toEqual(["", "Recovered with a substantive response."]);
+      expect(events.some((event) => event.type === "error")).toBe(false);
+      expect(events.at(-1)?.type).toBe("done");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports empty_response when every completed model attempt is empty", async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = createLoop({
+        adapter: fakeAdapter(Array.from({ length: 3 }, () => [
+          { type: "done" as const, usage: { inputTokens: 1, outputTokens: 0 } },
+        ])),
+        fallbackAdapter: fakeAdapter(Array.from({ length: 2 }, () => [
+          { type: "done" as const, usage: { inputTokens: 1, outputTokens: 0 } },
+        ])),
+        fallbackModelId: "cheap:small",
+      });
+
+      const eventsPromise = collect(fixture.loop.run({ prompt: "fail on empty response" }));
+      await vi.runAllTimersAsync();
+      const events = await eventsPromise;
+
+      expect(events.filter((event) => event.type === "model-retry")).toHaveLength(4);
+      expect(events.at(-1)).toEqual({
+        type: "error",
+        error: {
+          code: "empty_response",
+          message: "Provider completed without visible text or tool calls",
+        },
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -681,7 +768,10 @@ describe("AgentLoop", () => {
       const fixture = createLoop({
         adapter: fakeAdapter([
           [{ type: "error", error: { code: "network", message: "temporary" } }],
-          [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
+          [
+            { type: "text", text: "recovered" },
+            { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+          ],
         ]),
         fallbackAdapter: fakeAdapter([]),
         fallbackModelId: "cheap:small",
@@ -812,6 +902,7 @@ describe("AgentLoop", () => {
         { type: "tool-call", id: "skipped", name: "echo", input: { value: "skip" } },
         { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
       ], [
+        { type: "text", text: "done" },
         { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
       ]], requests),
       execute: async () => { executions += 1; return output(); },
@@ -833,7 +924,10 @@ describe("AgentLoop", () => {
           { type: "tool-call", id: "call-1", name: "echo", input: { value: "hi" } },
           { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
         ],
-        [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
+        [
+          { type: "text", text: "done" },
+          { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+        ],
       ]),
       toolSummarize: (input) => `echo: ${input.value}`,
     });
@@ -855,7 +949,10 @@ describe("AgentLoop", () => {
           { type: "tool-call", id: "call-1", name: "echo", input: { value: "hi" } },
           { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
         ],
-        [{ type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
+        [
+          { type: "text", text: "done" },
+          { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+        ],
       ]),
     });
 

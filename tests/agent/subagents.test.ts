@@ -525,6 +525,7 @@ describe("LocalHarness", () => {
     const adapter: ModelAdapter = {
       async *stream(request) {
         requests.push({ messages: request.messages });
+        yield { type: "text", text: "done" };
         yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
       },
     };
@@ -663,6 +664,8 @@ describe("LocalHarness", () => {
         requests.push({ model: request.model, tools: request.tools.map((tool) => tool.name), messages: request.messages.map((message) => modelContentText(message.content)) });
         if (request.model === "cheap" && cheapCalls++ === 0) {
           yield { type: "tool-call", id: "network", name: "Network", input: {} };
+        } else {
+          yield { type: "text", text: "done" };
         }
         yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
       },

@@ -33,6 +33,7 @@ async function workspace(memory: Record<string, unknown>, config: Record<string,
       globalThis.__flavorMemoryRequests ??= [];
       globalThis.__flavorMemoryRequests.push(request.messages);
       const text = request.messages.map((message) => message.content).join("\\n");
+      const latestUserText = [...request.messages].reverse().find((message) => message.role === "user")?.content ?? "";
       if (text.includes("Evaluate this completed coding task")) {
         const memories = text.includes("NO_MEMORY") ? [] : text.includes("HIGH_SCORE") ? [
           {"type":"project","summary":"Use pnpm for repository scripts","content":"Use pnpm for all repository scripts.","topicKey":"project.package-manager","keywords":["pnpm","scripts"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":3}}
@@ -44,7 +45,7 @@ async function workspace(memory: Record<string, unknown>, config: Record<string,
           {"type":"feedback","summary":"Keep answers concise","content":"Keep answers concise for the user.","topicKey":"user.response-style","keywords":["concise"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":1}}
         ];
         yield { type: "text", text: JSON.stringify({ memories }) };
-      } else if (text.includes("FAIL_MAIN")) {
+      } else if (latestUserText.includes("FAIL_MAIN")) {
         yield { type: "error", error: { code: "authentication", message: "simulated main-model failure" } };
         return;
       } else {
@@ -148,7 +149,7 @@ describe("production long-term memory", () => {
     const extractionCount = ((globalThis as { __flavorMemoryRequests?: Array<Array<{ content: string }>> })
       .__flavorMemoryRequests ?? []).filter((messages) => messages.some((message) => message.content.includes("Evaluate this completed coding task"))).length;
     expect(extractionCount).toBe(1);
-    await expect(first.services.finishTask()).resolves.toBe("Task was already completed and evaluated for long-term memory.");
+    await expect(first.services.finishTask()).resolves.toBe("This conversation segment was already evaluated for long-term memory.");
     expect(((globalThis as { __flavorMemoryRequests?: Array<Array<{ content: string }>> })
       .__flavorMemoryRequests ?? []).filter((messages) => messages.some((message) => message.content.includes("Evaluate this completed coding task")))).toHaveLength(extractionCount);
     await first.memoryReviews.accept(first.memoryReviews.pending[0]!.id);
@@ -223,6 +224,23 @@ describe("production long-term memory", () => {
     await runtime.dispose();
   });
 
+  it("starts a fresh memory boundary after a failed turn", async () => {
+    const root = await workspace({ autoExtract: true, autoExtractMinChars: 200 });
+    const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
+
+    await runtime.session.submit(`FAIL_MAIN FIRST_FAILED_MARKER ${"old task context ".repeat(20)}`);
+    await runtime.session.submit(`SECOND_SUCCESS_MARKER ${"new task context ".repeat(20)}`);
+
+    const extractions = ((globalThis as { __flavorMemoryRequests?: Array<Array<{ content: string }>> })
+      .__flavorMemoryRequests ?? []).filter((messages) => messages.some((message) =>
+        message.content.includes("Evaluate this completed coding task")));
+    expect(extractions).toHaveLength(1);
+    const prompt = extractions[0]!.map((message) => message.content).join("\n");
+    expect(prompt).toContain("SECOND_SUCCESS_MARKER");
+    expect(prompt).not.toContain("FIRST_FAILED_MARKER");
+    await runtime.dispose();
+  });
+
   it("evaluates only the current task when multiple tasks share one session", async () => {
     const root = await workspace({ autoExtract: true, autoExtractMinChars: 200 });
     const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
@@ -287,7 +305,8 @@ describe("production long-term memory", () => {
     const store = new MemoryStore({ workspace: root, maxEntries: 200, maxEntryChars: 1000 });
     expect(await store.list()).toMatchObject([{ type: "project", content: "Use pnpm for repository scripts" }]);
     expect(runtime.memoryReviews.pending).toEqual([]);
-    expect(notices.some((notice) => notice.includes("Stored high-confidence long-term memory directly"))).toBe(true);
+    expect(notices.some((notice) => notice.includes("Long-term memory updated. Stored high-confidence entry"))).toBe(true);
+    expect(notices.every((notice) => !notice.includes("Task completed"))).toBe(true);
     expect(notices.some((notice) => notice.includes("Use pnpm for all repository scripts."))).toBe(true);
     await runtime.dispose();
   });
@@ -312,7 +331,7 @@ describe("production long-term memory", () => {
     expect(extractions()).toHaveLength(2);
 
     // A manual /finish still works and bypasses the pause.
-    await expect(runtime.services.finishTask()).resolves.toContain("Task completed.");
+    await expect(runtime.services.finishTask()).resolves.toContain("Long-term-memory evaluation completed.");
     expect(extractions()).toHaveLength(3);
 
     // An explicit remember request restores automatic extraction. It also calls

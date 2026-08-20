@@ -232,6 +232,7 @@ describe("production runtime", () => {
       ctx.registerModelAdapter("capture", { async *stream(request) {
         globalThis.__flavorPalsTools ??= [];
         globalThis.__flavorPalsTools.push(request.tools.map((tool) => tool.name));
+        yield { type: "text", text: "done" };
         yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
       }});
     }`);
@@ -272,6 +273,7 @@ describe("production runtime", () => {
       let calls = 0;
       ctx.registerModelAdapter("capture", { async *stream() {
         if (calls++ === 0) yield { type: "tool-call", id: "share-1", name: "PalSend", input: { target: "api", message: ${JSON.stringify(`credential=${secret}`)} } };
+        else yield { type: "text", text: "done" };
         yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
       }});
     }`);
@@ -491,6 +493,7 @@ describe("production runtime", () => {
           tools: request.tools.map((tool) => tool.name),
           system: request.messages.filter((message) => message.role === "system").map((message) => message.content).join("\\n\\n"),
         });
+        yield { type: "text", text: "done" };
         yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
       }});
     }`);
@@ -528,6 +531,7 @@ describe("production runtime", () => {
     await writeFile(join(pluginRoot, "index.mjs"), `export function activate(ctx) {
       ctx.registerModelAdapter("capture", { async *stream(request) {
         globalThis.__flavorMcpTools = request.tools.map((tool) => tool.name);
+        yield { type: "text", text: "done" };
         yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
       }});
     }`);
@@ -575,6 +579,7 @@ describe("production runtime", () => {
       ctx.registerModelAdapter("capture", { async *stream(request) {
         globalThis.__flavorMcpToolSnapshots ??= [];
         globalThis.__flavorMcpToolSnapshots.push(request.tools.map((tool) => tool.name));
+        yield { type: "text", text: "done" };
         yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
       }});
     }`);
@@ -691,6 +696,7 @@ describe("production runtime", () => {
     }));
     await writeFile(join(pluginRoot, "index.mjs"), `export function activate(ctx) {
       ctx.registerModelAdapter("capture", { async *stream() {
+        yield { type: "text", text: "done" };
         yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
       }});
     }`);
@@ -729,6 +735,7 @@ describe("production runtime", () => {
     await writeFile(join(pluginRoot, "index.mjs"), `export function activate(ctx) {
       ctx.registerModelAdapter("capture", { async *stream() {
         globalThis.__flavorDiscoveryCalls = (globalThis.__flavorDiscoveryCalls ?? 0) + 1;
+        yield { type: "text", text: "done" };
         yield { type: "done", usage: { inputTokens: 7, outputTokens: 3 } };
       }});
     }`);
@@ -840,6 +847,8 @@ describe("production runtime", () => {
             id: "implement", subject: "Implement new requirement", activeForm: "Implementing new requirement",
             status: "pending", dependencies: [],
           }] } };
+        } else {
+          yield { type: "text", text: "done" };
         }
         yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
       }});
@@ -947,6 +956,7 @@ describe("production runtime", () => {
           yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
           return;
         }
+        yield { type: "text", text: "done" };
         yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
       }});
     }`);
@@ -987,6 +997,7 @@ describe("production runtime", () => {
     }));
     await writeFile(join(pluginRoot, "index.mjs"), `export function activate(ctx) {
       ctx.registerModelAdapter("capture", { async *stream() {
+        yield { type: "text", text: "done" };
         yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } };
       }});
     }`);
@@ -1204,6 +1215,7 @@ describe("production runtime", () => {
         globalThis.__flavorManagedSnapshots ??= [];
         globalThis.__flavorManagedSnapshots.push(request.tools.map((tool) => tool.name));
         if (globalThis.__flavorManagedRestart === true) {
+          yield { type: "text", text: "done" };
           yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
           return;
         }

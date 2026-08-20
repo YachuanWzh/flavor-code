@@ -14,7 +14,7 @@ const DEFAULT_MODEL_ATTEMPTS = 3;
 const FALLBACK_MODEL_ATTEMPTS = 2;
 const RETRY_BASE_DELAY_MS = 1_000;
 const RECOVERABLE_MODEL_ERRORS = new Set<AgentError["code"]>([
-  "network", "rate_limit", "unknown", "incomplete_stream",
+  "network", "rate_limit", "unknown", "incomplete_stream", "empty_response",
 ]);
 
 type CollectedToolCall =
@@ -261,6 +261,12 @@ export class AgentLoop {
         } finally {
           if (!completed && terminalError === undefined) {
             terminalError = { code: "incomplete_stream", message: "Provider stream ended without a done or error event" };
+          } else if (completed && assistantText.trim().length === 0 && collectedToolCalls.length === 0) {
+            completed = false;
+            terminalError = {
+              code: "empty_response",
+              message: "Provider completed without visible text or tool calls",
+            };
           }
           providerError = terminalError !== undefined;
           try {
@@ -301,7 +307,7 @@ export class AgentLoop {
           totalCacheCreationTokens += usage.cacheCreationTokens ?? 0;
           yield { type: "usage", ...usage, totalInputTokens, totalOutputTokens };
         }
-        const providerProducedOutput = assistantText.length > 0 || collectedToolCalls.length > 0;
+        const providerProducedOutput = assistantText.trim().length > 0 || collectedToolCalls.length > 0;
         if (
           terminalError?.code === "context_overflow"
           && !reactiveRetried
