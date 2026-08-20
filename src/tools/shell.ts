@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 
@@ -86,6 +86,54 @@ function tokenizeCommandLine(command: string): string[] {
 
 function unquoteToken(token: string): string {
   return token.length >= 2 && token.startsWith("\"") && token.endsWith("\"") ? token.slice(1, -1) : token;
+}
+
+type WindowsShellKind = "pwsh" | "powershell" | "cmd";
+
+let cachedWindowsShell: WindowsShellKind | undefined;
+
+function hasExecutable(name: string): boolean {
+  try {
+    return spawnSync("where", [name], { stdio: "ignore", windowsHide: true }).status === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Choose the most capable shell available on Windows: PowerShell 7 (pwsh),
+ * then legacy Windows PowerShell (powershell.exe), then cmd.exe as a last
+ * resort. Detected once per process and cached — the tool runs on every
+ * command, and the installed shells rarely change mid-process.
+ */
+function detectWindowsShell(): WindowsShellKind {
+  if (cachedWindowsShell !== undefined) return cachedWindowsShell;
+  cachedWindowsShell = hasExecutable("pwsh") ? "pwsh" : hasExecutable("powershell") ? "powershell" : "cmd";
+  return cachedWindowsShell;
+}
+
+/** Quote one token as a PowerShell single-quoted string (doubling embedded quotes). */
+function psQuote(token: string): string {
+  return `'${token.replace(/'/g, "''")}'`;
+}
+
+/**
+ * Build the command line handed to cmd.exe via `spawn(shell: true)` on Windows.
+ * `commandLine` is the pre-quoted line used directly for the cmd.exe fallback.
+ *
+ * For PowerShell we do not pass the raw line through cmd: `-EncodedCommand`
+ * (UTF-16LE base64) carries the script untouched, so arguments with spaces,
+ * quotes or `&` reach the child program exactly as given. `chcp 65001` keeps
+ * the console code page UTF-8 so redirected pipes decode consistently.
+ */
+export function buildWindowsCommandLine(kind: WindowsShellKind, commandLine: string, command: string, args: readonly string[]): string {
+  if (kind === "cmd") return `chcp 65001>nul & ${commandLine}`;
+  const executable = kind === "pwsh" ? "pwsh" : "powershell";
+  // `exit $LASTEXITCODE` forwards the child's exit code: -EncodedCommand alone
+  // collapses a non-zero native exit to 1 instead of propagating it.
+  const script = `& ${psQuote(command)}${args.length > 0 ? ` ${args.map(psQuote).join(" ")}` : ""}; exit $LASTEXITCODE`;
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  return `chcp 65001>nul & ${executable} -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}`;
 }
 
 export function createShellTool(
@@ -207,10 +255,12 @@ export async function executeShell(
     const commandLine = quoted.length > 0
       ? `${quoteArg(input.command)} ${quoted}`
       : quoteArg(input.command);
-    // cmd.exe writes diagnostics and built-in command output using its active
-    // console code page. Force UTF-8 before invoking the requested command so
-    // redirected pipes are decoded consistently on non-English Windows too.
-    const shellCommandLine = process.platform === "win32" ? `chcp 65001>nul & ${commandLine}` : commandLine;
+    // On Windows, prefer PowerShell 7 when available and fall back through
+    // Windows PowerShell to cmd.exe (see buildWindowsCommandLine). On other
+    // platforms the pre-quoted line runs directly via the default shell.
+    const shellCommandLine = process.platform === "win32"
+      ? buildWindowsCommandLine(detectWindowsShell(), commandLine, input.command, input.args)
+      : commandLine;
     const child = spawn(shellCommandLine, {
       cwd,
       shell: true,

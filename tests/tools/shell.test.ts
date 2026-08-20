@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
-import { createShellTool, normalizeShellCommand } from "../../src/tools/shell.js";
+import { buildWindowsCommandLine, createShellTool, normalizeShellCommand } from "../../src/tools/shell.js";
 import { JobRegistry } from "../../src/jobs/registry.js";
 
 const node = process.execPath;
@@ -53,7 +53,36 @@ describe("normalizeShellCommand", () => {
   });
 });
 
+describe("buildWindowsCommandLine", () => {
+  it("keeps the cmd.exe fallback with the UTF-8 code page prefix", () => {
+    expect(buildWindowsCommandLine("cmd", "node --version", "node", [])).toBe("chcp 65001>nul & node --version");
+  });
+
+  it("prefers pwsh and carries arguments through -EncodedCommand untouched", () => {
+    const line = buildWindowsCommandLine("pwsh", "node --version", "node", ["-e", "console.log('a b')"]);
+    expect(line).toMatch(/^chcp 65001>nul & pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand [A-Za-z0-9+/=]+$/);
+    const encoded = line.split(" ").pop()!;
+    const script = Buffer.from(encoded, "base64").toString("utf16le");
+    expect(script).toBe("& 'node' '-e' 'console.log(''a b'')'; exit $LASTEXITCODE");
+  });
+
+  it("falls back to legacy Windows PowerShell when pwsh is absent", () => {
+    const line = buildWindowsCommandLine("powershell", "node --version", "node", []);
+    expect(line).toMatch(/^chcp 65001>nul & powershell .*-EncodedCommand /);
+  });
+});
+
 describe("Shell", () => {
+  it.skipIf(process.platform !== "win32")("runs PowerShell syntax via the detected shell instead of cmd.exe", async () => {
+    const result = await createShellTool(process.cwd()).execute({
+      // cmd.exe has no Write-Output; a PowerShell-family shell prints the argument.
+      command: "Write-Output",
+      args: ["pwsh-works"],
+    }, signal);
+    expect(result).toMatchObject({ exitCode: 0 });
+    expect(result.stdout.trim()).toBe("pwsh-works");
+  });
+
   it("returns immediately for background commands and exposes incremental job output", async () => {
     const jobs = new JobRegistry();
     const tool = createShellTool(process.cwd(), { jobs });
@@ -118,6 +147,8 @@ describe("Shell", () => {
     expect(result).toMatchObject({ exitCode: 7, signal: null, stderr: "bad", truncated: false });
   });
 
+  // Runs three subprocesses (cmd UTF-8, node GBK, and a real npm call that
+  // can hit the network), so allow well beyond the default 5s under parallel load.
   it.skipIf(process.platform !== "win32")("decodes non-ASCII cmd output as UTF-8", async () => {
     const result = await createShellTool(process.cwd()).execute({
       command: "cmd.exe", args: ["/d", "/c", "echo 中文错误"],
@@ -137,7 +168,7 @@ describe("Shell", () => {
     // The compatibility layer splits the whole line into npm + args, so it may
     // actually succeed; this assertion only guards against replacement chars.
     expect(`${invalid.stdout}${invalid.stderr}`).not.toContain("�");
-  });
+  }, 30_000);
 
   it.skipIf(process.platform !== "win32")("streams split GBK output to background jobs without replacement characters", async () => {
     const jobs = new JobRegistry();
