@@ -98,3 +98,25 @@ it("turns fire-and-forget Stop failures into rendered errors", async () => {
   await submitSafely({ submit: async () => { throw new Error("Stop hook failed"); } }, "hello", (message) => errors.push(message));
   expect(errors).toEqual(["Stop hook failed"]);
 });
+
+it("force-exits when graceful disposal hangs past the shutdown watchdog", async () => {
+  const exit = vi.fn();
+  const errors: string[] = [];
+  const forceExit = vi.fn();
+  const hangingClose = vi.fn(() => new Promise<void>(() => undefined));
+  const runtime = { session: { close: hangingClose }, dispose: vi.fn(async () => undefined) } as unknown as ProductionRuntime;
+  await shutdownRuntime(runtime, exit, (message) => errors.push(message), { shutdownTimeoutMs: 25, forceExit });
+  expect(exit).toHaveBeenCalledOnce();
+  expect(errors.join(" ")).toContain("timed out");
+  await vi.waitFor(() => expect(forceExit).toHaveBeenCalledOnce());
+});
+
+it("does not force-exit when disposal finishes within the watchdog", async () => {
+  const exit = vi.fn();
+  const forceExit = vi.fn();
+  const runtime = { session: { close: async () => undefined }, dispose: async () => undefined } as unknown as ProductionRuntime;
+  await shutdownRuntime(runtime, exit, () => undefined, { shutdownTimeoutMs: 250, forceExit });
+  expect(exit).toHaveBeenCalledOnce();
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  expect(forceExit).not.toHaveBeenCalled();
+});

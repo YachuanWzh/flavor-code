@@ -2,7 +2,18 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.2.17 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.2.18 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.2.18] - 2026-08-24
+
+### 修复
+- 修复终端 Markdown 渲染中单行代码块内容在滚动/重绘时偶发丢失的问题：代码块渲染区域标记为 opaque（不透明），防止 ScrollBox 增量渲染器用缓存的空白单元格覆盖已渲染的单行代码内容
+- 新增回归测试：验证多行围栏代码块旁边的单行代码内容保持可见
+- 修复 Windows 环境下 Ctrl+C 偶发无法退出的问题：原退出链路为「优雅关闭 → 退出」，任一清理步骤挂起（MCP stdio 服务关闭、pals 命名管道、IDE 会话、持久化等）都会使后续按键全部失效且进程永不退出。具体修复：
+  - 二次 Ctrl+C 强制退出：首次中断触发的优雅关闭仍在进行时，再次按 Ctrl+C 立即强制退出进程，不再被清理守卫吞掉
+  - 关闭看门狗：优雅关闭整体限时 8 秒，超时后先恢复终端模式再强制退出，挂起的清理不会阻塞退出
+  - 清理步骤逐步超时：dispose 各异步步骤（协作事件泵、睡眠调度、记忆刷新、持久化、IDE 会话、执行环境、后台任务、协作连接关闭、插件卸载、MCP 关闭）各自限时 3 秒，超时即放弃该步并记录诊断，其余步骤与退出流程继续；构造失败的清理路径同样受保护
+  - 新增信号处理、超时工具、看门狗与挂起清理的回归测试
 
 ## [1.2.17] - 2026-08-20
 
@@ -314,6 +325,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.2.18 | 2026-08-24 | 修复单行代码块渲染丢失；修复 Windows 下 Ctrl+C 偶发无法退出（二次强制退出 + 关闭看门狗 + 清理步骤逐步超时） |
 | 1.2.17 | 2026-08-20 | /logout 登出命令、OAuth 单凭据登录语义、模型决策持久化改进 |
 | 1.2.16 | 2026-08-20 | 桌面端 E2E 交付运行状态查看、Windows Shell 命令执行优化、OAuth 回环地址配置 |
 | 1.2.15 | 2026-08-18 | 原生 Git 工作流（/commit、/review、GitHistory）、evolve 护栏规则与 trends 仪表盘、子代理写冲突防护、崩溃防护 |

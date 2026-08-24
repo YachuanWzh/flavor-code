@@ -132,7 +132,11 @@ function CodeBlock({ token }: { token: Tokens.Code }): React.JSX.Element {
   const label = langLabel && langLabel.length > 0 ? langLabel : "code";
   const topBarWidth = Math.max(0, columns - 4 - label.length - 4);
   return (
-    <Box flexDirection="column" paddingX={1}>
+    // Code blocks are self-contained painted regions. Marking the region
+    // opaque prevents ScrollBox's incremental renderer from blitting cached
+    // blank cells over clean, single-line code bodies during transcript
+    // scrolls/redraws.
+    <Box flexDirection="column" paddingX={1} opaque>
       <Text color="gray">{"╭─ "}<Text color="cyan">{label}</Text>{" "}{"─".repeat(topBarWidth)}{"╮"}</Text>
       <Box flexDirection="column" paddingX={1}>
         {truncated.map((line, i) => (

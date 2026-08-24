@@ -17,7 +17,7 @@ it.skipIf(process.platform === "win32")("routes two process SIGINTs through Stop
     let cleanup;
     const handler = createSessionInterruptHandler(() => session, async () => {
       console.log('SessionEnd'); console.log('disposed'); cleanup(); setTimeout(() => process.exit(0), 0);
-    });
+    }, { forceExit: () => process.exit(1) });
     cleanup = installSigintHandler(process, handler); console.log('READY');
   `);
   const child = spawn(process.execPath, ["--experimental-strip-types", script], { stdio: ["ignore", "pipe", "pipe"] });

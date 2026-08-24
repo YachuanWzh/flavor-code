@@ -84,7 +84,7 @@ import { FlavorSession, type SessionOutput, type SessionServices } from "./ui/se
 import { createTranscriptState, restoreTranscriptState, transcriptReducer, type TranscriptState } from "./ui/transcript.js";
 import { MVP_COMMANDS } from "./ui/commands.js";
 import { resolveLanguage, languageInstruction } from "./utils/intl.js";
-import { awaitWithSignal } from "./utils/async.js";
+import { awaitWithSignal, withTimeout } from "./utils/async.js";
 import { message } from "./utils/error.js";
 import { execFileNoThrow } from "./utils/execFileNoThrow.js";
 import { redactSecrets } from "./utils/redact.js";
@@ -113,6 +113,13 @@ const INTERRUPTED_TASK_PLAN_CONTEXT = [
   "If the current work needs a plan, create a fresh one with TaskPlan before using TaskUpdate.",
 ].join(" ");
 
+/**
+ * Per-step shutdown budget. On Windows a hung child-process pipe, named pipe,
+ * or MCP stdio server can block one cleanup step forever; abandoning that step
+ * after the budget lets the remaining steps — and process exit — proceed.
+ */
+export const DEFAULT_SHUTDOWN_STEP_TIMEOUT_MS = 3_000;
+
 export interface ProductionRuntimeOptions {
   workspace?: string;
   home?: string;
@@ -129,6 +136,8 @@ export interface ProductionRuntimeOptions {
   resumeSession?: string | true;
   /** Test and embedding seam for creating configured MCP clients. */
   mcpClientFactory?: McpClientFactory;
+  /** Per-step timeout (ms) for shutdown/disposal steps so a hung cleanup cannot block process exit. */
+  shutdownStepTimeoutMs?: number;
   /** Additional tools provided by embedders (e.g. desktop-only D2C tools). */
   extraTools?: readonly ToolDefinition<unknown>[];
   /** Explicitly opt into CLI-local collaboration. Omit for print/RPC/eval callers. */
@@ -1718,23 +1727,24 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     async dispose() {
       if (disposed) return;
       disposed = true;
+      const stepTimeoutMs = options.shutdownStepTimeoutMs ?? DEFAULT_SHUTDOWN_STEP_TIMEOUT_MS;
       collaborationEventsOpen = false;
       unsubscribeCollaboration?.();
-      await collaborationEventPump;
+      if (collaborationEventPump !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "collaboration-event-pump", collaborationEventPump);
       mcpDiscarded = true;
-      await sleepScheduler?.dispose();
-      await memoryCoordinator?.flush();
-      await persist();
-      await persistTail;
-      if (ideSessionId !== undefined) await ide.endSession(ideSessionId);
-      await executionEnvironment?.dispose();
+      if (sleepScheduler !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "sleep-scheduler", sleepScheduler.dispose());
+      if (memoryCoordinator !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "memory-flush", memoryCoordinator.flush());
+      await boundedStep(stepTimeoutMs, diagnostics, "persist", persist());
+      if (persistTail !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "persist-tail", persistTail);
+      if (ideSessionId !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "ide-end-session", ide.endSession(ideSessionId));
+      if (executionEnvironment !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "execution-environment", executionEnvironment.dispose());
       terminals.dispose();
-      await jobs.dispose();
+      await boundedStep(stepTimeoutMs, diagnostics, "jobs", jobs.dispose());
       auditLogger.close();
       evolveService.dispose();
       memoryReviews.dispose();
-      await collaborationClient?.close();
-      await cleanupProduction(approvals, questions, pluginHost, mcpManager, harness);
+      if (collaborationClient !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "collaboration-close", collaborationClient.close());
+      await cleanupProduction(approvals, questions, pluginHost, mcpManager, harness, { stepTimeoutMs });
     },
   };
   } catch (primaryError) {
@@ -1742,16 +1752,17 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     mcpDiscarded = true;
     memoryReviews.dispose();
     try {
-      if (ideSessionId !== undefined) await ide.endSession(ideSessionId);
-      await sleepScheduler?.dispose();
-      await executionEnvironment?.dispose();
+      const stepTimeoutMs = options.shutdownStepTimeoutMs ?? DEFAULT_SHUTDOWN_STEP_TIMEOUT_MS;
+      if (ideSessionId !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "ide-end-session", ide.endSession(ideSessionId));
+      if (sleepScheduler !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "sleep-scheduler", sleepScheduler.dispose());
+      if (executionEnvironment !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "execution-environment", executionEnvironment.dispose());
       terminals.dispose();
-      await jobs.dispose();
+      await boundedStep(stepTimeoutMs, diagnostics, "jobs", jobs.dispose());
       unsubscribeCollaboration?.();
       pendingCollaborationEvents.length = 0;
-      await collaborationEventPump;
-      await collaborationClient?.close();
-      await cleanupProduction(approvals, questions, pluginHost, mcpManager, harnessCreated ? harness : undefined);
+      if (collaborationEventPump !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "collaboration-event-pump", collaborationEventPump);
+      if (collaborationClient !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "collaboration-close", collaborationClient.close());
+      await cleanupProduction(approvals, questions, pluginHost, mcpManager, harnessCreated ? harness : undefined, { stepTimeoutMs });
     }
     catch (cleanupError) { attachCleanupError(primaryError, cleanupError); }
     throw primaryError;
@@ -2491,10 +2502,16 @@ function storedConversation(snapshot: ContextSnapshot): SessionDocument["convers
   };
 }
 
+interface CleanupProductionOptions {
+  stepTimeoutMs: number;
+}
+
 async function cleanupProduction(
   approvals: ApprovalBridge, questions: QuestionBridge, pluginHost: PluginHost,
   mcpManager: McpManager | undefined, harness: LocalHarness | undefined,
+  cleanupOptions: CleanupProductionOptions = { stepTimeoutMs: DEFAULT_SHUTDOWN_STEP_TIMEOUT_MS },
 ): Promise<void> {
+  const { stepTimeoutMs } = cleanupOptions;
   let primary: unknown;
   try { approvals.resolve("deny"); }
   catch (error) { primary = error; }
@@ -2503,7 +2520,10 @@ async function cleanupProduction(
     if (primary === undefined) primary = error;
     else attachCleanupError(primary, error);
   }
-  try { await pluginHost.unloadAll(); }
+  try {
+    const outcome = await withTimeout(pluginHost.unloadAll(), stepTimeoutMs);
+    if (outcome.timedOut) primary = new Error(`Plugin unload timed out after ${stepTimeoutMs}ms`);
+  }
   catch (error) {
     if (primary === undefined) primary = error;
     else attachCleanupError(primary, error);
@@ -2514,13 +2534,32 @@ async function cleanupProduction(
       if (primary === undefined) primary = error;
       else attachCleanupError(primary, error);
     }
-    try { await mcpManager?.close(); }
+    try {
+      if (mcpManager !== undefined) {
+        const outcome = await withTimeout(mcpManager.close(), stepTimeoutMs);
+        if (outcome.timedOut) {
+          const timeoutError = new Error(`MCP shutdown timed out after ${stepTimeoutMs}ms`);
+          if (primary === undefined) primary = timeoutError;
+          else attachCleanupError(primary, timeoutError);
+        }
+      }
+    }
     catch (error) {
       if (primary === undefined) primary = error;
       else attachCleanupError(primary, error);
     }
   }
   if (primary !== undefined) throw primary;
+}
+
+/**
+ * Await one shutdown step with a budget. A timeout abandons the step (it keeps
+ * running in the background) and records a diagnostic instead of blocking the
+ * rest of the shutdown chain forever. Real errors still propagate unchanged.
+ */
+async function boundedStep(timeoutMs: number, diagnostics: string[], name: string, step: Promise<unknown>): Promise<void> {
+  const outcome = await withTimeout(step, timeoutMs);
+  if (outcome.timedOut) diagnostics.push(`Shutdown step "${name}" timed out after ${timeoutMs}ms and was abandoned.`);
 }
 
 function attachCleanupError(primary: unknown, cleanup: unknown): void {

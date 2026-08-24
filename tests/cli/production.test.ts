@@ -193,6 +193,22 @@ describe("production runtime", () => {
     expect(client.close).toHaveBeenCalledOnce();
   });
 
+  it("abandons a hung collaboration close instead of blocking dispose", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pals-hang-")); roots.push(workspace);
+    const client = new FakeProductionPalClient();
+    client.close.mockImplementation(() => new Promise<undefined>(() => undefined));
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, output: () => {},
+      collaboration: { instanceId: PAL_A, alias: "app", client },
+      shutdownStepTimeoutMs: 50,
+    });
+    const started = Date.now();
+    await runtime.dispose();
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(client.close).toHaveBeenCalledOnce();
+    expect(runtime.diagnostics.join(" ")).toContain("collaboration-close");
+  });
+
   it("uses a safe UUID fallback for unknown senders and closes collaboration after construction failure", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pals-failure-")); roots.push(workspace);
     const unknown = new FakeProductionPalClient([{

@@ -48,6 +48,7 @@ import {
 } from "./slash-completion.js";
 import { message } from "../utils/error.js";
 import { redactErrorText } from "../utils/redact.js";
+import { withTimeout } from "../utils/async.js";
 import { compactProgressPresentation } from "./compact-progress.js";
 import { createGlobTool, type SearchResult } from "../tools/search.js";
 import {
@@ -334,6 +335,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
   interruptRef.current ??= createSessionInterruptHandler(
     () => runtimeRef.current?.session,
     () => shutdownRef.current(runtimeRef.current),
+    { forceExit: () => process.exit(1) },
   );
   const interrupt = interruptRef.current;
 
@@ -2010,11 +2012,39 @@ export async function submitSafely(
   catch (error) { safeReport(report, safeUiError(error)); }
 }
 
+/** Overall watchdog for graceful shutdown; hung cleanups must not block exit forever. */
+export const SHUTDOWN_TIMEOUT_MS = 8_000;
+/** Grace given to flush the terminal restore before a forced exit. */
+const FORCE_EXIT_GRACE_MS = 250;
+
+export interface ShutdownRuntimeOptions {
+  shutdownTimeoutMs?: number;
+  /** Hard-exit hook used when the watchdog fires. Defaults to `process.exit(1)`. Injectable for tests. */
+  forceExit?: () => void;
+}
+
 export async function shutdownRuntime(
   runtime: ProductionRuntime | undefined, exit: () => void, report: (message: string) => void,
+  options: ShutdownRuntimeOptions = {},
 ): Promise<void> {
-  try { await closeAndDisposeRuntime(runtime, report); }
-  finally { exit(); }
+  const timeoutMs = options.shutdownTimeoutMs ?? SHUTDOWN_TIMEOUT_MS;
+  let timedOut = false;
+  try {
+    const outcome = await withTimeout(closeAndDisposeRuntime(runtime, report), timeoutMs);
+    timedOut = outcome.timedOut;
+    if (timedOut) report(`Shutdown timed out after ${timeoutMs}ms; forcing exit.`);
+  }
+  finally {
+    // Unmount first so the terminal modes are restored before a forced exit.
+    exit();
+    if (timedOut) {
+      // Abandoned cleanup may still hold open handles (child-process pipes,
+      // named pipes, sockets) that keep the event loop alive, so force the
+      // process out once the terminal has been restored.
+      const forceExit = options.forceExit ?? ((): void => { process.exit(1); });
+      setTimeout(forceExit, FORCE_EXIT_GRACE_MS);
+    }
+  }
 }
 
 export async function closeAndDisposeRuntime(
