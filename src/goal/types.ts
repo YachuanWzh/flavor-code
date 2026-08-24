@@ -68,7 +68,33 @@ export interface EvidencePacket {
   planFile: string | null;
   finalResponse: string;
   priorGaps: string;
+  contractHash: string;
+  workspaceDiffHash: string;
+  workspaceStatus: string[];
+  hostVerification?: HostVerificationEvidence;
 }
+
+export interface HostVerificationEvidence {
+  passed: boolean;
+  summary: string;
+  commands: Array<{
+    command: string;
+    args: string[];
+    exitCode: number | null;
+    stdout?: string;
+    stderr?: string;
+    truncated?: boolean;
+  }>;
+}
+
+const HostVerificationEvidenceSchema = z.object({
+  passed: z.boolean(),
+  summary: z.string(),
+  commands: z.array(z.object({
+    command: z.string(), args: z.array(z.string()), exitCode: z.number().int().nullable(),
+    stdout: z.string().optional(), stderr: z.string().optional(), truncated: z.boolean().optional(),
+  }).strict()).max(100),
+}).strict();
 
 // ──── Goal State (serializable snapshot) ────
 
@@ -84,6 +110,12 @@ export const GoalStateSchema = z.object({
   lastGaps: z.array(GapSchema),
   gapFingerprint: z.string(),
   stallStreak: z.number().int().min(0),
+  contractHash: z.string().regex(/^[a-f0-9]{64}$/),
+  evidenceRounds: z.array(z.object({
+    round: z.number().int().positive(),
+    workspaceDiffHash: z.string().regex(/^[a-f0-9]{64}$/),
+    hostVerification: HostVerificationEvidenceSchema.optional(),
+  }).strict()).max(1_000),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
 }).strict();

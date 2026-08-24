@@ -45,6 +45,10 @@ export interface AgentLoopOptions {
   agent?: "main" | "subagent";
   ownerId?: string;
   hallucinationGuard?: HallucinationGuard;
+  modelJournal?: {
+    start(input: { agent: "main" | "subagent"; model: string; iteration: number; attempt: number; messages: readonly ModelMessage[] }): string;
+    complete(id: string, completed: boolean, error?: string): void;
+  };
 }
 
 export class AgentLoop {
@@ -90,6 +94,18 @@ export class AgentLoop {
   }
 
   async *run(request: AgentRunRequest): AsyncIterable<AgentEvent> {
+    const transientId = request.additionalContext === undefined
+      ? undefined
+      : this.#options.context.beginTransientSystem(request.additionalContext);
+    try { yield* this.#runInternal(request); }
+    finally { if (transientId !== undefined) this.#options.context.endTransientSystem(transientId); }
+  }
+
+  async *#runInternal(request: AgentRunRequest): AsyncIterable<AgentEvent> {
+    // Dynamic context is sampled at a provider boundary before the user turn.
+    // This keeps the epoch prefix byte-stable while preserving chronological
+    // source updates in the durable conversation.
+    this.#options.context.refreshContextSources();
     this.#options.context.append(request.initialUserMessage ?? { role: "user", content: request.prompt });
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
@@ -184,10 +200,7 @@ export class AgentLoop {
         const { adapter, model } = resolved;
         const modelRequest = {
           model,
-          messages: [
-            ...this.#options.context.messagesForModel(),
-            ...(request.additionalContext ? [{ role: "system" as const, content: request.additionalContext }] : []),
-          ],
+          messages: this.#options.context.messagesForModel(),
           tools: [...this.#options.tools],
           ...(request.signal === undefined ? {} : { signal: request.signal }),
         };
@@ -219,6 +232,9 @@ export class AgentLoop {
       cacheCreationTokens?: number;
     } | undefined;
         const modelCallId = String(++modelInvocation);
+        const journalModelId = this.#options.modelJournal?.start({
+          agent: this.#options.agent, model: attemptedModelId, iteration, attempt, messages: modelRequest.messages,
+        });
         yield { type: "model-start", id: modelCallId };
         try {
           for await (const event of adapter.stream(modelRequest)) {
@@ -292,6 +308,9 @@ export class AgentLoop {
               terminalError = normalizeProviderError(error);
               providerError = false;
             }
+          }
+          if (journalModelId !== undefined) {
+            this.#options.modelJournal?.complete(journalModelId, completed, terminalError?.message);
           }
         }
         yield { type: "model-end", id: modelCallId };

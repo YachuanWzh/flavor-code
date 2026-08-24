@@ -9,8 +9,6 @@ import { SessionStore } from "../../src/session/store.js";
 const roots: string[] = [];
 
 afterEach(async () => {
-  delete (globalThis as { __goalWorkerStarted?: boolean }).__goalWorkerStarted;
-  delete (globalThis as { __goalWorkerRelease?: () => void }).__goalWorkerRelease;
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -19,6 +17,9 @@ it("persists a detailed neutral /goal timeline while the worker is still running
   roots.push(workspace);
   const pluginRoot = join(workspace, ".flavor", "plugins", "goal-capture");
   await mkdir(pluginRoot, { recursive: true });
+  await writeFile(join(workspace, "package.json"), JSON.stringify({
+    name: "goal-fixture", private: true, scripts: { test: "node -e \"console.log('verified')\"" },
+  }));
   await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
     memory: { enabled: false },
     providers: { capture: { type: "plugin", defaultModel: "main", cheapModel: "cheap" } },
@@ -48,8 +49,7 @@ it("persists a detailed neutral /goal timeline while the worker is still running
         return;
       }
       yield { type: "text", text: "worker began" };
-      globalThis.__goalWorkerStarted = true;
-      await new Promise((resolve) => { globalThis.__goalWorkerRelease = resolve; });
+      await new Promise((resolve) => setTimeout(resolve, 500));
       yield { type: "text", text: "worker detail" };
       yield { type: "done", usage: { inputTokens: 3, outputTokens: 2 } };
     }});
@@ -61,13 +61,14 @@ it("persists a detailed neutral /goal timeline while the worker is still running
     home: workspace,
     environment: {},
     approvalPolicy: "deny",
+    pluginSandbox: false,
     output: (event) => outputs.push(event as { type: string; message?: string }),
   });
   try {
     const submission = runtime.session.submit("/goal fix it");
-    await vi.waitFor(() => expect(
-      (globalThis as { __goalWorkerStarted?: boolean }).__goalWorkerStarted,
-    ).toBe(true), { timeout: 10_000 });
+    await vi.waitFor(async () => expect(await readFile(
+      join(workspace, ".flavor", "sessions", `${runtime.sessionId}.jsonl`), "utf8",
+    )).toContain("worker began"), { timeout: 10_000 });
 
     const rawInFlight = await readFile(
       join(workspace, ".flavor", "sessions", `${runtime.sessionId}.jsonl`),
@@ -81,7 +82,6 @@ it("persists a detailed neutral /goal timeline while the worker is still running
     expect(outputs.some((event) => event.type === "warning")).toBe(false);
     expect(outputs.some((event) => event.type === "notice")).toBe(true);
 
-    (globalThis as { __goalWorkerRelease?: () => void }).__goalWorkerRelease?.();
     await submission;
 
     const saved = await new SessionStore({ workspace }).load(runtime.sessionId);
@@ -91,7 +91,6 @@ it("persists a detailed neutral /goal timeline while the worker is still running
     expect(JSON.parse(await readFile(join(workspace, ".flavor", "goals", goalFiles[0]!), "utf8")))
       .toMatchObject({ phase: "complete", status: "achieved", workerRounds: 1, verifyRounds: 1 });
   } finally {
-    (globalThis as { __goalWorkerRelease?: () => void }).__goalWorkerRelease?.();
     await runtime.dispose();
   }
 }, 15_000);

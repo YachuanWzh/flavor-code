@@ -29,6 +29,11 @@ export interface ToolRuntimeOptions {
   /** Inline tool-result content budgets. */
   outputLimits?: Partial<ToolOutputLimits>;
   afterSuccess?(tool: string, paths: readonly string[], input: unknown, output: unknown, context: ToolContext): Promise<readonly string[]>;
+  journal?: {
+    start(tool: string, input: unknown, retrySafe: boolean): string;
+    complete(id: string, result: ToolResult): void;
+    interrupt(id: string, reason: string): void;
+  };
 }
 
 export interface ToolOutputLimits {
@@ -76,6 +81,7 @@ export class ToolRuntime {
   readonly #workspace: string;
   readonly #outputLimits: ToolOutputLimits;
   readonly #afterSuccess: ToolRuntimeOptions["afterSuccess"];
+  readonly #journal: ToolRuntimeOptions["journal"];
   #turnOutputChars = 0;
   #disposed = false;
 
@@ -89,6 +95,7 @@ export class ToolRuntime {
     this.#workspace = resolve(options.workspace ?? process.cwd());
     this.#outputLimits = { ...DEFAULT_TOOL_OUTPUT_LIMITS, ...options.outputLimits };
     this.#afterSuccess = options.afterSuccess;
+    this.#journal = options.journal;
     validateOutputLimit("perToolChars", this.#outputLimits.perToolChars);
     validateOutputLimit("perTurnChars", this.#outputLimits.perTurnChars);
     this.#disposeSchemas = [
@@ -169,6 +176,21 @@ export class ToolRuntime {
   }
 
   async execute(call: ToolCall, context: ToolContext): Promise<ToolResult> {
+    const definition = this.#tools.get(call.name);
+    const journalId = definition === undefined || this.#journal === undefined
+      ? undefined
+      : this.#journal.start(call.name, call.input, definition.retrySafe === true || definition.readOnly === true);
+    try {
+      const result = await this.#execute(call, context);
+      if (journalId !== undefined) this.#journal?.complete(journalId, result);
+      return result;
+    } catch (error) {
+      if (journalId !== undefined) this.#journal?.interrupt(journalId, message(error));
+      throw error;
+    }
+  }
+
+  async #execute(call: ToolCall, context: ToolContext): Promise<ToolResult> {
     const tool = this.#tools.get(call.name);
     if (tool === undefined) return { ok: false, error: { code: "unknown_tool", message: `Unknown tool: ${call.name}` } };
     const signal = context.signal ?? new AbortController().signal;

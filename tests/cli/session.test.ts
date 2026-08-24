@@ -46,6 +46,94 @@ function services(events: string[], outputs: string[]): SessionServices {
 }
 
 describe("FlavorSession", () => {
+  it("resumes and acknowledges prompts recovered from the durable queue", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const prompts: string[] = [];
+    const claimed: string[] = [];
+    const acked: string[] = [];
+    base.run = async function* (prompt) {
+      prompts.push(prompt);
+      yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
+    };
+    base.durableQueue = {
+      recover: () => [{ id: "queue-1", kind: "followUp", payload: { text: "recovered task", displayText: "recovered task" } }],
+      admit: () => "new",
+      claim: (id) => { claimed.push(id); },
+      ack: (id) => { acked.push(id); },
+      release: () => {},
+    };
+    const session = new FlavorSession(base);
+
+    await session.start();
+    await session.whenIdle();
+
+    expect(prompts).toEqual(["recovered task"]);
+    expect(claimed).toEqual(["queue-1"]);
+    expect(acked).toEqual(["queue-1"]);
+    expect(outputs.join("\n")).toContain("durable harness");
+  });
+
+  it("runs every recovered prompt in order and only acknowledges completed work", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const prompts: string[] = [];
+    const claimed: string[] = [];
+    const acked: string[] = [];
+    let finishSecond!: () => void;
+    const secondGate = new Promise<void>((resolve) => { finishSecond = resolve; });
+    base.run = async function* (prompt) {
+      prompts.push(prompt);
+      if (prompt === "second") await secondGate;
+      yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
+    };
+    base.durableQueue = {
+      recover: () => [
+        { id: "queue-1", kind: "followUp", payload: { text: "first", displayText: "first" } },
+        { id: "queue-2", kind: "followUp", payload: { text: "second", displayText: "second" } },
+      ],
+      admit: () => "new",
+      claim: (id) => { claimed.push(id); },
+      ack: (id) => { acked.push(id); },
+      release: () => {},
+    };
+    const session = new FlavorSession(base);
+
+    await session.start();
+    await vi.waitFor(() => expect(prompts).toEqual(["first", "second"]));
+    expect(claimed).toEqual(["queue-1", "queue-2"]);
+    expect(acked).toEqual(["queue-1"]);
+
+    finishSecond();
+    await session.whenIdle();
+    expect(acked).toEqual(["queue-1", "queue-2"]);
+  });
+
+  it("resumes recovered work after a submission that starts the session first", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const prompts: string[] = [];
+    const acked: string[] = [];
+    base.run = async function* (prompt) {
+      prompts.push(prompt);
+      yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
+    };
+    base.durableQueue = {
+      recover: () => [{ id: "recovered", kind: "followUp", payload: { text: "older durable", displayText: "older durable" } }],
+      admit: () => "new",
+      claim: () => {},
+      ack: (id) => { acked.push(id); },
+      release: () => {},
+    };
+    const session = new FlavorSession(base);
+
+    await session.submit("new local");
+    await session.whenIdle();
+
+    expect(prompts).toEqual(["new local", "older durable"]);
+    expect(acked).toEqual(["recovered"]);
+  });
+
   it("dispatches pal list, rename, info, task, and co-work commands through the narrow service", async () => {
     const events: string[] = []; const outputs: string[] = [];
     const base = services(events, outputs);

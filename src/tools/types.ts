@@ -110,6 +110,9 @@ export interface ToolDefinition<T, O = unknown> {
   modelStrict?: boolean;
   /** Declared read-only: allowed without approval, same as Read/Glob/Grep (including plan mode). */
   readOnly?: boolean;
+  /** Explicitly safe to retry after an interrupted process. Defaults to false;
+   *  read-only tools are treated as retry-safe by the durable harness. */
+  retrySafe?: boolean;
   paths(input: T): string[];
   /**
    * Optional short human-readable parameter summary, rendered dimmed next to the tool name.

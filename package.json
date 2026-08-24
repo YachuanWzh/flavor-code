@@ -1,6 +1,6 @@
 {
   "name": "flavor-code",
-  "version": "1.2.20",
+  "version": "1.3.0",
   "author": "YachuanWzh",
   "type": "module",
   "publishConfig": {
@@ -45,6 +45,7 @@
     "desktop:pack": "npm run build && electron-builder --win --dir",
     "desktop:dist": "npm run build && electron-builder --win nsis",
     "test": "vitest run",
+    "test:reliability": "vitest run tests/harness/journal.test.ts tests/context/manager.test.ts tests/session/store.test.ts tests/permissions/policy.test.ts tests/goal/classifier.test.ts tests/goal/orchestrator.test.ts",
     "test:watch": "vitest",
     "test:desktop:e2e": "npm run build:desktop && node tests/desktop/electron-app.e2e.mjs",
     "typecheck": "tsc --noEmit",

@@ -16,7 +16,7 @@ async function workspace(): Promise<string> {
 
 function document(root: string): SessionDocument {
   return {
-    version: 3,
+    version: 4,
     sessionId: "session-20260712",
     createdAt: "2026-07-12T01:00:00.000Z",
     updatedAt: "2026-07-12T02:00:00.000Z",
@@ -143,7 +143,7 @@ describe("SessionStore", () => {
 
     const meta = JSON.parse(lines[0]!) as Record<string, unknown>;
     expect(meta.__meta).toBe(true);
-    expect(meta.version).toBe(3);
+    expect(meta.version).toBe(4);
     expect(meta.sessionId).toBe("session-20260712");
     expect(meta).not.toHaveProperty("conversation");
 
@@ -218,7 +218,9 @@ describe("SessionStore", () => {
 
     const loaded = await new SessionStore({ workspace: root }).load("version-two");
 
-    expect(loaded.version).toBe(3);
+    expect(loaded.version).toBe(4);
+    await expect(readFile(join(root, ".flavor", "sessions", "version-two.jsonl.v2.bak"), "utf8"))
+      .resolves.toContain('"version":2');
     expect(loaded.timeline.state.completed[0]).toMatchObject({ kind: "compaction" });
     expect(loaded.timeline.state.completed[1]?.blocks).toEqual([
       expect.objectContaining({
@@ -227,6 +229,21 @@ describe("SessionStore", () => {
         tool: { name: "Read", input: { path: "a.ts" }, result: { ok: true, output: "contents" } },
       }),
     ]);
+  });
+
+  it("migrates version 3 with a recoverable backup before the first v4 save", async () => {
+    const root = await workspace();
+    await mkdir(join(root, ".flavor", "sessions"), { recursive: true });
+    const current = document(root);
+    const legacy = { ...current, version: 3 };
+    await writeFile(join(root, ".flavor", "sessions", "session-20260712.jsonl"), `${JSON.stringify(legacy)}\n`, "utf8");
+
+    const loaded = await new SessionStore({ workspace: root }).load("session-20260712");
+
+    expect(loaded.version).toBe(4);
+    expect(loaded.conversation.epoch).toBeUndefined();
+    await expect(readFile(join(root, ".flavor", "sessions", "session-20260712.jsonl.v3.bak"), "utf8"))
+      .resolves.toContain('"version":3');
   });
 
   it("recovers a persisted active timeline turn as cancelled completed history", async () => {
@@ -301,7 +318,7 @@ describe("SessionStore", () => {
     const store = new SessionStore({ workspace: root });
     const loaded = await store.load("old-format");
     expect(loaded.sessionId).toBe("old-format");
-    expect(loaded.version).toBe(3);
+    expect(loaded.version).toBe(4);
     expect(loaded.conversation.compact).toEqual({ summary: "Old summary.", compactedAt: "2026-01-01T01:00:00.000Z" });
     expect(loaded.conversation.messages).toHaveLength(4);
     expect(loaded.conversation.messages[1]).toMatchObject({
@@ -334,7 +351,7 @@ describe("SessionStore", () => {
 
     const loaded = await new SessionStore({ workspace: root }).load("old-jsonl");
 
-    expect(loaded.version).toBe(3);
+    expect(loaded.version).toBe(4);
     expect(loaded.conversation.compact).toEqual({ summary: "JSONL summary.", compactedAt: "2026-02-01T01:00:00.000Z" });
     expect(loaded.conversation.messages).toEqual([{ role: "user", content: "continue" }]);
   });
@@ -420,7 +437,7 @@ describe("SessionStore", () => {
 });
 
 describe("ContextManager recovery", () => {
-  it("restores only provider-valid conversation turns while retaining current pinned instructions", () => {
+  it("restores the persisted epoch prefix byte-for-byte", () => {
     const source = context("old-system", "old-flavor");
     source.appendMany([
       { role: "user", content: "question" },
@@ -433,14 +450,16 @@ describe("ContextManager recovery", () => {
     restored.restore(snapshot);
 
     expect(restored.messagesForModel().map((message) => message.content)).toEqual([
-      "new-system", "FLAVOR.md\nnew-flavor", "question", "", "result", "answer",
+      "old-system", "FLAVOR.md\nold-flavor", "question", "", "result", "answer",
     ]);
     restored.restore({ messages: [
       { role: "system", content: "injected" },
       { role: "tool", toolCallId: "missing", content: "orphan" },
       { role: "assistant", content: "safe" },
     ] });
-    expect(restored.messagesForModel().map((message) => message.content)).toEqual(["new-system", "FLAVOR.md\nnew-flavor", "safe"]);
+    expect(restored.messagesForModel().map((message) => message.content)).toEqual([
+      "old-system", "FLAVOR.md\nold-flavor", "injected", "safe",
+    ]);
   });
 });
 

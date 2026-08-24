@@ -18,7 +18,7 @@ import {
 import { message } from "../utils/error.js";
 import type { ModelContent } from "../models/types.js";
 
-export const SESSION_VERSION = 3 as const;
+export const SESSION_VERSION = 4 as const;
 export const DEFAULT_MAX_SESSION_BYTES = 5 * 1024 * 1024;
 
 const SessionIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/, "Invalid session id");
@@ -48,6 +48,7 @@ const MessageMetadataShape = {
 };
 const MessageSchema = z.discriminatedUnion("role", [
   z.object({ role: z.literal("user"), content: UserContentSchema, ...MessageMetadataShape }).strict(),
+  z.object({ role: z.literal("system"), content: z.string().max(DEFAULT_MAX_SESSION_BYTES), ...MessageMetadataShape }).strict(),
   z.object({ role: z.literal("assistant"), content: z.string().max(DEFAULT_MAX_SESSION_BYTES), ...MessageMetadataShape }).strict(),
   z.object({ role: z.literal("tool"), content: z.string().max(DEFAULT_MAX_SESSION_BYTES), ...MessageMetadataShape }).strict(),
 ]);
@@ -105,10 +106,35 @@ const TimelineSchema = z.object({
   state: TranscriptStateSchema,
 }).strict();
 
+const ContextEpochSchema = z.object({
+  version: z.literal(1),
+  id: z.string().uuid(),
+  startedAt: IsoDateSchema,
+  stableMessages: z.array(z.object({
+    role: z.literal("system"),
+    content: z.string().max(DEFAULT_MAX_SESSION_BYTES),
+    cacheBreakpoint: z.boolean().optional(),
+  }).strict()).max(1_000),
+  sources: z.record(z.string().min(1).max(128), z.string().max(DEFAULT_MAX_SESSION_BYTES)),
+  stableSourceHash: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+const ContextVisibilityRecordSchema = z.object({
+  id: z.string().uuid(), role: z.literal("system"), content: z.string().max(DEFAULT_MAX_SESSION_BYTES),
+  admittedAt: IsoDateSchema, scope: z.literal("run"),
+}).strict();
+
+const SessionDocumentV3Schema = SessionBaseSchema.extend({
+  version: z.literal(3),
+  conversation: ConversationSchema,
+  timeline: TimelineSchema,
+}).strict();
+
 export const SessionDocumentSchema = SessionBaseSchema.extend({
   version: z.literal(SESSION_VERSION),
   conversation: z.object({
     compact: CompactBoundarySchema.optional(),
+    epoch: ContextEpochSchema.optional(),
+    visibilityLog: z.array(ContextVisibilityRecordSchema).max(10_000).optional(),
     messages: z.array(MessageSchema).max(50_000),
   }).strict(),
   timeline: TimelineSchema,
@@ -144,11 +170,13 @@ export class SessionStore {
     await this.#assertWorkspace(document.workspace.path);
     await this.#prepareDirectory();
     const target = this.#path(document.sessionId);
-    const { conversation: { messages, compact }, timeline, ...meta } = document;
+    const { conversation: { messages, compact, epoch, visibilityLog }, timeline, ...meta } = document;
     const metaLine = JSON.stringify({
       __meta: true,
       ...meta,
       ...(compact === undefined ? {} : { compact }),
+      ...(epoch === undefined ? {} : { epoch }),
+      ...(visibilityLog === undefined ? {} : { visibilityLog }),
       timeline: {
         version: timeline.version,
         nextId: timeline.state.nextId,
@@ -199,6 +227,8 @@ export class SessionStore {
       throw new Error(`Session "${sessionId}" is corrupt or incompatible and was quarantined as ${basename(quarantine)}: ${message(error)}`);
     }
     await this.#assertWorkspace(parsed.workspace.path);
+    const storedVersion = storedSessionVersion(raw);
+    if (storedVersion < SESSION_VERSION) await this.#backupLegacy(path, raw, storedVersion);
     return normalizeAbandonedTasks(parsed);
   }
 
@@ -219,19 +249,25 @@ export class SessionStore {
       const timelineRecords = records.filter(isTimelineRecord);
       const summary = meta.summary;
       const compact = meta.compact;
+      const epoch = meta.epoch;
+      const visibilityLog = meta.visibilityLog;
       const timeline = meta.timeline;
       delete meta.__meta;
       delete meta.summary;
       delete meta.compact;
+      delete meta.epoch;
+      delete meta.visibilityLog;
       delete meta.timeline;
       candidate = {
         ...meta,
         conversation: {
           ...(meta.version === 1 && summary !== undefined ? { summary } : {}),
-          ...((meta.version === 2 || meta.version === SESSION_VERSION) && compact !== undefined ? { compact } : {}),
+          ...((meta.version === 2 || meta.version === 3 || meta.version === SESSION_VERSION) && compact !== undefined ? { compact } : {}),
+          ...(meta.version === SESSION_VERSION && epoch !== undefined ? { epoch } : {}),
+          ...(meta.version === SESSION_VERSION && visibilityLog !== undefined ? { visibilityLog } : {}),
           messages,
         },
-        ...(meta.version === SESSION_VERSION ? {
+        ...((meta.version === 3 || meta.version === SESSION_VERSION) ? {
           timeline: timelineFromRecords(timeline, timelineRecords),
         } : {}),
       };
@@ -244,7 +280,9 @@ export class SessionStore {
   async list(): Promise<SessionEntry[]> {
     try { await this.#assertSafeExistingDirectory(); }
     catch (error) { if (isCode(error, "ENOENT")) return []; throw error; }
-    const names = (await readdir(this.#sessions)).filter((name) => name.endsWith(".jsonl")).sort();
+    const names = (await readdir(this.#sessions))
+      .filter((name) => name.endsWith(".jsonl") && !name.endsWith(".events.jsonl"))
+      .sort();
     const entries: SessionEntry[] = [];
     for (const name of names) {
       const id = name.slice(0, -6);
@@ -268,6 +306,7 @@ export class SessionStore {
       const metadata = await lstat(path);
       if (!metadata.isFile()) throw new Error("Session path is not a regular file");
       await rm(path);
+      await rm(join(this.#sessions, `${sessionId}.events.jsonl`), { force: true }).catch(() => undefined);
     } catch (error) {
       if (!isCode(error, "ENOENT")) throw error;
     }
@@ -286,6 +325,7 @@ export class SessionStore {
     const excess = entries.slice(this.#maxSessions);
     for (const entry of excess) {
       await rm(this.#path(entry.sessionId), { force: true }).catch(() => undefined);
+      await rm(join(this.#sessions, `${entry.sessionId}.events.jsonl`), { force: true }).catch(() => undefined);
     }
   }
 
@@ -315,6 +355,27 @@ export class SessionStore {
     await rename(path, target);
     return target;
   }
+
+  async #backupLegacy(path: string, raw: string, version: number): Promise<void> {
+    const target = `${path}.v${version}.bak`;
+    let handle;
+    try {
+      handle = await open(target, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+      await handle.writeFile(raw, "utf8");
+      await handle.sync();
+    } catch (error) {
+      if (!isCode(error, "EEXIST")) throw error;
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+  }
+}
+
+function storedSessionVersion(raw: string): number {
+  const trimmed = raw.trim();
+  const first = JSON.parse(trimmed.split("\n", 1)[0] ?? "{}") as Record<string, unknown>;
+  const candidate = first.__meta === true ? first.version : (JSON.parse(trimmed) as Record<string, unknown>).version;
+  return typeof candidate === "number" && Number.isInteger(candidate) ? candidate : 0;
 }
 
 async function boundedRead(path: string, maxBytes: number): Promise<string> {
@@ -373,6 +434,10 @@ function normalizeAbandonedTasks(document: SessionDocument): SessionDocument {
 function parseAndMigrateSession(input: unknown): SessionDocument {
   if (typeof input !== "object" || input === null || !("version" in input)) throw new Error("Session version is missing");
   if (input.version === SESSION_VERSION) return SessionDocumentSchema.parse(input);
+  if (input.version === 3) {
+    const legacy = SessionDocumentV3Schema.parse(input);
+    return SessionDocumentSchema.parse({ ...legacy, version: SESSION_VERSION });
+  }
   if (input.version === 2) {
     const legacy = SessionDocumentV2Schema.parse(input);
     return SessionDocumentSchema.parse({
@@ -380,7 +445,7 @@ function parseAndMigrateSession(input: unknown): SessionDocument {
       version: SESSION_VERSION,
       timeline: {
         version: 1,
-        state: transcriptFromLegacyConversation(legacy.conversation.messages, legacy.conversation.compact),
+        state: transcriptFromLegacyConversation(legacy.conversation.messages.filter((message) => message.role !== "system"), legacy.conversation.compact),
       },
     });
   }
@@ -403,7 +468,7 @@ function parseAndMigrateSession(input: unknown): SessionDocument {
     },
     timeline: {
       version: 1,
-      state: transcriptFromLegacyConversation(conversation.messages, compact),
+      state: transcriptFromLegacyConversation(conversation.messages.filter((message) => message.role !== "system"), compact),
     },
   });
 }

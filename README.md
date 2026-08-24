@@ -34,6 +34,7 @@ Flavor Code connects to OpenAI, Anthropic, or compatible services and works with
 | 🖥️ | **One runtime, three entry points** | CLI, Electron, and VS Code share model configuration, sessions, and tooling |
 | 🧭 | **Controlled progress on complex tasks** | Task plans, sub-agents, steering, follow-ups, `/loop`, `/goal`, and conflict-safe parallel execution (tasks owning overlapping files run serially) |
 | ⏪ | **Traceable, resumable results** | Full timeline, checkpoints, rewind, traces, diffs, and failure audits |
+| 🧱 | **Crash-consistent execution** | Fsync-backed event journal, durable steering queue, savepoints, and no automatic replay of non-idempotent tools |
 | 🧠 | **Local long-term context** | Memory, Skills, plugins, and project guides stored on your machine |
 | 🔎 | **Code graph navigation** | A local AST code-graph index (`.flavor/astgraph/`) powers `ast_search`/`ast_callers`/`ast_impact` queries for precise symbol lookup and reachability tracing |
 | 🌿 | **Git-native workflows** | `/commit` drafts a Conventional-Commits message for staged changes and commits after confirmation; `/review` audits uncommitted changes; the read-only `GitHistory` tool explains when and why code changed |
@@ -249,10 +250,10 @@ flavor mcp disable docs
 
 A Skill is a `SKILL.md` with YAML frontmatter, placed in `.flavor/skills/<name>/` or `~/.flavor-code/skills/<name>/`. Flavor loads skills progressively based on the task, and you can invoke one explicitly with `/<skill-name>`. Skill bodies support `$ARGUMENTS`, `$ARGUMENTS[N]`, and `$N` substitutions. A running composite Skill can load a dependency through the read-only `Skill` tool; plugin-qualified names such as `superharness:test-driven-development` resolve to discovered skills.
 
-Plugins live in `.flavor/plugins/` and can register commands, tools, hooks, Skill roots, and model adapters. `additionalContext` returned by `SessionStart` and `UserPromptSubmit` hooks is added to the current task context, enabling reliable project-level engineering policy injection.
+Plugins live in `.flavor/plugins/` and can register commands, tools, hooks, Skill roots, and model adapters. `additionalContext` returned by `SessionStart` and `UserPromptSubmit` hooks is added to the current task context, enabling reliable project-level engineering policy injection. Production plugin activation is isolated in a Worker/vm realm by default and records a content fingerprint plus declared capabilities.
 
 > [!WARNING]
-> Plugins and agent self-registered tools are in-process JavaScript, not a security sandbox. Only install, enable, and approve code you trust.
+> Sandboxing reduces ambient access but does not make untrusted instructions safe. Only install and enable plugins you trust; legacy `pluginSandbox: false` activation grants full in-process Node.js access.
 
 ## Sessions, Memory & Execution Records
 
@@ -262,6 +263,7 @@ Project runtime data lives under `.flavor/`:
 .flavor/
 ├── flavor.json       # Project config
 ├── sessions/         # Session timelines
+│   └── *.events.jsonl # Crash-consistent execution journals
 ├── session-assets/   # Image attachments
 ├── session-trees/    # Session branches
 ├── checkpoints/      # Workspace snapshots
@@ -287,6 +289,8 @@ Image prompts support PNG, JPEG, and WebP, with a 5 MiB per-image maximum and up
 | `bypassPermissions` | The main agent executes as much as possible after hard safety checks |
 | `auto` | A classifier decides, falling back to human approval when uncertain |
 | `bubble` | Uncertain operations bubble up to the main session for approval |
+
+Layered permission policies can be defined in the managed, user, project, local-project, and session tiers. Matching rules use token arrays and the strictest result always wins (`deny > ask > allow`); built-in hard denials cannot be weakened.
 
 > [!CAUTION]
 > Local Shell still runs as your current user. Consider enabling Docker when working with untrusted projects.
@@ -377,6 +381,7 @@ npm run build
 
 - [Technical Design Report](./技术方案报告.md): overall architecture, agent loop, context, permissions, plugins, and security model
 - [Runtime reliability spec](./docs/specs/2026-07-26-runtime-reliability.md)
+- [1.3 reliability, prompt-cache & verification contract](./docs/specs/2026-08-24-v1.3-reliability-contract.md)
 - [Control plane, sandbox & VS Code spec](./docs/specs/2026-07-29-control-plane-sandbox-vscode.md)
 - [Multimodal image attachments spec](./docs/specs/2026-07-30-multimodal-image-attachments.md)
 - [D2C design-to-code spec](./docs/specs/2026-08-09-d2c-design-to-code.md)
@@ -390,7 +395,7 @@ npm run build
 - Review model-generated code and commands, especially dependency installs, scripts, and deletions.
 - Do not treat `.flavor/sessions/`, traces, or long-term memory as secret stores.
 - Use least-privilege API keys and never commit `.env`.
-- Skill content can influence model behavior; plugins and self-registered tools also have in-process Node.js permissions.
+- Skill content can influence model behavior; sandboxed plugins still require review, while explicitly enabled legacy in-process plugins have full Node.js permissions.
 - Work under version control and create checkpoints before high-risk tasks.
 
 ## Contributing

@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
-import { lstat, open, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, open, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import type { BigIntStats } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -24,7 +25,7 @@ const silentLogger: PluginLogger = { debug() {}, info() {}, warn() {}, error() {
 
 interface Snapshot { dev: bigint; ino: bigint; mode: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint }
 interface EntrySnapshot { lexical: Snapshot; physical: Snapshot; physicalPath: string }
-interface Candidate { manifest: PluginManifest; root: string; source: PluginSource; entry: string; entrySnapshot: EntrySnapshot }
+interface Candidate { manifest: PluginManifest; root: string; source: PluginSource; entry: string; entrySnapshot: EntrySnapshot; fingerprint: string }
 interface ContextState { active: boolean; controller: AbortController }
 interface ActivePlugin { metadata: LoadedPlugin; disposers: PluginDisposer[]; state: ContextState }
 type ContributionKind = keyof PluginRegistrationCallbacks;
@@ -159,7 +160,11 @@ export class PluginHost {
       const manifest = PluginManifestSchema.parse(rawManifest);
       const entry = resolveContained(root, manifest.main, "Plugin entry");
       const entrySnapshot = await snapshotEntry(root, entry);
-      return { manifest, root, source, entry, entrySnapshot };
+      const fingerprint = createHash("sha256")
+        .update(JSON.stringify(manifest))
+        .update(await readFile(entrySnapshot.physicalPath))
+        .digest("hex");
+      return { manifest, root, source, entry, entrySnapshot, fingerprint };
     } catch (error) {
       this.#diagnose(diagnosticLabel, error, inputRoot);
       return undefined;
@@ -177,6 +182,23 @@ export class PluginHost {
 
     try {
       await verifyEntry(candidate.root, candidate.entry, candidate.entrySnapshot);
+      if (!useSandbox && this.#options.requireInProcessTrust === true
+        && !candidate.manifest.permissions.includes("runtime:in-process")) {
+        throw new Error("Legacy in-process plugins must declare runtime:in-process");
+      }
+      const trustRequest = {
+        name: plugin,
+        version: candidate.manifest.version,
+        source: candidate.source,
+        root: candidate.root,
+        fingerprint: candidate.fingerprint,
+        sandboxed: useSandbox,
+        permissions: [...candidate.manifest.permissions],
+      } as const;
+      const trusted = await this.#options.authorizePlugin?.(trustRequest);
+      if (trusted === false || (!useSandbox && this.#options.requireInProcessTrust === true && trusted !== true)) {
+        throw new Error(`Plugin "${plugin}" is not trusted for ${useSandbox ? "sandboxed" : "in-process"} activation`);
+      }
 
       if (useSandbox) {
         const session = await bounded(
@@ -250,7 +272,10 @@ export class PluginHost {
       }
 
       this.#assertAllDeclaredRegistered(candidate, claimed);
-      const metadata: LoadedPlugin = { name: plugin, version: candidate.manifest.version, source: candidate.source, root: candidate.root };
+      const metadata: LoadedPlugin = {
+        name: plugin, version: candidate.manifest.version, source: candidate.source, root: candidate.root,
+        fingerprint: candidate.fingerprint, sandboxed: useSandbox, permissions: [...candidate.manifest.permissions],
+      };
       this.#active.push({ metadata, disposers, state });
       try { await bounded(Promise.resolve(this.#options.emitLifecycle?.("PluginLoad", metadata)), this.#activationTimeoutMs, "PluginLoad lifecycle"); }
       catch (error) { this.#diagnose(plugin, error, candidate.root); }

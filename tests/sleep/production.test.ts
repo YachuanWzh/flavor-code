@@ -3,8 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 
-import { createProductionRuntime } from "../../src/production.js";
+import { createProductionRuntime as createRuntime, type ProductionRuntimeOptions } from "../../src/production.js";
 import { SESSION_VERSION, SessionStore, type SessionDocument } from "../../src/session/store.js";
+
+const createProductionRuntime = (options: ProductionRuntimeOptions) => createRuntime({ ...options, pluginSandbox: false });
 
 const roots: string[] = [];
 

@@ -34,6 +34,7 @@ Flavor Code 接入 OpenAI、Anthropic 或兼容服务，在受控工作区内使
 | 🖥️ | **一个运行时，三个入口** | CLI、Electron 与 VS Code 共享模型配置、会话和工具能力 |
 | 🧭 | **复杂任务可控推进** | 任务计划、子 Agent、steering、follow-up、`/loop`、`/goal`，并行任务自动避免写冲突（拥有重叠文件的任务串行执行） |
 | ⏪ | **结果可追溯、可恢复** | 完整时间线、checkpoint、rewind、trace、Diff 和失败审计 |
+| 🧱 | **崩溃一致执行** | fsync 事件日志、持久 steering 队列、savepoint，非幂等工具不自动重放 |
 | 🧠 | **本地长期上下文** | 记忆、Skill、插件和项目指南均保存在本机 |
 | 🔎 | **代码图导航** | 本地 AST 代码图索引（`.flavor/astgraph/`），通过 `ast_search`/`ast_callers`/`ast_impact` 等查询精确定位符号、追踪可达性 |
 | 🌿 | **Git 原生工作流** | `/commit` 为暂存改动生成 Conventional Commits 提交信息并确认提交；`/review` 审查未提交改动；只读 `GitHistory` 工具回答“这段代码为什么是这样” |
@@ -249,10 +250,10 @@ flavor mcp disable docs
 
 Skill 是带有 YAML 头信息的 `SKILL.md`，放在 `.flavor/skills/<name>/` 或 `~/.flavor-code/skills/<name>/`。Flavor 会按任务渐进加载，也支持通过 `/<skill-name>` 显式调用。Skill 正文支持 `$ARGUMENTS`、`$ARGUMENTS[N]` 和 `$N` 参数占位符；运行中的组合 Skill 可以使用只读 `Skill` 工具继续加载依赖 Skill，插件限定名称（如 `superharness:test-driven-development`）会安全解析到已发现的 Skill。
 
-插件放在 `.flavor/plugins/`，可以注册命令、工具、Hook、Skill 根目录和模型适配器。`SessionStart` 与 `UserPromptSubmit` Hook 返回的 `additionalContext` 会进入当前任务上下文，可用于注入项目级工程规则。
+插件放在 `.flavor/plugins/`，可以注册命令、工具、Hook、Skill 根目录和模型适配器。`SessionStart` 与 `UserPromptSubmit` Hook 返回的 `additionalContext` 会进入当前任务上下文，可用于注入项目级工程规则。产品运行时默认在 Worker/vm 隔离环境激活插件，并记录内容指纹与声明的能力。
 
 > [!WARNING]
-> 插件和 Agent 自注册工具是进程内执行的 JavaScript，不是安全沙箱。只安装、启用和批准你信任的代码。
+> 沙箱会降低环境权限，但不能让不可信指令自动变安全。只安装和启用可信插件；旧版兼容选项 `pluginSandbox: false` 会授予完整的进程内 Node.js 权限。
 
 ## 会话、记忆与执行记录
 
@@ -262,6 +263,7 @@ Skill 是带有 YAML 头信息的 `SKILL.md`，放在 `.flavor/skills/<name>/` �
 .flavor/
 ├── flavor.json       # 项目配置
 ├── sessions/         # 会话时间线
+│   └── *.events.jsonl # 崩溃一致执行事件日志
 ├── session-assets/   # 图片附件
 ├── session-trees/    # 会话分支
 ├── checkpoints/      # 工作区快照
@@ -287,6 +289,8 @@ Skill 是带有 YAML 头信息的 `SKILL.md`，放在 `.flavor/skills/<name>/` �
 | `bypassPermissions` | 主 Agent 在硬安全检查后尽量自动执行 |
 | `auto` | 使用分类器判断，无法确定时回到人工确认 |
 | `bubble` | 将不确定操作冒泡给主会话审批 |
+
+权限策略支持托管、用户、项目、本机项目和 session 五层配置。规则以 token 数组匹配，所有命中项始终采用最严格结果（`deny > ask > allow`），内置硬拒绝不可被放宽。
 
 > [!CAUTION]
 > 本地 Shell 仍然以当前用户身份运行。处理不可信项目时建议启用 Docker。
@@ -377,6 +381,7 @@ npm run build
 
 - [技术方案报告](./技术方案报告.md)：整体架构、Agent 循环、上下文、权限、插件和安全模型
 - [运行时可靠性规范](./docs/specs/2026-07-26-runtime-reliability.md)
+- [1.3 可靠性、Prompt Cache 与验收契约](./docs/specs/2026-08-24-v1.3-reliability-contract.md)
 - [控制面、沙箱与 VS Code 规范](./docs/specs/2026-07-29-control-plane-sandbox-vscode.md)
 - [多模态图片规范](./docs/specs/2026-07-30-multimodal-image-attachments.md)
 - [VS Code 后续规划](./docs/specs/2026-08-01-flavor-code-vscode-next.md)
@@ -387,7 +392,7 @@ npm run build
 - 审查模型生成的代码和命令，尤其是依赖安装、脚本和删除操作。
 - 不要把 `.flavor/sessions/`、trace 或长期记忆当作秘密仓库。
 - 使用最小权限 API Key，不要提交 `.env`。
-- Skill 内容可能影响模型行为；插件和自注册工具还拥有进程内 Node.js 权限。
+- Skill 内容可能影响模型行为；沙箱插件仍需审查，显式启用的旧版进程内插件拥有完整 Node.js 权限。
 - 建议在版本控制下工作，并在高风险任务前创建 checkpoint。
 
 ## 参与贡献

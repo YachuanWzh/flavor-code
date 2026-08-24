@@ -2,7 +2,25 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.2.20 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.3.0 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.3.0] - 2026-08-24
+
+### 新增
+- 新增 Durable Harness：使用 fsync、顺序号和 SHA-256 哈希链持久化队列、turn、模型请求、工具调用与 savepoint；崩溃后恢复未确认 steering/follow-up，非幂等工具只中断不重放
+- 新增 Context Epoch：稳定 system/FLAVOR/工作区/用户记忆前缀在 epoch 内逐字节不变，动态上下文在 Prompt Cache 断点后按时间加入，压缩显式开启新 epoch
+- 新增五层权限策略（托管、用户、项目、本机项目、session），支持 token 前缀、自测样例、遮蔽诊断与最严格决策合并，内置硬拒绝不可降级
+- Goal Verification 新增不可变 contract hash、Git diff hash、宿主验证结果与持久 evidence rounds
+
+### 安全与可靠性
+- 产品插件默认启用 Worker + VM 沙箱；加载元数据携带内容指纹与能力声明，进程内兼容模式支持 capability + 指纹信任双门槛
+- 动态上下文刷新采用 stale-while-revalidate；本轮 Hook/Skill 内容进入持久 visibility log，保证模型可见输入可审计且不污染后续轮次
+- Session schema 升级至 v4；v1/v2/v3 迁移前保留独占原始备份，事件日志随会话删除与保留策略同步管理
+- Goal 验收改为 fail closed：宿主测试失败、缺少验证命令、分类器故障或无效 skeptic 输出都不能误报完成
+
+### 工程化
+- CI 扩展至 Windows、macOS、Ubuntu 与 Node.js 20/24，增加 durable journal、Prompt Cache、迁移、权限和验收的独立可靠性门禁
+- 新增 [1.3 可靠性契约](./docs/specs/2026-08-24-v1.3-reliability-contract.md)，明确恢复、缓存、安全和发布不变量
 
 ## [1.2.20] - 2026-08-24
 
@@ -344,6 +362,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.3.0 | 2026-08-24 | Durable Harness、Context Epoch/Prompt Cache、分层权限、插件默认隔离与 fail-closed Goal Verification |
 | 1.2.20 | 2026-08-24 | 组合 Skill 工具、Claude 风格 Skill 参数展开、SessionStart additionalContext 持久注入 |
 | 1.2.19 | 2026-08-24 | 插件沙箱升级 Worker 线程隔离；影子验证干跑改用 Worker 沙箱杜绝宿主副作用 |
 | 1.2.18 | 2026-08-24 | 修复单行代码块渲染丢失；修复 Windows 下 Ctrl+C 偶发无法退出（二次强制退出 + 关闭看门狗 + 清理步骤逐步超时） |

@@ -124,4 +124,34 @@ describe("GoalOrchestrator runtime events", () => {
     });
     expect(events.some((event) => event.type === "goal-verification-start")).toBe(false);
   });
+
+  it("cannot complete a code goal when deterministic host verification fails", async () => {
+    const root = await workspace();
+    const orchestrator = new GoalOrchestrator({
+      workspace: root,
+      registry: registry(),
+      plannerModelId: "capture:main",
+      classifierModelId: "capture:main",
+      skepticCount: 1,
+      maxRounds: 1,
+      maxStallStreak: 2,
+      verifyHost: async () => ({
+        passed: false,
+        summary: "npm test failed with exit code 1",
+        commands: [{ command: "npm", args: ["test"], exitCode: 1 }],
+      }),
+      runWorker: async function* () {
+        yield { type: "text", text: "claimed success" };
+        yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    });
+    const events = [];
+    for await (const event of orchestrator.run({ goal: "fix it", signal: new AbortController().signal })) events.push(event);
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "goal-verdict",
+      outcome: expect.objectContaining({ type: "not_achieved", summary: expect.stringContaining("npm test failed") }),
+    }));
+    expect(events.some((event) => event.type === "goal-complete")).toBe(false);
+  });
 });

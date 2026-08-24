@@ -21,7 +21,9 @@ export const PluginManifestSchema = z.object({
   version: z.string().min(1).max(64),
   apiVersion: z.literal("1"),
   main: z.string().min(1).max(512),
-  permissions: uniqueArray(z.enum(["filesystem:read", "filesystem:write"]), "permission").max(16),
+  permissions: uniqueArray(z.enum([
+    "filesystem:read", "filesystem:write", "network", "process", "runtime:in-process",
+  ]), "permission").max(16),
   contributes: z.object({
     commands: uniqueArray(entry, "command contribution", (item) => item.name),
     tools: uniqueArray(entry, "tool contribution", (item) => item.name),
@@ -56,8 +58,9 @@ export interface PluginCommandContext { readonly workspace: string; readonly sig
 export type PluginCommandHandler = (args: readonly string[], context: PluginCommandContext) => unknown | Promise<unknown>;
 
 /**
- * A deliberately narrow registration surface. Plugins run in-process and are trusted in the
- * MVP: this API mediates host-provided capabilities, but it is not a Node.js process sandbox.
+ * A deliberately narrow registration surface. Production runs plugins in an
+ * isolated Worker/vm realm by default. Hosts that explicitly opt into legacy
+ * in-process activation must treat the plugin as fully trusted Node.js code.
  */
 export interface PluginContext {
   readonly signal: AbortSignal;
@@ -87,6 +90,19 @@ export interface LoadedPlugin {
   readonly version: string;
   readonly source: PluginSource;
   readonly root: string;
+  readonly fingerprint: string;
+  readonly sandboxed: boolean;
+  readonly permissions: readonly PluginPermission[];
+}
+
+export interface PluginTrustRequest {
+  readonly name: string;
+  readonly version: string;
+  readonly source: PluginSource;
+  readonly root: string;
+  readonly fingerprint: string;
+  readonly sandboxed: boolean;
+  readonly permissions: readonly PluginPermission[];
 }
 
 export interface PluginRegistrationCallbacks {
@@ -120,4 +136,8 @@ export interface PluginHostOptions {
   /** When true, plugin modules run in an isolated Worker/vm realm. Only relative
    *  modules inside the plugin root and RPC-backed contribution calls are available. */
   sandbox?: boolean;
+  /** Trust gate evaluated against the content fingerprint before activation. */
+  authorizePlugin?: (request: PluginTrustRequest) => boolean | Promise<boolean>;
+  /** Legacy in-process execution requires both a manifest capability and trust approval. */
+  requireInProcessTrust?: boolean;
 }

@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from "node:crypto";
 import type { HookBus } from "../hooks/bus.js";
 import { cloneModelContent, modelContentText, type ModelMessage } from "../models/types.js";
 import { awaitWithSignal } from "../utils/async.js";
@@ -44,7 +45,34 @@ export interface ContextSnapshot {
   compact?: CompactBoundary;
   /** @deprecated Version 1 session compatibility. */
   summary?: { role: "system"; content: string };
+  epoch?: ContextEpochSnapshot;
+  visibilityLog?: ContextVisibilityRecord[];
   messages: ModelMessage[];
+}
+
+export interface ContextVisibilityRecord {
+  id: string;
+  role: "system";
+  content: string;
+  admittedAt: string;
+  scope: "run";
+}
+
+export interface ContextEpochSnapshot {
+  version: 1;
+  id: string;
+  startedAt: string;
+  /** Exact byte-stable provider prefix. Never rebuilt during an epoch. */
+  stableMessages: ContextSystemMessage[];
+  /** Last admitted values for dynamic sources. */
+  sources: Record<string, string>;
+  stableSourceHash: string;
+}
+
+export interface ContextSystemMessage {
+  role: "system";
+  content: string;
+  cacheBreakpoint?: boolean;
 }
 
 export interface CompactBoundary {
@@ -84,6 +112,9 @@ export class ContextManager {
   #lastCompactProgress: number | undefined;
   #forkPinnedBoundary = false;
   #forkCompactBoundary = false;
+  #epoch: ContextEpochSnapshot;
+  #visibilityLog: ContextVisibilityRecord[] = [];
+  readonly #activeTransientSystem = new Map<string, ModelMessage>();
 
   constructor(options: ContextManagerOptions) {
     if (options.compactAtChars !== undefined && options.compactAtChars <= 0) throw new Error("compactAtChars must be positive");
@@ -111,6 +142,7 @@ export class ContextManager {
     this.#summarize = options.summarize;
     this.#onCompactProgress = options.onCompactProgress;
     this.#hooks = options.hooks;
+    this.#epoch = this.#createEpoch();
   }
 
   clear(): void {
@@ -122,6 +154,9 @@ export class ContextManager {
     this.#consecutiveAutoCompactFailures = 0;
     this.#forkPinnedBoundary = false;
     this.#forkCompactBoundary = false;
+    this.#epoch = this.#createEpoch();
+    this.#visibilityLog = [];
+    this.#activeTransientSystem.clear();
   }
 
   /**
@@ -149,6 +184,7 @@ export class ContextManager {
       hooks: options.hooks ?? this.#hooks,
     });
     child.#compact = this.#compact === undefined ? undefined : { ...this.#compact };
+    child.#epoch = cloneEpoch(this.#epoch);
     child.#messages = this.#messages.map((message) => {
       const { cacheBreakpoint: _cacheBreakpoint, ...copy } = cloneForkMessage(message);
       return copy;
@@ -178,9 +214,64 @@ export class ContextManager {
     this.#taskState = taskState;
   }
 
+  beginTransientSystem(content: string): string {
+    const id = randomUUID();
+    const record: ContextVisibilityRecord = {
+      id, role: "system", content, admittedAt: new Date().toISOString(), scope: "run",
+    };
+    this.#visibilityLog.push(record);
+    this.#activeTransientSystem.set(id, { role: "system", content });
+    return id;
+  }
+
+  endTransientSystem(id: string): void { this.#activeTransientSystem.delete(id); }
+
+  /**
+   * Admit dynamic source changes at a model-call savepoint. The stable prefix
+   * remains byte-identical; changes become chronological, persisted system
+   * messages after the cache breakpoint.
+   */
+  refreshContextSources(): boolean {
+    const updates: ModelMessage[] = [];
+    const next = this.#resolvedDynamicSources(this.#epoch.sources);
+    let currentStable: ContextSystemMessage[] | undefined;
+    try { currentStable = this.#buildStableMessages(this.#epoch.stableMessages); }
+    catch { currentStable = undefined; }
+    const currentStableHash = currentStable === undefined ? this.#epoch.stableSourceHash : hashMessages(currentStable);
+    if (currentStable !== undefined && currentStableHash !== this.#epoch.stableSourceHash) {
+      const value = currentStable.map((message) => message.content).join("\n\n");
+      if (this.#epoch.sources["system-baseline"] !== value) {
+        updates.push(contextUpdateMessage("system-baseline", value));
+        this.#epoch.sources["system-baseline"] = value;
+      }
+    } else if (currentStable !== undefined && this.#epoch.sources["system-baseline"] !== undefined) {
+      const value = currentStable.map((message) => message.content).join("\n\n");
+      updates.push(contextUpdateMessage("system-baseline", value));
+      delete this.#epoch.sources["system-baseline"];
+    }
+    for (const key of DYNAMIC_SOURCE_ORDER) {
+      const value = next[key];
+      if (value === undefined || value === this.#epoch.sources[key]) continue;
+      updates.push(contextUpdateMessage(key, displaySourceValue(key, value)));
+      this.#epoch.sources[key] = value;
+    }
+    for (const key of DYNAMIC_SOURCE_ORDER) {
+      if (key in next || !(key in this.#epoch.sources)) continue;
+      updates.push(contextUpdateMessage(key, "(removed)"));
+      delete this.#epoch.sources[key];
+    }
+    if (updates.length === 0) return false;
+    this.#messages.push(...updates);
+    this.#lastRecordedInputTokens = undefined;
+    this.#estimatedTokensAtLastRecordedUsage = undefined;
+    return true;
+  }
+
   snapshot(): ContextSnapshot {
     return {
       ...(this.#compact === undefined ? {} : { compact: { ...this.#compact } }),
+      epoch: cloneEpoch(this.#epoch),
+      ...(this.#visibilityLog.length === 0 ? {} : { visibilityLog: this.#visibilityLog.map((item) => ({ ...item })) }),
       messages: providerValidMessages(this.#messages),
     };
   }
@@ -193,6 +284,9 @@ export class ContextManager {
     this.#compact = snapshot.compact === undefined
       ? (legacySummary === undefined ? undefined : { summary: legacySummary, compactedAt: new Date(0).toISOString() })
       : { ...snapshot.compact };
+    if (snapshot.epoch !== undefined) this.#epoch = cloneEpoch(snapshot.epoch);
+    this.#visibilityLog = snapshot.visibilityLog?.map((item) => ({ ...item })) ?? [];
+    this.#activeTransientSystem.clear();
     this.#messages = messages.map((message) => message.role === "tool"
       ? { ...message, content: truncateToolOutput(message.content, this.#toolOutputChars) }
       : cloneMessage(message));
@@ -214,6 +308,7 @@ export class ContextManager {
         ...(this.#forkCompactBoundary ? { cacheBreakpoint: true } : {}),
       }]),
       ...this.#messages.map(cloneMessage),
+      ...[...this.#activeTransientSystem.values()].map(cloneMessage),
     ];
   }
 
@@ -237,6 +332,7 @@ export class ContextManager {
 
   async prepareForModelCall(signal: AbortSignal = new AbortController().signal): Promise<boolean> {
     signal.throwIfAborted();
+    this.refreshContextSources();
     if (!this.needsCompaction()) return false;
     const originalMessages = this.#messages;
     const originalRecordedUsage = this.#lastRecordedInputTokens;
@@ -339,6 +435,10 @@ export class ContextManager {
     this.#reportCompactProgress(90);
     this.#compact = nextCompact;
     this.#messages = nextMessages.map(cloneMessage);
+    // Compaction is an epoch boundary. Re-sample stable sources only after the
+    // old conversation has been summarized, so cache invalidation is explicit
+    // and never rewrites a live epoch in place.
+    this.#epoch = this.#createEpoch();
     this.#lastRecordedInputTokens = undefined;
     this.#estimatedTokensAtLastRecordedUsage = undefined;
     this.#reportCompactProgress(100);
@@ -361,42 +461,124 @@ export class ContextManager {
   }
 
   #pinnedMessages(): ModelMessage[] {
-    const userMemory = this.#resolvedUserMemory();
-    // Byte-stable prefix: identical across turns, so providers can cache it.
-    const stable: ModelMessage[] = [
+    return [
+      ...this.#epoch.stableMessages.map(cloneMessage),
+      ...sourceMessages(this.#epoch.sources),
+    ];
+  }
+
+  #resolvedUserMemory(): string | undefined {
+    const message = this.#epoch.stableMessages.find((item) => item.content.startsWith("User memory\n"));
+    return message?.content.slice("User memory\n".length);
+  }
+
+  #createEpoch(): ContextEpochSnapshot {
+    const stableMessages = this.#buildStableMessages();
+    const sources = this.#resolvedDynamicSources();
+    return {
+      version: 1,
+      id: randomUUID(),
+      startedAt: new Date().toISOString(),
+      stableMessages,
+      sources,
+      stableSourceHash: hashMessages(stableMessages),
+    };
+  }
+
+  #buildStableMessages(fallback: readonly ContextSystemMessage[] = []): ContextSystemMessage[] {
+    const resolvedUserMemory = tryResolveOptionalSystemSections(this.#userMemory);
+    const fallbackUserMemory = fallback.find((item) => item.content.startsWith("User memory\n"));
+    const userMemory = resolvedUserMemory.available
+      ? resolvedUserMemory.sections?.join("\n\n")
+      : fallbackUserMemory?.content.slice("User memory\n".length);
+    const stable: ContextSystemMessage[] = [
       ...resolveSystemSections(this.#system).map((content) => ({ role: "system" as const, content })),
-      // Breakpoint after FLAVOR.md so the byte-stable system prompt plus project
-      // guidance stays cached even when the trailing user memory section changes.
       ...(this.#flavor === undefined ? [] : [{
-        role: "system" as const,
-        content: `FLAVOR.md\n${this.#flavor}`,
-        cacheBreakpoint: true,
+        role: "system" as const, content: `FLAVOR.md\n${this.#flavor}`, cacheBreakpoint: true,
       }]),
       ...(this.#workspaceInstructions === undefined ? [] : [{
         role: "system" as const,
         content: `Workspace instructions\n${this.#workspaceInstructions}`,
+      }]),
+      ...(userMemory === undefined || userMemory.length === 0 ? [] : [{
+        role: "system" as const,
+        content: `User memory\n${userMemory}`,
         cacheBreakpoint: true,
       }]),
-      // Stable user preferences close the cacheable prefix.
-      ...(userMemory === undefined ? [] : [{ role: "system" as const, content: `User memory\n${userMemory}` }]),
     ];
-    // Dynamic sections change between turns: memory edits, task updates, date,
-    // model or permission switches. They follow the cache breakpoint so they
-    // never invalidate the cached prefix.
-    const dynamic: ModelMessage[] = [
-      ...(this.#memory === undefined ? [] : [{ role: "system" as const, content: `Long-term memory\n${this.#memory}` }]),
-      ...(this.#taskState === undefined ? [] : [{ role: "system" as const, content: `Task state\n${this.#taskState}` }]),
-      ...(this.#volatileSystem === undefined ? [] : resolveSystemSections(this.#volatileSystem).map((content) => ({ role: "system" as const, content }))),
-    ];
-    if (dynamic.length > 0 && stable.length > 0) stable[stable.length - 1]!.cacheBreakpoint = true;
-    return [...stable, ...dynamic];
+    if (stable.length > 0 && (userMemory === undefined || userMemory.length === 0)) {
+      stable[stable.length - 1]!.cacheBreakpoint = true;
+    }
+    return stable;
   }
 
-  #resolvedUserMemory(): string | undefined {
-    if (this.#userMemory === undefined) return undefined;
-    const content = resolveSystemSections(this.#userMemory).join("\n\n");
-    return content.length === 0 ? undefined : content;
+  #resolvedDynamicSources(previous: Readonly<Record<string, string>> = {}): Record<string, string> {
+    const result: Record<string, string> = {};
+    if (this.#memory !== undefined) result["long-term-memory"] = this.#memory;
+    if (this.#taskState !== undefined) result["task-state"] = this.#taskState;
+    const volatile = tryResolveOptionalSystemSections(this.#volatileSystem);
+    if (!volatile.available && previous["runtime"] !== undefined) result["runtime"] = previous["runtime"];
+    else if (volatile.sections !== undefined && volatile.sections.length > 0) result["runtime"] = JSON.stringify(volatile.sections);
+    return result;
   }
+}
+
+const DYNAMIC_SOURCE_ORDER = ["long-term-memory", "task-state", "runtime"] as const;
+
+function sourceMessages(sources: Readonly<Record<string, string>>): ModelMessage[] {
+  return DYNAMIC_SOURCE_ORDER.flatMap((key) => {
+    const content = sources[key];
+    if (content === undefined) return [];
+    if (key === "runtime") {
+      try {
+        const sections = JSON.parse(content) as unknown;
+        if (Array.isArray(sections) && sections.every((item) => typeof item === "string")) {
+          return sections.map((item) => ({ role: "system" as const, content: item }));
+        }
+      } catch { /* A malformed restored source remains visible below. */ }
+    }
+    const label = key === "long-term-memory" ? "Long-term memory"
+        : key === "task-state" ? "Task state" : "Runtime";
+    return [{
+      role: "system" as const,
+      content: `${label}\n${content}`,
+    }];
+  });
+}
+
+function displaySourceValue(source: string, value: string): string {
+  if (source !== "runtime") return value;
+  try {
+    const sections = JSON.parse(value) as unknown;
+    if (Array.isArray(sections) && sections.every((item) => typeof item === "string")) return sections.join("\n\n");
+  } catch { /* Preserve the raw value below. */ }
+  return value;
+}
+
+function contextUpdateMessage(source: string, content: string): ModelMessage {
+  return { role: "system", content: `Context update [${source}]\n${content}` };
+}
+
+function cloneEpoch(epoch: ContextEpochSnapshot): ContextEpochSnapshot {
+  return {
+    ...epoch,
+    stableMessages: epoch.stableMessages.map((message) => ({
+      role: "system",
+      content: message.content,
+      ...(message.cacheBreakpoint === undefined ? {} : { cacheBreakpoint: message.cacheBreakpoint }),
+    })),
+    sources: { ...epoch.sources },
+  };
+}
+
+function hashMessages(messages: readonly ModelMessage[]): string {
+  return createHash("sha256").update(JSON.stringify(messages)).digest("hex");
+}
+
+function tryResolveOptionalSystemSections(source: SystemPromptSource | undefined): { available: boolean; sections?: string[] } {
+  if (source === undefined) return { available: true };
+  try { return { available: true, sections: resolveSystemSections(source) }; }
+  catch { return { available: false }; }
 }
 
 function resolveSystemSections(source: SystemPromptSource): string[] {
@@ -468,7 +650,7 @@ function providerValidMessages(input: readonly ModelMessage[]): ModelMessage[] {
   const availableResults = new Set(input.filter((message) => message.role === "tool" && message.toolCallId).map((message) => message.toolCallId!));
   const output: ModelMessage[] = [];
   for (const original of input) {
-    if (original.role === "system") continue;
+    if (original.role === "system") { output.push(cloneMessage(original)); continue; }
     if (original.role === "assistant" && original.toolCalls !== undefined) {
       const calls = original.toolCalls.filter((call) => call.id && call.name && availableResults.has(call.id));
       calls.forEach((call) => announced.add(call.id));

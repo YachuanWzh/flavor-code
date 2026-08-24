@@ -2,6 +2,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, parse, relative, resolve, sep } from "node:path";
 
 import { normalizePermissionMode, type LegacyPermissionMode, type PermissionMode } from "../config/schema.js";
+import type { CompiledPermissionPolicy } from "./policy.js";
 
 export type { PermissionMode } from "../config/schema.js";
 export type PermissionDecision = {
@@ -28,6 +29,7 @@ export interface PermissionEngineOptions {
   workspace: string;
   mode?: PermissionMode | LegacyPermissionMode;
   profile?: PermissionProfile;
+  policy?: CompiledPermissionPolicy;
 }
 
 const CONTROL_TOOLS = new Set(["TaskPlan", "TaskUpdate", "AskUserQuestion", "TodoWrite", "TaskOutput", "JobList", "JobRead", "JobWait", "JobKill", "TerminalRead", "TerminalList"]);
@@ -66,6 +68,7 @@ export class PermissionEngine {
   readonly #workspace: string;
   #mode: PermissionMode;
   #profile: PermissionProfile;
+  readonly #policy: CompiledPermissionPolicy | undefined;
 
   constructor(options: PermissionEngineOptions) {
     const root = resolve(options.workspace);
@@ -77,6 +80,7 @@ export class PermissionEngine {
     this.#workspace = existsSync(root) ? realpathSync.native(root) : root;
     this.#mode = canonicalMode(options.mode ?? "default");
     this.#profile = options.profile ?? "standard";
+    this.#policy = options.policy;
   }
 
   get mode(): PermissionMode { return this.#mode; }
@@ -86,6 +90,17 @@ export class PermissionEngine {
   setProfile(profile: PermissionProfile): void { this.#profile = profile; }
 
   decide(request: PermissionRequest): PermissionDecision {
+    const builtIn = this.#builtInDecision(request);
+    // Built-in denials are monotonic safety invariants (plan-mode, workspace
+    // escape, catastrophic commands) and can never be weakened by config.
+    if (builtIn.decision === "deny") return builtIn;
+    const policy = this.#policy?.decide(request);
+    if (policy === undefined) return builtIn;
+    if (policy.decision === "allow") return builtIn.decision === "ask" ? policy : builtIn;
+    return policy;
+  }
+
+  #builtInDecision(request: PermissionRequest): PermissionDecision {
     if (request.tool === "Task") return request.agent === "main"
       ? { decision: "allow" }
       : { decision: "deny", reason: "Task delegation is restricted to the main agent" };

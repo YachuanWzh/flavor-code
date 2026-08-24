@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [windows-latest, macos-latest, ubuntu-latest]
         node: [20, 24]
     runs-on: ${{ matrix.os }}
     # Fail fast instead of letting a wedged step occupy the runner until it
@@ -26,10 +26,11 @@ jobs:
       # bundle from dist/, and dist/ is not part of the checkout.
       - run: npm run typecheck
       - run: npm run build
+      - run: npm run test:reliability
       - name: Test (Windows, excluding POSIX signal/process contract)
         if: runner.os == 'Windows'
         run: npm test -- --exclude tests/cli/sigint-process.test.ts
-      - name: Test (macOS, including POSIX signal/process contract)
-        if: runner.os == 'macOS'
+      - name: Test (POSIX, including signal/process contract)
+        if: runner.os != 'Windows'
         run: npm test
       - run: npm run smoke:install

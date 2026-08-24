@@ -1,16 +1,17 @@
-import { AgentLoop } from "../agent/loop.js";
+import { AgentLoop, type AgentLoopOptions } from "../agent/loop.js";
 import { MAIN_TASK_TOOL_NAMES } from "../agent/task-tools.js";
 import type { TaskNode } from "../agent/planner.js";
 import type { HallucinationGuard } from "../hallucination/guard.js";
 import type { PermissionMode, PermissionProfile } from "../permissions/engine.js";
 import { PermissionEngine } from "../permissions/engine.js";
+import type { CompiledPermissionPolicy } from "../permissions/policy.js";
 import { createPermissionClassifier } from "../permissions/classifier.js";
 import type { ContextManager } from "../context/manager.js";
 import type { HookBus } from "../hooks/bus.js";
 import type { ModelRegistry } from "../models/registry.js";
 import type { ModelTool } from "../models/types.js";
 import { modelToolFromZod } from "../models/structured.js";
-import { ToolRuntime, type ApprovalCallback } from "../tools/runtime.js";
+import { ToolRuntime, type ApprovalCallback, type ToolRuntimeOptions } from "../tools/runtime.js";
 import type { ToolDefinition } from "../tools/types.js";
 
 export interface LocalHarnessOptions {
@@ -35,6 +36,9 @@ export interface LocalHarnessOptions {
   /** When true, non-destructive tools skip the approval callback. Destructive tools still require confirmation. */
   loopMode?: boolean;
   afterToolSuccess?(tool: string, paths: readonly string[], input: unknown, output: unknown, context: import("../tools/types.js").ToolContext): Promise<readonly string[]>;
+  toolJournal?: ToolRuntimeOptions["journal"];
+  permissionPolicy?: CompiledPermissionPolicy;
+  modelJournal?: AgentLoopOptions["modelJournal"];
 }
 
 export interface HarnessProfile {
@@ -185,6 +189,7 @@ export class LocalHarness {
       workspace: this.#options.workspace,
       ...(this.#options.afterToolSuccess === undefined ? {} : { afterSuccess: this.#options.afterToolSuccess }),
       profile: this.#permissionProfile,
+      ...(this.#options.permissionPolicy === undefined ? {} : { policy: this.#options.permissionPolicy }),
       mode: this.#options.loopMode
         ? "bypassPermissions"
         : (agent === "subagent"
@@ -204,6 +209,7 @@ export class LocalHarness {
           modelId: () => this.#subagentModelId,
         }),
       } : {}),
+      ...(this.#options.toolJournal === undefined ? {} : { journal: this.#options.toolJournal }),
     });
     try {
       const tools = definitions.map(toModelTool);
@@ -222,6 +228,7 @@ export class LocalHarness {
         ...(maxIterations === undefined ? {} : { maxIterations }),
         ...(isMain && this.#options.hasActiveProgress !== undefined ? { hasActiveProgress: this.#options.hasActiveProgress } : {}),
         ...(isMain && this.#options.hallucinationGuard !== undefined ? { hallucinationGuard: this.#options.hallucinationGuard } : {}),
+        ...(this.#options.modelJournal === undefined ? {} : { modelJournal: this.#options.modelJournal }),
       });
       loop.setIterationLimitMode(this.#permissionProfile === "d2c" ? "d2c" : "standard");
       return { get modelId() { return loop.modelId; }, context, runtime, tools, loop };

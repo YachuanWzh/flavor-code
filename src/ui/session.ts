@@ -133,6 +133,13 @@ export interface SessionServices {
   login(): Promise<string>;
   logout(): Promise<string>;
   pals?: PalSessionServices;
+  durableQueue?: {
+    recover(): readonly { id: string; kind: "steer" | "followUp"; payload: unknown }[];
+    admit(kind: "steer" | "followUp", payload: unknown): string;
+    claim(id: string): void;
+    ack(id: string): void;
+    release(id: string, reason: string): void;
+  };
 }
 
 export interface MultimodalSessionInput {
@@ -152,6 +159,7 @@ type NormalizedSubmission = {
   };
   coWorkPlanningKey?: string;
   controlOnly?: boolean;
+  durableId?: string;
 };
 
 type CoWorkFlow = { epoch: number; status: "planning" | "started" | "terminal" };
@@ -197,15 +205,33 @@ export class FlavorSession {
   readonly #activePlanning = new Set<string>();
   readonly #planningIdleWaiters = new Set<() => void>();
   readonly #pendingCoWorkStarts: NormalizedSubmission[] = [];
+  readonly #activeSteeringDurableIds = new Set<string>();
+  #durableResumeStarted = false;
   #permissionBaseline: PermissionMode | undefined;
   #activeSubmission: NormalizedSubmission | undefined;
 
-  constructor(services: SessionServices) { this.#services = services; }
+  constructor(services: SessionServices) {
+    this.#services = services;
+    for (const item of services.durableQueue?.recover() ?? []) {
+      const submission = recoveredSubmission(item.payload);
+      if (submission === undefined) {
+        services.durableQueue?.ack(item.id);
+        continue;
+      }
+      this.#queue.enqueue(item.kind, submission.text);
+      this.#queuedSubmissions[item.kind].push({ ...submission, durableId: item.id });
+    }
+  }
 
   get active(): boolean { return this.#active !== undefined; }
   queueSnapshot(): AgentQueueSnapshot { return this.#queue.snapshot(); }
   clearQueue(): AgentQueueSnapshot {
     const snapshot = this.#queue.clear();
+    for (const kind of ["steer", "followUp"] as const) {
+      for (const submission of this.#queuedSubmissions[kind]) {
+        if (submission.durableId !== undefined) this.#services.durableQueue?.ack(submission.durableId);
+      }
+    }
     this.#queuedSubmissions.steer.length = 0;
     this.#queuedSubmissions.followUp.length = 0;
     return snapshot;
@@ -346,6 +372,7 @@ export class FlavorSession {
     }).then(async (decision) => {
       if (decision.additionalContext !== undefined) await this.#services.addContext?.(decision.additionalContext);
       this.#started = true;
+      this.#resumeDurableQueue();
     });
     return this.#startPromise;
   }
@@ -362,7 +389,10 @@ export class FlavorSession {
   #enqueueNormalizedSubmission(submission: NormalizedSubmission): Promise<void> {
     this.#pendingSubmissions += 1;
     const operation = this.#submissionTail.catch(() => {}).then(() => this.#runSubmissionChain(submission))
-      .finally(() => { this.#pendingSubmissions -= 1; });
+      .finally(() => {
+        this.#pendingSubmissions -= 1;
+        if (this.#pendingSubmissions === 0) this.#resumeDurableQueue();
+      });
     this.#submissionTail = operation;
     return operation;
   }
@@ -373,6 +403,7 @@ export class FlavorSession {
     while (pending.length > 0) {
       const submission = pending.shift()!;
       if (!this.#isSubmissionCurrent(submission) || submission.controlOnly === true) {
+        this.#ackDurable(submission);
         pending.push(...this.#drainMessages("steer"), ...this.#drainMessages("followUp"));
         continue;
       }
@@ -387,10 +418,11 @@ export class FlavorSession {
     const prompt = submission.text;
     await this.start();
     if (this.#closed) throw new Error("Session is closed");
-    if (!this.#isSubmissionCurrent(submission)) return;
+    if (!this.#isSubmissionCurrent(submission)) { this.#ackDurable(submission); return; }
     if (submission.coWorkPlanningKey !== undefined) {
-      if (!await this.#activatePlanningGate(submission.coWorkPlanningKey)) return;
+      if (!await this.#activatePlanningGate(submission.coWorkPlanningKey)) { this.#ackDurable(submission); return; }
     }
+    if (submission.durableId !== undefined) this.#services.durableQueue?.claim(submission.durableId);
     const controller = new AbortController();
     this.#active = controller;
     this.#activeSubmission = submission;
@@ -413,7 +445,7 @@ export class FlavorSession {
       const command = parseSlashCommand(prompt, this.#services.pluginCommands().map(({ name }) => name), skillNames);
       if (command !== null) await this.#dispatch(command, controller.signal);
       else for await (const event of this.#services.run(prompt, controller.signal, {
-        getSteeringMessages: () => this.#drainMessages("steer").map((item) => item.text),
+        getSteeringMessages: () => this.#drainMessages("steer", true).map((item) => item.text),
         ...(decision.additionalContext === undefined
           ? {}
           : { additionalContext: decision.additionalContext }),
@@ -451,6 +483,8 @@ export class FlavorSession {
           try { this.#services.output({ type: "error", error: { code: "unknown", message: message(error) } }); }
           catch { /* Never let cleanup failures escape. */ }
         }
+        this.#ackDurable(submission);
+        this.#ackActiveSteering();
       }
     }
   }
@@ -609,13 +643,46 @@ export class FlavorSession {
   }
 
   #enqueueMessage(kind: "steer" | "followUp", submission: NormalizedSubmission): void {
+    const durableId = submission.durableId ?? this.#services.durableQueue?.admit(kind, durablePayload(submission));
     this.#queue.enqueue(kind, submission.text);
-    this.#queuedSubmissions[kind].push(submission);
+    this.#queuedSubmissions[kind].push(durableId === undefined ? submission : { ...submission, durableId });
   }
 
-  #drainMessages(kind: "steer" | "followUp"): NormalizedSubmission[] {
+  #drainMessages(kind: "steer" | "followUp", activeSteering = false): NormalizedSubmission[] {
     const prompts = this.#queue.drain(kind);
-    return prompts.map((prompt) => this.#queuedSubmissions[kind].shift() ?? normalizeRequiredSubmission(prompt));
+    return prompts.map((prompt) => {
+      const submission = this.#queuedSubmissions[kind].shift() ?? normalizeRequiredSubmission(prompt);
+      if (activeSteering && submission.durableId !== undefined) {
+        this.#services.durableQueue?.claim(submission.durableId);
+        this.#activeSteeringDurableIds.add(submission.durableId);
+      }
+      return submission;
+    });
+  }
+
+  #resumeDurableQueue(): void {
+    if (this.#durableResumeStarted || this.#closed || this.active || this.#pendingSubmissions > 0) return;
+    if (!this.#queue.hasPending) return;
+    this.#durableResumeStarted = true;
+    const submissions = [...this.#drainMessages("steer"), ...this.#drainMessages("followUp")];
+    if (submissions.length === 0) return;
+    this.#notice("Resuming a queued prompt recovered from the durable harness journal.");
+    for (const submission of submissions) {
+      this.#enqueueNormalizedSubmission(submission).catch((error) => {
+        this.#services.output({ type: "error", error: { code: "unknown", message: message(error) } });
+      });
+    }
+  }
+
+  #ackDurable(submission: NormalizedSubmission): void {
+    if (submission.durableId === undefined) return;
+    this.#services.durableQueue?.ack(submission.durableId);
+    this.#activeSteeringDurableIds.delete(submission.durableId);
+  }
+
+  #ackActiveSteering(): void {
+    for (const id of this.#activeSteeringDurableIds) this.#services.durableQueue?.ack(id);
+    this.#activeSteeringDurableIds.clear();
   }
 
   #outputQueuedSubmission(submission: NormalizedSubmission): void {
@@ -721,6 +788,25 @@ function normalizeRequiredSubmission(input: string): NormalizedSubmission {
   const normalized = normalizeSubmission(input);
   if (normalized === undefined) throw new Error("Cannot queue an empty message");
   return normalized;
+}
+
+function durablePayload(submission: NormalizedSubmission): unknown {
+  const { durableId: _durableId, ...payload } = submission;
+  return structuredClone(payload);
+}
+
+function recoveredSubmission(value: unknown): NormalizedSubmission | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const input = value as Partial<NormalizedSubmission>;
+  if (typeof input.text !== "string" || input.text.trim().length === 0) return undefined;
+  if (typeof input.displayText !== "string") return undefined;
+  if (input.controlOnly !== undefined && typeof input.controlOnly !== "boolean") return undefined;
+  if (input.coWorkPlanningKey !== undefined && typeof input.coWorkPlanningKey !== "string") return undefined;
+  if (input.remoteOrigin !== undefined) {
+    const origin = input.remoteOrigin;
+    if (typeof origin.senderId !== "string" || typeof origin.senderAlias !== "string" || typeof origin.prompt !== "string") return undefined;
+  }
+  return structuredClone(input as NormalizedSubmission);
 }
 
 function coWorkKey(coWorkId: string, epoch: number): string { return `${coWorkId}:${epoch}`; }

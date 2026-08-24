@@ -24,8 +24,9 @@ describe("ContextManager", () => {
     system = ["changed after fork"];
     child.append({ role: "user", content: "child directive" });
     expect(child.messagesForModel()[0]?.content).toBe("共享系统提示");
-    expect(parent.messagesForModel()[0]?.content).toBe("changed after fork");
-    expect(parent.snapshot().messages.at(-1)?.content).toBe("父回复");
+    expect(parent.messagesForModel()[0]?.content).toBe("共享系统提示");
+    expect(parent.refreshContextSources()).toBe(true);
+    expect(parent.snapshot().messages.at(-1)?.content).toContain("changed after fork");
     expect(child.snapshot().messages.at(-1)?.content).toBe("child directive");
   });
 
@@ -96,6 +97,71 @@ describe("ContextManager", () => {
     expect(cachedPrefix(context.messagesForModel())).toBe(before);
   });
 
+  it("keeps the epoch cache prefix byte-identical while admitting volatile updates", () => {
+    let runtime = ["Date: one", "Model: alpha"] as readonly string[];
+    const context = createContext({ volatileSystem: () => runtime });
+    const prefixBytes = () => {
+      const messages = context.messagesForModel();
+      let boundary = -1;
+      messages.forEach((message, index) => { if (message.cacheBreakpoint === true) boundary = index; });
+      return Buffer.from(JSON.stringify(messages.slice(0, boundary + 1)));
+    };
+    const before = prefixBytes();
+
+    runtime = ["Date: two", "Model: beta"];
+    expect(context.refreshContextSources()).toBe(true);
+
+    expect(prefixBytes().equals(before)).toBe(true);
+    expect(context.snapshot().messages.at(-1)?.content).toContain("Date: two");
+    expect(context.snapshot().epoch?.sources.runtime).toBe(JSON.stringify(runtime));
+  });
+
+  it("freezes user memory in the cache prefix until a new epoch", () => {
+    let preference = "Prefer concise answers.";
+    const context = createContext({ userMemory: () => preference });
+    const prefixBytes = () => {
+      const messages = context.messagesForModel();
+      let boundary = -1;
+      messages.forEach((message, index) => { if (message.cacheBreakpoint === true) boundary = index; });
+      return Buffer.from(JSON.stringify(messages.slice(0, boundary + 1)));
+    };
+    const before = prefixBytes();
+
+    preference = "Prefer detailed answers.";
+    expect(context.refreshContextSources()).toBe(true);
+
+    expect(prefixBytes().equals(before)).toBe(true);
+    expect(context.messagesForModel().find((message) => modelContentText(message.content).startsWith("User memory\n"))?.content)
+      .toContain("concise");
+    expect(context.snapshot().messages.at(-1)?.content).toContain("detailed");
+  });
+
+  it("keeps stale user memory when its source temporarily fails", () => {
+    let fail = false;
+    const context = createContext({ userMemory: () => {
+      if (fail) throw new Error("temporarily unavailable");
+      return "Keep the stable preference.";
+    } });
+    fail = true;
+
+    expect(context.refreshContextSources()).toBe(false);
+    expect(context.messagesForModel().map((message) => message.content)).toContain(
+      "User memory\nKeep the stable preference.",
+    );
+  });
+
+  it("uses stale source state when a dynamic source refresh fails", () => {
+    let fail = false;
+    const context = createContext({ volatileSystem: () => {
+      if (fail) throw new Error("temporarily unavailable");
+      return ["healthy runtime"];
+    } });
+    fail = true;
+
+    expect(context.refreshContextSources()).toBe(false);
+    expect(context.messagesForModel().map((message) => message.content)).toContain("healthy runtime");
+  });
+
   it("preserves long-term memory across forks and compaction", async () => {
     const context = createContext({ memory: "- [project] Use pnpm.", compactAtChars: 1, recentTurns: 0 });
     context.append({ role: "user", content: "old turn" });
@@ -111,14 +177,18 @@ describe("ContextManager", () => {
     );
   });
 
-  it("resolves system section factories for every model request", () => {
+  it("freezes system factories inside an epoch and admits changes chronologically", () => {
     let sections: readonly string[] = ["model one", " "];
     const context = createContext({ system: () => sections });
 
     expect(context.messagesForModel()[0]?.content).toBe("model one");
     sections = ["model two"];
-    expect(context.messagesForModel()[0]?.content).toBe("model two");
-    expect(context.snapshot().messages).toEqual([]);
+    expect(context.messagesForModel()[0]?.content).toBe("model one");
+    expect(context.refreshContextSources()).toBe(true);
+    expect(context.messagesForModel()[0]?.content).toBe("model one");
+    expect(context.snapshot().messages).toEqual([
+      { role: "system", content: "Context update [system-baseline]\nmodel two\n\nFLAVOR.md\nproject guidance" },
+    ]);
   });
 
   it("truncates tool output to head and tail with original length metadata", () => {

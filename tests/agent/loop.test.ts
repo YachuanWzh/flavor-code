@@ -94,7 +94,7 @@ describe("AgentLoop", () => {
     expect(requests[1]?.messages).toContainEqual({ role: "user", content: "first" });
   });
 
-  it("adds transient skill context for one run without persisting it", async () => {
+  it("scopes skill context to one run while persisting its visibility audit", async () => {
     const requests: ModelRequest[] = [];
     const fixture = createLoop({ adapter: fakeAdapter([
       [{ type: "text", text: "first" }, { type: "done", usage: { inputTokens: 1, outputTokens: 1 } }],
@@ -104,6 +104,9 @@ describe("AgentLoop", () => {
     await collect(fixture.loop.run({ prompt: "second" }));
     expect(requests[0]?.messages).toContainEqual({ role: "system", content: "Skill body" });
     expect(requests[1]?.messages).not.toContainEqual({ role: "system", content: "Skill body" });
+    expect(fixture.context.snapshot().visibilityLog).toEqual([
+      expect.objectContaining({ role: "system", content: "Skill body", scope: "run" }),
+    ]);
   });
 
   it("streams text, executes a tool once, feeds back its result, and records usage", async () => {

@@ -19,6 +19,7 @@ import { ContextManager, type CompactProgressCallback, type ContextSnapshot } fr
 import { WorkspaceInstructions } from "./context/workspace-instructions.js";
 import { summarizeWithModel } from "./context/summarizer.js";
 import { LocalHarness } from "./harness/local.js";
+import { HarnessJournal } from "./harness/journal.js";
 import { HookBus } from "./hooks/bus.js";
 import { HOOK_EVENT_NAMES, type HookDecision, type HookEventName } from "./hooks/types.js";
 import { createIncidentReporter } from "./incidents/reporter.js";
@@ -43,6 +44,7 @@ import { createFileTokenStore, retainOnlyCredentials } from "./auth/store.js";
 import { oauthCredentialId } from "./auth/oauth-config.js";
 import type { AuthResult, OAuthLlmConfig } from "./auth/types.js";
 import type { PermissionProfile, PermissionRequest } from "./permissions/engine.js";
+import { loadPermissionPolicy } from "./permissions/policy.js";
 import { buildCurrentDateSection, buildRuntimeEnvironmentSection, buildSubagentDirective, buildSystemPrompt, type PromptEnvironment } from "./prompts/system.js";
 import type { ApprovalDecision } from "./tools/runtime.js";
 import { PluginHost } from "./plugins/host.js";
@@ -141,6 +143,9 @@ export interface ProductionRuntimeOptions {
   shutdownStepTimeoutMs?: number;
   /** Additional tools provided by embedders (e.g. desktop-only D2C tools). */
   extraTools?: readonly ToolDefinition<unknown>[];
+  /** Compatibility seam for explicitly trusted legacy plugins. Product
+   * runtimes default to Worker/vm isolation. */
+  pluginSandbox?: boolean;
   /** Explicitly opt into CLI-local collaboration. Omit for print/RPC/eval callers. */
   collaboration?: {
     instanceId: string;
@@ -343,6 +348,14 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
 
   const registry = new ModelRegistry();
   const diagnostics: string[] = [];
+  const permissionPolicy = await loadPermissionPolicy({
+    workspace,
+    home,
+    ...(environment.FLAVOR_MANAGED_PERMISSIONS === undefined
+      ? {}
+      : { managedPath: environment.FLAVOR_MANAGED_PERMISSIONS }),
+  });
+  diagnostics.push(...permissionPolicy.diagnostics);
   const approvals = new ApprovalBridge(options.onApprovalChange);
   const resolveToolApproval = options.approvalPolicy === "deny" && options.rpcToolApprovals !== true
     ? () => "deny" as ApprovalDecision
@@ -442,6 +455,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     globalPluginDirs: [join(home, ".flavor-code", "plugins")],
     projectPluginDirs: [join(workspace, ".flavor", "plugins")],
     config,
+    sandbox: options.pluginSandbox ?? true,
     registrations: {
       command(name, handler, description) {
         if (typeof handler !== "function") throw new Error(`Plugin command "${name}" must be a function.`);
@@ -643,6 +657,20 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const subagentStartedAt: Record<string, number> = {};
   const subagentElapsedMs: Record<string, number> = {};
   let sessionId = recovered?.sessionId ?? `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
+  let harnessJournal = new HarnessJournal({ workspace, sessionId });
+  const harnessRecovery = harnessJournal.recover();
+  if (harnessRecovery.queue.length > 0 || harnessRecovery.incompleteTools.length > 0
+    || harnessRecovery.incompleteModelIds.length > 0 || harnessRecovery.interruptedTurnIds.length > 0) {
+    diagnostics.push(
+      `Recovered durable harness state: ${harnessRecovery.queue.length} queued prompt(s), ` +
+      `${harnessRecovery.incompleteTools.length} interrupted tool call(s), ` +
+      `${harnessRecovery.incompleteModelIds.length} interrupted model call(s), ${harnessRecovery.interruptedTurnIds.length} interrupted turn(s).`,
+    );
+    for (const tool of harnessRecovery.incompleteTools.filter((item) => !item.retrySafe)) {
+      diagnostics.push(`Interrupted non-retry-safe tool "${tool.tool}" was not replayed (${tool.inputHash.slice(0, 12)}).`);
+    }
+    harnessJournal.markRecoveryComplete(harnessRecovery);
+  }
   // Tag usage.jsonl with this session; the file is overwritten per session.
   setUsageSession(sessionId);
   ideSessionId = sessionId;
@@ -821,10 +849,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       volatileSystem: () => [
         buildCurrentDateSection(promptEnvironment.date),
         buildRuntimeEnvironmentSection({
-          model: agent === "main" ? harness.mainModelId : contextModelId,
+          model: agent === "main" && harnessCreated ? harness.mainModelId : contextModelId,
           permissionMode: agent === "subagent"
-            ? (harness.permissionMode === "plan" ? "plan" : "bubble")
-            : harness.permissionMode,
+            ? ((harnessCreated ? harness.permissionMode : (recovered?.permissionMode ?? config.permissionMode)) === "plan" ? "plan" : "bubble")
+            : (harnessCreated ? harness.permissionMode : (recovered?.permissionMode ?? config.permissionMode)),
         }),
       ],
       ...(flavor === undefined ? {} : { flavor }),
@@ -858,15 +886,36 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     registry, hooks, workspace, mainModelId: mainModel, subagentModelId: childModel,
     hallucinationGuard,
     tools, createContext, permissionMode: recovered?.permissionMode ?? config.permissionMode,
+    permissionPolicy,
     maxIterationsMain: config.maxIterations.main,
     maxIterationsSubagent: config.maxIterations.subagent,
     hasActiveProgress,
     afterToolSuccess: async (_tool, paths, _input, _output, context) => workspaceInstructions.discover(paths, context.ownerId ?? context.agent),
+    toolJournal: {
+      start: (tool, input, retrySafe) => harnessJournal.startTool(tool, input, retrySafe),
+      complete: (id, result) => harnessJournal.completeTool(id, result),
+      interrupt: (id, reason) => harnessJournal.interruptTool(id, reason),
+    },
+    modelJournal: {
+      start: (input) => harnessJournal.startModel(input),
+      complete: (id, completed, error) => harnessJournal.completeModel(id, completed, error),
+    },
     approve: resolveToolApproval,
   });
   harnessCreated = true;
   if (recovered !== undefined) harness.main.context.restore({
     ...(recovered.conversation.compact === undefined ? {} : { compact: recovered.conversation.compact }),
+    ...(recovered.conversation.epoch === undefined ? {} : { epoch: {
+      ...recovered.conversation.epoch,
+      stableMessages: recovered.conversation.epoch.stableMessages.map((message) => ({
+        role: "system" as const,
+        content: message.content,
+        ...(message.cacheBreakpoint === undefined ? {} : { cacheBreakpoint: message.cacheBreakpoint }),
+      })),
+    } }),
+    ...(recovered.conversation.visibilityLog === undefined ? {} : {
+      visibilityLog: recovered.conversation.visibilityLog,
+    }),
     messages: recovered.conversation.messages.map((message): ModelMessage => {
       const metadata = {
         ...(message.toolCallId === undefined ? {} : { toolCallId: message.toolCallId }),
@@ -1118,6 +1167,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     let compactionInputTokens = 0;
     let compactionOutputTokens = 0;
     let loopHarness!: LocalHarness;
+    let loopHarnessCreated = false;
     const createLoopContext = (
       agent: "main" | "subagent", agentTools: readonly ToolDefinition<unknown>[], contextModelId: string,
     ) => {
@@ -1139,10 +1189,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         volatileSystem: () => [
           buildCurrentDateSection(loopEnvironment.date),
           buildRuntimeEnvironmentSection({
-            model: agent === "main" ? loopHarness.mainModelId : contextModelId,
+            model: agent === "main" && loopHarnessCreated ? loopHarness.mainModelId : contextModelId,
             permissionMode: agent === "subagent"
-              ? (loopHarness.permissionMode === "plan" ? "plan" : "bubble")
-              : loopHarness.permissionMode,
+              ? ((loopHarnessCreated ? loopHarness.permissionMode : harness.permissionMode) === "plan" ? "plan" : "bubble")
+              : (loopHarnessCreated ? loopHarness.permissionMode : harness.permissionMode),
           }),
         ],
         ...(loopFlavor === undefined ? {} : { flavor: loopFlavor }),
@@ -1168,12 +1218,23 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       registry, hooks, workspace: input.workspace,
       mainModelId: harness.mainModelId, subagentModelId: harness.subagentModelId,
       tools: loopTools, createContext: createLoopContext, permissionMode: harness.permissionMode,
+      permissionPolicy,
       maxIterationsMain: config.maxIterations.main,
       maxIterationsSubagent: config.maxIterations.subagent,
       loopMode: true,
       afterToolSuccess: async (_tool, paths, _input, _output, context) => loopInstructions.discover(paths, context.ownerId ?? context.agent),
+      toolJournal: {
+        start: (tool, input, retrySafe) => harnessJournal.startTool(tool, input, retrySafe),
+        complete: (id, result) => harnessJournal.completeTool(id, result),
+        interrupt: (id, reason) => harnessJournal.interruptTool(id, reason),
+      },
+      modelJournal: {
+        start: (input) => harnessJournal.startModel(input),
+        complete: (id, completed, error) => harnessJournal.completeModel(id, completed, error),
+      },
       approve: resolveToolApproval,
     });
+    loopHarnessCreated = true;
     let runReason = "finished";
     try {
       evolveService.beginRun();
@@ -1247,6 +1308,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     maxRounds: 5,
     maxStallStreak: 2,
     persistence: goalStore,
+    verifyHost: async (signal) => runVerificationPlan(
+      await inferVerificationPlan(workspace), workspace, signal, executionEnvironment,
+    ),
     now: () => new Date().toISOString(),
     idFactory: () => `goal-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`,
     runWorker: ({ workspace: goalWorkspace, prompt, signal }) =>
@@ -1308,6 +1372,13 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
 
   const services: SessionServices = {
     hooks, workspace,
+    durableQueue: {
+      recover: () => harnessRecovery.queue,
+      admit: (kind, payload) => harnessJournal.admitQueue(kind, payload),
+      claim: (id) => harnessJournal.claimQueue(id),
+      ack: (id) => harnessJournal.ackQueue(id),
+      release: (id, reason) => harnessJournal.releaseQueue(id, reason),
+    },
     mainModel: () => mainModel,
     subagentModel: () => childModel,
     llmServiceName: () => effectiveLlm?.serviceName,
@@ -1319,7 +1390,14 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     ...(palServices === undefined ? {} : { pals: palServices }),
     run: (prompt, signal, runOptions) => {
       interruptedTaskPlanNeedsReassessment = false;
-      return persistAndCheckpointAfter(runMain(
+      const turnConfig = Object.freeze({
+        mainModel,
+        subagentModel: childModel,
+        permissionMode: harness.permissionMode,
+        contextEpoch: harness.main.context.snapshot().epoch?.id ?? "legacy",
+      });
+      const turnId = harnessJournal.startTurn(turnConfig, { prompt, initialUserMessage: runOptions?.initialUserMessage });
+      return durableTurn(persistAndCheckpointAfter(runMain(
         harness, skills, prompt, signal, selectedModels.mainError,
         memoryStore === undefined || (!memoryHasRoutableEntries && userMemoryContext === undefined) ? undefined : {
           store: memoryStore, taskId: memoryLifecycle.taskId ?? sessionId,
@@ -1333,7 +1411,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         prompt,
         context: harness.main.context.snapshot(),
         label: `turn: ${prompt.slice(0, 80)}`,
-      }));
+      })), harnessJournal, turnId, turnConfig);
     },
     runSkill: (skill, prompt, signal) => persistAfter(
       runExplicitSkill(harness, skills, skill, prompt, signal, selectedModels.mainError), persist,
@@ -1490,6 +1568,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       for (const key of Object.keys(subagentElapsedMs)) delete subagentElapsedMs[key];
       const previousIdeSessionId = ideSessionId;
       sessionId = `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
+      harnessJournal = new HarnessJournal({ workspace, sessionId });
       setUsageSession(sessionId);
       ideSessionId = sessionId;
       if (previousIdeSessionId !== undefined) await ide.endSession(previousIdeSessionId);
@@ -2015,6 +2094,33 @@ async function* persistEach<T>(source: AsyncIterable<T>, persist: () => Promise<
   }
 }
 
+async function* durableTurn(
+  source: AsyncIterable<AgentEvent>,
+  journal: HarnessJournal,
+  turnId: string,
+  config: unknown,
+): AsyncIterable<AgentEvent> {
+  let failure: string | undefined;
+  let completed = false;
+  try {
+    for await (const event of source) {
+      if (event.type === "error") failure = event.error.message;
+      yield event;
+    }
+    completed = true;
+  } catch (error) {
+    failure = message(error);
+    throw error;
+  } finally {
+    if (completed && failure === undefined) {
+      journal.completeTurn(turnId);
+      journal.savepoint("turn-complete", config);
+    } else {
+      journal.interruptTurn(turnId, failure ?? "turn consumer interrupted before completion");
+    }
+  }
+}
+
 interface GitCommandDeps {
   workspace: string;
   registry: ModelRegistry;
@@ -2494,13 +2600,15 @@ function sameToolName(left: string, right: string): boolean { return left.toLowe
 function storedConversation(snapshot: ContextSnapshot): SessionDocument["conversation"] {
   return {
     ...(snapshot.compact === undefined ? {} : { compact: snapshot.compact }),
+    ...(snapshot.epoch === undefined ? {} : { epoch: snapshot.epoch }),
+    ...(snapshot.visibilityLog === undefined ? {} : { visibilityLog: snapshot.visibilityLog }),
     messages: snapshot.messages.flatMap((message) => {
-      if (message.role === "system") return [];
       const metadata = {
         ...(message.toolCallId === undefined ? {} : { toolCallId: message.toolCallId }),
         ...(message.toolCalls === undefined ? {} : { toolCalls: message.toolCalls }),
       };
       if (message.role === "user") return { role: "user" as const, content: message.content, ...metadata };
+      if (message.role === "system") return { role: "system" as const, content: message.content, ...metadata };
       if (message.role === "assistant") return { role: "assistant" as const, content: message.content, ...metadata };
       return { role: "tool" as const, content: message.content, ...metadata };
     }),

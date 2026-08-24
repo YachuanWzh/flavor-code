@@ -1,14 +1,16 @@
 import { createHash } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import type { ModelRegistry } from "../models/registry.js";
 import type { ModelMessage } from "../models/types.js";
+import { execFileNoThrow } from "../utils/execFileNoThrow.js";
 import {
   VerdictSchema,
   type AggregatedOutcome,
   type EvidencePacket,
   type Gap,
+  type HostVerificationEvidence,
   type Plan,
   type Verdict,
 } from "./types.js";
@@ -45,6 +47,10 @@ function buildSkepticPrompt(evidence: EvidencePacket, plan: Plan, index: number)
     `Changed files: ${evidence.changedFiles.length > 0 ? evidence.changedFiles.join(", ") : "(none)"}`,
     `Plan file: ${evidence.planFile ?? "(unavailable)"}`,
     `Prior gaps: ${evidence.priorGaps || "(none)"}`,
+    `Contract hash: ${evidence.contractHash}`,
+    `Workspace diff hash: ${evidence.workspaceDiffHash}`,
+    `Workspace status: ${evidence.workspaceStatus.length > 0 ? evidence.workspaceStatus.join(" | ") : "(clean)"}`,
+    `Host verification: ${evidence.hostVerification === undefined ? "(not configured)" : JSON.stringify(evidence.hostVerification)}`,
     "",
     "## Implementer's Closing Statement",
     evidence.finalResponse || "(no closing statement)",
@@ -56,7 +62,8 @@ function buildSkepticPrompt(evidence: EvidencePacket, plan: Plan, index: number)
     "4. Missing tests alone are NOT grounds for refutation unless a criterion explicitly requires them.",
     "5. NEVER invent requirements beyond the contract (objective + criteria + non-goals).",
     "6. In repeat verification rounds, focus on whether PRIOR_GAPS have been fixed. New issues are only valid if they are clearly demonstrable defects.",
-    "7. Audit the CURRENT workspace state — do not re-execute code unless it is a cheap spot-check.",
+    "7. Host verification is authoritative. A failed deterministic command must be refuted.",
+    "8. Every PRIOR_GAP must have current evidence that it was resolved; uncertainty means refuted.",
     "",
     "## Output",
     "Write your verdict as a single JSON object (no markdown, no preamble):",
@@ -93,9 +100,12 @@ export async function runClassifier(
   for (const result of skepticResults) {
     try {
       verdicts.push(parseVerdict(result));
-    } catch {
-      // Fail-open: a broken skeptic counts as "not refuted" (don't block the user)
-      verdicts.push({ refuted: false, gaps: [] });
+    } catch (error) {
+      verdicts.push({ refuted: true, gaps: [{
+        criterion: "verification-panel",
+        description: `Skeptic output was unavailable or invalid: ${error instanceof Error ? error.message : String(error)}`,
+        blocking: "unverifiable",
+      }] });
     }
   }
 
@@ -229,8 +239,10 @@ export async function collectEvidence(
   objective: string,
   finalResponse: string,
   priorGaps: string,
+  contractHash: string = createHash("sha256").update(objective).digest("hex"),
+  hostVerification?: HostVerificationEvidence,
 ): Promise<EvidencePacket> {
-  const changedFiles = await collectChangedFiles(workspace);
+  const workspaceState = await collectWorkspaceState(workspace);
   const planPath = join(workspace, ".flavor", "goal-plan.md");
   let planFile: string | null = null;
   try {
@@ -241,45 +253,40 @@ export async function collectEvidence(
 
   return {
     objective,
-    changedFiles: changedFiles.map((f) => relative(workspace, f)),
+    changedFiles: workspaceState.changedFiles,
     planFile,
     finalResponse,
     priorGaps,
+    contractHash,
+    workspaceDiffHash: workspaceState.diffHash,
+    workspaceStatus: workspaceState.status,
+    ...(hostVerification === undefined ? {} : { hostVerification }),
   };
 }
 
-async function collectChangedFiles(workspace: string): Promise<string[]> {
-  // Collect files modified in the workspace (non-.git, non-node_modules)
-  const results: string[] = [];
-  const seen = new Set<string>();
-
-  async function walk(dir: string): Promise<void> {
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const full = join(dir, entry.name);
-      const rel = relative(workspace, full);
-      if (
-        entry.name === ".git" ||
-        entry.name === "node_modules" ||
-        entry.name === ".flavor" ||
-        entry.name.startsWith(".")
-      ) continue;
-      if (entry.isDirectory()) {
-        await walk(full);
-      } else if (entry.isFile()) {
-        if (!seen.has(rel)) {
-          seen.add(rel);
-          results.push(full);
-        }
-      }
-    }
+async function collectWorkspaceState(workspace: string): Promise<{ changedFiles: string[]; status: string[]; diffHash: string }> {
+  const statusResult = await execFileNoThrow("git", ["-C", workspace, "status", "--porcelain=v1", "--untracked-files=all"], {
+    timeout: 30_000, useCwd: false,
+  });
+  if (statusResult.code !== 0) {
+    return {
+      changedFiles: [], status: ["not-a-git-worktree"],
+      diffHash: createHash("sha256").update("not-a-git-worktree").digest("hex"),
+    };
   }
-
-  await walk(workspace);
-  return results.sort();
+  const status = statusResult.stdout.split(/\r?\n/).map((line) => line.trimEnd()).filter(Boolean);
+  const changedFiles = status.map((line) => {
+    const value = line.slice(3);
+    const arrow = value.lastIndexOf(" -> ");
+    return arrow >= 0 ? value.slice(arrow + 4) : value;
+  }).sort();
+  const diff = await execFileNoThrow("git", ["-C", workspace, "diff", "--no-ext-diff", "--binary", "HEAD"], {
+    timeout: 30_000, useCwd: false,
+  });
+  const untracked = status.filter((line) => line.startsWith("?? ")).map((line) => line.slice(3)).sort().join("\n");
+  return {
+    changedFiles,
+    status,
+    diffHash: createHash("sha256").update(diff.stdout).update("\nUNTRACKED\n").update(untracked).digest("hex"),
+  };
 }

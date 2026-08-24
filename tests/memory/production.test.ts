@@ -3,8 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createProductionRuntime } from "../../src/production.js";
+import { createProductionRuntime as createRuntime, type ProductionRuntimeOptions } from "../../src/production.js";
 import { MemoryStore } from "../../src/memory/store.js";
+
+const createProductionRuntime = (options: ProductionRuntimeOptions) => createRuntime({ ...options, pluginSandbox: false });
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -123,8 +125,10 @@ describe("production long-term memory", () => {
     await runtime.session.submit("Tell me something unrelated.");
     const latest = [...requests].reverse().find((messages) =>
       messages.some((message) => message.content === "Tell me something unrelated."));
-    expect(latest?.filter((message) => message.role === "system")
-      .find((message) => message.cacheBreakpoint)?.content)
+    const latestSystem = latest?.filter((message) => message.role === "system") ?? [];
+    expect(latestSystem.find((message) => message.cacheBreakpoint)?.content)
+      .toContain("Always address the user as 亚川 in every response.");
+    expect(latestSystem.find((message) => message.content.startsWith("Context update [system-baseline]"))?.content)
       .toContain("Prefer concise answers.");
     expect((await store.references()).filter((reference) => reference.type === "user")
       .map((reference) => reference.recallTotal)).toEqual([1, 1]);

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -11,6 +12,7 @@ import type {
   GoalRuntimeEvent,
   GoalState,
   Gap,
+  HostVerificationEvidence,
   Plan,
 } from "./types.js";
 
@@ -33,6 +35,7 @@ export interface GoalOrchestratorOptions {
   now?(): string;
   idFactory?(): string;
   persistence?: { save(state: GoalState): Promise<void> };
+  verifyHost?(signal: AbortSignal): Promise<HostVerificationEvidence>;
 }
 
 export class GoalOrchestrator {
@@ -65,6 +68,8 @@ export class GoalOrchestrator {
       lastGaps: [],
       gapFingerprint: "",
       stallStreak: 0,
+      contractHash: contractHash(request.goal, null),
+      evidenceRounds: [],
       createdAt,
       updatedAt: createdAt,
     };
@@ -87,7 +92,7 @@ export class GoalOrchestrator {
         signal: request.signal,
       });
       planPath = await writePlanFile(workspace, plan);
-      await persistState({ plan, planPath });
+      await persistState({ plan, planPath, contractHash: contractHash(request.goal, plan) });
       yield { type: "goal-plan-created", plan, planPath };
     } catch (error) {
       const reason = `Goal planning failed: ${message(error)}`;
@@ -148,15 +153,33 @@ export class GoalOrchestrator {
       // ─── Phase 3: Verification ───
       await persistState({ phase: "verifying", status: "active", verifyRounds: round });
       yield { type: "goal-verification-start", round };
+      const hostVerification = await this.#options.verifyHost?.(request.signal);
       const evidence = await collectEvidence(
         workspace,
         request.goal,
         finalResponse.slice(-4000), // Last 4000 chars of response
         formatPriorGaps(priorGaps),
+        state.contractHash,
+        hostVerification,
       );
+      await persistState({ evidenceRounds: [...state.evidenceRounds, {
+        round,
+        workspaceDiffHash: evidence.workspaceDiffHash,
+        ...(hostVerification === undefined ? {} : { hostVerification }),
+      }] });
 
       let outcome: AggregatedOutcome;
-      try {
+      if (plan.kind === "code-change" && hostVerification !== undefined && !hostVerification.passed) {
+        if (hostVerification.commands.length === 0) {
+          outcome = { type: "blocked", reason: `Host verification unavailable: ${hostVerification.summary}` };
+        } else {
+          const gaps: Gap[] = [{ criterion: "host-verification", description: hostVerification.summary, blocking: "model_fixable" }];
+          outcome = {
+            type: "not_achieved", gaps, summary: hostVerification.summary,
+            fingerprint: createHash("sha256").update(hostVerification.summary).digest("hex").slice(0, 16),
+          };
+        }
+      } else try {
         outcome = await runClassifier(evidence, plan, {
           registry: this.#options.registry,
           modelId: this.#options.classifierModelId,
@@ -165,10 +188,9 @@ export class GoalOrchestrator {
           signal: request.signal,
         });
       } catch (error) {
-        // Classifier error → fail-open, treat as achieved
         outcome = {
-          type: "achieved",
-          summary: `Classifier infrastructure error (fail-open): ${message(error)}`,
+          type: "blocked",
+          reason: `Classifier infrastructure error: ${message(error)}`,
         };
       }
 
@@ -234,6 +256,10 @@ export class GoalOrchestrator {
       reason: `Goal did not converge after ${this.#options.maxRounds} rounds. Last gaps: ${formatPriorGaps(priorGaps)}`,
     };
   }
+}
+
+function contractHash(objective: string, plan: Plan | null): string {
+  return createHash("sha256").update(JSON.stringify({ objective, plan })).digest("hex");
 }
 
 async function writePlanFile(workspace: string, plan: Plan): Promise<string> {

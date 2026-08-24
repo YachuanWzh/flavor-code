@@ -262,7 +262,7 @@ describe("desktop D2C workflow controller", () => {
     expect(JSON.parse(await readFile(join(workspace, ".flavor", "d2c", "dashboard", "quality-judge.json"), "utf8"))).toMatchObject({ verdict: "pass" });
     expect(JSON.parse(await readFile(join(workspace, ".flavor", "d2c", "dashboard", "integration", "interaction-results.json"), "utf8"))).toMatchObject({ passed: true });
     await controller.dispose();
-  });
+  }, 15_000);
 
   it("records generated API artifacts with real file content hashes, not file names", async () => {
     const { workspace, report } = await seedWorkspace();

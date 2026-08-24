@@ -5,13 +5,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { createProductionRuntime, createPromptEnvironment } from "../../src/production.js";
+import { createProductionRuntime as createRuntime, createPromptEnvironment, type ProductionRuntimeOptions } from "../../src/production.js";
 import { SessionStore } from "../../src/session/store.js";
 import { writeFile, mkdir } from "node:fs/promises";
 import { createFileTokenStore } from "../../src/auth/store.js";
 import { oauthCredentialId } from "../../src/auth/oauth-config.js";
 import type { PalClientLike } from "../../src/pals/tools.js";
 import type { BrokerEvent, CoWorkSnapshot, DeliveryReceipt, PalPresence } from "../../src/pals/protocol.js";
+
+const createProductionRuntime = (options: ProductionRuntimeOptions) => createRuntime({ ...options, pluginSandbox: false });
 
 const PAL_A = "10000000-0000-4000-8000-000000000001";
 const PAL_B = "10000000-0000-4000-8000-000000000002";
@@ -44,6 +46,24 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("production runtime", () => {
+  it("isolates project plugins by default and exposes their content fingerprint", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-plugin-sandbox-")); roots.push(workspace);
+    const plugin = join(workspace, ".flavor", "plugins", "safe-default");
+    await mkdir(plugin, { recursive: true });
+    await writeFile(join(plugin, "flavor-plugin.json"), JSON.stringify({
+      name: "safe-default", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
+      contributes: { commands: [], tools: [], hooks: [], skillRoots: [], modelAdapters: [] },
+    }));
+    await writeFile(join(plugin, "index.mjs"), "export function activate() {}", "utf8");
+
+    const runtime = await createRuntime({ workspace, home: workspace, environment: {}, approvalPolicy: "deny", output: () => {} });
+    try {
+      expect(runtime.services.plugins()).toEqual([
+        expect.objectContaining({ name: "safe-default", sandboxed: true, fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+      ]);
+    } finally { await runtime.dispose(); }
+  });
+
   it("delivers collaboration events in broker socket order even when an earlier event awaits", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pals-order-")); roots.push(workspace);
     const client = new FakeProductionPalClient();
@@ -781,7 +801,7 @@ describe("production runtime", () => {
     }));
     const store = new SessionStore({ workspace });
     await store.save({
-      version: 3,
+      version: 4,
       sessionId: "planned-session",
       createdAt: "2026-07-13T01:00:00.000Z",
       updatedAt: "2026-07-13T01:01:00.000Z",
@@ -871,7 +891,7 @@ describe("production runtime", () => {
     }`);
     const store = new SessionStore({ workspace });
     await store.save({
-      version: 3,
+      version: 4,
       sessionId: "old-plan-session",
       createdAt: "2026-07-19T01:00:00.000Z",
       updatedAt: "2026-07-19T01:01:00.000Z",
