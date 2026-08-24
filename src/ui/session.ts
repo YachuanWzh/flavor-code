@@ -82,6 +82,7 @@ export interface SessionServices {
   subagentModel(): string;
   llmServiceName?(): string | undefined;
   permissionMode(): PermissionMode;
+  addContext?(content: string): void | Promise<void>;
   run(
     prompt: string,
     signal: AbortSignal,
@@ -342,7 +343,10 @@ export class FlavorSession {
     if (this.#closed) throw new Error("Session is closed");
     this.#startPromise ??= this.#services.hooks.emit({
       version: 1, type: "SessionStart", payload: { workspace: this.#services.workspace },
-    }).then(() => { this.#started = true; });
+    }).then(async (decision) => {
+      if (decision.additionalContext !== undefined) await this.#services.addContext?.(decision.additionalContext);
+      this.#started = true;
+    });
     return this.#startPromise;
   }
 

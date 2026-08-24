@@ -2,7 +2,19 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.2.19 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.2.20 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.2.20] - 2026-08-24
+
+### 新增
+- 新增只读 `Skill` 工具：运行中的组合 Skill 可以按名称继续加载依赖 Skill；同时接受 `superharness:test-driven-development` 这类插件限定别名，恢复跨宿主工作流的 Skill 组合语义
+- 新增 Claude 风格 Skill 参数展开：支持 `$ARGUMENTS`、`$ARGUMENTS[N]` 和 `$N`，含引号与转义参数解析；未声明占位符时以 `ARGUMENTS:` 兜底追加
+
+### 修复
+- `SessionStart` Hook 返回的 `additionalContext` 现在会在首轮模型调用前写入持久会话上下文，并在恢复会话时按内容去重；插件注入的工程规则不再被静默丢弃
+
+### 测试
+- 新增 Skill 参数、组合 Skill、限定别名和 SessionStart 上下文持久化测试；同步扩展系统提示词的可用工具契约
 
 ## [1.2.19] - 2026-08-24
 
@@ -332,6 +344,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.2.20 | 2026-08-24 | 组合 Skill 工具、Claude 风格 Skill 参数展开、SessionStart additionalContext 持久注入 |
 | 1.2.19 | 2026-08-24 | 插件沙箱升级 Worker 线程隔离；影子验证干跑改用 Worker 沙箱杜绝宿主副作用 |
 | 1.2.18 | 2026-08-24 | 修复单行代码块渲染丢失；修复 Windows 下 Ctrl+C 偶发无法退出（二次强制退出 + 关闭看门狗 + 清理步骤逐步超时） |
 | 1.2.17 | 2026-08-20 | /logout 登出命令、OAuth 单凭据登录语义、模型决策持久化改进 |

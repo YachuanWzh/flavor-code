@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { HookBus } from "../../src/hooks/bus.js";
 import { PermissionEngine } from "../../src/permissions/engine.js";
 import { SkillRegistry } from "../../src/skills/registry.js";
-import { createSkillResourceTool } from "../../src/skills/tool.js";
+import { createSkillResourceTool, createSkillTool } from "../../src/skills/tool.js";
 import { ToolRuntime } from "../../src/tools/runtime.js";
 
 describe("SkillResource tool", () => {
@@ -27,5 +27,24 @@ describe("SkillResource tool", () => {
       .resolves.toMatchObject({ ok: true, output: { encoding: "base64", content: "/wD+", size: 3 } });
     await expect(runtime.execute({ name: "SkillResource", input: { skill: "cook", reference: "references/hidden.txt" } }, { agent: "main" }))
       .resolves.toMatchObject({ ok: false });
+  });
+});
+
+describe("Skill tool", () => {
+  it("loads composable skills, accepts plugin-qualified aliases, and expands arguments", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-skill-compose-"));
+    const root = join(workspace, ".flavor", "skills", "testing");
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "SKILL.md"), "---\nname: testing\ndescription: Test changes\n---\nTest goal: $ARGUMENTS");
+    const registry = new SkillRegistry({ projectRoots: [join(workspace, ".flavor", "skills")] });
+    const runtime = new ToolRuntime({ tools: [createSkillTool(registry)], hooks: new HookBus(),
+      permissions: new PermissionEngine({ workspace }) });
+
+    await expect(runtime.execute({
+      name: "Skill", input: { skill: "superharness:testing", arguments: "fix login" },
+    }, { agent: "main" })).resolves.toMatchObject({
+      ok: true,
+      output: { skill: "testing", content: "Test goal: fix login" },
+    });
   });
 });

@@ -48,7 +48,8 @@ import type { ApprovalDecision } from "./tools/runtime.js";
 import { PluginHost } from "./plugins/host.js";
 import type { PluginCommandHandler } from "./plugins/types.js";
 import { SkillRegistry } from "./skills/registry.js";
-import { createSkillResourceTool } from "./skills/tool.js";
+import { createSkillResourceTool, createSkillTool } from "./skills/tool.js";
+import { expandSkillArguments } from "./skills/arguments.js";
 import { SESSION_VERSION, SessionStore, type SessionDocument } from "./session/store.js";
 import { SessionHistory } from "./session/tree.js";
 import { ProjectSleepOrganizer, ProjectSleepScheduler, localDateKey } from "./sleep/organizer.js";
@@ -615,7 +616,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   });
   const skillsReady = skills.discover();
   skillsReady.catch(() => undefined); // Re-surfaced at the await before harness creation.
-  tools.push(createSkillResourceTool(skills));
+  tools.push(createSkillTool(skills), createSkillResourceTool(skills));
   if (options.extraTools !== undefined) tools.push(...options.extraTools);
   const flavor = await optionalText(join(workspace, "FLAVOR.md"));
   const instructionBaseline = await workspaceInstructions.baseline();
@@ -1311,6 +1312,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     subagentModel: () => childModel,
     llmServiceName: () => effectiveLlm?.serviceName,
     permissionMode: () => harness.permissionMode,
+    addContext: (content) => {
+      const duplicate = harness.main.context.snapshot().messages.some((entry) => entry.role === "system" && entry.content === content);
+      if (!duplicate) harness.main.context.append({ role: "system", content });
+    },
     ...(palServices === undefined ? {} : { pals: palServices }),
     run: (prompt, signal, runOptions) => {
       interruptedTaskPlanNeedsReassessment = false;
@@ -1931,7 +1936,7 @@ async function* runMain(
     const ideContext = await ide?.promptContext();
     if (ideContext !== undefined) contexts.push(ideContext);
     const skill = await skills.match(prompt);
-    if (skill !== undefined) contexts.push(`Matched skill: ${skill.name}\n${await skills.loadBody(skill)}`);
+    if (skill !== undefined) contexts.push(`Matched skill: ${skill.name}\n${expandSkillArguments(await skills.loadBody(skill), prompt)}`);
     const additionalContext = contexts.length === 0 ? undefined : contexts.join("\n\n");
     for await (const event of harness.main.loop.run({
       prompt,
@@ -1974,7 +1979,7 @@ async function* runExplicitSkill(
       return;
     }
     const userPrompt = prompt || `Apply the ${skillName} skill.`;
-    const additionalContext = `Matched skill: ${skill.name}\n${await skills.loadBody(skill)}`;
+    const additionalContext = `Matched skill: ${skill.name}\n${expandSkillArguments(await skills.loadBody(skill), prompt)}`;
     yield* harness.main.loop.run({ prompt: userPrompt, signal, additionalContext });
   } catch (error) {
     yield { type: "error", error: { code: "unknown", message: message(error) } };

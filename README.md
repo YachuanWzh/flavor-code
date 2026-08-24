@@ -247,9 +247,9 @@ flavor mcp disable docs
 
 </details>
 
-A Skill is a `SKILL.md` with YAML frontmatter, placed in `.flavor/skills/<name>/` or `~/.flavor-code/skills/<name>/`. Flavor loads skills progressively based on the task, and you can invoke one explicitly with `/<skill-name>`.
+A Skill is a `SKILL.md` with YAML frontmatter, placed in `.flavor/skills/<name>/` or `~/.flavor-code/skills/<name>/`. Flavor loads skills progressively based on the task, and you can invoke one explicitly with `/<skill-name>`. Skill bodies support `$ARGUMENTS`, `$ARGUMENTS[N]`, and `$N` substitutions. A running composite Skill can load a dependency through the read-only `Skill` tool; plugin-qualified names such as `superharness:test-driven-development` resolve to discovered skills.
 
-Plugins live in `.flavor/plugins/` and can register commands, tools, hooks, Skill roots, and model adapters.
+Plugins live in `.flavor/plugins/` and can register commands, tools, hooks, Skill roots, and model adapters. `additionalContext` returned by `SessionStart` and `UserPromptSubmit` hooks is added to the current task context, enabling reliable project-level engineering policy injection.
 
 > [!WARNING]
 > Plugins and agent self-registered tools are in-process JavaScript, not a security sandbox. Only install, enable, and approve code you trust.

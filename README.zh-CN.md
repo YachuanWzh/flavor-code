@@ -247,9 +247,9 @@ flavor mcp disable docs
 
 </details>
 
-Skill 是带有 YAML 头信息的 `SKILL.md`，放在 `.flavor/skills/<name>/` 或 `~/.flavor-code/skills/<name>/`。Flavor 会按任务渐进加载，也支持通过 `/<skill-name>` 显式调用。
+Skill 是带有 YAML 头信息的 `SKILL.md`，放在 `.flavor/skills/<name>/` 或 `~/.flavor-code/skills/<name>/`。Flavor 会按任务渐进加载，也支持通过 `/<skill-name>` 显式调用。Skill 正文支持 `$ARGUMENTS`、`$ARGUMENTS[N]` 和 `$N` 参数占位符；运行中的组合 Skill 可以使用只读 `Skill` 工具继续加载依赖 Skill，插件限定名称（如 `superharness:test-driven-development`）会安全解析到已发现的 Skill。
 
-插件放在 `.flavor/plugins/`，可以注册命令、工具、Hook、Skill 根目录和模型适配器。
+插件放在 `.flavor/plugins/`，可以注册命令、工具、Hook、Skill 根目录和模型适配器。`SessionStart` 与 `UserPromptSubmit` Hook 返回的 `additionalContext` 会进入当前任务上下文，可用于注入项目级工程规则。
 
 > [!WARNING]
 > 插件和 Agent 自注册工具是进程内执行的 JavaScript，不是安全沙箱。只安装、启用和批准你信任的代码。

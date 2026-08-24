@@ -752,6 +752,20 @@ describe("FlavorSession", () => {
     expect(outputs).toContain("hel"); expect(outputs).toContain("lo");
   });
 
+  it("persists SessionStart additionalContext before the first run", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const addContext = vi.fn();
+    base.addContext = addContext;
+    base.hooks.on("SessionStart", () => ({ decision: "allow", additionalContext: "project harness rules" }));
+    const session = new FlavorSession(base);
+
+    await session.submit("hello");
+
+    expect(addContext).toHaveBeenCalledOnce();
+    expect(addContext).toHaveBeenCalledWith("project harness rules");
+  });
+
   it("first interrupt cancels an active run and second requests exit", async () => {
     const events: string[] = []; const outputs: string[] = [];
     const base = services(events, outputs);
