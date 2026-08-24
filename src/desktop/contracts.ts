@@ -208,6 +208,18 @@ export interface DesktopSessionSummary {
   preview?: string;
 }
 
+/** Lightweight state used to render and switch projects without activating them. */
+export interface DesktopProjectSummary {
+  workspace: string;
+  sessions: readonly DesktopSessionSummary[];
+  activeSession?: {
+    sessionId: string;
+    busy: boolean;
+  };
+  /** Includes foreground agent work and managed background jobs. */
+  running: boolean;
+}
+
 export interface DesktopApproval {
   agent: "main" | "subagent";
   tool: string;
@@ -221,6 +233,8 @@ export interface DesktopApproval {
 
 export interface DesktopSnapshot {
   workspace?: string;
+  /** Every project kept open by the desktop app, in most-recently-opened order. */
+  projects?: readonly DesktopProjectSummary[];
   sessions: readonly DesktopSessionSummary[];
   activeSession?: {
     sessionId: string;
@@ -357,13 +371,17 @@ export interface D2cReportEventPayload {
   pageCount?: number;
 }
 
-export type DesktopEvent =
+export type DesktopEvent = (
   | { type: "snapshot"; snapshot: DesktopSnapshot }
   | { type: "session-started"; payload: SessionStartedPayload }
   | { type: "session-output"; sessionId: string; event: SessionOutput }
   | { type: "d2c-progress"; payload: D2cProgressEvent }
   | { type: "d2c-report"; payload: D2cReportEventPayload }
-  | { type: "runtime-error"; sessionId?: string; message: string };
+  | { type: "runtime-error"; sessionId?: string; message: string }
+) & {
+  /** Present for events emitted by a project managed in the desktop app. */
+  workspace?: string;
+};
 
 export interface FlavorDesktopApi {
   bootstrap(): Promise<DesktopSnapshot>;

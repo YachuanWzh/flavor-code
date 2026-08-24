@@ -49,6 +49,33 @@ export function workspaceName(path: string | undefined): string {
   return path.replace(/[\\/]+$/, "").split(/[\\/]/).at(-1) || path;
 }
 
+export interface ProjectActivityState {
+  running: boolean;
+  sessionId: string | undefined;
+}
+
+/** Tracks a running-to-idle edge as an unread completion until the project is opened. */
+export function reconcileProjectCompletionNotices(
+  projects: readonly { workspace: string; running: boolean; activeSession?: { sessionId: string } }[],
+  previousActivity: ReadonlyMap<string, ProjectActivityState>,
+  currentNotices: ReadonlyMap<string, string | null>,
+): { activity: Map<string, ProjectActivityState>; notices: Map<string, string | null> } {
+  const activity = new Map(previousActivity);
+  const notices = new Map(currentNotices);
+  for (const project of projects) {
+    const previous = previousActivity.get(project.workspace);
+    const sessionId = project.activeSession?.sessionId;
+    if (project.running) {
+      activity.set(project.workspace, { running: true, sessionId });
+      notices.delete(project.workspace);
+      continue;
+    }
+    if (previous?.running) notices.set(project.workspace, previous.sessionId ?? sessionId ?? null);
+    activity.set(project.workspace, { running: false, sessionId });
+  }
+  return { activity, notices };
+}
+
 export function applyDesktopOutput(state: TranscriptState, event: SessionOutput): TranscriptState {
   return transcriptReducer(state, { type: "session", event });
 }

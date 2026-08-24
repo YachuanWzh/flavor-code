@@ -204,7 +204,7 @@ npm run desktop:pack     # Windows portable directory
 npm run desktop:dist     # Windows NSIS installer
 ```
 
-The desktop app provides project and session switching, streaming Markdown, tool and diff views, permission confirmations, task status, and management of Skills, MCP, memory, and models.
+The desktop app keeps multiple projects open at once and lets you switch between each project's sessions without stopping work in the background. Running tasks use an animated activity indicator; completed-but-unread tasks leave a blue dot until you open them. It also provides streaming Markdown, tool and diff views, permission confirmations, task status, and management of Skills, MCP, memory, and models.
 
 The **E2E** module in the sidebar drives a rough requirement or an existing design export through the full delivery pipeline: it generates a PRD and an interactive prototype for review, then moves into D2C visual implementation (Vue 3 / React) under `src/d2c-output/<task>/`. A Vite dev server starts automatically for pixel-level comparison, producing a visual-fidelity score and a structured diff report (region offsets, color deviations, font differences); the results workbench offers overlay, curtain, flicker, and heatmap modes, an SVG annotation layer, and a severity-sorted issue list. After visual review, a Swagger/OpenAPI contract is generated or imported to auto-create Axios wrappers and an Express mock server, followed by autonomous interactive acceptance and scored delivery.
 

@@ -1,6 +1,6 @@
 import { appendFileSync } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell } from "electron";
@@ -40,6 +40,8 @@ import {
   SwitchDesktopModelInputSchema,
   SubmitInputSchema,
   type DesktopEvent,
+  type DesktopSnapshot,
+  type SessionStartedPayload,
 } from "./contracts.js";
 import { createD2cCaptureService } from "./d2c-capture.js";
 import { isLoopbackPreviewUrl } from "../d2c/interaction.js";
@@ -51,7 +53,7 @@ import { createD2cJudgeConfigStore } from "./d2c-judge-config.js";
 import { createD2cTools } from "../d2c/tools.js";
 import { createProductionRuntime } from "../production.js";
 import { DesktopRuntimeController } from "./runtime-controller.js";
-import { isSafeExternalUrl, isTrustedNavigation, normalizePersistedWorkspace } from "./security.js";
+import { isSafeExternalUrl, isTrustedNavigation, normalizePersistedDesktopProjects } from "./security.js";
 import { desktopWindowChrome } from "./window-options.js";
 import { installCrashGuard } from "../utils/crash-guard.js";
 
@@ -106,62 +108,123 @@ function judgeImage(png: Buffer): Buffer {
   return image.resize({ width: Math.max(1, Math.round(size.width * ratio)), height: Math.max(1, Math.round(size.height * ratio)), quality: "best" }).toPNG();
 }
 
-const controller = new DesktopRuntimeController({
-  emit: emitDesktopEvent,
-  runD2cInteractionTests: (manifest, baseUrl, mockUrl) => d2cEmbedded.run(manifest, baseUrl, mockUrl),
-  observeD2cPages: (manifest, baseUrl) => d2cEmbedded.observe(manifest, baseUrl),
-  captureD2cPreview: (url) => d2cEmbedded.capture(url),
-  d2cJudge: {
-    config: () => judgeStore().view(),
-    saveConfig: (input) => judgeStore().save(input),
-    evaluate: async ({ report, interaction, designPng, implementationPng }) => {
-      const config = await judgeStore().load();
-      if (config === undefined) throw new Error("Configure a multimodal D2C judge model before running the quality gate");
-      const assessment = await d2cJudgeClient.evaluate(config, {
-        prompt: buildD2cJudgePrompt({ report, interaction }),
-        designPng: judgeImage(designPng), implementationPng: judgeImage(implementationPng),
-      });
-      return finalizeD2cQualityJudgment({ assessment, report, interaction, model: config.model, passThreshold: config.passThreshold });
+interface ManagedDesktopProject {
+  controller: DesktopRuntimeController;
+  snapshot: DesktopSnapshot;
+}
+
+const managedProjects = new Map<string, ManagedDesktopProject>();
+const projectOrder: string[] = [];
+let activeWorkspace: string | undefined;
+
+function projectSummaries() {
+  return projectOrder.flatMap((workspace) => {
+    const project = managedProjects.get(workspace);
+    if (project === undefined) return [];
+    const snapshot = project.snapshot;
+    const active = snapshot.activeSession;
+    return [{
+      workspace,
+      sessions: snapshot.sessions,
+      ...(active === undefined ? {} : { activeSession: { sessionId: active.sessionId, busy: active.busy } }),
+      running: (active?.busy ?? false) || snapshot.jobs.some((job) => job.state === "running"),
+    }];
+  });
+}
+
+function decorateSnapshot(snapshot: DesktopSnapshot): DesktopSnapshot {
+  return { ...snapshot, projects: projectSummaries() };
+}
+
+function decorateSessionStarted(payload: SessionStartedPayload): SessionStartedPayload {
+  return { ...payload, snapshot: decorateSnapshot(payload.snapshot) };
+}
+
+function emitManagedDesktopEvent(workspace: string | undefined, event: DesktopEvent): void {
+  if (workspace === undefined) {
+    emitDesktopEvent(event.type === "snapshot" ? { ...event, snapshot: decorateSnapshot(event.snapshot) } : event);
+    return;
+  }
+  const project = managedProjects.get(workspace);
+  if (project !== undefined) {
+    if (event.type === "snapshot") project.snapshot = event.snapshot;
+    else if (event.type === "session-started") project.snapshot = event.payload.snapshot;
+  }
+  if (workspace === activeWorkspace) {
+    if (event.type === "snapshot") emitDesktopEvent({ ...event, workspace, snapshot: decorateSnapshot(event.snapshot) });
+    else if (event.type === "session-started") emitDesktopEvent({ ...event, workspace, payload: decorateSessionStarted(event.payload) });
+    else emitDesktopEvent({ ...event, workspace });
+    return;
+  }
+  // Background output lets the renderer keep a warm transcript cache. Snapshot
+  // changes redraw the active project's rail without stealing its conversation.
+  if (event.type === "session-output") emitDesktopEvent({ ...event, workspace });
+  if ((event.type === "snapshot" || event.type === "session-started") && activeWorkspace !== undefined) {
+    emitDesktopEvent({ type: "snapshot", workspace: activeWorkspace, snapshot: decorateSnapshot(controller.snapshot()) });
+  }
+}
+
+function createDesktopController(workspace?: string): DesktopRuntimeController {
+  return new DesktopRuntimeController({
+    emit: (event) => emitManagedDesktopEvent(workspace, event),
+    runD2cInteractionTests: (manifest, baseUrl, mockUrl) => d2cEmbedded.run(manifest, baseUrl, mockUrl),
+    observeD2cPages: (manifest, baseUrl) => d2cEmbedded.observe(manifest, baseUrl),
+    captureD2cPreview: (url) => d2cEmbedded.capture(url),
+    d2cJudge: {
+      config: () => judgeStore().view(),
+      saveConfig: (input) => judgeStore().save(input),
+      evaluate: async ({ report, interaction, designPng, implementationPng }) => {
+        const config = await judgeStore().load();
+        if (config === undefined) throw new Error("Configure a multimodal D2C judge model before running the quality gate");
+        const assessment = await d2cJudgeClient.evaluate(config, {
+          prompt: buildD2cJudgePrompt({ report, interaction }),
+          designPng: judgeImage(designPng), implementationPng: judgeImage(implementationPng),
+        });
+        return finalizeD2cQualityJudgment({ assessment, report, interaction, model: config.model, passThreshold: config.passThreshold });
+      },
+      planInteractions: async (input) => {
+        const config = await judgeStore().load();
+        if (config === undefined) throw new Error("Configure a multimodal D2C judge model before autonomous interaction review");
+        return d2cJudgeClient.planInteractions(config, {
+          prompt: buildD2cAutonomousPlanPrompt(input),
+          screenshots: input.observations.map((page) => judgeImage(page.screenshot)),
+          observedPages: input.observations.map((page) => page.url),
+          observedSelectors: input.observations.flatMap((page) => page.elements.map((element) => element.selector)),
+        });
+      },
     },
-    planInteractions: async (input) => {
-      const config = await judgeStore().load();
-      if (config === undefined) throw new Error("Configure a multimodal D2C judge model before autonomous interaction review");
-      return d2cJudgeClient.planInteractions(config, {
-        prompt: buildD2cAutonomousPlanPrompt(input),
-        screenshots: input.observations.map((page) => judgeImage(page.screenshot)),
-        observedPages: input.observations.map((page) => page.url),
-        observedSelectors: input.observations.flatMap((page) => page.elements.map((element) => element.selector)),
-      });
-    },
-  },
-  createRuntime: async (runtimeOptions) => createProductionRuntime({
-    ...runtimeOptions,
-    ...(runtimeOptions.workspace === undefined ? {} : {
-      extraTools: createD2cTools(runtimeOptions.workspace, {
-        capture: d2cCapture,
-        onProgress: (progress) => emitDesktopEvent({ type: "d2c-progress", payload: progress }),
-        onReport: (report) => emitDesktopEvent({ type: "d2c-report", payload: report }),
+    createRuntime: async (runtimeOptions) => createProductionRuntime({
+      ...runtimeOptions,
+      ...(runtimeOptions.workspace === undefined ? {} : {
+        extraTools: createD2cTools(runtimeOptions.workspace, {
+          capture: d2cCapture,
+          onProgress: (progress) => emitManagedDesktopEvent(workspace, { type: "d2c-progress", payload: progress }),
+          onReport: (report) => emitManagedDesktopEvent(workspace, { type: "d2c-report", payload: report }),
+        }),
       }),
     }),
-  }),
-});
+  });
+}
+
+const detachedController = createDesktopController();
+let controller = detachedController;
 
 function statePath(): string {
   return join(app.getPath("userData"), "desktop-state.json");
 }
 
-async function loadPersistedWorkspace(): Promise<string | undefined> {
+async function loadPersistedProjects() {
   try {
     const raw = await readFile(statePath(), "utf8");
-    if (raw.length > 40_000) return undefined;
-    return normalizePersistedWorkspace(JSON.parse(raw));
+    if (raw.length > 100_000) return { projects: [] as readonly string[] };
+    return normalizePersistedDesktopProjects(JSON.parse(raw));
   } catch {
-    return undefined;
+    return { projects: [] as readonly string[] };
   }
 }
 
-async function savePersistedWorkspace(workspace: string): Promise<void> {
-  await writeFile(statePath(), `${JSON.stringify({ workspace })}\n`, { encoding: "utf8", mode: 0o600 });
+async function savePersistedProjects(): Promise<void> {
+  await writeFile(statePath(), `${JSON.stringify({ workspace: activeWorkspace, projects: projectOrder })}\n`, { encoding: "utf8", mode: 0o600 });
 }
 
 async function assertDirectory(path: string): Promise<void> {
@@ -169,10 +232,24 @@ async function assertDirectory(path: string): Promise<void> {
 }
 
 async function openWorkspace(path: string) {
-  await assertDirectory(path);
-  const snapshot = await controller.openWorkspace(path);
-  await savePersistedWorkspace(path);
-  return snapshot;
+  const workspace = resolve(path);
+  await assertDirectory(workspace);
+  let project = managedProjects.get(workspace);
+  if (project === undefined) {
+    const nextController = createDesktopController(workspace);
+    project = { controller: nextController, snapshot: nextController.snapshot() };
+    managedProjects.set(workspace, project);
+    projectOrder.unshift(workspace);
+    activeWorkspace = workspace;
+    controller = nextController;
+    project.snapshot = await nextController.openWorkspace(workspace);
+  } else {
+    activeWorkspace = workspace;
+    controller = project.controller;
+    project.snapshot = await controller.refreshSessions();
+  }
+  await savePersistedProjects();
+  return decorateSnapshot(project.snapshot);
 }
 
 async function chooseAndOpenWorkspace() {
@@ -198,10 +275,18 @@ function appIconDataUrl(): string | undefined {
 function installIpcHandlers(): void {
   ipcMain.handle(DESKTOP_CHANNELS.appIcon, () => appIconDataUrl());
   ipcMain.handle(DESKTOP_CHANNELS.bootstrap, async () => {
-    const workspace = await loadPersistedWorkspace();
-    if (workspace === undefined) return controller.snapshot();
-    try { return await openWorkspace(workspace); }
-    catch { return controller.snapshot(); }
+    const persisted = await loadPersistedProjects();
+    for (const path of [...persisted.projects].reverse()) {
+      try { await openWorkspace(path); }
+      catch { /* A moved or deleted project must not block the remaining list. */ }
+    }
+    if (persisted.workspace !== undefined && managedProjects.has(resolve(persisted.workspace))) {
+      try { return await openWorkspace(persisted.workspace); }
+      catch { /* fall through to the most recently available project */ }
+    }
+    const fallback = projectOrder[0];
+    if (fallback !== undefined) return openWorkspace(fallback);
+    return decorateSnapshot(controller.snapshot());
   });
   ipcMain.handle(DESKTOP_CHANNELS.chooseWorkspace, chooseAndOpenWorkspace);
   ipcMain.handle(DESKTOP_CHANNELS.openWorkspace, async (_event, value) => {
@@ -210,11 +295,11 @@ function installIpcHandlers(): void {
   });
   ipcMain.handle(DESKTOP_CHANNELS.startSession, async (_event, value) => {
     const { resumeSession } = StartSessionInputSchema.parse(value);
-    return controller.startSession(resumeSession);
+    return decorateSessionStarted(await controller.startSession(resumeSession));
   });
   ipcMain.handle(DESKTOP_CHANNELS.deleteSession, async (_event, value) => {
     const { sessionId } = DeleteSessionInputSchema.parse(value);
-    return controller.deleteSession(sessionId);
+    return decorateSnapshot(await controller.deleteSession(sessionId));
   });
   ipcMain.handle(DESKTOP_CHANNELS.showAppMenu, async (_event, value) => {
     const { menu, x, y } = AppMenuInputSchema.parse(value);
@@ -284,10 +369,11 @@ function installIpcHandlers(): void {
     return controller.deleteMemory(DeleteMemoryInputSchema.parse(value).id);
   });
   ipcMain.handle(DESKTOP_CHANNELS.switchModel, async (_event, value) => {
-    return controller.switchModel(SwitchDesktopModelInputSchema.parse(value).modelId);
+    return decorateSnapshot(await controller.switchModel(SwitchDesktopModelInputSchema.parse(value).modelId));
   });
   ipcMain.handle(DESKTOP_CHANNELS.addModel, async (_event, value) => {
-    return controller.addModel(AddDesktopModelInputSchema.parse(value));
+    const result = await controller.addModel(AddDesktopModelInputSchema.parse(value));
+    return { ...result, snapshot: decorateSnapshot(result.snapshot) };
   });
   ipcMain.handle(DESKTOP_CHANNELS.d2cImport, async (_event, value) => {
     const { task } = D2cImportInputSchema.parse(value);
@@ -465,7 +551,8 @@ async function createWindow(): Promise<void> {
     if (quitting) return;
     event.preventDefault();
     quitting = true;
-    void controller.dispose().finally(() => {
+    const controllers = [detachedController, ...[...managedProjects.values()].map((project) => project.controller)];
+    void Promise.all(controllers.map((item) => item.dispose())).finally(() => {
       mainWindow?.destroy();
       app.quit();
     });

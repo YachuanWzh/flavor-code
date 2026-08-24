@@ -11,7 +11,7 @@ import type {
   DesktopSnapshot,
   DesktopSessionSummary,
 } from "../contracts.js";
-import { applyDesktopSessionOutput, groupSessions, permissionLabel, sessionTitle, STARTER_PROMPTS, workspaceName } from "./view-model.js";
+import { applyDesktopSessionOutput, permissionLabel, reconcileProjectCompletionNotices, sessionTitle, STARTER_PROMPTS, workspaceName, type ProjectActivityState } from "./view-model.js";
 import { MarkdownContent } from "./markdown.js";
 import { SlashCompletionDropdown } from "./slash-completion-dropdown.js";
 import {
@@ -104,9 +104,14 @@ export function DesktopApp(): React.JSX.Element {
   const [view, setView] = useState<"conversation" | "skills" | "memory" | "mcp" | "e2e">("conversation");
   const [d2cRefreshKey, setD2cRefreshKey] = useState(0);
   const [d2cPending, setD2cPending] = useState<D2cPendingTask>();
+  const [completionNotices, setCompletionNotices] = useState<Map<string, string | null>>(() => new Map());
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const activeSessionIdRef = useRef<string | undefined>(undefined);
+  const activeWorkspaceRef = useRef<string | undefined>(undefined);
+  const transcriptRef = useRef<TranscriptState>(transcript);
+  const projectTranscriptsRef = useRef(new Map<string, { sessionId: string | undefined; transcript: TranscriptState }>());
+  const projectActivityRef = useRef(new Map<string, ProjectActivityState>());
   const previewUrlsRef = useRef(new Set<string>());
   const userScrolledUp = useRef(false);
   const updateInput = useCallback((value: string) => {
@@ -114,6 +119,41 @@ export function DesktopApp(): React.JSX.Element {
     setDismissedSlashInput(undefined);
     setDismissedMentionInput(undefined);
   }, []);
+
+  useEffect(() => { transcriptRef.current = transcript; }, [transcript]);
+
+  const rememberCurrentProject = useCallback(() => {
+    const workspace = activeWorkspaceRef.current;
+    if (workspace === undefined) return;
+    projectTranscriptsRef.current.set(workspace, {
+      sessionId: activeSessionIdRef.current,
+      transcript: transcriptRef.current,
+    });
+  }, []);
+
+  const acknowledgeProject = useCallback((workspace: string | undefined) => {
+    if (workspace === undefined) return;
+    setCompletionNotices((current) => {
+      if (!current.has(workspace)) return current;
+      const next = new Map(current);
+      next.delete(workspace);
+      return next;
+    });
+  }, []);
+
+  const activateProjectSnapshot = useCallback((next: DesktopSnapshot) => {
+    const workspace = next.workspace;
+    activeWorkspaceRef.current = workspace;
+    activeSessionIdRef.current = next.activeSession?.sessionId;
+    setSnapshot(next);
+    const cached = workspace === undefined ? undefined : projectTranscriptsRef.current.get(workspace);
+    setTranscript(cached !== undefined && cached.sessionId === next.activeSession?.sessionId
+      ? cached.transcript
+      : createTranscriptState());
+    acknowledgeProject(workspace);
+    setView("conversation");
+    setRailOpen(false);
+  }, [acknowledgeProject]);
 
   useEffect(() => () => {
     for (const url of previewUrlsRef.current) URL.revokeObjectURL(url);
@@ -188,6 +228,37 @@ export function DesktopApp(): React.JSX.Element {
 
   useEffect(() => {
     const unsubscribe = window.flavorDesktop.onEvent((event) => {
+      if (event.type === "snapshot" && event.workspace !== undefined && event.snapshot.workspace === event.workspace) {
+        const previous = activeWorkspaceRef.current;
+        if (previous !== undefined && previous !== event.workspace) {
+          projectTranscriptsRef.current.set(previous, {
+            sessionId: activeSessionIdRef.current,
+            transcript: transcriptRef.current,
+          });
+          const cached = projectTranscriptsRef.current.get(event.workspace);
+          setTranscript(cached !== undefined && cached.sessionId === event.snapshot.activeSession?.sessionId
+            ? cached.transcript
+            : createTranscriptState());
+          setView("conversation");
+          acknowledgeProject(event.workspace);
+        }
+        activeWorkspaceRef.current = event.workspace;
+      } else if (event.workspace !== undefined && event.workspace !== activeWorkspaceRef.current) {
+        const cached = projectTranscriptsRef.current.get(event.workspace)
+          ?? { sessionId: undefined, transcript: createTranscriptState() };
+        if (event.type === "session-started") {
+          projectTranscriptsRef.current.set(event.workspace, {
+            sessionId: event.payload.sessionId,
+            transcript: transcriptReducer(createTranscriptState(), { type: "restore", state: event.payload.restoredTranscript }),
+          });
+        } else if (event.type === "session-output" && cached.sessionId === event.sessionId) {
+          projectTranscriptsRef.current.set(event.workspace, {
+            ...cached,
+            transcript: applyDesktopSessionOutput(cached.transcript, cached.sessionId, event),
+          });
+        }
+        return;
+      }
       if (event.type === "d2c-report") {
         setD2cRefreshKey((key) => key + 1);
         setD2cPending((current) => current !== undefined && current.task === event.payload.task ? undefined : current);
@@ -211,6 +282,7 @@ export function DesktopApp(): React.JSX.Element {
       handleEvent(event, activeSessionIdRef, setSnapshot, setTranscript, setError);
     });
     window.flavorDesktop.bootstrap().then((next) => {
+      activeWorkspaceRef.current = next.workspace;
       activeSessionIdRef.current = next.activeSession?.sessionId;
       setSnapshot(next);
     }).catch((cause) => setError(errorMessage(cause))).finally(() => setLoading(false));
@@ -249,7 +321,21 @@ export function DesktopApp(): React.JSX.Element {
   }, [snapshot.workspace, view]);
 
   const busy = snapshot.activeSession?.busy ?? false;
-  const groups = useMemo(() => groupSessions(snapshot.sessions), [snapshot.sessions]);
+  const projects = useMemo(() => snapshot.projects ?? (snapshot.workspace === undefined ? [] : [{
+    workspace: snapshot.workspace,
+    sessions: snapshot.sessions,
+    ...(snapshot.activeSession === undefined ? {} : { activeSession: {
+      sessionId: snapshot.activeSession.sessionId, busy: snapshot.activeSession.busy,
+    } }),
+    running: busy || snapshot.jobs.some((job) => job.state === "running"),
+  }]), [snapshot.projects, snapshot.workspace, snapshot.sessions, snapshot.activeSession, snapshot.jobs, busy]);
+  useEffect(() => {
+    setCompletionNotices((current) => {
+      const reconciled = reconcileProjectCompletionNotices(projects, projectActivityRef.current, current);
+      projectActivityRef.current = reconciled.activity;
+      return reconciled.notices;
+    });
+  }, [projects]);
   const slashCandidates = useMemo(() => buildSlashCandidates(
     BUILTIN_SLASH_CANDIDATES,
     [],
@@ -326,12 +412,44 @@ export function DesktopApp(): React.JSX.Element {
   const chooseWorkspace = async () => {
     setError(undefined);
     try {
+      rememberCurrentProject();
       const next = await window.flavorDesktop.chooseWorkspace();
       if (next !== undefined) {
         clearAttachments();
-        setSnapshot(next); setTranscript(createTranscriptState()); setRailOpen(false); setView("conversation");
+        activateProjectSnapshot(next);
       }
     } catch (cause) { setError(errorMessage(cause)); }
+  };
+
+  const switchWorkspace = async (workspace: string): Promise<DesktopSnapshot | undefined> => {
+    if (workspace === snapshot.workspace) {
+      acknowledgeProject(workspace);
+      setView("conversation");
+      setRailOpen(false);
+      return snapshot;
+    }
+    setError(undefined);
+    rememberCurrentProject();
+    try {
+      const next = await window.flavorDesktop.openWorkspace(workspace);
+      clearAttachments();
+      activateProjectSnapshot(next);
+      return next;
+    } catch (cause) {
+      setError(errorMessage(cause));
+      return undefined;
+    }
+  };
+
+  const openProjectSession = async (workspace: string, session: DesktopSessionSummary): Promise<void> => {
+    const next = await switchWorkspace(workspace);
+    if (next === undefined) return;
+    if (next.activeSession?.sessionId === session.sessionId) {
+      setView("conversation");
+      setRailOpen(false);
+      return;
+    }
+    await startSession(session);
   };
 
   const startSession = async (session?: DesktopSessionSummary) => {
@@ -340,6 +458,8 @@ export function DesktopApp(): React.JSX.Element {
       const result = await window.flavorDesktop.startSession(session?.sessionId);
       clearAttachments();
       setSnapshot(result.snapshot);
+      activeWorkspaceRef.current = result.snapshot.workspace;
+      activeSessionIdRef.current = result.sessionId;
       setTranscript(transcriptReducer(createTranscriptState(), { type: "restore", state: result.restoredTranscript }));
       setRailOpen(false);
       setView("conversation");
@@ -443,49 +563,63 @@ export function DesktopApp(): React.JSX.Element {
       <div className="brand-row">
         <FlavorMark />
         <strong>Flavor Code</strong>
-        <span className="brand-chevron">⌄</span>
       </div>
       <nav className="primary-actions" aria-label="主要操作">
         <button className="rail-action rail-action-primary" disabled={snapshot.workspace === undefined} onClick={() => void startSession()}>
-          <span className="action-icon">＋</span><span>新建任务</span><kbd>Ctrl N</kbd>
+          <span className="action-icon"><UiIcon name="plus" /></span><span>新建任务</span><kbd>Ctrl N</kbd>
         </button>
-        <button className="rail-action" onClick={() => void chooseWorkspace()}><span className="action-icon">⌂</span><span>打开项目</span></button>
-        <button className="rail-action" data-active={view === "skills"} onClick={() => { setView("skills"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">◇</span><span>技能</span></button>
-        <button className="rail-action" data-active={view === "memory"} onClick={() => { setView("memory"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">⌁</span><span>长期记忆</span></button>
-        <button className="rail-action" data-active={view === "mcp"} onClick={() => { setView("mcp"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">◎</span><span>MCP 服务</span></button>
-        <button className="rail-action" data-active={view === "e2e"} onClick={() => { setView("e2e"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon">▤</span><span>E2E</span></button>
+        <button className="rail-action" onClick={() => void chooseWorkspace()}><span className="action-icon"><UiIcon name="folder" /></span><span>打开项目</span></button>
+        <button className="rail-action" data-active={view === "skills"} onClick={() => { setView("skills"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon"><UiIcon name="sparkles" /></span><span>技能</span></button>
+        <button className="rail-action" data-active={view === "memory"} onClick={() => { setView("memory"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon"><UiIcon name="database" /></span><span>长期记忆</span></button>
+        <button className="rail-action" data-active={view === "mcp"} onClick={() => { setView("mcp"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon"><UiIcon name="server" /></span><span>MCP 服务</span></button>
+        <button className="rail-action" data-active={view === "e2e"} onClick={() => { setView("e2e"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon"><UiIcon name="checklist" /></span><span>E2E</span></button>
       </nav>
       <div className="sessions-scroll">
-        <div className="rail-section-title">项目</div>
-        {snapshot.workspace === undefined
+        <div className="rail-section-heading"><span>项目</span><button onClick={() => void chooseWorkspace()} aria-label="打开新项目" title="打开新项目"><UiIcon name="plus" /></button></div>
+        {projects.length === 0
           ? <button className="empty-project" onClick={() => void chooseWorkspace()}>选择一个本地文件夹开始</button>
-          : <>
-            <div className="project-heading"><span className="folder-icon">▱</span><span>{workspaceName(snapshot.workspace)}</span></div>
-            {groups.length === 0 && <p className="no-sessions">还没有任务</p>}
-            {groups.map((group) => <section className="session-group" key={group.label}>
-              <h2>{group.label}</h2>
-              {group.sessions.map((session) => <div className="session-item-shell" key={session.sessionId}
+          : projects.map((project) => {
+            const selected = project.workspace === snapshot.workspace;
+            const completed = completionNotices.has(project.workspace);
+            const completedSessionId = completionNotices.get(project.workspace);
+            const expanded = selected || project.running || completed;
+            return <section className="project-entry" data-active={selected} key={project.workspace}>
+              <button className="project-heading" onClick={() => void switchWorkspace(project.workspace)} title={project.workspace}>
+                <span className="folder-icon" aria-hidden="true"><UiIcon name="folder" /></span>
+                <span>{workspaceName(project.workspace)}</span>
+                {project.running
+                  ? <span className="project-running-dot" title="项目中有任务正在执行" />
+                  : completed && <span className="project-complete-dot" role="status" aria-label="项目任务已完成，点击查看" />}
+              </button>
+              {expanded && project.sessions.length === 0 && <p className="no-sessions">还没有任务</p>}
+              {expanded && project.sessions.map((session) => {
+                const sessionActive = selected && session.sessionId === snapshot.activeSession?.sessionId;
+                const sessionRunning = project.running && session.sessionId === project.activeSession?.sessionId;
+                const sessionCompleted = completedSessionId === session.sessionId;
+                return <div className="session-item-shell" key={session.sessionId}
                 onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setSessionMenu(undefined); }}>
-                <button className="session-item" data-active={session.sessionId === snapshot.activeSession?.sessionId}
-                  disabled={busy && session.sessionId !== snapshot.activeSession?.sessionId}
-                  onClick={() => {
-                    if (session.sessionId === snapshot.activeSession?.sessionId) {
-                      setRailOpen(false);
-                      setView("conversation");
-                    } else void startSession(session);
-                  }}>
-                  <span>{sessionTitle(session)}</span><time>{formatSessionTime(session.updatedAt)}</time>
+                <button className="session-item" data-active={sessionActive} data-running={sessionRunning}
+                  disabled={selected && busy && !sessionActive}
+                  onClick={() => void openProjectSession(project.workspace, session)}>
+                  <span>{sessionTitle(session)}</span>
+                  {sessionRunning
+                    ? <span className="session-spinner" role="status" aria-label="任务正在执行" />
+                    : sessionCompleted
+                      ? <span className="session-complete-dot" role="status" aria-label="任务已完成，点击查看" />
+                      : <time>{formatSessionTime(session.updatedAt)}</time>}
                 </button>
-                <button className="session-more" aria-label={`管理会话：${sessionTitle(session)}`} aria-expanded={sessionMenu === session.sessionId}
+                {selected && <button className="session-more" aria-label={`管理会话：${sessionTitle(session)}`} aria-expanded={sessionMenu === session.sessionId}
                   onClick={() => setSessionMenu((current) => current === session.sessionId ? undefined : session.sessionId)}>•••</button>
-                {sessionMenu === session.sessionId && <div className="session-menu" role="menu">
+                }
+                {selected && sessionMenu === session.sessionId && <div className="session-menu" role="menu">
                   <button role="menuitem" className="danger-item"
                     disabled={busy && session.sessionId === snapshot.activeSession?.sessionId}
                     onClick={() => { setPendingDelete(session); setSessionMenu(undefined); }}>删除会话</button>
                 </div>}
-              </div>)}
-            </section>)}
-          </>}
+              </div>;
+              })}
+            </section>;
+          })}
       </div>
       <div className="rail-footer"><span className="avatar">F</span><span>本地工作区</span><button title="帮助">?</button></div>
     </aside>
@@ -905,19 +1039,22 @@ function Composer(props: ComposerProps): React.JSX.Element {
           props.onAddImages(imageFiles(event.target.files));
           event.target.value = "";
         }} />
-      <button type="button" className="attach-button image-attach-button"
+      <button type="button" className="attach-button attach-button-labeled image-attach-button"
         title="添加图片（也可粘贴或拖入）" aria-label="添加图片"
         onClick={() => fileInputRef.current?.click()}
-        disabled={disabled || props.busy || props.attachments.length >= MAX_DESKTOP_IMAGES}>▧</button>
-      <button className="attach-button" title="在提示中输入 @ 引用项目文件"
+        disabled={disabled || props.busy || props.attachments.length >= MAX_DESKTOP_IMAGES}><UiIcon name="image" /><span>图片</span></button>
+      <button className="attach-button attach-button-labeled" title="在提示中输入 @ 引用项目文件"
         onClick={() => {
           props.setInput(`${props.input}${props.input ? " " : ""}@`);
           setTimeout(() => {
             const el = props.inputRef.current;
             if (el !== null) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
           }, 0);
-        }} disabled={disabled}>＋</button>
-      <div className="composer-context"><span className="context-item">▱ {workspaceName(props.snapshot.workspace)}</span><span className="context-item">▣ 本地</span></div>
+        }} disabled={disabled}><UiIcon name="at" /><span>文件</span></button>
+      <div className="composer-context">
+        <span className="context-item" title={props.snapshot.workspace}><UiIcon name="folder" /><span>{workspaceName(props.snapshot.workspace)}</span></span>
+        <span className="context-item"><UiIcon name="monitor" /><span>本地</span></span>
+      </div>
       <div className="composer-controls">
         <ModelMenu models={props.snapshot.models} activeModel={props.snapshot.activeSession?.mainModel} busy={props.busy}
           onSelect={props.setModel} onAdd={props.addModel} />
@@ -1083,6 +1220,24 @@ function useAppIcon(): string | undefined {
     return () => { cancelled = true; };
   }, []);
   return url;
+}
+
+type UiIconName = "plus" | "folder" | "sparkles" | "database" | "server" | "checklist" | "image" | "at" | "monitor";
+
+function UiIcon({ name }: { name: UiIconName }): React.JSX.Element {
+  let content: React.JSX.Element;
+  switch (name) {
+    case "plus": content = <path d="M10 4v12M4 10h12" />; break;
+    case "folder": content = <path d="M2.75 6.25h5l1.5 1.75h8v7.25a1.5 1.5 0 0 1-1.5 1.5h-12a1.5 1.5 0 0 1-1.5-1.5v-7.5a1.5 1.5 0 0 1 1.5-1.5Z" />; break;
+    case "sparkles": content = <><path d="M8.25 3.25c.4 2.4 1.6 3.6 4 4-2.4.4-3.6 1.6-4 4-.4-2.4-1.6-3.6-4-4 2.4-.4 3.6-1.6 4-4Z" /><path d="M14.5 11.5c.25 1.45 1.05 2.25 2.5 2.5-1.45.25-2.25 1.05-2.5 2.5-.25-1.45-1.05-2.25-2.5-2.5 1.45-.25 2.25-1.05 2.5-2.5Z" /></>; break;
+    case "database": content = <><ellipse cx="10" cy="5" rx="6.25" ry="2.5" /><path d="M3.75 5v5c0 1.38 2.8 2.5 6.25 2.5s6.25-1.12 6.25-2.5V5M3.75 10v5c0 1.38 2.8 2.5 6.25 2.5s6.25-1.12 6.25-2.5v-5" /></>; break;
+    case "server": content = <><rect x="3" y="3.5" width="14" height="5" rx="1.5" /><rect x="3" y="11.5" width="14" height="5" rx="1.5" /><path d="M6 6h.01M6 14h.01M9 6h5M9 14h5" /></>; break;
+    case "checklist": content = <><rect x="3.25" y="2.75" width="13.5" height="14.5" rx="2" /><path d="m6.25 7 1.25 1.25L10 5.75M11.75 7h2M6.25 12h1.5M10 12h4" /></>; break;
+    case "image": content = <><rect x="2.75" y="3.25" width="14.5" height="13.5" rx="2" /><circle cx="7" cy="7.25" r="1.25" /><path d="m4.75 14 3.5-3.5 2.25 2.25 2.25-2.5 2.5 3.75" /></>; break;
+    case "at": content = <><circle cx="9.5" cy="10" r="3" /><path d="M12.5 10v1.25c0 1.15.8 1.75 1.75 1.75 1.4 0 2.25-1.2 2.25-3a6.5 6.5 0 1 0-2.1 4.78" /></>; break;
+    case "monitor": content = <><rect x="2.75" y="3.5" width="14.5" height="10.5" rx="2" /><path d="M7 17h6M10 14v3" /></>; break;
+  }
+  return <svg className="ui-icon" viewBox="0 0 20 20" aria-hidden="true" focusable="false">{content}</svg>;
 }
 
 function FlavorMark(): React.JSX.Element {

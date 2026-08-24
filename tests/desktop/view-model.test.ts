@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { createTranscriptState, transcriptReducer } from "../../src/ui/transcript.js";
-import { applyDesktopOutput, applyDesktopSessionOutput, groupSessions, permissionLabel, sessionTitle, STARTER_PROMPTS } from "../../src/desktop/renderer/view-model.js";
+import { applyDesktopOutput, applyDesktopSessionOutput, groupSessions, permissionLabel, reconcileProjectCompletionNotices, sessionTitle, STARTER_PROMPTS } from "../../src/desktop/renderer/view-model.js";
 
 describe("desktop renderer view model", () => {
   it("groups sessions into today, yesterday and earlier", () => {
@@ -79,5 +79,22 @@ describe("desktop renderer view model", () => {
 
   it("provides three actionable starter prompts", () => {
     expect(STARTER_PROMPTS).toEqual(["梳理项目并给出改进方向", "帮我排查一个问题", "实现一个新功能"]);
+  });
+
+  it("creates an unread completion notice on the running-to-idle edge and clears it on a new run", () => {
+    const running = reconcileProjectCompletionNotices([{
+      workspace: "/work/demo", running: true, activeSession: { sessionId: "session-1" },
+    }], new Map(), new Map());
+    expect(running.notices.size).toBe(0);
+
+    const completed = reconcileProjectCompletionNotices([{
+      workspace: "/work/demo", running: false, activeSession: { sessionId: "session-1" },
+    }], running.activity, running.notices);
+    expect(completed.notices.get("/work/demo")).toBe("session-1");
+
+    const restarted = reconcileProjectCompletionNotices([{
+      workspace: "/work/demo", running: true, activeSession: { sessionId: "session-2" },
+    }], completed.activity, completed.notices);
+    expect(restarted.notices.has("/work/demo")).toBe(false);
   });
 });

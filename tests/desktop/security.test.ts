@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
 
 import { DESKTOP_CHANNELS } from "../../src/desktop/contracts.js";
-import { isSafeExternalUrl, isTrustedNavigation, normalizePersistedWorkspace } from "../../src/desktop/security.js";
+import { isSafeExternalUrl, isTrustedNavigation, normalizePersistedDesktopProjects, normalizePersistedWorkspace } from "../../src/desktop/security.js";
 
 describe("desktop security helpers", () => {
   it("permits only HTTP(S) links outside the renderer", () => {
@@ -18,6 +18,15 @@ describe("desktop security helpers", () => {
     expect(normalizePersistedWorkspace({ workspace: "" })).toBeUndefined();
     expect(normalizePersistedWorkspace({ workspace: 12 })).toBeUndefined();
     expect(normalizePersistedWorkspace({ workspace: "x".repeat(40_000) })).toBeUndefined();
+  });
+
+  it("loads legacy and multi-project desktop records without duplicate projects", () => {
+    expect(normalizePersistedDesktopProjects({ workspace: "C:\\work\\demo" })).toEqual({
+      workspace: "C:\\work\\demo", projects: ["C:\\work\\demo"],
+    });
+    expect(normalizePersistedDesktopProjects({
+      workspace: "C:\\work\\two", projects: ["C:\\work\\one", "C:\\work\\two", 12, ""],
+    })).toEqual({ workspace: "C:\\work\\two", projects: ["C:\\work\\two", "C:\\work\\one"] });
   });
 
   it("keeps the preload channel surface explicit", () => {

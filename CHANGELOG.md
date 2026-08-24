@@ -2,7 +2,21 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.3.0 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.3.1 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.3.1] - 2026-08-25
+
+### 新增
+- Electron 桌面端支持同时打开并切换多个项目；每个项目保留独立运行时、会话与对话缓存，切换项目不会中止后台执行
+- 侧栏按项目展示会话：运行中的项目和任务显示活动动效，任务完成后在项目与对应任务上保留蓝色未读圆点，打开后自动清除
+- 多项目列表和最后选中的项目持久化，应用重启后自动恢复；兼容旧版单项目状态文件
+
+### 改进
+- 统一侧栏与输入区的 SVG 线性图标、尺寸和基线；长期记忆、MCP、E2E、图片与文件引用使用明确语义，移除无实际交互的品牌下拉符号
+
+### 文档与测试
+- 更新中英文 README 的 Electron 多项目与任务状态说明
+- 扩展 Electron E2E 测试，覆盖双项目打开、切换与可选视觉快照；新增状态迁移和持久化兼容测试
 
 ## [1.3.0] - 2026-08-24
 
@@ -362,6 +376,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.3.1 | 2026-08-25 | Electron 多项目切换、后台任务保活、运行/完成状态提醒与项目列表持久化 |
 | 1.3.0 | 2026-08-24 | Durable Harness、Context Epoch/Prompt Cache、分层权限、插件默认隔离与 fail-closed Goal Verification |
 | 1.2.20 | 2026-08-24 | 组合 Skill 工具、Claude 风格 Skill 参数展开、SessionStart additionalContext 持久注入 |
 | 1.2.19 | 2026-08-24 | 插件沙箱升级 Worker 线程隔离；影子验证干跑改用 Worker 沙箱杜绝宿主副作用 |
