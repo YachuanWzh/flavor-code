@@ -2,7 +2,14 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.2.18 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.2.19 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.2.19] - 2026-08-24
+
+### 改进
+- 插件沙箱升级为 Worker + VM capability 隔离：`PluginHost` 新增 `sandbox` 选项，为 `true` 时插件在独立 V8 isolate 的受限 module realm 中激活，仅允许加载插件根目录内的相对模块，并通过校验后的 RPC 调用宿主贡献
+- 影子验证干跑（`/evolve verify`）复用完整 manifest、路径和贡献声明校验，并在受限 realm 中阻止 Node.js 内置模块、包依赖、宿主文件系统及网络 API
+- Worker 沙箱内置资源限制（128MB 老年代内存上限、10s 激活超时），超出时限或异常崩溃均安全降级为失败报告
 
 ## [1.2.18] - 2026-08-24
 
@@ -325,6 +332,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.2.19 | 2026-08-24 | 插件沙箱升级 Worker 线程隔离；影子验证干跑改用 Worker 沙箱杜绝宿主副作用 |
 | 1.2.18 | 2026-08-24 | 修复单行代码块渲染丢失；修复 Windows 下 Ctrl+C 偶发无法退出（二次强制退出 + 关闭看门狗 + 清理步骤逐步超时） |
 | 1.2.17 | 2026-08-20 | /logout 登出命令、OAuth 单凭据登录语义、模型决策持久化改进 |
 | 1.2.16 | 2026-08-20 | 桌面端 E2E 交付运行状态查看、Windows Shell 命令执行优化、OAuth 回环地址配置 |

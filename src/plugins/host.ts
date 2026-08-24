@@ -3,14 +3,18 @@ import { lstat, open, readdir, realpath, stat, writeFile } from "node:fs/promise
 import type { BigIntStats } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { z } from "zod";
 
 import { redactConfig } from "../config/load.js";
+import type { ModelEvent } from "../models/types.js";
+import type { ToolDefinition } from "../tools/types.js";
 import type {
   LoadedPlugin, PluginContext, PluginDiagnostic, PluginDisposer, PluginHostOptions, PluginLogger,
   PluginManifest, PluginRegistrationCallbacks, PluginSkillRootCapability, PluginSource,
 } from "./types.js";
 import { message } from "../utils/error.js";
 import { PluginManifestSchema } from "./types.js";
+import { startPluginSandbox } from "./worker-host.js";
 
 const MANIFEST = "flavor-plugin.json";
 const MAX_MANIFEST_BYTES = 64 * 1024;
@@ -26,9 +30,8 @@ interface ActivePlugin { metadata: LoadedPlugin; disposers: PluginDisposer[]; st
 type ContributionKind = keyof PluginRegistrationCallbacks;
 
 /**
- * Hosts trusted in-process plugins behind a narrow host API. Plugin roots must remain immutable
- * during activation. Concurrent malicious mutation is outside the MVP trust model because plugin
- * code already has Node.js authority; this is explicitly not a process sandbox.
+ * Hosts plugins behind a narrow host API. The default backend loads trusted plugins in-process;
+ * sandbox mode uses an isolated Worker/vm realm and RPC-backed contributions.
  */
 export class PluginHost {
   readonly #options: PluginHostOptions;
@@ -169,23 +172,83 @@ export class PluginHost {
     const claimed: string[] = [];
     const state: ContextState = { active: true, controller: new AbortController() };
     let activation: Promise<unknown> | undefined;
+
+    const useSandbox = this.#options.sandbox === true;
+
     try {
       await verifyEntry(candidate.root, candidate.entry, candidate.entrySnapshot);
-      // A fresh query on every activation busts Node's ESM cache so reload()
-      // picks up on-disk changes instead of serving the previous module.
-      const imported = import(`${pathToFileURL(candidate.entrySnapshot.physicalPath).href}?flavor=${encodeURIComponent(plugin)}&v=${Date.now()}`);
-      const module = await bounded(imported, this.#activationTimeoutMs, "Plugin import") as {
-        activate?: (context: PluginContext) => unknown | Promise<unknown>;
-      };
-      await verifyEntry(candidate.root, candidate.entry, candidate.entrySnapshot);
-      if (typeof module.activate !== "function") throw new Error("Plugin entry must export activate(context)");
-      const context = this.#context(candidate, disposers, claimed, state);
-      activation = Promise.resolve().then(() => module.activate!(context));
-      const deactivate = await bounded(activation, this.#activationTimeoutMs, "Plugin activation");
-      if (deactivate !== undefined) {
-        if (typeof deactivate !== "function") throw new Error("Plugin activate result must be a disposer or undefined");
-        disposers.push(deactivate as PluginDisposer);
+
+      if (useSandbox) {
+        const session = await bounded(
+          startPluginSandbox({
+            entryPath: candidate.entrySnapshot.physicalPath,
+            pluginRoot: candidate.root,
+            pluginName: plugin,
+            pluginVersion: candidate.manifest.version,
+            config: redactConfig(this.#options.config ?? {}),
+            activationTimeoutMs: this.#activationTimeoutMs,
+          }),
+          this.#activationTimeoutMs + 1_000,
+          "Plugin sandbox activation",
+        );
+        disposers.push(() => session.dispose());
+        const result = session.result;
+        if (!result.ok) throw new Error(result.error ?? `Plugin "${plugin}" sandbox execution failed`);
+        const context = this.#context(candidate, disposers, claimed, state);
+        for (const command of result.contributions.commands) {
+          context.registerCommand(command.name, (args, commandContext) => session.invoke("command", command.name, [
+            args, { workspace: commandContext.workspace },
+          ]), command.description);
+        }
+        for (const contribution of result.contributions.tools) {
+          const tool: ToolDefinition<unknown> = {
+            name: contribution.toolName,
+            description: contribution.description,
+            inputSchema: z.unknown(),
+            ...(contribution.modelInputSchema === undefined ? {} : { modelInputSchema: contribution.modelInputSchema }),
+            ...(contribution.readOnly === undefined ? {} : { readOnly: contribution.readOnly }),
+            paths: () => [],
+            execute: (input, _signal, toolContext) => session.invoke("tool", contribution.name, [
+              input, toolContext === undefined ? undefined : { agent: toolContext.agent, ownerId: toolContext.ownerId },
+            ]),
+          };
+          context.registerTool(contribution.name, tool);
+        }
+        for (const hook of result.contributions.hooks) {
+          context.registerHook(hook.name as Parameters<PluginContext["registerHook"]>[0],
+            (event) => session.invoke("hook", hook.name, [event]), hook.options);
+        }
+        for (const skill of result.contributions.skillRoots) {
+          context.registerSkillRoot(skill.name, skill.root);
+        }
+        for (const adapter of result.contributions.modelAdapters) {
+          context.registerModelAdapter(adapter.name, {
+            async *stream(request) {
+              const safeRequest = { ...request, signal: undefined };
+              const events = await session.invoke<ModelEvent[]>("modelAdapter", adapter.name, [safeRequest]);
+              for (const event of events) yield event;
+            },
+          });
+        }
+        await verifyEntry(candidate.root, candidate.entry, candidate.entrySnapshot);
+      } else {
+        // A fresh query on every activation busts Node's ESM cache so reload()
+        // picks up on-disk changes instead of serving the previous module.
+        const imported = import(`${pathToFileURL(candidate.entrySnapshot.physicalPath).href}?flavor=${encodeURIComponent(plugin)}&v=${Date.now()}`);
+        const module = await bounded(imported, this.#activationTimeoutMs, "Plugin import") as {
+          activate?: (context: PluginContext) => unknown | Promise<unknown>;
+        };
+        await verifyEntry(candidate.root, candidate.entry, candidate.entrySnapshot);
+        if (typeof module.activate !== "function") throw new Error("Plugin entry must export activate(context)");
+        const context = this.#context(candidate, disposers, claimed, state);
+        activation = Promise.resolve().then(() => module.activate!(context));
+        const deactivate = await bounded(activation, this.#activationTimeoutMs, "Plugin activation");
+        if (deactivate !== undefined) {
+          if (typeof deactivate !== "function") throw new Error("Plugin activate result must be a disposer or undefined");
+          disposers.push(deactivate as PluginDisposer);
+        }
       }
+
       this.#assertAllDeclaredRegistered(candidate, claimed);
       const metadata: LoadedPlugin = { name: plugin, version: candidate.manifest.version, source: candidate.source, root: candidate.root };
       this.#active.push({ metadata, disposers, state });

@@ -1,6 +1,6 @@
 {
   "name": "flavor-code",
-  "version": "1.2.18",
+  "version": "1.2.19",
   "author": "YachuanWzh",
   "type": "module",
   "publishConfig": {
@@ -57,7 +57,8 @@
     "productName": "Flavor Code",
     "asar": true,
     "asarUnpack": [
-      "dist/desktop/pixel-worker.js"
+      "dist/desktop/pixel-worker.js",
+      "dist/desktop/plugin-worker-entry.js"
     ],
     "icon": "assets/icon",
     "directories": {

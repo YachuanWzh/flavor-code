@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -5,6 +6,10 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { PluginHost } from "../../src/plugins/host.js";
+import type { PluginCommandHandler, PluginSkillRootCapability } from "../../src/plugins/types.js";
+import type { HookHandler } from "../../src/hooks/types.js";
+import type { ModelAdapter } from "../../src/models/types.js";
+import type { ToolDefinition } from "../../src/tools/types.js";
 
 const baseManifest = {
   version: "1.0.0",
@@ -42,6 +47,48 @@ function registrations() {
 }
 
 describe("PluginHost", () => {
+  it("keeps sandboxed contributions callable through RPC until unload", async () => {
+    const f = await fixture();
+    const root = await plugin(f.project, "sandboxed", `export function activate(ctx) {
+      ctx.registerCommand('sandbox-command', (args) => ctx.config.prefix + args.join(':'));
+      ctx.registerTool('sandbox-tool', { name: 'sandbox-tool', description: 'rpc tool', modelInputSchema: { type: 'object' }, execute: async (input) => ({ echoed: input }) });
+      ctx.registerHook('SessionStart', async () => ({ decision: 'allow', reason: 'sandbox' }));
+      ctx.registerSkillRoot('sandbox-skills', 'skills');
+      ctx.registerModelAdapter('sandbox-model', { async *stream() { yield { type: 'text', text: 'sandbox' }; } });
+    }`, { contributes: {
+      commands: [{ name: "sandbox-command" }], tools: [{ name: "sandbox-tool" }], hooks: [{ name: "SessionStart" }],
+      skillRoots: [{ name: "sandbox-skills", path: "skills" }], modelAdapters: [{ name: "sandbox-model" }],
+    } });
+    await mkdir(join(root, "skills"));
+    let command!: PluginCommandHandler;
+    let tool!: ToolDefinition<unknown>;
+    let hook!: HookHandler;
+    let skill!: PluginSkillRootCapability;
+    let adapter!: ModelAdapter;
+    const host = new PluginHost({
+      projectPluginDirs: [f.project], sandbox: true, config: { prefix: "rpc:" },
+      registrations: {
+        command: (_name, value) => { command = value; return () => undefined; },
+        tool: (_name, value) => { tool = value; return () => undefined; },
+        hook: (_name, value) => { hook = value; return () => undefined; },
+        skillRoot: (_name, value) => { skill = value; return () => undefined; },
+        modelAdapter: (_name, value) => { adapter = value; return () => undefined; },
+      },
+    });
+
+    await host.loadAll();
+    expect(host.diagnostics).toEqual([]);
+    expect(await command(["a", "b"], { workspace: f.root, signal: new AbortController().signal })).toBe("rpc:a:b");
+    expect(await tool.execute({ value: 1 }, new AbortController().signal)).toEqual({ echoed: { value: 1 } });
+    expect(await hook({ version: 1, type: "SessionStart", payload: {} }, new AbortController().signal)).toEqual({ decision: "allow", reason: "sandbox" });
+    expect(skill.path).toBe(realpathSync.native(join(root, "skills")));
+    const events = [];
+    for await (const event of adapter.stream({ model: "sandbox", messages: [], tools: [] })) events.push(event);
+    expect(events).toEqual([{ type: "text", text: "sandbox" }]);
+    await host.unloadAll();
+    await expect(command([], { workspace: f.root, signal: new AbortController().signal })).rejects.toThrow(/closed/i);
+  });
+
   it("discovers deterministically with project overrides and disabled plugins", async () => {
     const f = await fixture();
     await plugin(f.global, "zeta", "export function activate(ctx) { ctx.registerCommand('zeta', {}); }", {

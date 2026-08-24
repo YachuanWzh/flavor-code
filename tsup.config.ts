@@ -6,6 +6,7 @@ export default defineConfig({
   entry: {
     cli: "src/cli.tsx",
     "sdk/index": "src/sdk/index.ts",
+    "plugin-worker-entry": "src/plugins/plugin-worker-entry.ts",
   },
   format: ["esm"],
   dts: false,

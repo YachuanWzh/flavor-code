@@ -33,7 +33,7 @@ async function writeGoodPlugin(workspace: string, name: string) {
   }));
   await writeFile(join(dir, "index.js"), [
     "export function activate(ctx) {",
-    "  ctx.registerTool('hello', { name: 'hello' });",
+    "  ctx.registerTool('hello', { name: 'hello', description: 'hello', execute: async () => 'ok' });",
     "}",
     "",
   ].join("\n"));
@@ -131,7 +131,7 @@ describe("verifyFixPlugin", () => {
     }));
     await writeFile(join(dir, "index.js"), [
       "export function activate(ctx) {",
-      "  ctx.registerTool('hello', { name: 'hello' });",
+      "  ctx.registerTool('hello', { name: 'hello', description: 'hello', execute: async () => 'ok' });",
       "  ctx.registerCommand('read-fix-helper', () => 'ok');",
       "}",
       "",
@@ -155,14 +155,33 @@ describe("verifyFixPlugin", () => {
     expect(report.error).toContain("boom");
   });
 
-  it("reports failure for a plugin that registers undeclared contributions", async () => {
+  it("reports failure when the plugin tries to access host Node.js APIs", async () => {
     const workspace = await fixture();
     const dir = await writeGoodPlugin(workspace, "fix-read");
-    await writeFile(join(dir, "index.js"), "export function activate(ctx) { ctx.registerTool('ghost', {}); }\n", "utf8");
+    await writeFile(join(dir, "index.js"), "import { execSync } from 'node:child_process'; export function activate() { execSync('echo pwned'); }\n", "utf8");
 
     const report = await verifyFixPlugin(workspace, "fix-read");
     expect(report.ok).toBe(false);
-    expect(report.error).toMatch(/not declared|declared/i);
+    expect(report.error).toMatch(/blocks external module import.*node:child_process/i);
+  });
+
+  it("uses manifest main/version and rejects undeclared contributions", async () => {
+    const workspace = await fixture();
+    const dir = await writeGoodPlugin(workspace, "fix-read");
+    await writeFile(join(dir, "alternate.js"), "export function activate() {}\n", "utf8");
+    await writeFile(join(dir, "index.js"), "throw new Error('wrong entry loaded');\n", "utf8");
+    await writeFile(join(dir, "flavor-plugin.json"), JSON.stringify({
+      name: "fix-read", version: "2.3.4", apiVersion: "1", main: "alternate.js", permissions: [],
+      contributes: { commands: [], tools: [], hooks: [], skillRoots: [], modelAdapters: [] },
+    }));
+    const valid = await verifyFixPlugin(workspace, "fix-read");
+    expect(valid.ok).toBe(true);
+    expect(valid.provided).toEqual(["fix-read@2.3.4"]);
+
+    await writeFile(join(dir, "alternate.js"), "export function activate(ctx) { ctx.registerCommand('ghost', () => undefined); }\n", "utf8");
+    const undeclared = await verifyFixPlugin(workspace, "fix-read");
+    expect(undeclared.ok).toBe(false);
+    expect(undeclared.error).toMatch(/not declared/i);
   });
 
   it("reports failure when the plugin does not exist", async () => {

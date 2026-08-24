@@ -117,4 +117,7 @@ export interface PluginHostOptions {
   emitLifecycle?: (type: "PluginLoad" | "PluginUnload", plugin: LoadedPlugin) => void | Promise<void>;
   activationTimeoutMs?: number;
   unloadTimeoutMs?: number;
+  /** When true, plugin modules run in an isolated Worker/vm realm. Only relative
+   *  modules inside the plugin root and RPC-backed contribution calls are available. */
+  sandbox?: boolean;
 }
