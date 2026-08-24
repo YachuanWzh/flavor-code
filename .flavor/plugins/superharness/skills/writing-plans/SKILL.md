@@ -13,7 +13,7 @@ Assume they are a skilled developer, but know almost nothing about our toolset o
 
 **Announce at start:** "I'm using the writing-plans skill to create the implementation plan."
 
-**Save plans to:** `.claude/superharness/plans/YYYY-MM-DD-<feature-name>.md` (create the folder if missing)
+**Save plans to:** `<state-root>/superharness/plans/YYYY-MM-DD-<feature-name>.md` (create the folder if missing). `<state-root>` follows the host: `.claude` under Claude Code, `.flavor` under flavor-code.
 - (User preferences for plan location override this default)
 
 ## Scope Check
@@ -131,7 +131,7 @@ If you find issues, fix them inline. No need to re-review — just fix and move 
 
 ## Execution Handoff
 
-After saving the plan, announce: "Plan complete and saved to `.claude/superharness/plans/<filename>.md`."
+After saving the plan, announce: "Plan complete and saved to `<state-root>/superharness/plans/<filename>.md`."
 
 Then continue with the superharness:go workflow, Phase 2: execute the plan task-by-task
 in this session, one TodoWrite/Task item per plan task, strict TDD on every task, and

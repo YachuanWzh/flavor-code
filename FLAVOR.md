@@ -56,7 +56,7 @@ engineering-discipline skills for autonomous development, plus SessionStart /
 UserPromptSubmit / Stop hooks that inject `HARNESS.md` into every session and
 track `/go` tasks under `.flavor/superharness/ralph/`.
 
-Installed skills: `brainstorm`, `go`, `light`, `requesting-code-review`, `subagent-driven-development`, `systematic-debugging`, `test-driven-development`, `using-git-worktrees`, `verification-before-completion`, `writing-plans`
+Installed skills: `brainstorm`, `finishing-a-development-branch`, `go`, `light`, `requesting-code-review`, `subagent-driven-development`, `systematic-debugging`, `test-driven-development`, `using-git-worktrees`, `verification-before-completion`, `writing-plans`
 
 Key capabilities:
 - **go** -- Drive a task end-to-end under strict TDD + verification + code review discipline.

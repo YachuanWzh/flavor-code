@@ -133,7 +133,16 @@ no guess-and-patch fixes.
 - Fix Critical and Important issues (each fix goes through the TDD cycle again).
   Note Minor issues in the final report.
 
-## Phase 5 — Report
+## Phase 5 — Finish & Report
+
+**REQUIRED SUB-SKILL:** `superharness:finishing-a-development-branch`
+
+If Phase 0.5 created a worktree or branch, close it out now: merge the branch
+back, remove the worktree, delete the branch — follow
+`superharness:finishing-a-development-branch`. If the project is not a git repo
+or work was done in place, there is nothing to finish; proceed to the report.
+Never push to a remote as part of finishing — pushing stays with your human
+partner.
 
 Deliver a final summary containing:
 
@@ -141,6 +150,7 @@ Deliver a final summary containing:
 - Evidence: test commands run and their actual results
 - Review outcome and what was fixed
 - Assumptions made and any noted Minor issues / follow-ups
+- How the work was finished (merge + worktree cleanup, or in-place)
 
 **Close the trace.** On final completion, record the terminal event and clear the
 active marker: `Add-RalphTrace -Root <project> -Phase 'done' -Event 'task:completed' -Detail '<summary>'`

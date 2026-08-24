@@ -151,6 +151,68 @@ function onStop(event) {
   return ALLOW;
 }
 
+// Called when the session ends (host fires SessionEnd). Records a final
+// trace event and clears any remaining ralph state so the next session
+// starts with a clean slate.
+function onSessionEnd(event) {
+  const root = projectRoot(event);
+  const current = getCurrentTask(root);
+  if (current === undefined) return ALLOW;
+  const tasks = readJson(join(ralphDir(root), "task.json"));
+  const phase = typeof tasks?.phase === "string" && tasks.phase.length > 0 ? tasks.phase : "go";
+  appendTrace(root, phase, "session:end", "session ended");
+  // Clear the active-task pointer so the Stop hook no longer records heartbeats.
+  try { rmSync(currentTaskPath(root), { force: true }); } catch { /* ignore */ }
+  return ALLOW;
+}
+
+// Called before the planning phase begins. Injects a lightweight context
+// flagging that plan mode is about to start so the model can prepare.
+function onBeforePlan(event) {
+  const root = projectRoot(event);
+  const current = getCurrentTask(root);
+  if (current === undefined) return ALLOW;
+  appendTrace(root, "plan", "plan:before", "planning phase starting");
+  return ALLOW;
+}
+
+// Called after the planning phase ends. Records the plan result and
+// advances the ralph task status so the next phase is clear.
+function onAfterPlan(event) {
+  const root = projectRoot(event);
+  const current = getCurrentTask(root);
+  if (current === undefined) return ALLOW;
+  const tasks = readJson(join(ralphDir(root), "task.json"));
+  const phase = typeof tasks?.phase === "string" && tasks.phase.length > 0 ? tasks.phase : "go";
+  appendTrace(root, phase, "plan:after", "planning phase complete");
+  return ALLOW;
+}
+
+// Called when a subagent is about to start. Records the subagent
+// launch so the trace has a clear subagent lifecycle boundary.
+function onSubagentStart(event) {
+  const root = projectRoot(event);
+  const current = getCurrentTask(root);
+  if (current === undefined) return ALLOW;
+  const tasks = readJson(join(ralphDir(root), "task.json"));
+  const phase = typeof tasks?.phase === "string" && tasks.phase.length > 0 ? tasks.phase : "go";
+  appendTrace(root, phase, "subagent:start", "subagent starting");
+  return ALLOW;
+}
+
+// Called when a subagent finishes. Records the subagent completion
+// and any errors so trace.jsonl has a complete subagent picture.
+function onSubagentStop(event) {
+  const root = projectRoot(event);
+  const current = getCurrentTask(root);
+  if (current === undefined) return ALLOW;
+  const tasks = readJson(join(ralphDir(root), "task.json"));
+  const phase = typeof tasks?.phase === "string" && tasks.phase.length > 0 ? tasks.phase : "go";
+  const outcome = typeof event?.payload?.outcome === "string" ? event.payload.outcome : "completed";
+  appendTrace(root, phase, "subagent:stop", `subagent ${outcome}`);
+  return ALLOW;
+}
+
 export function activate(context) {
   context.registerSkillRoot("superharness", "./skills");
 
@@ -163,9 +225,14 @@ export function activate(context) {
     context.registerHook("SessionStart", guard(onSessionStart), options),
     context.registerHook("UserPromptSubmit", guard(onUserPromptSubmit), options),
     context.registerHook("Stop", guard(onStop), options),
+    context.registerHook("SessionEnd", guard(onSessionEnd), options),
+    context.registerHook("BeforePlan", guard(onBeforePlan), options),
+    context.registerHook("AfterPlan", guard(onAfterPlan), options),
+    context.registerHook("SubagentStart", guard(onSubagentStart), options),
+    context.registerHook("SubagentStop", guard(onSubagentStop), options),
   ];
   return () => { for (const dispose of disposers.reverse()) dispose(); };
 }
 
 // Exported for tests.
-export const __test = { goInvocation, onSessionStart, onUserPromptSubmit, onStop, ralphDir };
+export const __test = { goInvocation, onSessionStart, onUserPromptSubmit, onStop, onSessionEnd, onBeforePlan, onAfterPlan, onSubagentStart, onSubagentStop, ralphDir };

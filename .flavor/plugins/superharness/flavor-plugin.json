@@ -10,7 +10,12 @@
     "hooks": [
       { "name": "SessionStart" },
       { "name": "UserPromptSubmit" },
-      { "name": "Stop" }
+      { "name": "Stop" },
+      { "name": "SessionEnd" },
+      { "name": "BeforePlan" },
+      { "name": "AfterPlan" },
+      { "name": "SubagentStart" },
+      { "name": "SubagentStop" }
     ],
     "skillRoots": [
       { "name": "superharness", "path": "./skills" }
