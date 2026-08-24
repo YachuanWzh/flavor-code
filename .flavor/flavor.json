@@ -3,8 +3,8 @@
     "pkce": {
       "type": "oauth-callback",
       "apiType": "anthropic",
-      "authorizationUrl": "http://127.0.0.1:8091/authorize",
-      "tokenUrl": "http://127.0.0.1:8091/token",
+      "authorizationUrl": "http://192.168.5.7:8091/authorize",
+      "tokenUrl": "http://192.168.5.7:8091/token",
       "clientId": "flavor-code-cli",
       "scope": "models:read models:use"
     }
