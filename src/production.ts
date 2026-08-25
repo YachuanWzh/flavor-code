@@ -100,7 +100,7 @@ import { DEFAULT_MEMORY_BEHAVIOR, MemoryStore, renderMemoryDocument } from "./me
 import { MemoryReviewBridge } from "./memory/review.js";
 import { createExecutionEnvironment } from "./execution/factory.js";
 import { FlavorIdeClient } from "./ide/client.js";
-import { JobRegistry, type JobSnapshot } from "./jobs/registry.js";
+import { JobRegistry, type JobReadResult, type JobSnapshot } from "./jobs/registry.js";
 import { TerminalService } from "./terminal/service.js";
 import { createJobTools } from "./tools/jobs.js";
 import { createTerminalTools } from "./tools/terminal.js";
@@ -115,6 +115,43 @@ const INTERRUPTED_TASK_PLAN_CONTEXT = [
   "Reassess the current query independently.",
   "If the current work needs a plan, create a fresh one with TaskPlan before using TaskUpdate.",
 ].join(" ");
+
+function recoverablePalClient(client: PalClientLike, onRecovered: () => void): PalClientLike {
+  let presence: PalPresence | undefined;
+  let starting: Promise<PalPresence> | undefined;
+  const ensure = (): Promise<PalPresence> => {
+    if (presence !== undefined) return Promise.resolve(presence);
+    if (starting !== undefined) return starting;
+    starting = client.start().then((value) => { presence = value; onRecovered(); return value; })
+      .finally(() => { starting = undefined; });
+    return starting;
+  };
+  const invoke = async <T>(run: () => Promise<T>): Promise<T> => {
+    await ensure();
+    try { return await run(); }
+    catch (error) {
+      const detail = message(error);
+      if (!/not connected|connection closed|ECONNRESET|ECONNREFUSED|EPIPE/i.test(detail)) throw error;
+      presence = undefined;
+      await ensure();
+      return run();
+    }
+  };
+  return {
+    start: ensure,
+    list: () => invoke(() => client.list()),
+    rename: (alias) => invoke(() => client.rename(alias)),
+    sendTask: (target, value) => invoke(() => client.sendTask(target, value)),
+    sendChat: (target, value) => invoke(() => client.sendChat(target, value)),
+    startCoWork: (input) => invoke(() => client.startCoWork(input)),
+    coWorkAction: (action) => invoke(() => client.coWorkAction(action)),
+    coWorkStatus: (coWorkId) => invoke(() => client.coWorkStatus(coWorkId)),
+    integrateCoWork: (input) => invoke(() => client.integrateCoWork(input)),
+    cancelCoWork: (coWorkId, reason) => invoke(() => client.cancelCoWork(coWorkId, reason)),
+    subscribe: (listener) => client.subscribe(listener),
+    close: async () => { presence = undefined; await client.close(); },
+  };
+}
 
 /**
  * Per-step shutdown budget. On Windows a hung child-process pipe, named pipe,
@@ -150,6 +187,10 @@ export interface ProductionRuntimeOptions {
   collaboration?: {
     instanceId: string;
     alias?: string;
+    /** Optional integrations degrade to diagnostics instead of blocking runtime startup. */
+    optional?: boolean;
+    /** Embedder-owned broker starter, used by Electron where process.argv points at the desktop entry. */
+    startBroker?: (address: string) => Promise<void>;
     client?: PalClientLike;
     createClient?: (input: { instanceId: string; alias: string; projectPath: string }) => PalClientLike;
   };
@@ -167,7 +208,7 @@ export interface ProductionRuntime {
   diagnostics: readonly string[];
   sessionId: string;
   restoredTranscript: TranscriptState;
-  jobs: { list(): readonly JobSnapshot[]; subscribe(listener: (jobs: readonly JobSnapshot[]) => void): () => void };
+  jobs: { list(): readonly JobSnapshot[]; read(id: string, owner: string, cursor?: number): JobReadResult; subscribe(listener: (jobs: readonly JobSnapshot[]) => void): () => void };
   dispose(): Promise<void>;
 }
 
@@ -501,6 +542,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   tools.push(evolveService.toolDefinition());
   let sleepScheduler: ProjectSleepScheduler | undefined;
   let collaborationClient: PalClientLike | undefined;
+  let collaborationUnavailableDiagnostic: string | undefined;
   let unsubscribeCollaboration: (() => void) | undefined;
   let collaborationSession: FlavorSession | undefined;
   let deliverCollaborationEvent: ((event: BrokerEvent) => Promise<void>) | undefined;
@@ -540,14 +582,19 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       userScope: home,
       runtimeDir: join(tmpdir(), `flavor-code-pals-${createHash("sha256").update(home).digest("hex").slice(0, 16)}`),
     });
-    collaborationClient = collaboration.client ?? collaboration.createClient?.({
+    const baseCollaborationClient = collaboration.client ?? collaboration.createClient?.({
       instanceId: collaboration.instanceId, alias, projectPath: workspace,
     }) ?? new PalClient({
       address,
       authHome: home,
       registration: { id: collaboration.instanceId, alias, projectPath: workspace },
-      startBroker: () => ensurePalBrokerRunning({ address }),
+      startBroker: () => ensurePalBrokerRunning({ address, ...(collaboration.startBroker === undefined ? {} : { startBroker: () => collaboration.startBroker!(address) }) }),
     });
+    collaborationClient = collaboration.optional ? recoverablePalClient(baseCollaborationClient, () => {
+      if (collaborationUnavailableDiagnostic === undefined) return;
+      remove(diagnostics, collaborationUnavailableDiagnostic);
+      collaborationUnavailableDiagnostic = undefined;
+    }) : baseCollaborationClient;
     deliverCollaborationEvent = async (event: BrokerEvent): Promise<void> => {
       const session = collaborationSession;
       const client = collaborationClient;
@@ -592,11 +639,18 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       }
     };
     unsubscribeCollaboration = collaborationClient.subscribe(enqueueCollaborationEvent);
-    tools.push(...createPalsTools(collaborationClient, {
-      selfId: collaboration.instanceId,
-      shareGuard: new CollaborationShareGuard({ redact: (value) => redactSecrets(value, secrets) }),
-    }));
-    await collaborationClient.start();
+    try { await collaborationClient.start(); }
+    catch (error) {
+      if (!collaboration.optional) throw error;
+      collaborationUnavailableDiagnostic = `Pals unavailable: ${message(error)}`;
+      diagnostics.push(collaborationUnavailableDiagnostic);
+    }
+    if (collaborationClient !== undefined) {
+      tools.push(...createPalsTools(collaborationClient, {
+        selfId: collaboration.instanceId,
+        shareGuard: new CollaborationShareGuard({ redact: (value) => redactSecrets(value, secrets) }),
+      }));
+    }
   }
   const syncMcpTools = (): void => {
     for (const tool of mcpTools) remove(tools, tool);
@@ -1347,6 +1401,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     }),
     rename: (alias) => collaborationClient!.rename(alias),
     info: (target) => resolveCollaborationTarget(target),
+    sendChat: (target, message) => collaborationClient!.sendChat(target, message),
     sendTask: (target, goal) => collaborationClient!.sendTask(target, goal),
     startCoWork: async (target, goal) => {
       const recipient = await resolveCollaborationTarget(target);
@@ -1594,6 +1649,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       return sessionHistory.checkpoint(tagged, harness.main.context.snapshot());
     },
     tree: () => sessionHistory.tree(),
+    historyLeaf: () => sessionHistory.leafId,
     rewind: async (nodeId) => {
       await sessionHistory.rewind(nodeId, harness.main.context.snapshot());
       await persist();
@@ -1805,7 +1861,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   let disposed = false;
   return {
     session, services, authorization, approvals, memoryReviews, restoredTranscript,
-    jobs: { list: () => jobs.list(), subscribe: (listener) => jobs.subscribe(listener) },
+    jobs: { list: () => jobs.list(), read: (id, owner, cursor) => jobs.read(id, owner, cursor), subscribe: (listener) => jobs.subscribe(listener) },
     get sessionId() { return sessionId; },
     get diagnostics() { return diagnostics.map((item) => redactSecrets(item, secrets)); },
     async dispose() {

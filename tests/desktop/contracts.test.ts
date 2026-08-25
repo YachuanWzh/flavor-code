@@ -28,12 +28,23 @@ import {
   SetSkillEnabledInputSchema,
   SubmitInputSchema,
   UpdateMemoryInputSchema,
+  GitReviewInputSchema,
+  TerminalWriteInputSchema,
+  PreviewUrlInputSchema,
+  PalMessageInputSchema,
+  JobReadInputSchema,
 } from "../../src/desktop/contracts.js";
 
 describe("desktop IPC contracts", () => {
   it("accepts the bounded request payloads used by the preload bridge", () => {
     expect(OpenWorkspaceInputSchema.parse({ path: "C:\\work\\demo" })).toEqual({ path: "C:\\work\\demo" });
     expect(StartSessionInputSchema.parse({ resumeSession: "session-1" })).toEqual({ resumeSession: "session-1" });
+    expect(StartSessionInputSchema.parse({ environment: "worktree" })).toEqual({ environment: "worktree" });
+    expect(GitReviewInputSchema.parse({ scope: "base", target: "origin/main" })).toEqual({ scope: "base", target: "origin/main" });
+    expect(TerminalWriteInputSchema.parse({ id: "term-one", data: "npm test\r" })).toEqual({ id: "term-one", data: "npm test\r" });
+    expect(PreviewUrlInputSchema.parse({ url: "http://localhost:3000" })).toEqual({ url: "http://localhost:3000" });
+    expect(PalMessageInputSchema.parse({ target: "api-pal", message: "check it", kind: "chat" })).toEqual({ target: "api-pal", message: "check it", kind: "chat" });
+    expect(JobReadInputSchema.parse({ id: "job-abc123", cursor: 12 })).toEqual({ id: "job-abc123", cursor: 12 });
     expect(SubmitInputSchema.parse({ prompt: "fix the tests" })).toEqual({ prompt: "fix the tests" });
     expect(SubmitInputSchema.parse({ prompt: "build from design", permissionProfile: "d2c" }))
       .toEqual({ prompt: "build from design", permissionProfile: "d2c" });
@@ -90,6 +101,10 @@ describe("desktop IPC contracts", () => {
     expect(() => AnswerQuestionsInputSchema.parse({ answers: { 10: "x" } })).toThrow();
     expect(() => ResolveMemoryReviewInputSchema.parse({ id: "../outside", decision: "accept" })).toThrow();
     expect(() => DeleteSessionInputSchema.parse({ sessionId: "../outside" })).toThrow();
+    expect(() => StartSessionInputSchema.parse({ environment: "container" })).toThrow();
+    expect(() => GitReviewInputSchema.parse({ scope: "commit", target: "--exec" })).toThrow();
+    expect(() => TerminalWriteInputSchema.parse({ id: "../term", data: "x" })).toThrow();
+    expect(() => JobReadInputSchema.parse({ id: "../job" })).toThrow();
     expect(() => AppMenuInputSchema.parse({ menu: "window", x: -1, y: 36 })).toThrow();
     expect(() => SkillNameInputSchema.parse({ name: "../escape" })).toThrow();
     expect(() => MemoryCandidateInputSchema.parse({ type: "secret", content: "x" })).toThrow();

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import type { AgentEvent } from "../agent/types.js";
+import type { AgentEvent, TaskSnapshot } from "../agent/types.js";
 import type { D2cProgressEvent, D2cReport } from "../d2c/types.js";
 import type { D2cWorkflow } from "../d2c/workflow.js";
 import type { D2cInteractionRun } from "../d2c/interaction.js";
@@ -18,7 +18,14 @@ import { MEMORY_TYPES, type MemoryCandidate, type MemoryEntry } from "../memory/
 import type { MemorySnapshot } from "../memory/manager.js";
 import type { MemoryReviewItem } from "../memory/review.js";
 import type { JobSnapshot } from "../jobs/registry.js";
+import type { GitHistoryEntry } from "../git/service.js";
 import type { ManagedMcpServer } from "../mcp/config-manager.js";
+import type { SessionTreeNode } from "../session/tree.js";
+import type { TerminalReadResult, TerminalSnapshot } from "../terminal/service.js";
+import type { JobReadResult } from "../jobs/registry.js";
+import type { DesktopWorktree } from "./worktree-manager.js";
+import type { DesktopWorkbenchInspection } from "./workbench-service.js";
+import type { DesktopAstNode, DesktopAstRelations, DesktopAstStatus } from "./astgraph-service.js";
 import {
   DEFAULT_MAX_IMAGE_BYTES,
   DEFAULT_MAX_IMAGES,
@@ -29,6 +36,7 @@ export { DESKTOP_CHANNELS } from "./channels.js";
 export const OpenWorkspaceInputSchema = z.object({ path: z.string().trim().min(1).max(32_768) }).strict();
 export const StartSessionInputSchema = z.object({
   resumeSession: z.string().trim().min(1).max(128).optional(),
+  environment: z.enum(["local", "worktree"]).optional(),
 }).strict();
 export const DeleteSessionInputSchema = z.object({
   sessionId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/, "Invalid session id"),
@@ -48,6 +56,28 @@ export const CloseProjectInputSchema = ProjectPathInputSchema.extend({ force: z.
 export const GitPathInputSchema = z.object({ path: z.string().min(1).max(32_768) }).strict();
 export const GitDiffInputSchema = GitPathInputSchema.extend({ staged: z.boolean().optional() }).strict();
 export const GitCommitInputSchema = z.object({ message: z.string().trim().min(1).max(20_000) }).strict();
+export const GitReviewInputSchema = z.object({
+  scope: z.enum(["working", "staged", "commit", "base", "last-turn"]),
+  target: z.string().trim().min(1).max(256).regex(/^[A-Za-z0-9][A-Za-z0-9._/@{}~^:-]*$/).optional(),
+  paths: z.array(z.string().min(1).max(32_768)).max(200).optional(),
+}).strict();
+const SafeIdInput = z.string().trim().min(1).max(512).regex(/^[A-Za-z0-9._:/#@+~-]+$/);
+export const WorktreeRemoveInputSchema = z.object({ id: z.string().regex(/^worktree-[a-z0-9._-]{1,80}$/), force: z.boolean().optional() }).strict();
+export const HistoryNodeInputSchema = z.object({ nodeId: SafeIdInput }).strict();
+export const CheckpointInputSchema = z.object({ label: z.string().trim().min(1).max(160).optional() }).strict();
+export const TerminalOpenInputSchema = z.object({ cwd: z.string().max(32_768).optional(), shell: z.string().max(1_024).optional(), columns: z.number().int().min(20).max(500).optional(), rows: z.number().int().min(5).max(300).optional() }).strict();
+export const TerminalIdInputSchema = z.object({ id: z.string().regex(/^term-[A-Za-z0-9-]{1,80}$/) }).strict();
+export const TerminalReadInputSchema = TerminalIdInputSchema.extend({ cursor: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional() }).strict();
+export const TerminalWriteInputSchema = TerminalIdInputSchema.extend({ data: z.string().max(100_000) }).strict();
+export const TerminalResizeInputSchema = TerminalIdInputSchema.extend({ columns: z.number().int().min(20).max(500), rows: z.number().int().min(5).max(300) }).strict();
+export const JobReadInputSchema = z.object({ id: z.string().regex(/^job-[A-Za-z0-9-]{1,80}$/), cursor: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional() }).strict();
+export const PreviewUrlInputSchema = z.object({ url: z.string().trim().min(1).max(2_048) }).strict();
+export const PalMessageInputSchema = z.object({ target: SafeIdInput, message: z.string().trim().min(1).max(50_000), kind: z.enum(["chat", "task"]) }).strict();
+export const CoWorkStartInputSchema = z.object({ target: SafeIdInput, goal: z.string().trim().min(1).max(50_000) }).strict();
+export const CoWorkStatusInputSchema = z.object({ coWorkId: SafeIdInput.optional() }).strict();
+export const CoWorkCancelInputSchema = z.object({ coWorkId: SafeIdInput, reason: z.string().trim().min(1).max(4_000).optional() }).strict();
+export const AstSearchInputSchema = z.object({ query: z.string().trim().min(1).max(200) }).strict();
+export const AstNodeInputSchema = z.object({ id: SafeIdInput, hops: z.number().int().min(1).max(4).optional() }).strict();
 export const AppMenuInputSchema = z.object({
   menu: z.enum(["file", "edit", "view", "help"]),
   x: z.number().int().min(0).max(32_768),
@@ -226,6 +256,9 @@ export interface DesktopSessionSummary {
   archived?: boolean;
   activity?: "running" | "completed" | "failed" | "attention" | "interrupted";
   unread?: boolean;
+  environment?: "local" | "worktree";
+  workingDirectory?: string;
+  worktreeId?: string;
 }
 
 export interface DesktopActivityItem {
@@ -303,6 +336,9 @@ export interface DesktopSnapshot {
     permissionMode: PermissionMode;
     busy: boolean;
     queue: { steering: readonly string[]; followUp: readonly string[] };
+    environment?: "local" | "worktree";
+    workingDirectory?: string;
+    worktreeId?: string;
   };
   approval?: DesktopApproval;
   questions?: readonly Question[];
@@ -312,6 +348,7 @@ export interface DesktopSnapshot {
   diagnostics: readonly string[];
   models: readonly DesktopModelOption[];
   jobs: readonly JobSnapshot[];
+  tasks?: TaskSnapshot;
 }
 
 export interface DesktopModelMutationResult {
@@ -324,6 +361,9 @@ export interface SessionStartedPayload {
   restoredTranscript: TranscriptState;
   snapshot: DesktopSnapshot;
 }
+
+export interface DesktopHistorySnapshot { leafId: string | null; nodes: readonly SessionTreeNode[] }
+export interface DesktopPalPresence { id: string; alias: string; projectPath?: string; connectedAt: string; lastSeenAt: string }
 
 export interface D2cReportListItem {
   task: string;
@@ -449,7 +489,7 @@ export interface FlavorDesktopApi {
   appIcon(): Promise<string | undefined>;
   chooseWorkspace(): Promise<DesktopSnapshot | undefined>;
   openWorkspace(path: string): Promise<DesktopSnapshot>;
-  startSession(resumeSession?: string): Promise<SessionStartedPayload>;
+  startSession(resumeSession?: string, environment?: "local" | "worktree"): Promise<SessionStartedPayload>;
   selectSession(sessionId: string): Promise<SessionStartedPayload>;
   deleteSession(sessionId: string): Promise<DesktopSnapshot>;
   updateSession(sessionId: string, changes: { title?: string; pinned?: boolean; archived?: boolean }): Promise<DesktopSnapshot>;
@@ -465,6 +505,34 @@ export interface FlavorDesktopApi {
   gitUnstage(path: string): Promise<DesktopGitStatus>;
   gitDiscard(path: string): Promise<DesktopGitStatus>;
   gitCommit(message: string): Promise<{ result: string; status: DesktopGitStatus }>;
+  gitReview(scope: "working" | "staged" | "commit" | "base" | "last-turn", target?: string, paths?: readonly string[]): Promise<string>;
+  gitHistory(): Promise<readonly GitHistoryEntry[]>;
+  listWorktrees(): Promise<readonly DesktopWorktree[]>;
+  removeWorktree(id: string, force?: boolean): Promise<void>;
+  mergeWorktree(id: string): Promise<void>;
+  historySnapshot(): Promise<DesktopHistorySnapshot>;
+  createCheckpoint(label?: string): Promise<SessionTreeNode>;
+  rewindHistory(nodeId: string): Promise<void>;
+  unrevertHistory(): Promise<void>;
+  forkHistory(nodeId: string): Promise<void>;
+  openTerminal(input?: { cwd?: string; shell?: string; columns?: number; rows?: number }): Promise<TerminalSnapshot>;
+  listTerminals(): Promise<readonly TerminalSnapshot[]>;
+  readTerminal(id: string, cursor?: number): Promise<TerminalReadResult>;
+  writeTerminal(id: string, data: string): Promise<void>;
+  resizeTerminal(id: string, columns: number, rows: number): Promise<void>;
+  closeTerminal(id: string): Promise<void>;
+  readJob(id: string, cursor?: number): Promise<JobReadResult>;
+  validatePreviewUrl(url: string): Promise<string>;
+  openPreviewUrl(url: string): Promise<void>;
+  inspectWorkbench(): Promise<DesktopWorkbenchInspection>;
+  astStatus(): Promise<DesktopAstStatus>;
+  astSearch(query: string): Promise<readonly DesktopAstNode[]>;
+  astRelations(id: string, hops?: number): Promise<DesktopAstRelations>;
+  listPals(): Promise<readonly DesktopPalPresence[]>;
+  sendPalMessage(target: string, message: string, kind: "chat" | "task"): Promise<unknown>;
+  startCoWork(target: string, goal: string): Promise<unknown>;
+  coWorkStatus(coWorkId?: string): Promise<unknown>;
+  cancelCoWork(coWorkId: string, reason?: string): Promise<unknown>;
   showAppMenu(menu: "file" | "edit" | "view" | "help", x: number, y: number): Promise<void>;
   submit(
     prompt: string,
@@ -492,6 +560,7 @@ export interface FlavorDesktopApi {
   createMemory(candidate: MemoryCandidate): Promise<MemoryEntry>;
   updateMemory(id: string, candidate: MemoryCandidate): Promise<MemoryEntry>;
   deleteMemory(id: string): Promise<boolean>;
+  deleteColdMemory(): Promise<number>;
   switchModel(modelId: string): Promise<DesktopSnapshot>;
   addModel(input: AddDesktopModelInput): Promise<DesktopModelMutationResult>;
   listD2cReports(): Promise<readonly D2cReportListItem[]>;

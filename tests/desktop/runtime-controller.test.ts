@@ -55,6 +55,20 @@ function fakeRuntime(output: (event: SessionOutput) => void, sessionId = "sessio
 }
 
 describe("DesktopRuntimeController", () => {
+  it("reads bounded job output for the active desktop session", async () => {
+    const runtime = fakeRuntime(() => undefined);
+    const read = vi.fn(() => ({
+      id: "job-1", kind: "shell" as const, owner: "main", label: "serve", state: "running" as const,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), outputChars: 28, truncated: false,
+      output: "http://localhost:5173", cursor: 28,
+    }));
+    Object.assign(runtime, { jobs: { list: () => [{ id: "job-1", kind: "shell" as const, owner: "main", label: "serve", state: "running" as const, createdAt: "2026-08-25T00:00:00Z", updatedAt: "2026-08-25T00:00:00Z", outputChars: 28, truncated: false }], subscribe: () => () => undefined, read } });
+    const controller = new DesktopRuntimeController({ home: demoHome, createRuntime: async () => runtime, listSessions: async () => [], emit: () => undefined });
+    await controller.openWorkspace(workDemoDir); await controller.startSession();
+    expect(controller.readJob("job-1", 3).output).toContain("localhost");
+    expect(read).toHaveBeenCalledWith("job-1", "main", 3);
+  });
+
   it("publishes desktop snapshots when background job state changes", async () => {
     const events: unknown[] = [];
     const runtime = fakeRuntime(() => undefined);
@@ -204,6 +218,46 @@ describe("DesktopRuntimeController", () => {
     expect(await controller.deleteMemory(updated.id)).toBe(true);
     expect(loadMemoryManager).toHaveBeenCalledWith(workDir, demoHome);
     expect(runtime.services.refreshMemory).toHaveBeenCalledTimes(3);
+  });
+
+  it("exposes desktop history, terminal and Pals controls without slash-command parsing", async () => {
+    const runtime = fakeRuntime(() => undefined);
+    const node = { id: "turn-one", parentId: null, createdAt: "2026-08-25T00:00:00.000Z", prompt: "Start", checkpointId: "cp-one", context: { messages: [] } };
+    const pals = [{ id: "11111111-1111-4111-8111-111111111111", alias: "api", connectedAt: "", lastSeenAt: "" }];
+    Object.assign(runtime.services, {
+      tree: vi.fn(() => [node]), historyLeaf: vi.fn(() => "turn-one"), checkpoint: vi.fn(async () => node),
+      rewind: vi.fn(async () => undefined), unrevert: vi.fn(async () => undefined), fork: vi.fn(async () => undefined),
+      pals: {
+        list: vi.fn(async () => pals), rename: vi.fn(), info: vi.fn(), sendTask: vi.fn(async () => ({ status: "delivered" })),
+        sendChat: vi.fn(async () => ({ status: "delivered" })), startCoWork: vi.fn(async () => ({ coWorkId: "co-1" })),
+        coWorkStatus: vi.fn(async () => ({ coWorkId: "co-1", status: "planning" })), cancelCoWork: vi.fn(async () => ({ status: "cancelled" })),
+      },
+    });
+    const terminalItems = [
+      { id: "term-1", owner: "session-live", shell: "pwsh", cwd: workDir, state: "running" as const, createdAt: "" },
+      { id: "term-closed", owner: "session-live", shell: "pwsh", cwd: workDir, state: "closed" as const, createdAt: "" },
+    ];
+    const terminal = {
+      open: vi.fn(() => ({ id: "term-1", owner: "session-live", shell: "pwsh", cwd: workDir, state: "running" as const, createdAt: "" })),
+      list: vi.fn(() => terminalItems), write: vi.fn(), resize: vi.fn(),
+      read: vi.fn(() => ({ id: "term-1", owner: "session-live", shell: "pwsh", cwd: workDir, state: "running" as const, createdAt: "", output: "ready", cursor: 5, truncated: false })),
+      close: vi.fn(), dispose: vi.fn(),
+    };
+    const controller = new DesktopRuntimeController({
+      home: demoHome, createRuntime: async () => runtime, listSessions: async () => [],
+      createTerminalService: () => terminal, emit: () => undefined,
+    });
+    await controller.openWorkspace(workDir); await controller.startSession();
+
+    expect(await controller.historySnapshot()).toMatchObject({ leafId: "turn-one", nodes: [node] });
+    await controller.createCheckpoint("before refactor"); await controller.rewindHistory("turn-one");
+    expect(controller.openTerminal()).toMatchObject({ id: "term-1" });
+    expect(controller.listTerminals().map((item) => item.id)).toEqual(["term-1"]);
+    controller.writeTerminal("term-1", "npm test\r");
+    expect(controller.readTerminal("term-1", 0).output).toBe("ready");
+    expect(await controller.listPals()).toEqual(pals);
+    await controller.sendPalMessage("api", "check tests", "chat");
+    expect(runtime.services.pals?.sendChat).toHaveBeenCalledWith("api", "check tests");
   });
 
   it("opens a workspace, lists its sessions and starts a resumable runtime", async () => {

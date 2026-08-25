@@ -252,6 +252,25 @@ describe("production runtime", () => {
     expect(failing.close).toHaveBeenCalledOnce();
   });
 
+  it("can degrade optional desktop collaboration without failing session startup", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pals-optional-")); roots.push(workspace);
+    const failing = new FakeProductionPalClient();
+    failing.start.mockRejectedValueOnce(new Error("broker unavailable"));
+
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, output: () => {},
+      collaboration: { instanceId: PAL_A, client: failing, optional: true },
+    });
+
+    expect(runtime.diagnostics).toContainEqual(expect.stringMatching(/Pals unavailable.*broker unavailable/i));
+    expect(failing.close).not.toHaveBeenCalled();
+    await expect(runtime.services.pals?.list(true)).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ alias: "app" })]));
+    expect(failing.start).toHaveBeenCalledTimes(2);
+    expect(runtime.diagnostics).not.toContainEqual(expect.stringMatching(/Pals unavailable/i));
+    await runtime.dispose();
+    expect(failing.close).toHaveBeenCalledOnce();
+  });
+
   it("registers collaboration tools with the main harness only when collaboration is enabled", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pals-tools-")); roots.push(workspace);
     const pluginRoot = join(workspace, ".flavor", "plugins", "capture-pals-tools");

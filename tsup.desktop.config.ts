@@ -8,6 +8,7 @@ export default defineConfig([
       main: "src/desktop/main.ts",
       "pixel-worker": "src/d2c/pixel-worker.ts",
       "plugin-worker-entry": "src/plugins/plugin-worker-entry.ts",
+      "pals-broker-entry": "src/pals/broker-entry.ts",
     },
     outDir: "dist/desktop",
     format: ["esm"],

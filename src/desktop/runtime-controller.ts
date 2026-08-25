@@ -49,7 +49,10 @@ import { message } from "../utils/error.js";
 import { modelContentText } from "../models/types.js";
 import type { ApprovalDecision } from "../tools/runtime.js";
 import type { PermissionProfile } from "../permissions/engine.js";
-import type { JobSnapshot } from "../jobs/registry.js";
+import type { JobReadResult, JobSnapshot } from "../jobs/registry.js";
+import type { TaskSnapshot } from "../agent/types.js";
+import type { SessionTreeNode } from "../session/tree.js";
+import { TerminalService, type TerminalReadResult, type TerminalSnapshot } from "../terminal/service.js";
 import { createGlobTool, type SearchResult } from "../tools/search.js";
 import { SkillManager, type ManagedSkill, type ManagedSkillSummary, type SkillDraft } from "../skills/manager.js";
 import { createProjectMemoryManager, type MemoryManagerLike, type MemorySnapshot } from "../memory/manager.js";
@@ -134,6 +137,20 @@ export interface RuntimeLike {
     finishTask(): Promise<string>;
     refreshMemory?(): Promise<void>;
     reloadSkills?(): Promise<void>;
+    checkpoint?(label?: string): Promise<SessionTreeNode>;
+    tree?(): readonly SessionTreeNode[];
+    historyLeaf?(): string | null;
+    rewind?(nodeId: string): Promise<void>;
+    unrevert?(): Promise<void>;
+    fork?(nodeId: string): Promise<void>;
+    pals?: {
+      list(verbose: boolean): Promise<unknown>;
+      sendChat?(target: string, message: string): Promise<unknown>;
+      sendTask(target: string, goal: string): Promise<unknown>;
+      startCoWork(target: string, goal: string): Promise<unknown>;
+      coWorkStatus(coWorkId?: string): Promise<unknown>;
+      cancelCoWork(coWorkId: string, reason?: string): Promise<unknown>;
+    };
     questions: { readonly pending: readonly Question[] | undefined; answer(answers: Record<number, string>): void };
   };
   readonly approvals: {
@@ -150,12 +167,22 @@ export interface RuntimeLike {
     accept(id: string): Promise<boolean>;
     dismiss(id: string): boolean;
   };
-  readonly jobs?: { list(): readonly JobSnapshot[]; subscribe(listener: (jobs: readonly JobSnapshot[]) => void): () => void };
+  readonly jobs?: { list(): readonly JobSnapshot[]; read(id: string, owner: string, cursor?: number): JobReadResult; subscribe(listener: (jobs: readonly JobSnapshot[]) => void): () => void };
   dispose(): Promise<void>;
 }
 
 export interface RuntimeFactoryOptions extends Pick<ProductionRuntimeOptions,
-  "workspace" | "home" | "output" | "onApprovalChange" | "approvalPolicy" | "resumeSession" | "extraTools"> {}
+  "workspace" | "home" | "output" | "onApprovalChange" | "approvalPolicy" | "resumeSession" | "extraTools" | "collaboration"> {}
+
+export interface DesktopTerminalServiceLike {
+  open(input: { owner: string; cwd?: string; shell?: string; args?: string[]; columns?: number; rows?: number }): TerminalSnapshot;
+  list(owner: string): readonly TerminalSnapshot[];
+  write(id: string, owner: string, data: string): void;
+  resize(id: string, owner: string, columns: number, rows: number): void;
+  read(id: string, owner: string, cursor?: number): TerminalReadResult;
+  close(id: string, owner: string): void;
+  dispose(): void;
+}
 
 export interface D2cJudgeService {
   config(): Promise<D2cJudgeConfigView>;
@@ -178,6 +205,7 @@ export interface D2cJudgeService {
 export interface DesktopRuntimeControllerOptions {
   home?: string;
   createRuntime?(options: RuntimeFactoryOptions): Promise<RuntimeLike>;
+  createTerminalService?(workspace: string): DesktopTerminalServiceLike;
   listSessions?(workspace: string): Promise<readonly DesktopSessionSummary[]>;
   deleteSession?(workspace: string, sessionId: string): Promise<void>;
   loadModels?(workspace: string, home: string): Promise<DesktopModelOption[]>;
@@ -204,6 +232,7 @@ export interface DesktopRuntimeControllerOptions {
 export class DesktopRuntimeController {
   readonly #home: string;
   readonly #createRuntime: NonNullable<DesktopRuntimeControllerOptions["createRuntime"]>;
+  readonly #createTerminalService: NonNullable<DesktopRuntimeControllerOptions["createTerminalService"]>;
   readonly #listSessions: NonNullable<DesktopRuntimeControllerOptions["listSessions"]>;
   readonly #deleteStoredSession: NonNullable<DesktopRuntimeControllerOptions["deleteSession"]>;
   readonly #loadModels: NonNullable<DesktopRuntimeControllerOptions["loadModels"]>;
@@ -226,8 +255,10 @@ export class DesktopRuntimeController {
   #skillManager: SkillManager | undefined;
   #memoryManager: MemoryManagerLike | undefined;
   #mcpManager: ProjectMcpConfigManagerLike | undefined;
+  #terminal: DesktopTerminalServiceLike | undefined;
   #models: readonly DesktopModelOption[] = DEFAULT_DESKTOP_MODELS;
   #busy = false;
+  #tasks: TaskSnapshot | undefined;
   #disposeJobSubscription: (() => void) | undefined;
   readonly #d2cMocks = new Map<string, D2cRunningMock>();
   readonly #d2cPreviews = new Map<string, RunningProject>();
@@ -240,6 +271,7 @@ export class DesktopRuntimeController {
   constructor(options: DesktopRuntimeControllerOptions) {
     this.#home = resolve(options.home ?? homedir());
     this.#createRuntime = options.createRuntime ?? (async (runtimeOptions) => createProductionRuntime(runtimeOptions));
+    this.#createTerminalService = options.createTerminalService ?? ((workspace) => new TerminalService(workspace));
     this.#listSessions = options.listSessions ?? (async (workspace) => {
       const store = new SessionStore({ workspace });
       const entries = await store.list();
@@ -308,6 +340,7 @@ export class DesktopRuntimeController {
       diagnostics: runtime?.diagnostics ?? [],
       models: this.#models,
       jobs: runtime?.jobs?.list() ?? [],
+      ...(this.#tasks === undefined ? {} : { tasks: this.#tasks }),
     };
   }
 
@@ -320,6 +353,8 @@ export class DesktopRuntimeController {
       await this.#stopAllD2cMocks();
     }
     this.#workspace = workspace;
+    this.#terminal?.dispose();
+    this.#terminal = this.#createTerminalService(workspace);
     this.#skillManager = new SkillManager({ workspace, home: this.#home });
     this.#memoryManager = await this.#loadMemoryManager(workspace, this.#home);
     this.#mcpManager = this.#loadMcpManager(workspace);
@@ -352,6 +387,7 @@ export class DesktopRuntimeController {
           bufferedOutput.push(event);
           return;
         }
+        this.#captureSessionOutput(event);
         this.#emit({ type: "session-output", sessionId: outputSessionId, event });
       },
       onApprovalChange: () => {
@@ -375,6 +411,7 @@ export class DesktopRuntimeController {
     this.#emit({ type: "session-started", payload });
     outputReady = true;
     for (const event of bufferedOutput) {
+      this.#captureSessionOutput(event);
       this.#emit({ type: "session-output", sessionId: runtime.sessionId, event });
     }
     this.#publishSnapshot();
@@ -575,6 +612,74 @@ export class DesktopRuntimeController {
     if (deleted) await this.#runtime?.services.refreshMemory?.();
     return deleted;
   }
+
+  async deleteColdMemory(): Promise<number> {
+    const manager = this.#requireMemoryManager();
+    if (manager.deleteCold === undefined) throw new Error("Cold-memory cleanup is unavailable");
+    const result = await manager.deleteCold();
+    if (result.removed > 0) await this.#runtime?.services.refreshMemory?.();
+    return result.removed;
+  }
+
+  async historySnapshot(): Promise<{ leafId: string | null; nodes: readonly SessionTreeNode[] }> {
+    const services = this.#requireRuntime().services;
+    if (services.tree === undefined) throw new Error("Session history is unavailable");
+    return { leafId: services.historyLeaf?.() ?? null, nodes: services.tree() };
+  }
+
+  async createCheckpoint(label?: string): Promise<SessionTreeNode> {
+    const checkpoint = this.#requireRuntime().services.checkpoint;
+    if (checkpoint === undefined) throw new Error("Session checkpoints are unavailable");
+    return checkpoint(label?.trim() || undefined);
+  }
+
+  async rewindHistory(nodeId: string): Promise<void> {
+    const rewind = this.#requireRuntime().services.rewind;
+    if (rewind === undefined) throw new Error("Session rewind is unavailable");
+    await rewind(nodeId);
+  }
+
+  async unrevertHistory(): Promise<void> {
+    const unrevert = this.#requireRuntime().services.unrevert;
+    if (unrevert === undefined) throw new Error("Session unrevert is unavailable");
+    await unrevert();
+  }
+
+  async forkHistory(nodeId: string): Promise<void> {
+    const fork = this.#requireRuntime().services.fork;
+    if (fork === undefined) throw new Error("Session fork is unavailable");
+    await fork(nodeId);
+  }
+
+  openTerminal(input: { cwd?: string; shell?: string; columns?: number; rows?: number } = {}): TerminalSnapshot {
+    return this.#requireTerminal().open({ ...input, owner: this.#requireRuntime().sessionId });
+  }
+
+  listTerminals(): readonly TerminalSnapshot[] { return this.#requireTerminal().list(this.#requireRuntime().sessionId).filter((terminal) => terminal.state !== "closed"); }
+  readTerminal(id: string, cursor = 0): TerminalReadResult { return this.#requireTerminal().read(id, this.#requireRuntime().sessionId, cursor); }
+  writeTerminal(id: string, data: string): void { this.#requireTerminal().write(id, this.#requireRuntime().sessionId, data); }
+  resizeTerminal(id: string, columns: number, rows: number): void { this.#requireTerminal().resize(id, this.#requireRuntime().sessionId, columns, rows); }
+  closeTerminal(id: string): void { this.#requireTerminal().close(id, this.#requireRuntime().sessionId); }
+  readJob(id: string, cursor = 0): JobReadResult {
+    const runtime = this.#requireRuntime();
+    if (runtime.jobs === undefined) throw new Error("Background job output is unavailable");
+    const job = runtime.jobs.list().find((item) => item.id === id);
+    if (job === undefined) throw new Error(`Unknown background job: ${id}`);
+    return runtime.jobs.read(id, job.owner, cursor);
+  }
+
+  async listPals(verbose = true): Promise<unknown> { return this.#requirePals().list(verbose); }
+  async sendPalMessage(target: string, message: string, kind: "chat" | "task"): Promise<unknown> {
+    const pals = this.#requirePals();
+    if (kind === "chat") {
+      if (pals.sendChat === undefined) throw new Error("Pal chat is unavailable");
+      return pals.sendChat(target, message);
+    }
+    return pals.sendTask(target, message);
+  }
+  async startCoWork(target: string, goal: string): Promise<unknown> { return this.#requirePals().startCoWork(target, goal); }
+  async coWorkStatus(coWorkId?: string): Promise<unknown> { return this.#requirePals().coWorkStatus(coWorkId); }
+  async cancelCoWork(coWorkId: string, reason?: string): Promise<unknown> { return this.#requirePals().cancelCoWork(coWorkId, reason); }
 
   async switchModel(modelId: string): Promise<DesktopSnapshot> {
     if (this.#busy) throw new Error("Stop the active task before switching models");
@@ -1290,6 +1395,8 @@ export class DesktopRuntimeController {
     await this.#disposeRuntime();
     await this.#stopAllD2cPreviews();
     await this.#stopAllD2cMocks();
+    this.#terminal?.dispose();
+    this.#terminal = undefined;
   }
 
   #publishSnapshot(): DesktopSnapshot {
@@ -1313,6 +1420,7 @@ export class DesktopRuntimeController {
     this.#disposeJobSubscription = undefined;
     this.#runtime = undefined;
     this.#busy = false;
+    this.#tasks = undefined;
     if (runtime === undefined) return;
     await runtime.session.close();
     await runtime.dispose();
@@ -1356,5 +1464,26 @@ export class DesktopRuntimeController {
   #requireMcpManager(): ProjectMcpConfigManagerLike {
     if (this.#mcpManager === undefined) throw new Error("Open a project before managing MCP services");
     return this.#mcpManager;
+  }
+
+  #captureSessionOutput(event: SessionOutput): void {
+    if (event.type === "tasks") this.#tasks = event.snapshot;
+    else if (event.type === "tasks-cleared") this.#tasks = undefined;
+  }
+
+  #requireRuntime(): RuntimeLike {
+    if (this.#runtime === undefined) throw new Error("Start a session before using this feature");
+    return this.#runtime;
+  }
+
+  #requireTerminal(): DesktopTerminalServiceLike {
+    if (this.#terminal === undefined) throw new Error("Open a project before using the terminal");
+    return this.#terminal;
+  }
+
+  #requirePals(): NonNullable<RuntimeLike["services"]["pals"]> {
+    const pals = this.#requireRuntime().services.pals;
+    if (pals === undefined) throw new Error("Pals are unavailable for this session");
+    return pals;
   }
 }

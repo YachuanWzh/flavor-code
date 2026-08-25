@@ -2,7 +2,30 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.3.1 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.3.2 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.3.2] - 2026-08-25
+
+### 新增
+- Electron 新任务支持“当前检出”与应用托管的隔离 Git worktree；隔离任务使用 `flavor/desktop-*` 分支，可查看 dirty/merged 状态、显式合并交付、保留分支或安全移除，未确认时拒绝清理脏工作树
+- 新增 Agent 工作台，将执行轨迹、持久 Goal 阶段与验证缺口、TaskPlan、子 Agent、后台 Job、Session Time Machine 和项目 PTY 终端集中可视化
+- Session Time Machine 支持命名 checkpoint、回退、撤销回退和从指定节点 fork；终端支持打开、输入、增量读取、调整尺寸和关闭，并严格绑定当前任务目录与会话所有者
+- Review Workbench 支持 working、staged、commit、base 与 last-turn 五种范围，提供文件与 hunk 导航、P0/P1/P2 审查提示，并可一键把选定文件交给 Agent 审查
+- 新增 loopback-only 应用预览，支持从当前任务的终端及后台 Job 输出自动发现本地 URL、内嵌查看、刷新、复制和外部打开
+- 新增 Context & Safety Inspector，展示 Context Epoch、visibility log、用量记录、项目指令、权限层、诊断与脱敏审计记录
+- 新增代码图浏览器，可查看 AST 索引状态、搜索符号，在可点击关系图中漫游 callers/callees/多跳影响范围，并将精确文件行号插入输入框
+- 新增 Pals / Co-work 可视化，可发现本地 Pal、发送 Chat/Task、启动共同目标、查看状态并取消协作；工作台采用在线实例轨道、Pal 身份头和并排操作卡，区分直接沟通、异步委托与共同执行，并提供明确的进行中和完成反馈
+- 长期记忆卡片新增 distinct-task 调用次数和 enamel 风格 hot/normal/cold 标签，支持热度筛选与一次确认清理所有 cold 记忆
+
+### 安全与兼容
+- 所有桌面新增能力均通过严格 Zod IPC 契约和 typed preload 暴露；预览仅接受 loopback HTTP(S)，AST/审计读取有大小上限，敏感字段在进入 renderer 前脱敏
+- Electron 工作树、界面与编排逻辑保持在 `src/desktop/`，共享运行时只增加历史、Pals Chat 和任务状态的加法式读取钩子；CLI 命令、默认值、输出与持久化行为不变
+- 修复 Electron 恢复会话时错误地使用桌面主入口拉起 Pals broker、最终导致 `desktop:select-session` 超时的问题；桌面端改用独立 broker entry，broker 暂不可用时不阻断任务，并在后续 `list-pals`/协作操作时自动重连而非永久丢弃 Pals 客户端
+- Agent 工作台终端改用按需加载的 xterm.js 连接现有 `node-pty`，支持逐键输入、方向键、Ctrl 组合键、粘贴、全屏 TUI 和自适应 resize，能够在桌面终端内正常运行交互式 `flavor` CLI；修复关闭后残留 `closed` 条目、ANSI/光标序列作为正文显示、长 shell 路径溢出及异常空白的问题，并统一工作台滚动条样式
+
+### 文档与测试
+- 新增 Electron Workbench 1.3.2 SDD，覆盖架构边界、视觉方向、安全不变量与发布门禁
+- 增加工作树生命周期/交付、Git 审查范围、时间机/终端/Pals 控制、终端 VT 输出投影与文本边界、逐键/方向键 PTY 交互、嵌套 Flavor CLI 和关闭清理、AST 查询、上下文边界、记忆热度与 cold 清理的单元、契约及 Electron E2E 测试
 
 ## [1.3.1] - 2026-08-25
 

@@ -69,6 +69,7 @@ export interface PalSessionServices {
   list(verbose: boolean): Promise<unknown>;
   rename(alias: string): Promise<unknown>;
   info(target: string): Promise<unknown>;
+  sendChat?(target: string, message: string): Promise<unknown>;
   sendTask(target: string, goal: string): Promise<unknown>;
   startCoWork(target: string, goal: string): Promise<unknown>;
   coWorkStatus(coWorkId?: string): Promise<unknown>;
@@ -117,6 +118,7 @@ export interface SessionServices {
   clearContext(): void | Promise<void>;
   checkpoint?(label?: string): Promise<SessionTreeNode>;
   tree?(): readonly SessionTreeNode[];
+  historyLeaf?(): string | null;
   rewind?(nodeId: string): Promise<void>;
   unrevert?(): Promise<void>;
   fork?(nodeId: string): Promise<void>;

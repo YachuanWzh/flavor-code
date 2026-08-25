@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 
-import type { MemorySnapshot } from "../../memory/manager.js";
-import { MEMORY_TYPES, type MemoryCandidate, type MemoryEntry, type MemoryType } from "../../memory/types.js";
+import type { ManagedMemoryEntry, MemorySnapshot } from "../../memory/manager.js";
+import { MEMORY_TYPES, type MemoryCandidate, type MemoryType } from "../../memory/types.js";
 
 interface MemoryManagerViewProps {
   onClose(): void;
@@ -18,23 +18,28 @@ const TYPE_COPY: Record<MemoryType, { label: string; hint: string }> = {
 const EMPTY_SNAPSHOT: MemorySnapshot = { enabled: true, path: "", entries: [] };
 const EMPTY_DRAFT: MemoryCandidate = { type: "project", content: "" };
 
+export function MemoryHeatBadge({ heat = "normal", recallTotal = 0 }: { heat?: ManagedMemoryEntry["heat"] | undefined; recallTotal?: number | undefined }): React.JSX.Element {
+  return <><span className="memory-heat-badge" data-heat={heat}>{heat}</span><span className="memory-recall-count">↻ {recallTotal}</span></>;
+}
+
 export function MemoryManagerView({ onClose, onError }: MemoryManagerViewProps): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<MemorySnapshot>(EMPTY_SNAPSHOT);
-  const [selected, setSelected] = useState<MemoryEntry>();
+  const [selected, setSelected] = useState<ManagedMemoryEntry>();
   const [draft, setDraft] = useState<MemoryCandidate>(EMPTY_DRAFT);
   const [creating, setCreating] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<MemoryType | "all">("all");
+  const [heatFilter, setHeatFilter] = useState<"all" | "hot" | "normal" | "cold">("all");
   const [pendingDelete, setPendingDelete] = useState(false);
 
   const report = (cause: unknown) => onError(cause instanceof Error ? cause.message : String(cause));
   const visible = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
-    return snapshot.entries.filter((entry) => (filter === "all" || entry.type === filter)
+    return snapshot.entries.filter((entry) => (filter === "all" || entry.type === filter) && (heatFilter === "all" || entry.heat === heatFilter)
       && (needle.length === 0 || entry.content.toLocaleLowerCase().includes(needle) || entry.id.includes(needle)));
-  }, [filter, query, snapshot.entries]);
+  }, [filter, heatFilter, query, snapshot.entries]);
   const dirty = creating
     ? draft.content.trim().length > 0
     : selected !== undefined && (draft.type !== selected.type || draft.content !== selected.content);
@@ -72,7 +77,7 @@ export function MemoryManagerView({ onClose, onError }: MemoryManagerViewProps):
     setPendingDelete(false);
   };
 
-  const choose = (entry: MemoryEntry) => {
+  const choose = (entry: ManagedMemoryEntry) => {
     setCreating(false);
     setSelected(entry);
     setDraft({ type: entry.type, content: entry.content });
@@ -106,14 +111,26 @@ export function MemoryManagerView({ onClose, onError }: MemoryManagerViewProps):
     finally { setSaving(false); }
   };
 
+  const removeCold = async () => {
+    const count = snapshot.entries.filter((entry) => entry.heat === "cold").length;
+    if (count === 0 || !window.confirm(`删除全部 ${count} 条 cold 记忆？此操作不可撤销。`)) return;
+    setSaving(true);
+    try { await window.flavorDesktop.deleteColdMemory(); setSelected(undefined); await load(); }
+    catch (cause) { report(cause); }
+    finally { setSaving(false); }
+  };
+
   return <section className="memory-workbench" aria-label="长期记忆管理">
     <header className="memory-workbench-header">
       <div className="memory-heading">
         <button className="memory-back" onClick={onClose} aria-label="返回对话">‹</button>
         <div><p>项目上下文</p><h1>长期记忆</h1></div>
       </div>
-      <div className="memory-ledger-status" data-enabled={snapshot.enabled}>
-        <i /><span><strong>{snapshot.entries.length}</strong> 条已保存</span>
+      <div className="memory-header-actions">
+        <div className="memory-ledger-status" data-enabled={snapshot.enabled}>
+          <i /><span><strong>{snapshot.entries.length}</strong> 条记忆</span>
+        </div>
+        <button className="memory-purge-cold" disabled={saving || !snapshot.entries.some((entry) => entry.heat === "cold")} onClick={() => void removeCold()}>清理 cold</button>
       </div>
     </header>
 
@@ -129,12 +146,15 @@ export function MemoryManagerView({ onClose, onError }: MemoryManagerViewProps):
             <span>{TYPE_COPY[type].label}</span><b>{snapshot.entries.filter((entry) => entry.type === type).length}</b>
           </button>)}
         </div>
+        <div className="memory-heat-index" aria-label="按热度筛选">
+          {(["all", "hot", "normal", "cold"] as const).map((heat) => <button key={heat} data-active={heatFilter === heat} data-heat={heat} onClick={() => setHeatFilter(heat)}>{heat === "all" ? "全部热度" : heat}<b>{heat === "all" ? snapshot.entries.length : snapshot.entries.filter((entry) => entry.heat === heat).length}</b></button>)}
+        </div>
         <div className="memory-list" aria-busy={loading}>
           {loading && <p className="memory-list-empty">正在读取记忆…</p>}
           {!loading && !snapshot.enabled && <div className="memory-list-empty"><strong>长期记忆已关闭</strong><span>在项目配置中将 memory.enabled 设为 true 后可维护。</span></div>}
           {!loading && snapshot.enabled && visible.length === 0 && <div className="memory-list-empty"><strong>{snapshot.entries.length === 0 ? "还没有长期记忆" : "没有匹配项"}</strong><span>{snapshot.entries.length === 0 ? "新建一条明确、稳定、以后仍有用的信息。" : "尝试其他关键词或类型。"}</span></div>}
           {visible.map((entry) => <button className="memory-card" data-selected={!creating && selected?.id === entry.id} data-type={entry.type} key={entry.id} onClick={() => choose(entry)}>
-            <span className="memory-card-tab">{TYPE_COPY[entry.type].label}</span>
+            <span className="memory-card-meta"><span className="memory-card-tab">{TYPE_COPY[entry.type].label}</span><MemoryHeatBadge heat={entry.heat} recallTotal={entry.recallTotal} /></span>
             <strong>{entry.content}</strong><code>{entry.id}</code>
           </button>)}
         </div>

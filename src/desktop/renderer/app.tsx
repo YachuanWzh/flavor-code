@@ -38,6 +38,7 @@ import { MemoryManagerView } from "./memory-manager.js";
 import { McpManagerView } from "./mcp-manager.js";
 import { E2eViewer } from "./e2e-viewer.js";
 import { GitChangesView } from "./git-changes.js";
+import { AgentWorkbench } from "./agent-workbench.js";
 import {
   applyD2cAgentProgress,
   applyD2cEngineProgress,
@@ -102,7 +103,8 @@ export function DesktopApp(): React.JSX.Element {
   const [dismissedMentionInput, setDismissedMentionInput] = useState<string>();
   const [mentionSpan, setMentionSpan] = useState<{ start: number; end: number }>();
   const [cursorPos, setCursorPos] = useState(0);
-  const [view, setView] = useState<"conversation" | "skills" | "memory" | "mcp" | "e2e" | "activity" | "git">("conversation");
+  const [view, setView] = useState<"conversation" | "skills" | "memory" | "mcp" | "e2e" | "activity" | "git" | "workbench">("conversation");
+  const [newTaskChooser, setNewTaskChooser] = useState(false);
   const [sessionQuery, setSessionQuery] = useState("");
   const [sessionGroup, setSessionGroup] = useState<"active" | "running" | "unread" | "archived">("active");
   const [projectMenu, setProjectMenu] = useState<string>();
@@ -480,10 +482,10 @@ export function DesktopApp(): React.JSX.Element {
     } catch (cause) { setError(errorMessage(cause)); }
   };
 
-  const startSession = async (session?: DesktopSessionSummary) => {
+  const startSession = async (session?: DesktopSessionSummary, environment?: "local" | "worktree") => {
     setError(undefined);
     try {
-      const result = await window.flavorDesktop.startSession(session?.sessionId);
+      const result = await window.flavorDesktop.startSession(session?.sessionId, environment);
       clearAttachments();
       setSnapshot(result.snapshot);
       activeWorkspaceRef.current = result.snapshot.workspace;
@@ -641,7 +643,7 @@ export function DesktopApp(): React.JSX.Element {
     const keydown = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey)) return;
       const key = event.key.toLowerCase();
-      if (key === "n") { event.preventDefault(); void startSession(); }
+      if (key === "n") { event.preventDefault(); setNewTaskChooser(true); }
       if (key === "p") { event.preventDefault(); setPalette("projects"); setPaletteQuery(""); }
       if (key === "k") { event.preventDefault(); setPalette("commands"); setPaletteQuery(""); }
       if (key === "[") { event.preventDefault(); void navigateHistory(-1); }
@@ -662,7 +664,7 @@ export function DesktopApp(): React.JSX.Element {
         <strong>Flavor Code</strong>
       </div>
       <nav className="primary-actions" aria-label="主要操作">
-        <button className="rail-action rail-action-primary" disabled={snapshot.workspace === undefined} onClick={() => void startSession()}>
+        <button className="rail-action rail-action-primary" disabled={snapshot.workspace === undefined} onClick={() => setNewTaskChooser(true)}>
           <span className="action-icon"><UiIcon name="plus" /></span><span>新建任务</span><kbd>Ctrl N</kbd>
         </button>
         <button className="rail-action" onClick={() => void chooseWorkspace()}><span className="action-icon"><UiIcon name="folder" /></span><span>打开项目</span></button>
@@ -672,6 +674,7 @@ export function DesktopApp(): React.JSX.Element {
         <button className="rail-action" data-active={view === "e2e"} onClick={() => { setView("e2e"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon"><UiIcon name="checklist" /></span><span>E2E</span></button>
         <button className="rail-action" data-active={view === "activity"} onClick={() => { setView("activity"); setRailOpen(false); }}><span className="action-icon"><UiIcon name="bell" /></span><span>活动</span>{(snapshot.activities?.filter((item) => item.unread).length ?? 0) > 0 && <em className="rail-badge">{snapshot.activities!.filter((item) => item.unread).length}</em>}</button>
         <button className="rail-action" data-active={view === "git"} onClick={() => { setView("git"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon"><UiIcon name="git" /></span><span>Git 变更</span></button>
+        <button className="rail-action" data-active={view === "workbench"} onClick={() => { setView("workbench"); setRailOpen(false); }} disabled={snapshot.workspace === undefined || snapshot.activeSession === undefined}><span className="action-icon"><UiIcon name="checklist" /></span><span>Agent 工作台</span></button>
       </nav>
       <div className="sessions-scroll">
         <div className="rail-section-heading"><span>项目</span><button onClick={() => void chooseWorkspace()} aria-label="打开新项目" title="打开新项目"><UiIcon name="plus" /></button></div>
@@ -750,7 +753,8 @@ export function DesktopApp(): React.JSX.Element {
     </aside>
 
     <main className="workspace-panel">
-      {view === "skills" && snapshot.workspace !== undefined ? <SkillManagerView onClose={() => setView("conversation")} onError={setError} />
+      {view === "workbench" && snapshot.workspace !== undefined && snapshot.activeSession !== undefined ? <AgentWorkbench snapshot={snapshot} onClose={() => setView("conversation")} onError={setError} onCompose={(value) => { updateInput(value); setView("conversation"); setTimeout(() => inputRef.current?.focus(), 0); }} />
+        : view === "skills" && snapshot.workspace !== undefined ? <SkillManagerView onClose={() => setView("conversation")} onError={setError} />
         : view === "memory" && snapshot.workspace !== undefined ? <MemoryManagerView onClose={() => setView("conversation")} onError={setError} />
           : view === "mcp" && snapshot.workspace !== undefined ? <McpManagerView onClose={() => setView("conversation")} onError={setError} />
             : view === "activity" ? <ActivityCenter activities={snapshot.activities ?? []} onClose={() => setView("conversation")} onOpen={(workspace, sessionId) => void openActivity(workspace, sessionId)} onClear={() => void window.flavorDesktop.acknowledgeSession().then(setSnapshot)} />
@@ -824,11 +828,12 @@ export function DesktopApp(): React.JSX.Element {
     />}
     {pendingDelete !== undefined && <DeleteSessionSheet session={pendingDelete} deleting={deletingSession}
       onCancel={() => setPendingDelete(undefined)} onDelete={() => void deletePendingSession()} />}
+    {newTaskChooser && <NewTaskSheet onCancel={() => setNewTaskChooser(false)} onChoose={(environment) => { setNewTaskChooser(false); void startSession(undefined, environment); }} />}
     {palette !== undefined && <CommandPalette mode={palette} query={paletteQuery} setQuery={setPaletteQuery} projects={projects}
       onClose={() => setPalette(undefined)} onProject={(workspace) => { setPalette(undefined); void switchWorkspace(workspace); }}
       onCommand={(command) => {
         setPalette(undefined);
-        if (command === "new") void startSession(); else if (command === "open") void chooseWorkspace();
+        if (command === "new") setNewTaskChooser(true); else if (command === "open") void chooseWorkspace();
         else if (command === "activity") setView("activity"); else if (command === "git") setView("git");
         else if (command === "skills") setView("skills");
       }} />}
@@ -846,6 +851,14 @@ function ActivityCenter({ activities, onClose, onOpen, onClear }: {
       <i /><div><strong>{item.title}</strong><span>{workspaceName(item.workspace)}{item.detail ? ` · ${item.detail}` : ""}</span></div><time>{formatSessionTime(item.createdAt)}</time>
     </button>)}</div>
   </section>;
+}
+
+function NewTaskSheet({ onCancel, onChoose }: { onCancel(): void; onChoose(environment: "local" | "worktree"): void }): React.JSX.Element {
+  return <div className="modal-layer" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}><section className="new-task-sheet" role="dialog" aria-modal="true" aria-labelledby="new-task-title">
+    <header><p>NEW TASK</p><h2 id="new-task-title">选择任务运行环境</h2><span>隔离只影响 Electron 任务，不改变 CLI 默认行为。</span></header>
+    <div><button onClick={() => onChoose("worktree")}><i>◇</i><strong>隔离工作树</strong><span>新建 flavor/desktop-* 分支，在应用目录中独立运行。</span><em>推荐</em></button><button onClick={() => onChoose("local")}><i>⌂</i><strong>当前检出</strong><span>直接使用项目当前目录，适合快速查看和轻量操作。</span></button></div>
+    <footer><button onClick={onCancel}>取消</button></footer>
+  </section></div>;
 }
 
 function CommandPalette({ mode, query, setQuery, projects, onClose, onProject, onCommand }: {

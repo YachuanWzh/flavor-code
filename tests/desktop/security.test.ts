@@ -43,12 +43,18 @@ describe("desktop security helpers", () => {
       "desktop:list-files", "desktop:list-mcp-servers", "desktop:list-memory", "desktop:list-skills",
       "desktop:open-workspace", "desktop:resolve-approval", "desktop:resolve-memory-review", "desktop:save-mcp-server", "desktop:set-mcp-server-enabled", "desktop:set-skill-enabled", "desktop:show-app-menu",
       "desktop:reveal-project", "desktop:select-session", "desktop:start-session", "desktop:submit", "desktop:switch-model", "desktop:update-memory", "desktop:update-project", "desktop:update-session", "desktop:update-skill",
+      "desktop:ast-relations", "desktop:ast-search", "desktop:ast-status", "desktop:cancel-co-work", "desktop:co-work-status", "desktop:create-checkpoint", "desktop:delete-cold-memory",
+      "desktop:fork-history", "desktop:git-history", "desktop:git-review", "desktop:history-snapshot", "desktop:inspect-workbench", "desktop:list-pals", "desktop:list-worktrees", "desktop:merge-worktree",
+      "desktop:job-read",
+      "desktop:preview-open", "desktop:preview-validate", "desktop:remove-worktree", "desktop:rewind-history", "desktop:send-pal-message", "desktop:start-co-work",
+      "desktop:terminal-close", "desktop:terminal-list", "desktop:terminal-open", "desktop:terminal-read", "desktop:terminal-resize", "desktop:terminal-write", "desktop:unrevert-history",
     ].sort());
   });
 
   it("allows embedded D2C frames only from loopback origins", async () => {
     const html = await readFile(new URL("../../src/desktop/renderer/index.html", import.meta.url), "utf8");
     expect(html).toContain("frame-src http://127.0.0.1:* http://localhost:*");
+    expect(html).toContain("http://[::1]:*");
     expect(html).not.toMatch(/frame-src[^\"]*https:/);
   });
 

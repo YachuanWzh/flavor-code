@@ -1,18 +1,26 @@
 import { loadConfig } from "../config/load.js";
 import { MemoryStore } from "./store.js";
-import type { MemoryCandidate, MemoryEntry } from "./types.js";
+import { classifyMemoryHeat } from "./retrieval.js";
+import type { MemoryCandidate, MemoryEntry, MemoryHeat } from "./types.js";
+
+export interface ManagedMemoryEntry extends MemoryEntry {
+  recallTotal?: number;
+  heat?: MemoryHeat;
+  lastRecalledAt?: string;
+}
 
 export interface MemorySnapshot {
   enabled: boolean;
   path: string;
-  entries: readonly MemoryEntry[];
+  entries: readonly ManagedMemoryEntry[];
 }
 
 export interface MemoryManagerLike {
-  snapshot(): Promise<MemorySnapshot>;
+  snapshot(now?: Date): Promise<MemorySnapshot>;
   remember(candidate: MemoryCandidate): Promise<MemoryEntry>;
   update(id: string, candidate: MemoryCandidate): Promise<MemoryEntry>;
   delete(id: string): Promise<boolean>;
+  deleteCold?(now?: Date): Promise<{ removed: number; filesRemoved: number }>;
 }
 
 export class ProjectMemoryManager implements MemoryManagerLike {
@@ -24,11 +32,19 @@ export class ProjectMemoryManager implements MemoryManagerLike {
     this.#enabled = enabled;
   }
 
-  async snapshot(): Promise<MemorySnapshot> {
+  async snapshot(now = new Date()): Promise<MemorySnapshot> {
+    const references = this.#enabled ? await this.#store.references() : [];
     return {
       enabled: this.#enabled,
       path: this.#store.path,
-      entries: this.#enabled ? await this.#store.list() : [],
+      entries: references.map((reference) => {
+        const lastRecalledAt = Object.values(reference.recalls).sort().at(-1);
+        return {
+          id: reference.id, type: reference.type, content: reference.summary,
+          recallTotal: reference.recallTotal, heat: classifyMemoryHeat(reference, now),
+          ...(lastRecalledAt === undefined ? {} : { lastRecalledAt }),
+        };
+      }),
     };
   }
 
@@ -47,6 +63,11 @@ export class ProjectMemoryManager implements MemoryManagerLike {
   async delete(id: string): Promise<boolean> {
     this.#assertEnabled();
     return this.#store.delete(id);
+  }
+
+  async deleteCold(now = new Date()): Promise<{ removed: number; filesRemoved: number }> {
+    this.#assertEnabled();
+    return this.#store.forgetCold(now);
   }
 
   #assertEnabled(): void {

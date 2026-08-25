@@ -1,6 +1,7 @@
 import { appendFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, stat, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, Notification, shell } from "electron";
@@ -25,7 +26,24 @@ import {
   DeleteSessionInputSchema,
   GitCommitInputSchema,
   GitDiffInputSchema,
+  GitReviewInputSchema,
   GitPathInputSchema,
+  WorktreeRemoveInputSchema,
+  HistoryNodeInputSchema,
+  CheckpointInputSchema,
+  TerminalOpenInputSchema,
+  TerminalIdInputSchema,
+  TerminalReadInputSchema,
+  TerminalWriteInputSchema,
+  TerminalResizeInputSchema,
+  JobReadInputSchema,
+  PreviewUrlInputSchema,
+  PalMessageInputSchema,
+  CoWorkStartInputSchema,
+  CoWorkStatusInputSchema,
+  CoWorkCancelInputSchema,
+  AstSearchInputSchema,
+  AstNodeInputSchema,
   DeleteMemoryInputSchema,
   DESKTOP_CHANNELS,
   OpenWorkspaceInputSchema,
@@ -65,7 +83,11 @@ import { DesktopRuntimeController } from "./runtime-controller.js";
 import { isSafeExternalUrl, isTrustedNavigation, normalizePersistedDesktopProjects } from "./security.js";
 import { desktopWindowChrome } from "./window-options.js";
 import { installCrashGuard } from "../utils/crash-guard.js";
-import { desktopGitCommit, desktopGitDiff, desktopGitDiscard, desktopGitStage, desktopGitStatus, desktopGitUnstage } from "./git-manager.js";
+import { desktopGitCommit, desktopGitDiff, desktopGitDiscard, desktopGitHistory, desktopGitReviewDiff, desktopGitStage, desktopGitStatus, desktopGitUnstage, desktopLastTurnDiff } from "./git-manager.js";
+import { DesktopWorktreeManager } from "./worktree-manager.js";
+import { DesktopWorkbenchService } from "./workbench-service.js";
+import { DesktopAstGraphService } from "./astgraph-service.js";
+import { spawnPalBrokerProcess } from "../pals/broker-cli.js";
 
 // Record uncaught failures to .flavor/crash-*.log instead of dying silently.
 installCrashGuard();
@@ -124,6 +146,9 @@ interface ManagedDesktopTask {
   sessionId?: string;
   payload?: SessionStartedPayload;
   terminal?: "completed" | "failed" | "interrupted";
+  environment: "local" | "worktree";
+  workingDirectory: string;
+  worktreeId?: string;
 }
 
 interface ManagedDesktopProject {
@@ -141,11 +166,12 @@ interface DesktopWorkbenchState {
   activities: DesktopActivityItem[];
   recoveryItems: DesktopRecoveryItem[];
   runningSessions: { workspace: string; sessionId: string }[];
+  taskCheckouts: Array<{ workspace: string; sessionId: string; environment: "worktree"; workingDirectory: string; worktreeId: string }>;
   cleanShutdown: boolean;
 }
 
 const workbench: DesktopWorkbenchState = {
-  projectMeta: {}, sessionMeta: {}, activities: [], recoveryItems: [], runningSessions: [], cleanShutdown: true,
+  projectMeta: {}, sessionMeta: {}, activities: [], recoveryItems: [], runningSessions: [], taskCheckouts: [], cleanShutdown: true,
 };
 
 const managedProjects = new Map<string, ManagedDesktopProject>();
@@ -154,8 +180,19 @@ let activeWorkspace: string | undefined;
 
 function sessionMetaKey(workspace: string, sessionId: string): string { return `${workspace}\u0000${sessionId}`; }
 
+function worktreeManager(workspace: string): DesktopWorktreeManager {
+  const key = createHash("sha256").update(resolve(workspace)).digest("hex").slice(0, 20);
+  return new DesktopWorktreeManager({ repository: workspace, storage: join(app.getPath("userData"), "task-worktrees", key) });
+}
+
+function activeWorkingDirectory(): string {
+  if (activeWorkspace === undefined) throw new Error("请先打开项目");
+  return managedProjects.get(activeWorkspace)?.selectedTask?.workingDirectory ?? activeWorkspace;
+}
+
 function projectSessions(workspace: string, project: ManagedDesktopProject) {
   const merged = new Map(project.snapshot.sessions.map((session) => [session.sessionId, session]));
+  const taskBySession = new Map([...project.tasks].flatMap((task) => task.sessionId === undefined ? [] : [[task.sessionId, task] as const]));
   for (const task of project.tasks) for (const session of task.snapshot.sessions) {
     const previous = merged.get(session.sessionId);
     if (previous === undefined || session.updatedAt >= previous.updatedAt) merged.set(session.sessionId, session);
@@ -164,7 +201,8 @@ function projectSessions(workspace: string, project: ManagedDesktopProject) {
     const meta = workbench.sessionMeta[sessionMetaKey(workspace, session.sessionId)] ?? {};
     const activity = workbench.activities.find((item) => item.workspace === workspace && item.sessionId === session.sessionId);
     const running = [...project.tasks].some((task) => task.sessionId === session.sessionId && task.snapshot.activeSession?.busy);
-    return { ...session, ...meta, ...(running ? { activity: "running" as const } : activity === undefined ? {} : { activity: activity.kind, unread: activity.unread }) };
+    const task = taskBySession.get(session.sessionId);
+    return { ...session, ...meta, ...(task === undefined ? {} : { environment: task.environment, workingDirectory: task.workingDirectory, ...(task.worktreeId === undefined ? {} : { worktreeId: task.worktreeId }) }), ...(running ? { activity: "running" as const } : activity === undefined ? {} : { activity: activity.kind, unread: activity.unread }) };
   }).sort((left, right) => Number(Boolean(right.pinned)) - Number(Boolean(left.pinned)) || right.updatedAt.localeCompare(left.updatedAt));
 }
 
@@ -188,9 +226,12 @@ function projectSummaries() {
 }
 
 function decorateSnapshot(snapshot: DesktopSnapshot): DesktopSnapshot {
-  const workspace = snapshot.workspace;
+  const workspace = snapshot.workspace !== undefined && managedProjects.has(snapshot.workspace) ? snapshot.workspace : activeWorkspace ?? snapshot.workspace;
+  const selected = workspace === undefined ? undefined : managedProjects.get(workspace)?.selectedTask;
   return {
     ...snapshot,
+    ...(workspace === undefined ? {} : { workspace }),
+    ...(snapshot.activeSession === undefined || selected === undefined ? {} : { activeSession: { ...snapshot.activeSession, environment: selected.environment, workingDirectory: selected.workingDirectory, ...(selected.worktreeId === undefined ? {} : { worktreeId: selected.worktreeId }) } }),
     sessions: workspace === undefined ? snapshot.sessions : projectSessions(workspace, managedProjects.get(workspace) ?? { controller, snapshot, tasks: new Set() }),
     projects: projectSummaries(),
     activities: workbench.activities,
@@ -210,6 +251,7 @@ function emitManagedDesktopEvent(workspace: string | undefined, owner: ManagedDe
   const project = managedProjects.get(workspace);
   if (project !== undefined) {
     if (event.type === "snapshot") {
+      event = { ...event, snapshot: { ...event.snapshot, workspace } };
       const previous = owner?.snapshot;
       if (owner !== undefined) {
         owner.snapshot = event.snapshot;
@@ -218,6 +260,7 @@ function emitManagedDesktopEvent(workspace: string | undefined, owner: ManagedDe
       else project.snapshot = event.snapshot;
       trackTaskTransition(workspace, owner, previous, event.snapshot);
     } else if (event.type === "session-started") {
+      event = { ...event, payload: { ...event.payload, snapshot: { ...event.payload.snapshot, workspace } } };
       if (owner !== undefined) {
         owner.sessionId = event.payload.sessionId;
         owner.payload = event.payload;
@@ -248,6 +291,7 @@ function emitManagedDesktopEvent(workspace: string | undefined, owner: ManagedDe
 }
 
 function createDesktopController(workspace?: string, owner?: ManagedDesktopTask): DesktopRuntimeController {
+  const collaborationId = randomUUID();
   return new DesktopRuntimeController({
     emit: (event) => emitManagedDesktopEvent(workspace, owner, event),
     runD2cInteractionTests: (manifest, baseUrl, mockUrl) => d2cEmbedded.run(manifest, baseUrl, mockUrl),
@@ -278,6 +322,22 @@ function createDesktopController(workspace?: string, owner?: ManagedDesktopTask)
     },
     createRuntime: async (runtimeOptions) => createProductionRuntime({
       ...runtimeOptions,
+      collaboration: {
+        instanceId: collaborationId,
+        alias: `desktop-${basename(workspace ?? runtimeOptions.workspace ?? "flavor")}`.slice(0, 64),
+        optional: true,
+        startBroker: (address) => {
+          const entry = app.isPackaged
+            ? join(process.resourcesPath, "app.asar.unpacked", "dist", "desktop", "pals-broker-entry.js")
+            : join(moduleDirectory, "pals-broker-entry.js");
+          return spawnPalBrokerProcess({
+            address,
+            executable: process.execPath,
+            args: [entry, address],
+            environment: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+          });
+        },
+      },
       ...(runtimeOptions.workspace === undefined ? {} : {
         extraTools: createD2cTools(runtimeOptions.workspace, {
           capture: d2cCapture,
@@ -306,6 +366,7 @@ async function loadPersistedProjects() {
       activities: Array.isArray(parsed.activities) ? parsed.activities.slice(0, 500) : [],
       recoveryItems: Array.isArray(parsed.recoveryItems) ? parsed.recoveryItems.slice(0, 100) : [],
       runningSessions: Array.isArray(parsed.runningSessions) ? parsed.runningSessions.slice(0, 100) : [],
+      taskCheckouts: Array.isArray(parsed.taskCheckouts) ? parsed.taskCheckouts.filter((item): item is DesktopWorkbenchState["taskCheckouts"][number] => typeof item === "object" && item !== null && (item as { environment?: unknown }).environment === "worktree" && typeof (item as { workspace?: unknown }).workspace === "string" && typeof (item as { sessionId?: unknown }).sessionId === "string" && typeof (item as { workingDirectory?: unknown }).workingDirectory === "string" && typeof (item as { worktreeId?: unknown }).worktreeId === "string").slice(0, 100) : [],
       cleanShutdown: parsed.cleanShutdown !== false,
     });
     if (!workbench.cleanShutdown) {
@@ -346,6 +407,16 @@ async function openWorkspace(path: string) {
     activeWorkspace = workspace;
     controller = nextController;
     project.snapshot = await nextController.openWorkspace(workspace);
+    for (const saved of workbench.taskCheckouts.filter((item) => resolve(item.workspace) === workspace)) {
+      try {
+        await assertDirectory(saved.workingDirectory);
+        const task = { environment: "worktree" as const, workingDirectory: resolve(saved.workingDirectory), worktreeId: saved.worktreeId } as ManagedDesktopTask;
+        task.controller = createDesktopController(workspace, task);
+        task.snapshot = await task.controller.openWorkspace(task.workingDirectory);
+        task.sessionId = saved.sessionId;
+        project.tasks.add(task);
+      } catch { /* A removed worktree must not block project recovery. */ }
+    }
   } else {
     activeWorkspace = workspace;
     controller = project.selectedTask?.controller ?? project.controller;
@@ -387,7 +458,7 @@ function addActivity(workspace: string, sessionId: string | undefined, kind: Des
   void savePersistedProjects();
 }
 
-async function startManagedSession(resumeSession?: string): Promise<SessionStartedPayload> {
+async function startManagedSession(resumeSession?: string, environment: "local" | "worktree" = "local"): Promise<SessionStartedPayload> {
   if (activeWorkspace === undefined) throw new Error("Open a project before starting a session");
   const project = managedProjects.get(activeWorkspace)!;
   if (resumeSession !== undefined) {
@@ -398,13 +469,20 @@ async function startManagedSession(resumeSession?: string): Promise<SessionStart
     }
   }
   if ([...project.tasks].filter((task) => task.snapshot.activeSession?.busy).length >= 4) throw new Error("每个项目最多同时运行 4 个任务");
-  const task = {} as ManagedDesktopTask;
+  const isolated = environment === "worktree" ? await worktreeManager(activeWorkspace).create(`task-${Date.now()}`) : undefined;
+  const task = {
+    environment, workingDirectory: isolated?.path ?? activeWorkspace,
+    ...(isolated === undefined ? {} : { worktreeId: isolated.id }),
+  } as ManagedDesktopTask;
   task.controller = createDesktopController(activeWorkspace, task);
   task.snapshot = task.controller.snapshot();
   project.tasks.add(task); project.selectedTask = task; controller = task.controller;
-  await task.controller.openWorkspace(activeWorkspace);
+  await task.controller.openWorkspace(task.workingDirectory);
   const payload = await task.controller.startSession(resumeSession);
   task.sessionId = payload.sessionId; task.payload = payload; task.snapshot = payload.snapshot;
+  if (task.environment === "worktree" && task.worktreeId !== undefined) {
+    workbench.taskCheckouts = [...workbench.taskCheckouts.filter((item) => !(item.workspace === activeWorkspace && item.sessionId === payload.sessionId)), { workspace: activeWorkspace, sessionId: payload.sessionId, environment: "worktree", workingDirectory: task.workingDirectory, worktreeId: task.worktreeId }];
+  }
   project.snapshot = { ...project.snapshot, sessions: payload.snapshot.sessions };
   await savePersistedProjects();
   return decorateSessionStarted(payload);
@@ -415,8 +493,12 @@ async function activateManagedSession(workspace: string, sessionId?: string): Pr
   if (sessionId === undefined) return undefined;
   const project = managedProjects.get(workspace)!;
   const task = [...project.tasks].find((item) => item.sessionId === sessionId);
-  const payload = task?.payload ?? await startManagedSession(sessionId);
-  if (task !== undefined) { project.selectedTask = task; controller = task.controller; }
+  let payload: SessionStartedPayload;
+  if (task !== undefined) {
+    project.selectedTask = task; controller = task.controller;
+    payload = task.payload ?? await task.controller.startSession(sessionId);
+    task.payload = payload; task.snapshot = payload.snapshot;
+  } else payload = await startManagedSession(sessionId);
   workbench.activities = workbench.activities.map((item) => item.workspace === workspace && item.sessionId === sessionId ? { ...item, unread: false } : item);
   mainWindow?.show(); mainWindow?.focus();
   emitDesktopEvent({ type: "session-started", workspace, payload: decorateSessionStarted(payload) });
@@ -467,8 +549,8 @@ function installIpcHandlers(): void {
     return openWorkspace(path);
   });
   ipcMain.handle(DESKTOP_CHANNELS.startSession, async (_event, value) => {
-    const { resumeSession } = StartSessionInputSchema.parse(value);
-    return startManagedSession(resumeSession);
+    const { resumeSession, environment } = StartSessionInputSchema.parse(value);
+    return startManagedSession(resumeSession, environment);
   });
   ipcMain.handle(DESKTOP_CHANNELS.selectSession, async (_event, value) => {
     const { sessionId } = DeleteSessionInputSchema.parse(value);
@@ -486,6 +568,7 @@ function installIpcHandlers(): void {
       if (project.selectedTask === task) { delete project.selectedTask; controller = project.controller; }
     }
     delete workbench.sessionMeta[sessionMetaKey(activeWorkspace, sessionId)];
+    workbench.taskCheckouts = workbench.taskCheckouts.filter((item) => !(item.workspace === activeWorkspace && item.sessionId === sessionId));
     workbench.activities = workbench.activities.filter((item) => !(item.workspace === activeWorkspace && item.sessionId === sessionId));
     project.snapshot = await project.controller.deleteSession(sessionId);
     await savePersistedProjects();
@@ -535,12 +618,52 @@ function installIpcHandlers(): void {
     workbench.recoveryItems = workbench.recoveryItems.filter((item) => !(item.workspace === activeWorkspace && item.sessionId === sessionId));
     await savePersistedProjects(); return decorateSnapshot(controller.snapshot());
   });
-  ipcMain.handle(DESKTOP_CHANNELS.gitStatus, async () => activeWorkspace === undefined ? { repository: false, branch: "", head: "", files: [] } : desktopGitStatus(activeWorkspace));
-  ipcMain.handle(DESKTOP_CHANNELS.gitDiff, async (_event, value) => { const input = GitDiffInputSchema.parse(value); if (activeWorkspace === undefined) throw new Error("请先打开项目"); return desktopGitDiff(activeWorkspace, input.path, input.staged); });
-  ipcMain.handle(DESKTOP_CHANNELS.gitStage, async (_event, value) => { const { path } = GitPathInputSchema.parse(value); if (activeWorkspace === undefined) throw new Error("请先打开项目"); return desktopGitStage(activeWorkspace, path); });
-  ipcMain.handle(DESKTOP_CHANNELS.gitUnstage, async (_event, value) => { const { path } = GitPathInputSchema.parse(value); if (activeWorkspace === undefined) throw new Error("请先打开项目"); return desktopGitUnstage(activeWorkspace, path); });
-  ipcMain.handle(DESKTOP_CHANNELS.gitDiscard, async (_event, value) => { const { path } = GitPathInputSchema.parse(value); if (activeWorkspace === undefined) throw new Error("请先打开项目"); return desktopGitDiscard(activeWorkspace, path); });
-  ipcMain.handle(DESKTOP_CHANNELS.gitCommit, async (_event, value) => { const { message } = GitCommitInputSchema.parse(value); if (activeWorkspace === undefined) throw new Error("请先打开项目"); return desktopGitCommit(activeWorkspace, message); });
+  ipcMain.handle(DESKTOP_CHANNELS.gitStatus, async () => activeWorkspace === undefined ? { repository: false, branch: "", head: "", files: [] } : desktopGitStatus(activeWorkingDirectory()));
+  ipcMain.handle(DESKTOP_CHANNELS.gitDiff, async (_event, value) => { const input = GitDiffInputSchema.parse(value); return desktopGitDiff(activeWorkingDirectory(), input.path, input.staged); });
+  ipcMain.handle(DESKTOP_CHANNELS.gitStage, async (_event, value) => desktopGitStage(activeWorkingDirectory(), GitPathInputSchema.parse(value).path));
+  ipcMain.handle(DESKTOP_CHANNELS.gitUnstage, async (_event, value) => desktopGitUnstage(activeWorkingDirectory(), GitPathInputSchema.parse(value).path));
+  ipcMain.handle(DESKTOP_CHANNELS.gitDiscard, async (_event, value) => desktopGitDiscard(activeWorkingDirectory(), GitPathInputSchema.parse(value).path));
+  ipcMain.handle(DESKTOP_CHANNELS.gitCommit, async (_event, value) => desktopGitCommit(activeWorkingDirectory(), GitCommitInputSchema.parse(value).message));
+  ipcMain.handle(DESKTOP_CHANNELS.gitReview, async (_event, value) => { const input = GitReviewInputSchema.parse(value); const workspace = activeWorkingDirectory(); return input.scope === "last-turn" && controller.snapshot().activeSession !== undefined ? desktopLastTurnDiff(workspace, controller.snapshot().activeSession!.sessionId, input.paths ?? []) : desktopGitReviewDiff(workspace, { scope: input.scope, ...(input.target === undefined ? {} : { target: input.target }), ...(input.paths === undefined ? {} : { paths: input.paths }) }); });
+  ipcMain.handle(DESKTOP_CHANNELS.gitHistory, async () => desktopGitHistory(activeWorkingDirectory()));
+  ipcMain.handle(DESKTOP_CHANNELS.listWorktrees, async () => activeWorkspace === undefined ? [] : worktreeManager(activeWorkspace).list());
+  ipcMain.handle(DESKTOP_CHANNELS.removeWorktree, async (_event, value) => {
+    if (activeWorkspace === undefined) throw new Error("请先打开项目");
+    const input = WorktreeRemoveInputSchema.parse(value);
+    const task = [...managedProjects.get(activeWorkspace)!.tasks].find((item) => item.worktreeId === input.id);
+    if (task?.snapshot.activeSession?.busy) throw new Error("不能删除正在运行任务的工作树");
+    if (task !== undefined) { await task.controller.dispose(); managedProjects.get(activeWorkspace)!.tasks.delete(task); }
+    await worktreeManager(activeWorkspace).remove(input.id, input.force);
+    workbench.taskCheckouts = workbench.taskCheckouts.filter((item) => !(item.workspace === activeWorkspace && item.worktreeId === input.id));
+    await savePersistedProjects();
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.mergeWorktree, async (_event, value) => {
+    if (activeWorkspace === undefined) throw new Error("请先打开项目");
+    await worktreeManager(activeWorkspace).merge(WorktreeRemoveInputSchema.parse(value).id);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.historySnapshot, async () => controller.historySnapshot());
+  ipcMain.handle(DESKTOP_CHANNELS.createCheckpoint, async (_event, value) => controller.createCheckpoint(CheckpointInputSchema.parse(value).label));
+  ipcMain.handle(DESKTOP_CHANNELS.rewindHistory, async (_event, value) => controller.rewindHistory(HistoryNodeInputSchema.parse(value).nodeId));
+  ipcMain.handle(DESKTOP_CHANNELS.unrevertHistory, async () => controller.unrevertHistory());
+  ipcMain.handle(DESKTOP_CHANNELS.forkHistory, async (_event, value) => controller.forkHistory(HistoryNodeInputSchema.parse(value).nodeId));
+  ipcMain.handle(DESKTOP_CHANNELS.terminalOpen, async (_event, value) => { const input = TerminalOpenInputSchema.parse(value); return controller.openTerminal({ ...(input.cwd === undefined ? {} : { cwd: input.cwd }), ...(input.shell === undefined ? {} : { shell: input.shell }), ...(input.columns === undefined ? {} : { columns: input.columns }), ...(input.rows === undefined ? {} : { rows: input.rows }) }); });
+  ipcMain.handle(DESKTOP_CHANNELS.terminalList, async () => controller.listTerminals());
+  ipcMain.handle(DESKTOP_CHANNELS.terminalRead, async (_event, value) => { const input = TerminalReadInputSchema.parse(value); return controller.readTerminal(input.id, input.cursor); });
+  ipcMain.handle(DESKTOP_CHANNELS.terminalWrite, async (_event, value) => { const input = TerminalWriteInputSchema.parse(value); controller.writeTerminal(input.id, input.data); });
+  ipcMain.handle(DESKTOP_CHANNELS.terminalResize, async (_event, value) => { const input = TerminalResizeInputSchema.parse(value); controller.resizeTerminal(input.id, input.columns, input.rows); });
+  ipcMain.handle(DESKTOP_CHANNELS.terminalClose, async (_event, value) => controller.closeTerminal(TerminalIdInputSchema.parse(value).id));
+  ipcMain.handle(DESKTOP_CHANNELS.jobRead, async (_event, value) => { const input = JobReadInputSchema.parse(value); return controller.readJob(input.id, input.cursor); });
+  ipcMain.handle(DESKTOP_CHANNELS.previewValidate, async (_event, value) => DesktopWorkbenchService.normalizePreviewUrl(PreviewUrlInputSchema.parse(value).url));
+  ipcMain.handle(DESKTOP_CHANNELS.previewOpen, async (_event, value) => shell.openExternal(DesktopWorkbenchService.normalizePreviewUrl(PreviewUrlInputSchema.parse(value).url)));
+  ipcMain.handle(DESKTOP_CHANNELS.inspectWorkbench, async () => new DesktopWorkbenchService(activeWorkingDirectory()).inspect(controller.snapshot().activeSession?.sessionId));
+  ipcMain.handle(DESKTOP_CHANNELS.astStatus, async () => new DesktopAstGraphService(activeWorkingDirectory()).status());
+  ipcMain.handle(DESKTOP_CHANNELS.astSearch, async (_event, value) => new DesktopAstGraphService(activeWorkingDirectory()).search(AstSearchInputSchema.parse(value).query));
+  ipcMain.handle(DESKTOP_CHANNELS.astRelations, async (_event, value) => { const input = AstNodeInputSchema.parse(value); return new DesktopAstGraphService(activeWorkingDirectory()).relations(input.id, input.hops); });
+  ipcMain.handle(DESKTOP_CHANNELS.listPals, async () => controller.listPals());
+  ipcMain.handle(DESKTOP_CHANNELS.sendPalMessage, async (_event, value) => { const input = PalMessageInputSchema.parse(value); return controller.sendPalMessage(input.target, input.message, input.kind); });
+  ipcMain.handle(DESKTOP_CHANNELS.startCoWork, async (_event, value) => { const input = CoWorkStartInputSchema.parse(value); return controller.startCoWork(input.target, input.goal); });
+  ipcMain.handle(DESKTOP_CHANNELS.coWorkStatus, async (_event, value) => controller.coWorkStatus(CoWorkStatusInputSchema.parse(value).coWorkId));
+  ipcMain.handle(DESKTOP_CHANNELS.cancelCoWork, async (_event, value) => { const input = CoWorkCancelInputSchema.parse(value); return controller.cancelCoWork(input.coWorkId, input.reason); });
   ipcMain.handle(DESKTOP_CHANNELS.showAppMenu, async (_event, value) => {
     const { menu, x, y } = AppMenuInputSchema.parse(value);
     const window = mainWindow;
@@ -608,6 +731,7 @@ function installIpcHandlers(): void {
   ipcMain.handle(DESKTOP_CHANNELS.deleteMemory, async (_event, value) => {
     return controller.deleteMemory(DeleteMemoryInputSchema.parse(value).id);
   });
+  ipcMain.handle(DESKTOP_CHANNELS.deleteColdMemory, async () => controller.deleteColdMemory());
   ipcMain.handle(DESKTOP_CHANNELS.switchModel, async (_event, value) => {
     return decorateSnapshot(await controller.switchModel(SwitchDesktopModelInputSchema.parse(value).modelId));
   });

@@ -21,7 +21,7 @@ describe("ProjectMemoryManager", () => {
     const created = await manager.remember({ type: "project", content: "Use npm." });
     const updated = await manager.update(created.id, { type: "project", content: "Use pnpm." });
 
-    expect((await manager.snapshot()).entries).toEqual([updated]);
+    expect((await manager.snapshot()).entries).toEqual([expect.objectContaining(updated)]);
     expect(await manager.delete(updated.id)).toBe(true);
     expect((await manager.snapshot()).entries).toEqual([]);
   });
@@ -35,5 +35,20 @@ describe("ProjectMemoryManager", () => {
     await expect(manager.remember({ type: "project", content: "No write" })).rejects.toThrow(/disabled/i);
     await expect(manager.update("000000000000", { type: "project", content: "No update" })).rejects.toThrow(/disabled/i);
     await expect(manager.delete("000000000000")).rejects.toThrow(/disabled/i);
+  });
+
+  it("exposes recall heat and deletes all cold memories for the desktop workbench", async () => {
+    const store = await createStore();
+    await store.rememberForTask("old-task", {
+      type: "project", summary: "Old rule", content: "Use the retired build script.",
+      topicKey: "project.build", keywords: ["retired", "build"],
+      scores: { durability: 3, futureUtility: 3, authority: 3, nonDerivability: 2 },
+    }, new Date("2026-08-01T00:00:00.000Z"));
+    const manager = new ProjectMemoryManager(store);
+
+    const snapshot = await manager.snapshot(new Date("2026-08-10T00:00:00.000Z"));
+    expect(snapshot.entries).toEqual([expect.objectContaining({ recallTotal: 0, heat: "cold" })]);
+    await expect(manager.deleteCold(new Date("2026-08-10T00:00:00.000Z"))).resolves.toEqual({ removed: 1, filesRemoved: 1 });
+    expect((await manager.snapshot()).entries).toEqual([]);
   });
 });

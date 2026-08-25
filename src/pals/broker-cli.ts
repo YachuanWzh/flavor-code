@@ -25,6 +25,13 @@ export interface EnsurePalBrokerOptions {
   startBroker?: () => Promise<void>;
 }
 
+export interface SpawnPalBrokerProcessOptions {
+  address: string;
+  executable: string;
+  args: readonly string[];
+  environment?: NodeJS.ProcessEnv;
+}
+
 const startupAttempts = new Map<string, Promise<void>>();
 
 function delay(milliseconds: number): Promise<void> {
@@ -53,18 +60,27 @@ function startupLockPath(address: string): string {
 async function spawnProductionBroker(address: string): Promise<void> {
   const entry = process.argv[1];
   if (entry === undefined) throw new Error("Cannot auto-start pals broker without a CLI entry point");
+  return spawnPalBrokerProcess({ address, executable: process.execPath, args: [entry, "--pals-broker", address] });
+}
+
+/** Start a detached broker entry under an embedder-selected runtime. */
+export async function spawnPalBrokerProcess(options: SpawnPalBrokerProcessOptions): Promise<void> {
+  if (options.executable.trim() === "" || options.args.length === 0) throw new Error("Pals broker process requires an executable and entry arguments");
+  const address = options.address;
   const lockPath = startupLockPath(address);
   const lock = await acquirePalFileLock({ path: lockPath, endpointLive: () => canConnect(address) });
   if (lock === undefined) return;
   try {
-    const child = spawn(process.execPath, [entry, "--pals-broker", address], {
+    const child = spawn(options.executable, [...options.args], {
       detached: true,
       stdio: "ignore",
       windowsHide: true,
+      ...(options.environment === undefined ? {} : { env: options.environment }),
     });
     child.unref();
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline && !(await canConnect(address))) await delay(25);
+    if (!(await canConnect(address))) throw new Error(`Pals broker process did not become ready at '${address}'`);
   } finally {
     await lock.release();
   }
