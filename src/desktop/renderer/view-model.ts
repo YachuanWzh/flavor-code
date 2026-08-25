@@ -38,6 +38,7 @@ export function permissionLabel(mode: PermissionMode): string {
 }
 
 export function sessionTitle(session: DesktopSessionSummary): string {
+  if (session.title?.trim()) return session.title.trim();
   const preview = session.preview?.trim();
   if (preview) return preview.length > 38 ? `${preview.slice(0, 38)}…` : preview;
   const time = new Date(session.updatedAt);

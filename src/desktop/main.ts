@@ -3,7 +3,7 @@ import { readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, Notification, shell } from "electron";
 
 import {
   AnswerQuestionsInputSchema,
@@ -21,15 +21,22 @@ import {
   D2cQualityIssueDecisionInputSchema,
   D2cConfirmMappingInputSchema,
   D2cTaskActionInputSchema,
+  CloseProjectInputSchema,
   DeleteSessionInputSchema,
+  GitCommitInputSchema,
+  GitDiffInputSchema,
+  GitPathInputSchema,
   DeleteMemoryInputSchema,
   DESKTOP_CHANNELS,
   OpenWorkspaceInputSchema,
+  ProjectPathInputSchema,
   MemoryCandidateInputSchema,
   McpServerNameInputSchema,
   ResolveApprovalInputSchema,
   ResolveMemoryReviewInputSchema,
   StartSessionInputSchema,
+  UpdateProjectInputSchema,
+  UpdateSessionInputSchema,
   SkillDraftInputSchema,
   SkillNameInputSchema,
   UpdateSkillInputSchema,
@@ -40,6 +47,8 @@ import {
   SwitchDesktopModelInputSchema,
   SubmitInputSchema,
   type DesktopEvent,
+  type DesktopActivityItem,
+  type DesktopRecoveryItem,
   type DesktopSnapshot,
   type SessionStartedPayload,
 } from "./contracts.js";
@@ -56,6 +65,7 @@ import { DesktopRuntimeController } from "./runtime-controller.js";
 import { isSafeExternalUrl, isTrustedNavigation, normalizePersistedDesktopProjects } from "./security.js";
 import { desktopWindowChrome } from "./window-options.js";
 import { installCrashGuard } from "../utils/crash-guard.js";
+import { desktopGitCommit, desktopGitDiff, desktopGitDiscard, desktopGitStage, desktopGitStatus, desktopGitUnstage } from "./git-manager.js";
 
 // Record uncaught failures to .flavor/crash-*.log instead of dying silently.
 installCrashGuard();
@@ -108,49 +118,122 @@ function judgeImage(png: Buffer): Buffer {
   return image.resize({ width: Math.max(1, Math.round(size.width * ratio)), height: Math.max(1, Math.round(size.height * ratio)), quality: "best" }).toPNG();
 }
 
+interface ManagedDesktopTask {
+  controller: DesktopRuntimeController;
+  snapshot: DesktopSnapshot;
+  sessionId?: string;
+  payload?: SessionStartedPayload;
+  terminal?: "completed" | "failed" | "interrupted";
+}
+
 interface ManagedDesktopProject {
   controller: DesktopRuntimeController;
   snapshot: DesktopSnapshot;
+  tasks: Set<ManagedDesktopTask>;
+  selectedTask?: ManagedDesktopTask;
 }
+
+interface PersistedProjectMeta { label?: string | undefined; pinned?: boolean }
+interface PersistedSessionMeta { title?: string | undefined; pinned?: boolean; archived?: boolean }
+interface DesktopWorkbenchState {
+  projectMeta: Record<string, PersistedProjectMeta>;
+  sessionMeta: Record<string, PersistedSessionMeta>;
+  activities: DesktopActivityItem[];
+  recoveryItems: DesktopRecoveryItem[];
+  runningSessions: { workspace: string; sessionId: string }[];
+  cleanShutdown: boolean;
+}
+
+const workbench: DesktopWorkbenchState = {
+  projectMeta: {}, sessionMeta: {}, activities: [], recoveryItems: [], runningSessions: [], cleanShutdown: true,
+};
 
 const managedProjects = new Map<string, ManagedDesktopProject>();
 const projectOrder: string[] = [];
 let activeWorkspace: string | undefined;
 
+function sessionMetaKey(workspace: string, sessionId: string): string { return `${workspace}\u0000${sessionId}`; }
+
+function projectSessions(workspace: string, project: ManagedDesktopProject) {
+  const merged = new Map(project.snapshot.sessions.map((session) => [session.sessionId, session]));
+  for (const task of project.tasks) for (const session of task.snapshot.sessions) {
+    const previous = merged.get(session.sessionId);
+    if (previous === undefined || session.updatedAt >= previous.updatedAt) merged.set(session.sessionId, session);
+  }
+  return [...merged.values()].map((session) => {
+    const meta = workbench.sessionMeta[sessionMetaKey(workspace, session.sessionId)] ?? {};
+    const activity = workbench.activities.find((item) => item.workspace === workspace && item.sessionId === session.sessionId);
+    const running = [...project.tasks].some((task) => task.sessionId === session.sessionId && task.snapshot.activeSession?.busy);
+    return { ...session, ...meta, ...(running ? { activity: "running" as const } : activity === undefined ? {} : { activity: activity.kind, unread: activity.unread }) };
+  }).sort((left, right) => Number(Boolean(right.pinned)) - Number(Boolean(left.pinned)) || right.updatedAt.localeCompare(left.updatedAt));
+}
+
 function projectSummaries() {
-  return projectOrder.flatMap((workspace) => {
+  return [...projectOrder].sort((left, right) => Number(Boolean(workbench.projectMeta[right]?.pinned)) - Number(Boolean(workbench.projectMeta[left]?.pinned))).flatMap((workspace) => {
     const project = managedProjects.get(workspace);
     if (project === undefined) return [];
-    const snapshot = project.snapshot;
+    const snapshot = project.selectedTask?.snapshot ?? project.snapshot;
     const active = snapshot.activeSession;
+    const runningSessions = [...project.tasks].flatMap((task) => task.sessionId !== undefined && task.snapshot.activeSession?.busy ? [task.sessionId] : []);
     return [{
       workspace,
-      sessions: snapshot.sessions,
+      ...workbench.projectMeta[workspace],
+      sessions: projectSessions(workspace, project),
       ...(active === undefined ? {} : { activeSession: { sessionId: active.sessionId, busy: active.busy } }),
-      running: (active?.busy ?? false) || snapshot.jobs.some((job) => job.state === "running"),
+      running: runningSessions.length > 0 || snapshot.jobs.some((job) => job.state === "running"),
+      runningSessions,
+      unreadCount: workbench.activities.filter((item) => item.workspace === workspace && item.unread).length,
     }];
   });
 }
 
 function decorateSnapshot(snapshot: DesktopSnapshot): DesktopSnapshot {
-  return { ...snapshot, projects: projectSummaries() };
+  const workspace = snapshot.workspace;
+  return {
+    ...snapshot,
+    sessions: workspace === undefined ? snapshot.sessions : projectSessions(workspace, managedProjects.get(workspace) ?? { controller, snapshot, tasks: new Set() }),
+    projects: projectSummaries(),
+    activities: workbench.activities,
+    recoveryItems: workbench.recoveryItems,
+  };
 }
 
 function decorateSessionStarted(payload: SessionStartedPayload): SessionStartedPayload {
   return { ...payload, snapshot: decorateSnapshot(payload.snapshot) };
 }
 
-function emitManagedDesktopEvent(workspace: string | undefined, event: DesktopEvent): void {
+function emitManagedDesktopEvent(workspace: string | undefined, owner: ManagedDesktopTask | undefined, event: DesktopEvent): void {
   if (workspace === undefined) {
     emitDesktopEvent(event.type === "snapshot" ? { ...event, snapshot: decorateSnapshot(event.snapshot) } : event);
     return;
   }
   const project = managedProjects.get(workspace);
   if (project !== undefined) {
-    if (event.type === "snapshot") project.snapshot = event.snapshot;
-    else if (event.type === "session-started") project.snapshot = event.payload.snapshot;
+    if (event.type === "snapshot") {
+      const previous = owner?.snapshot;
+      if (owner !== undefined) {
+        owner.snapshot = event.snapshot;
+        if (owner.payload !== undefined) owner.payload = { ...owner.payload, snapshot: event.snapshot };
+      }
+      else project.snapshot = event.snapshot;
+      trackTaskTransition(workspace, owner, previous, event.snapshot);
+    } else if (event.type === "session-started") {
+      if (owner !== undefined) {
+        owner.sessionId = event.payload.sessionId;
+        owner.payload = event.payload;
+        owner.snapshot = event.payload.snapshot;
+      } else project.snapshot = event.payload.snapshot;
+    } else if (event.type === "session-output" && owner !== undefined) {
+      if (event.event.type === "done") owner.terminal = "completed";
+      else if (event.event.type === "error") owner.terminal = "failed";
+      else if (event.event.type === "exit") owner.terminal = "interrupted";
+    } else if (event.type === "runtime-error") {
+      if (owner !== undefined) owner.terminal = "failed";
+      addActivity(workspace, event.sessionId ?? owner?.sessionId, "failed", "任务执行失败", event.message);
+    }
   }
-  if (workspace === activeWorkspace) {
+  const ownerSelected = owner === undefined ? project?.selectedTask === undefined : project?.selectedTask === owner;
+  if (workspace === activeWorkspace && ownerSelected) {
     if (event.type === "snapshot") emitDesktopEvent({ ...event, workspace, snapshot: decorateSnapshot(event.snapshot) });
     else if (event.type === "session-started") emitDesktopEvent({ ...event, workspace, payload: decorateSessionStarted(event.payload) });
     else emitDesktopEvent({ ...event, workspace });
@@ -164,9 +247,9 @@ function emitManagedDesktopEvent(workspace: string | undefined, event: DesktopEv
   }
 }
 
-function createDesktopController(workspace?: string): DesktopRuntimeController {
+function createDesktopController(workspace?: string, owner?: ManagedDesktopTask): DesktopRuntimeController {
   return new DesktopRuntimeController({
-    emit: (event) => emitManagedDesktopEvent(workspace, event),
+    emit: (event) => emitManagedDesktopEvent(workspace, owner, event),
     runD2cInteractionTests: (manifest, baseUrl, mockUrl) => d2cEmbedded.run(manifest, baseUrl, mockUrl),
     observeD2cPages: (manifest, baseUrl) => d2cEmbedded.observe(manifest, baseUrl),
     captureD2cPreview: (url) => d2cEmbedded.capture(url),
@@ -198,8 +281,8 @@ function createDesktopController(workspace?: string): DesktopRuntimeController {
       ...(runtimeOptions.workspace === undefined ? {} : {
         extraTools: createD2cTools(runtimeOptions.workspace, {
           capture: d2cCapture,
-          onProgress: (progress) => emitManagedDesktopEvent(workspace, { type: "d2c-progress", payload: progress }),
-          onReport: (report) => emitManagedDesktopEvent(workspace, { type: "d2c-report", payload: report }),
+          onProgress: (progress) => emitManagedDesktopEvent(workspace, owner, { type: "d2c-progress", payload: progress }),
+          onReport: (report) => emitManagedDesktopEvent(workspace, owner, { type: "d2c-report", payload: report }),
         }),
       }),
     }),
@@ -217,14 +300,34 @@ async function loadPersistedProjects() {
   try {
     const raw = await readFile(statePath(), "utf8");
     if (raw.length > 100_000) return { projects: [] as readonly string[] };
-    return normalizePersistedDesktopProjects(JSON.parse(raw));
+    const parsed = JSON.parse(raw) as Partial<DesktopWorkbenchState>;
+    Object.assign(workbench, {
+      projectMeta: validRecord(parsed.projectMeta), sessionMeta: validRecord(parsed.sessionMeta),
+      activities: Array.isArray(parsed.activities) ? parsed.activities.slice(0, 500) : [],
+      recoveryItems: Array.isArray(parsed.recoveryItems) ? parsed.recoveryItems.slice(0, 100) : [],
+      runningSessions: Array.isArray(parsed.runningSessions) ? parsed.runningSessions.slice(0, 100) : [],
+      cleanShutdown: parsed.cleanShutdown !== false,
+    });
+    if (!workbench.cleanShutdown) {
+      const interruptedAt = new Date().toISOString();
+      workbench.recoveryItems = workbench.runningSessions.map((item) => ({ ...item, interruptedAt, reason: "应用上次退出时任务仍在运行" }));
+      workbench.activities = [...workbench.runningSessions.map((item, index): DesktopActivityItem => ({
+        id: `recovery-${Date.now()}-${index}`, ...item, kind: "interrupted", title: "任务因应用退出而中断",
+        detail: "可以恢复会话并继续执行", createdAt: interruptedAt, unread: true,
+      })), ...workbench.activities].slice(0, 500);
+    }
+    return normalizePersistedDesktopProjects(parsed);
   } catch {
     return { projects: [] as readonly string[] };
   }
 }
 
 async function savePersistedProjects(): Promise<void> {
-  await writeFile(statePath(), `${JSON.stringify({ workspace: activeWorkspace, projects: projectOrder })}\n`, { encoding: "utf8", mode: 0o600 });
+  await writeFile(statePath(), `${JSON.stringify({ workspace: activeWorkspace, projects: projectOrder, ...workbench })}\n`, { encoding: "utf8", mode: 0o600 });
+}
+
+function validRecord(value: unknown): Record<string, never> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, never> : {};
 }
 
 async function assertDirectory(path: string): Promise<void> {
@@ -237,7 +340,7 @@ async function openWorkspace(path: string) {
   let project = managedProjects.get(workspace);
   if (project === undefined) {
     const nextController = createDesktopController(workspace);
-    project = { controller: nextController, snapshot: nextController.snapshot() };
+    project = { controller: nextController, snapshot: nextController.snapshot(), tasks: new Set() };
     managedProjects.set(workspace, project);
     projectOrder.unshift(workspace);
     activeWorkspace = workspace;
@@ -245,11 +348,80 @@ async function openWorkspace(path: string) {
     project.snapshot = await nextController.openWorkspace(workspace);
   } else {
     activeWorkspace = workspace;
-    controller = project.controller;
-    project.snapshot = await controller.refreshSessions();
+    controller = project.selectedTask?.controller ?? project.controller;
+    project.snapshot = await project.controller.refreshSessions();
   }
   await savePersistedProjects();
-  return decorateSnapshot(project.snapshot);
+  return decorateSnapshot(project.selectedTask?.snapshot ?? project.snapshot);
+}
+
+function trackTaskTransition(workspace: string, task: ManagedDesktopTask | undefined, previous: DesktopSnapshot | undefined, next: DesktopSnapshot): void {
+  const sessionId = task?.sessionId ?? next.activeSession?.sessionId;
+  if (sessionId === undefined) return;
+  const wasBusy = previous?.activeSession?.busy ?? false;
+  const busy = next.activeSession?.busy ?? false;
+  const key = sessionMetaKey(workspace, sessionId);
+  if (!wasBusy && busy) {
+    if (task !== undefined) delete task.terminal;
+    workbench.activities = workbench.activities.filter((item) => !(item.workspace === workspace && item.sessionId === sessionId));
+    workbench.runningSessions = [...workbench.runningSessions.filter((item) => sessionMetaKey(item.workspace, item.sessionId) !== key), { workspace, sessionId }];
+  } else if (wasBusy && !busy) {
+    workbench.runningSessions = workbench.runningSessions.filter((item) => sessionMetaKey(item.workspace, item.sessionId) !== key);
+    const outcome = task?.terminal ?? "completed";
+    addActivity(workspace, sessionId, outcome, outcome === "failed" ? "任务执行失败" : outcome === "interrupted" ? "任务已中断" : "任务已运行完成");
+  }
+  const needsAttention = next.approval !== undefined || (next.questions?.length ?? 0) > 0;
+  const hadAttention = previous?.approval !== undefined || (previous?.questions?.length ?? 0) > 0;
+  if (needsAttention && !hadAttention) addActivity(workspace, sessionId, "attention", "任务等待你的确认");
+  void savePersistedProjects();
+}
+
+function addActivity(workspace: string, sessionId: string | undefined, kind: DesktopActivityItem["kind"], title: string, detail?: string): void {
+  const item: DesktopActivityItem = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, workspace, ...(sessionId === undefined ? {} : { sessionId }), kind, title, ...(detail === undefined ? {} : { detail }), createdAt: new Date().toISOString(), unread: true };
+  workbench.activities = [item, ...workbench.activities.filter((old) => !(old.workspace === workspace && old.sessionId === sessionId && old.kind === kind))].slice(0, 500);
+  if (Notification.isSupported()) {
+    const notification = new Notification({ title, body: detail ?? `${workbench.projectMeta[workspace]?.label ?? workspace.split(/[\\/]/).pop() ?? workspace}` });
+    notification.on("click", () => { void activateManagedSession(workspace, sessionId); });
+    notification.show();
+  }
+  void savePersistedProjects();
+}
+
+async function startManagedSession(resumeSession?: string): Promise<SessionStartedPayload> {
+  if (activeWorkspace === undefined) throw new Error("Open a project before starting a session");
+  const project = managedProjects.get(activeWorkspace)!;
+  if (resumeSession !== undefined) {
+    const existing = [...project.tasks].find((task) => task.sessionId === resumeSession);
+    if (existing?.payload !== undefined) {
+      project.selectedTask = existing; controller = existing.controller;
+      return decorateSessionStarted(existing.payload);
+    }
+  }
+  if ([...project.tasks].filter((task) => task.snapshot.activeSession?.busy).length >= 4) throw new Error("每个项目最多同时运行 4 个任务");
+  const task = {} as ManagedDesktopTask;
+  task.controller = createDesktopController(activeWorkspace, task);
+  task.snapshot = task.controller.snapshot();
+  project.tasks.add(task); project.selectedTask = task; controller = task.controller;
+  await task.controller.openWorkspace(activeWorkspace);
+  const payload = await task.controller.startSession(resumeSession);
+  task.sessionId = payload.sessionId; task.payload = payload; task.snapshot = payload.snapshot;
+  project.snapshot = { ...project.snapshot, sessions: payload.snapshot.sessions };
+  await savePersistedProjects();
+  return decorateSessionStarted(payload);
+}
+
+async function activateManagedSession(workspace: string, sessionId?: string): Promise<SessionStartedPayload | undefined> {
+  await openWorkspace(workspace);
+  if (sessionId === undefined) return undefined;
+  const project = managedProjects.get(workspace)!;
+  const task = [...project.tasks].find((item) => item.sessionId === sessionId);
+  const payload = task?.payload ?? await startManagedSession(sessionId);
+  if (task !== undefined) { project.selectedTask = task; controller = task.controller; }
+  workbench.activities = workbench.activities.map((item) => item.workspace === workspace && item.sessionId === sessionId ? { ...item, unread: false } : item);
+  mainWindow?.show(); mainWindow?.focus();
+  emitDesktopEvent({ type: "session-started", workspace, payload: decorateSessionStarted(payload) });
+  await savePersistedProjects();
+  return decorateSessionStarted(payload);
 }
 
 async function chooseAndOpenWorkspace() {
@@ -276,6 +448,7 @@ function installIpcHandlers(): void {
   ipcMain.handle(DESKTOP_CHANNELS.appIcon, () => appIconDataUrl());
   ipcMain.handle(DESKTOP_CHANNELS.bootstrap, async () => {
     const persisted = await loadPersistedProjects();
+    workbench.cleanShutdown = false;
     for (const path of [...persisted.projects].reverse()) {
       try { await openWorkspace(path); }
       catch { /* A moved or deleted project must not block the remaining list. */ }
@@ -295,12 +468,79 @@ function installIpcHandlers(): void {
   });
   ipcMain.handle(DESKTOP_CHANNELS.startSession, async (_event, value) => {
     const { resumeSession } = StartSessionInputSchema.parse(value);
-    return decorateSessionStarted(await controller.startSession(resumeSession));
+    return startManagedSession(resumeSession);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.selectSession, async (_event, value) => {
+    const { sessionId } = DeleteSessionInputSchema.parse(value);
+    if (activeWorkspace === undefined) throw new Error("请先打开项目");
+    return activateManagedSession(activeWorkspace, sessionId);
   });
   ipcMain.handle(DESKTOP_CHANNELS.deleteSession, async (_event, value) => {
     const { sessionId } = DeleteSessionInputSchema.parse(value);
-    return decorateSnapshot(await controller.deleteSession(sessionId));
+    if (activeWorkspace === undefined) return decorateSnapshot(await controller.deleteSession(sessionId));
+    const project = managedProjects.get(activeWorkspace)!;
+    const task = [...project.tasks].find((item) => item.sessionId === sessionId);
+    if (task !== undefined) {
+      if (task.snapshot.activeSession?.busy) throw new Error("请先停止正在运行的任务");
+      await task.controller.dispose(); project.tasks.delete(task);
+      if (project.selectedTask === task) { delete project.selectedTask; controller = project.controller; }
+    }
+    delete workbench.sessionMeta[sessionMetaKey(activeWorkspace, sessionId)];
+    workbench.activities = workbench.activities.filter((item) => !(item.workspace === activeWorkspace && item.sessionId === sessionId));
+    project.snapshot = await project.controller.deleteSession(sessionId);
+    await savePersistedProjects();
+    return decorateSnapshot(project.selectedTask?.snapshot ?? project.snapshot);
   });
+  ipcMain.handle(DESKTOP_CHANNELS.updateSession, async (_event, value) => {
+    const input = UpdateSessionInputSchema.parse(value);
+    if (activeWorkspace === undefined) throw new Error("请先打开项目");
+    const key = sessionMetaKey(activeWorkspace, input.sessionId);
+    workbench.sessionMeta[key] = { ...workbench.sessionMeta[key], ...(input.title === undefined ? {} : { title: input.title || undefined }), ...(input.pinned === undefined ? {} : { pinned: input.pinned }), ...(input.archived === undefined ? {} : { archived: input.archived }) };
+    await savePersistedProjects();
+    return decorateSnapshot(controller.snapshot());
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.acknowledgeSession, async (_event, value) => {
+    const sessionId = Object.keys(value as object).length === 0 ? undefined : DeleteSessionInputSchema.parse(value).sessionId;
+    workbench.activities = workbench.activities.map((item) => item.workspace === activeWorkspace && (sessionId === undefined || item.sessionId === sessionId) ? { ...item, unread: false } : item);
+    await savePersistedProjects();
+    return decorateSnapshot(controller.snapshot());
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.updateProject, async (_event, value) => {
+    const input = UpdateProjectInputSchema.parse(value); const workspace = resolve(input.workspace);
+    if (!managedProjects.has(workspace)) throw new Error("项目未打开");
+    workbench.projectMeta[workspace] = { ...workbench.projectMeta[workspace], ...(input.label === undefined ? {} : { label: input.label || undefined }), ...(input.pinned === undefined ? {} : { pinned: input.pinned }) };
+    await savePersistedProjects(); return decorateSnapshot(controller.snapshot());
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.closeProject, async (_event, value) => {
+    const input = CloseProjectInputSchema.parse(value); const workspace = resolve(input.workspace);
+    const project = managedProjects.get(workspace); if (project === undefined) return decorateSnapshot(controller.snapshot());
+    if ([...project.tasks].some((task) => task.snapshot.activeSession?.busy) && !input.force) throw new Error("项目中仍有任务运行；确认后再关闭项目");
+    await Promise.all([project.controller, ...[...project.tasks].map((task) => task.controller)].map((item) => item.dispose()));
+    managedProjects.delete(workspace); projectOrder.splice(projectOrder.indexOf(workspace), 1);
+    if (activeWorkspace === workspace) {
+      activeWorkspace = projectOrder[0];
+      const next = activeWorkspace === undefined ? undefined : managedProjects.get(activeWorkspace);
+      controller = next?.selectedTask?.controller ?? next?.controller ?? detachedController;
+    }
+    await savePersistedProjects(); return decorateSnapshot(controller.snapshot());
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.revealProject, async (_event, value) => {
+    const workspace = resolve(ProjectPathInputSchema.parse(value).workspace); await assertDirectory(workspace); await shell.openPath(workspace);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.copyProjectPath, async (_event, value) => {
+    clipboard.writeText(resolve(ProjectPathInputSchema.parse(value).workspace));
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.dismissRecovery, async (_event, value) => {
+    const { sessionId } = DeleteSessionInputSchema.parse(value);
+    workbench.recoveryItems = workbench.recoveryItems.filter((item) => !(item.workspace === activeWorkspace && item.sessionId === sessionId));
+    await savePersistedProjects(); return decorateSnapshot(controller.snapshot());
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.gitStatus, async () => activeWorkspace === undefined ? { repository: false, branch: "", head: "", files: [] } : desktopGitStatus(activeWorkspace));
+  ipcMain.handle(DESKTOP_CHANNELS.gitDiff, async (_event, value) => { const input = GitDiffInputSchema.parse(value); if (activeWorkspace === undefined) throw new Error("请先打开项目"); return desktopGitDiff(activeWorkspace, input.path, input.staged); });
+  ipcMain.handle(DESKTOP_CHANNELS.gitStage, async (_event, value) => { const { path } = GitPathInputSchema.parse(value); if (activeWorkspace === undefined) throw new Error("请先打开项目"); return desktopGitStage(activeWorkspace, path); });
+  ipcMain.handle(DESKTOP_CHANNELS.gitUnstage, async (_event, value) => { const { path } = GitPathInputSchema.parse(value); if (activeWorkspace === undefined) throw new Error("请先打开项目"); return desktopGitUnstage(activeWorkspace, path); });
+  ipcMain.handle(DESKTOP_CHANNELS.gitDiscard, async (_event, value) => { const { path } = GitPathInputSchema.parse(value); if (activeWorkspace === undefined) throw new Error("请先打开项目"); return desktopGitDiscard(activeWorkspace, path); });
+  ipcMain.handle(DESKTOP_CHANNELS.gitCommit, async (_event, value) => { const { message } = GitCommitInputSchema.parse(value); if (activeWorkspace === undefined) throw new Error("请先打开项目"); return desktopGitCommit(activeWorkspace, message); });
   ipcMain.handle(DESKTOP_CHANNELS.showAppMenu, async (_event, value) => {
     const { menu, x, y } = AppMenuInputSchema.parse(value);
     const window = mainWindow;
@@ -551,8 +791,9 @@ async function createWindow(): Promise<void> {
     if (quitting) return;
     event.preventDefault();
     quitting = true;
-    const controllers = [detachedController, ...[...managedProjects.values()].map((project) => project.controller)];
-    void Promise.all(controllers.map((item) => item.dispose())).finally(() => {
+    workbench.cleanShutdown = true;
+    const controllers = [detachedController, ...[...managedProjects.values()].flatMap((project) => [project.controller, ...[...project.tasks].map((task) => task.controller)])];
+    void savePersistedProjects().catch(() => undefined).then(() => Promise.all(controllers.map((item) => item.dispose()))).finally(() => {
       mainWindow?.destroy();
       app.quit();
     });
@@ -588,5 +829,12 @@ app.whenReady().then(async () => {
   app.quit();
 });
 
-app.on("before-quit", () => { quitting = true; });
+app.on("before-quit", (event) => {
+  if (quitting) return;
+  event.preventDefault(); quitting = true; workbench.cleanShutdown = true;
+  const controllers = [detachedController, ...[...managedProjects.values()].flatMap((project) => [project.controller, ...[...project.tasks].map((task) => task.controller)])];
+  void savePersistedProjects().catch(() => undefined).then(() => Promise.all(controllers.map((item) => item.dispose()))).finally(() => {
+    mainWindow?.destroy(); app.quit();
+  });
+});
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });

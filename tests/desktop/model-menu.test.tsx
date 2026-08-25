@@ -20,10 +20,23 @@ describe("desktop model menu", () => {
 
     expect(output).toContain("DeepSeek V4 Pro");
     expect(output).toContain("DeepSeek V4 Flash");
-    expect(output).toContain("deepseek-v4-pro⌄");
+    expect(output).toContain("DeepSeek V4 Pro");
+    expect(output).toContain('class="model-status-dot" data-configured="true"');
     expect(output).toContain('aria-selected="true"');
     expect(output).toContain("qwen3-coder");
     expect(output).toContain("自定义");
     expect(output).toContain("新增");
+  });
+
+  it("shows the first available model as the Electron default before a session starts", () => {
+    const output = renderToStaticMarkup(<ModelMenu
+      models={DEFAULT_DESKTOP_MODELS}
+      busy={false}
+      onSelect={vi.fn()}
+      onAdd={vi.fn(async () => undefined)}
+    />);
+
+    expect(output).toContain('aria-label="主模型：DeepSeek V4 Pro"');
+    expect(output).toContain('aria-selected="true"');
   });
 });

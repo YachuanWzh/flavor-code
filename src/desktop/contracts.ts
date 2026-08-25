@@ -33,6 +33,21 @@ export const StartSessionInputSchema = z.object({
 export const DeleteSessionInputSchema = z.object({
   sessionId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/, "Invalid session id"),
 }).strict();
+export const UpdateSessionInputSchema = DeleteSessionInputSchema.extend({
+  title: z.string().trim().max(120).optional(),
+  pinned: z.boolean().optional(),
+  archived: z.boolean().optional(),
+}).strict();
+export const UpdateProjectInputSchema = z.object({
+  workspace: z.string().trim().min(1).max(32_768),
+  label: z.string().trim().max(80).optional(),
+  pinned: z.boolean().optional(),
+}).strict();
+export const ProjectPathInputSchema = z.object({ workspace: z.string().trim().min(1).max(32_768) }).strict();
+export const CloseProjectInputSchema = ProjectPathInputSchema.extend({ force: z.boolean().optional() }).strict();
+export const GitPathInputSchema = z.object({ path: z.string().min(1).max(32_768) }).strict();
+export const GitDiffInputSchema = GitPathInputSchema.extend({ staged: z.boolean().optional() }).strict();
+export const GitCommitInputSchema = z.object({ message: z.string().trim().min(1).max(20_000) }).strict();
 export const AppMenuInputSchema = z.object({
   menu: z.enum(["file", "edit", "view", "help"]),
   x: z.number().int().min(0).max(32_768),
@@ -206,11 +221,52 @@ export interface DesktopSessionSummary {
   updatedAt: string;
   mainModel: string;
   preview?: string;
+  title?: string | undefined;
+  pinned?: boolean;
+  archived?: boolean;
+  activity?: "running" | "completed" | "failed" | "attention" | "interrupted";
+  unread?: boolean;
+}
+
+export interface DesktopActivityItem {
+  id: string;
+  workspace: string;
+  sessionId?: string;
+  kind: "completed" | "failed" | "attention" | "interrupted";
+  title: string;
+  detail?: string;
+  createdAt: string;
+  unread: boolean;
+}
+
+export interface DesktopRecoveryItem {
+  workspace: string;
+  sessionId: string;
+  reason: string;
+  interruptedAt: string;
+}
+
+export interface DesktopGitFile {
+  path: string;
+  index: string;
+  worktree: string;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+}
+
+export interface DesktopGitStatus {
+  repository: boolean;
+  branch: string;
+  head: string;
+  files: readonly DesktopGitFile[];
 }
 
 /** Lightweight state used to render and switch projects without activating them. */
 export interface DesktopProjectSummary {
   workspace: string;
+  label?: string | undefined;
+  pinned?: boolean;
   sessions: readonly DesktopSessionSummary[];
   activeSession?: {
     sessionId: string;
@@ -218,6 +274,8 @@ export interface DesktopProjectSummary {
   };
   /** Includes foreground agent work and managed background jobs. */
   running: boolean;
+  runningSessions?: readonly string[];
+  unreadCount?: number;
 }
 
 export interface DesktopApproval {
@@ -235,6 +293,8 @@ export interface DesktopSnapshot {
   workspace?: string;
   /** Every project kept open by the desktop app, in most-recently-opened order. */
   projects?: readonly DesktopProjectSummary[];
+  activities?: readonly DesktopActivityItem[];
+  recoveryItems?: readonly DesktopRecoveryItem[];
   sessions: readonly DesktopSessionSummary[];
   activeSession?: {
     sessionId: string;
@@ -390,7 +450,21 @@ export interface FlavorDesktopApi {
   chooseWorkspace(): Promise<DesktopSnapshot | undefined>;
   openWorkspace(path: string): Promise<DesktopSnapshot>;
   startSession(resumeSession?: string): Promise<SessionStartedPayload>;
+  selectSession(sessionId: string): Promise<SessionStartedPayload>;
   deleteSession(sessionId: string): Promise<DesktopSnapshot>;
+  updateSession(sessionId: string, changes: { title?: string; pinned?: boolean; archived?: boolean }): Promise<DesktopSnapshot>;
+  acknowledgeSession(sessionId?: string): Promise<DesktopSnapshot>;
+  updateProject(workspace: string, changes: { label?: string; pinned?: boolean }): Promise<DesktopSnapshot>;
+  closeProject(workspace: string, force?: boolean): Promise<DesktopSnapshot>;
+  revealProject(workspace: string): Promise<void>;
+  copyProjectPath(workspace: string): Promise<void>;
+  dismissRecovery(sessionId: string): Promise<DesktopSnapshot>;
+  gitStatus(): Promise<DesktopGitStatus>;
+  gitDiff(path: string, staged?: boolean): Promise<string>;
+  gitStage(path: string): Promise<DesktopGitStatus>;
+  gitUnstage(path: string): Promise<DesktopGitStatus>;
+  gitDiscard(path: string): Promise<DesktopGitStatus>;
+  gitCommit(message: string): Promise<{ result: string; status: DesktopGitStatus }>;
   showAppMenu(menu: "file" | "edit" | "view" | "help", x: number, y: number): Promise<void>;
   submit(
     prompt: string,

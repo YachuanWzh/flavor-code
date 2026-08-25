@@ -38,9 +38,11 @@ describe("desktop security helpers", () => {
       "desktop:d2c-get-judge-config", "desktop:d2c-open-preview", "desktop:d2c-resolve-quality-issue", "desktop:d2c-run-interaction-tests", "desktop:d2c-run-quality-judge", "desktop:d2c-save-judge-config", "desktop:d2c-set-manual-acceptance", "desktop:d2c-start-mock",
       "desktop:d2c-start-preview", "desktop:d2c-stop-mock", "desktop:d2c-stop-preview", "desktop:d2c-update-review",
       "desktop:delete-mcp-server", "desktop:delete-memory", "desktop:delete-session", "desktop:delete-skill", "desktop:e2e-get-delivery-run", "desktop:event", "desktop:finish-task", "desktop:get-skill", "desktop:interrupt",
+      "desktop:acknowledge-session", "desktop:close-project", "desktop:copy-project-path", "desktop:dismiss-recovery",
+      "desktop:git-commit", "desktop:git-diff", "desktop:git-discard", "desktop:git-stage", "desktop:git-status", "desktop:git-unstage",
       "desktop:list-files", "desktop:list-mcp-servers", "desktop:list-memory", "desktop:list-skills",
       "desktop:open-workspace", "desktop:resolve-approval", "desktop:resolve-memory-review", "desktop:save-mcp-server", "desktop:set-mcp-server-enabled", "desktop:set-skill-enabled", "desktop:show-app-menu",
-      "desktop:start-session", "desktop:submit", "desktop:switch-model", "desktop:update-memory", "desktop:update-skill",
+      "desktop:reveal-project", "desktop:select-session", "desktop:start-session", "desktop:submit", "desktop:switch-model", "desktop:update-memory", "desktop:update-project", "desktop:update-session", "desktop:update-skill",
     ].sort());
   });
 

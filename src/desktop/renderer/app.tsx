@@ -37,6 +37,7 @@ import { SkillManagerView } from "./skill-manager.js";
 import { MemoryManagerView } from "./memory-manager.js";
 import { McpManagerView } from "./mcp-manager.js";
 import { E2eViewer } from "./e2e-viewer.js";
+import { GitChangesView } from "./git-changes.js";
 import {
   applyD2cAgentProgress,
   applyD2cEngineProgress,
@@ -101,7 +102,14 @@ export function DesktopApp(): React.JSX.Element {
   const [dismissedMentionInput, setDismissedMentionInput] = useState<string>();
   const [mentionSpan, setMentionSpan] = useState<{ start: number; end: number }>();
   const [cursorPos, setCursorPos] = useState(0);
-  const [view, setView] = useState<"conversation" | "skills" | "memory" | "mcp" | "e2e">("conversation");
+  const [view, setView] = useState<"conversation" | "skills" | "memory" | "mcp" | "e2e" | "activity" | "git">("conversation");
+  const [sessionQuery, setSessionQuery] = useState("");
+  const [sessionGroup, setSessionGroup] = useState<"active" | "running" | "unread" | "archived">("active");
+  const [projectMenu, setProjectMenu] = useState<string>();
+  const [palette, setPalette] = useState<"commands" | "projects">();
+  const [paletteQuery, setPaletteQuery] = useState("");
+  const [navigation, setNavigation] = useState<{ workspace?: string; sessionId?: string; view: typeof view }[]>([]);
+  const [navigationIndex, setNavigationIndex] = useState(-1);
   const [d2cRefreshKey, setD2cRefreshKey] = useState(0);
   const [d2cPending, setD2cPending] = useState<D2cPendingTask>();
   const [completionNotices, setCompletionNotices] = useState<Map<string, string | null>>(() => new Map());
@@ -111,6 +119,7 @@ export function DesktopApp(): React.JSX.Element {
   const activeWorkspaceRef = useRef<string | undefined>(undefined);
   const transcriptRef = useRef<TranscriptState>(transcript);
   const projectTranscriptsRef = useRef(new Map<string, { sessionId: string | undefined; transcript: TranscriptState }>());
+  const sessionTranscriptsRef = useRef(new Map<string, TranscriptState>());
   const projectActivityRef = useRef(new Map<string, ProjectActivityState>());
   const previewUrlsRef = useRef(new Set<string>());
   const userScrolledUp = useRef(false);
@@ -129,6 +138,7 @@ export function DesktopApp(): React.JSX.Element {
       sessionId: activeSessionIdRef.current,
       transcript: transcriptRef.current,
     });
+    if (activeSessionIdRef.current !== undefined) sessionTranscriptsRef.current.set(`${workspace}\u0000${activeSessionIdRef.current}`, transcriptRef.current);
   }, []);
 
   const acknowledgeProject = useCallback((workspace: string | undefined) => {
@@ -243,19 +253,23 @@ export function DesktopApp(): React.JSX.Element {
           acknowledgeProject(event.workspace);
         }
         activeWorkspaceRef.current = event.workspace;
-      } else if (event.workspace !== undefined && event.workspace !== activeWorkspaceRef.current) {
+      } else if (event.workspace !== undefined && (event.workspace !== activeWorkspaceRef.current
+          || (event.type === "session-output" && event.sessionId !== activeSessionIdRef.current)
+          || (event.type === "session-started" && event.payload.sessionId !== activeSessionIdRef.current))) {
         const cached = projectTranscriptsRef.current.get(event.workspace)
           ?? { sessionId: undefined, transcript: createTranscriptState() };
         if (event.type === "session-started") {
+          const restored = transcriptReducer(createTranscriptState(), { type: "restore", state: event.payload.restoredTranscript });
+          sessionTranscriptsRef.current.set(`${event.workspace}\u0000${event.payload.sessionId}`, restored);
           projectTranscriptsRef.current.set(event.workspace, {
             sessionId: event.payload.sessionId,
-            transcript: transcriptReducer(createTranscriptState(), { type: "restore", state: event.payload.restoredTranscript }),
+            transcript: restored,
           });
-        } else if (event.type === "session-output" && cached.sessionId === event.sessionId) {
-          projectTranscriptsRef.current.set(event.workspace, {
-            ...cached,
-            transcript: applyDesktopSessionOutput(cached.transcript, cached.sessionId, event),
-          });
+        } else if (event.type === "session-output") {
+          const key = `${event.workspace}\u0000${event.sessionId}`;
+          const nextTranscript = applyDesktopSessionOutput(sessionTranscriptsRef.current.get(key) ?? createTranscriptState(), event.sessionId, event);
+          sessionTranscriptsRef.current.set(key, nextTranscript);
+          if (cached.sessionId === event.sessionId) projectTranscriptsRef.current.set(event.workspace, { ...cached, transcript: nextTranscript });
         }
         return;
       }
@@ -424,6 +438,7 @@ export function DesktopApp(): React.JSX.Element {
   const switchWorkspace = async (workspace: string): Promise<DesktopSnapshot | undefined> => {
     if (workspace === snapshot.workspace) {
       acknowledgeProject(workspace);
+      void window.flavorDesktop.acknowledgeSession().then(setSnapshot).catch(() => undefined);
       setView("conversation");
       setRailOpen(false);
       return snapshot;
@@ -434,6 +449,7 @@ export function DesktopApp(): React.JSX.Element {
       const next = await window.flavorDesktop.openWorkspace(workspace);
       clearAttachments();
       activateProjectSnapshot(next);
+      void window.flavorDesktop.acknowledgeSession().then(setSnapshot).catch(() => undefined);
       return next;
     } catch (cause) {
       setError(errorMessage(cause));
@@ -449,7 +465,19 @@ export function DesktopApp(): React.JSX.Element {
       setRailOpen(false);
       return;
     }
-    await startSession(session);
+    await selectSession(session);
+  };
+
+  const selectSession = async (session: DesktopSessionSummary) => {
+    setError(undefined);
+    try {
+      rememberCurrentProject();
+      const result = await window.flavorDesktop.selectSession(session.sessionId);
+      const cached = result.snapshot.workspace === undefined ? undefined : sessionTranscriptsRef.current.get(`${result.snapshot.workspace}\u0000${result.sessionId}`);
+      setSnapshot(result.snapshot); activeWorkspaceRef.current = result.snapshot.workspace; activeSessionIdRef.current = result.sessionId;
+      setTranscript(cached ?? transcriptReducer(createTranscriptState(), { type: "restore", state: result.restoredTranscript }));
+      setView("conversation"); setRailOpen(false);
+    } catch (cause) { setError(errorMessage(cause)); }
   };
 
   const startSession = async (session?: DesktopSessionSummary) => {
@@ -461,6 +489,7 @@ export function DesktopApp(): React.JSX.Element {
       activeWorkspaceRef.current = result.snapshot.workspace;
       activeSessionIdRef.current = result.sessionId;
       setTranscript(transcriptReducer(createTranscriptState(), { type: "restore", state: result.restoredTranscript }));
+      if (result.snapshot.workspace !== undefined) sessionTranscriptsRef.current.set(`${result.snapshot.workspace}\u0000${result.sessionId}`, transcriptReducer(createTranscriptState(), { type: "restore", state: result.restoredTranscript }));
       setRailOpen(false);
       setView("conversation");
       setTimeout(() => inputRef.current?.focus(), 0);
@@ -555,8 +584,76 @@ export function DesktopApp(): React.JSX.Element {
     finally { setDeletingSession(false); }
   };
 
+  const updateSessionMeta = async (session: DesktopSessionSummary, changes: { title?: string; pinned?: boolean; archived?: boolean }) => {
+    try { setSnapshot(await window.flavorDesktop.updateSession(session.sessionId, changes)); setSessionMenu(undefined); }
+    catch (cause) { setError(errorMessage(cause)); }
+  };
+  const renameSession = (session: DesktopSessionSummary) => {
+    const title = window.prompt("任务名称", session.title ?? sessionTitle(session));
+    if (title !== null) void updateSessionMeta(session, { title: title.trim() });
+  };
+  const updateProjectMeta = async (workspace: string, changes: { label?: string; pinned?: boolean }) => {
+    try { setSnapshot(await window.flavorDesktop.updateProject(workspace, changes)); setProjectMenu(undefined); }
+    catch (cause) { setError(errorMessage(cause)); }
+  };
+  const renameProject = (workspace: string, current?: string) => {
+    const label = window.prompt("项目显示名称", current ?? workspaceName(workspace));
+    if (label !== null) void updateProjectMeta(workspace, { label: label.trim() });
+  };
+  const closeProject = async (workspace: string, running: boolean) => {
+    if (running && !window.confirm("项目中有任务正在运行。停止任务并关闭项目？")) return;
+    try { activateProjectSnapshot(await window.flavorDesktop.closeProject(workspace, running)); setProjectMenu(undefined); }
+    catch (cause) { setError(errorMessage(cause)); }
+  };
+  const openActivity = async (workspace: string, sessionId?: string) => {
+    const next = await switchWorkspace(workspace); if (next === undefined) return;
+    if (sessionId !== undefined) {
+      const session = next.sessions.find((item) => item.sessionId === sessionId);
+      if (session !== undefined) await selectSession(session);
+    }
+  };
+
+  useEffect(() => {
+    const entry = { ...(snapshot.workspace === undefined ? {} : { workspace: snapshot.workspace }), ...(snapshot.activeSession === undefined ? {} : { sessionId: snapshot.activeSession.sessionId }), view };
+    setNavigation((current) => {
+      const last = current[navigationIndex];
+      if (last?.workspace === entry.workspace && last?.sessionId === entry.sessionId && last?.view === entry.view) return current;
+      const next = [...current.slice(0, navigationIndex + 1), entry].slice(-50);
+      setNavigationIndex(next.length - 1); return next;
+    });
+  }, [snapshot.workspace, snapshot.activeSession?.sessionId, view]);
+
+  const navigateHistory = async (delta: -1 | 1) => {
+    const index = navigationIndex + delta; const entry = navigation[index]; if (entry === undefined) return;
+    setNavigationIndex(index);
+    if (entry.workspace !== undefined) {
+      const next = await window.flavorDesktop.openWorkspace(entry.workspace); activateProjectSnapshot(next);
+      if (entry.sessionId !== undefined) {
+        const result = await window.flavorDesktop.selectSession(entry.sessionId);
+        setSnapshot(result.snapshot); activeSessionIdRef.current = result.sessionId;
+        setTranscript(sessionTranscriptsRef.current.get(`${entry.workspace}\u0000${entry.sessionId}`) ?? transcriptReducer(createTranscriptState(), { type: "restore", state: result.restoredTranscript }));
+      }
+    }
+    setView(entry.view);
+  };
+
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      const key = event.key.toLowerCase();
+      if (key === "n") { event.preventDefault(); void startSession(); }
+      if (key === "p") { event.preventDefault(); setPalette("projects"); setPaletteQuery(""); }
+      if (key === "k") { event.preventDefault(); setPalette("commands"); setPaletteQuery(""); }
+      if (key === "[") { event.preventDefault(); void navigateHistory(-1); }
+      if (key === "]") { event.preventDefault(); void navigateHistory(1); }
+    };
+    window.addEventListener("keydown", keydown); return () => window.removeEventListener("keydown", keydown);
+  }, [snapshot.workspace, navigation, navigationIndex]);
+
   return <div className="app-frame">
-    <AppTitleBar railCollapsed={railCollapsed} onToggleRail={() => setRailCollapsed((value) => !value)} onMenu={showAppMenu} />
+    <AppTitleBar railCollapsed={railCollapsed} onToggleRail={() => setRailCollapsed((value) => !value)} onMenu={showAppMenu}
+      canBack={navigationIndex > 0} canForward={navigationIndex < navigation.length - 1}
+      onBack={() => void navigateHistory(-1)} onForward={() => void navigateHistory(1)} />
     <div className="desktop-shell" data-rail-collapsed={railCollapsed}>
     <button className="rail-scrim" data-open={railOpen} onClick={() => setRailOpen(false)} aria-label="关闭项目栏" />
     <aside className="project-rail" data-open={railOpen}>
@@ -573,9 +670,24 @@ export function DesktopApp(): React.JSX.Element {
         <button className="rail-action" data-active={view === "memory"} onClick={() => { setView("memory"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon"><UiIcon name="database" /></span><span>长期记忆</span></button>
         <button className="rail-action" data-active={view === "mcp"} onClick={() => { setView("mcp"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon"><UiIcon name="server" /></span><span>MCP 服务</span></button>
         <button className="rail-action" data-active={view === "e2e"} onClick={() => { setView("e2e"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon"><UiIcon name="checklist" /></span><span>E2E</span></button>
+        <button className="rail-action" data-active={view === "activity"} onClick={() => { setView("activity"); setRailOpen(false); }}><span className="action-icon"><UiIcon name="bell" /></span><span>活动</span>{(snapshot.activities?.filter((item) => item.unread).length ?? 0) > 0 && <em className="rail-badge">{snapshot.activities!.filter((item) => item.unread).length}</em>}</button>
+        <button className="rail-action" data-active={view === "git"} onClick={() => { setView("git"); setRailOpen(false); }} disabled={snapshot.workspace === undefined}><span className="action-icon"><UiIcon name="git" /></span><span>Git 变更</span></button>
       </nav>
       <div className="sessions-scroll">
         <div className="rail-section-heading"><span>项目</span><button onClick={() => void chooseWorkspace()} aria-label="打开新项目" title="打开新项目"><UiIcon name="plus" /></button></div>
+        {projects.length > 0 && <div className="session-filter">
+          <div className="session-search">
+            <UiIcon name="search" />
+            <input value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} placeholder="搜索任务" aria-label="搜索任务" />
+            {sessionQuery.length > 0 && <button type="button" onClick={() => setSessionQuery("")} aria-label="清除搜索" title="清除搜索">×</button>}
+          </div>
+          <div className="session-group-filter">
+            <select value={sessionGroup} onChange={(event) => setSessionGroup(event.target.value as typeof sessionGroup)} aria-label="按状态筛选">
+              <option value="active">任务</option><option value="running">运行</option><option value="unread">未读</option><option value="archived">归档</option>
+            </select>
+            <span aria-hidden="true" />
+          </div>
+        </div>}
         {projects.length === 0
           ? <button className="empty-project" onClick={() => void chooseWorkspace()}>选择一个本地文件夹开始</button>
           : projects.map((project) => {
@@ -584,24 +696,34 @@ export function DesktopApp(): React.JSX.Element {
             const completedSessionId = completionNotices.get(project.workspace);
             const expanded = selected || project.running || completed;
             return <section className="project-entry" data-active={selected} key={project.workspace}>
-              <button className="project-heading" onClick={() => void switchWorkspace(project.workspace)} title={project.workspace}>
+              <div className="project-heading-shell"><button className="project-heading" onClick={() => void switchWorkspace(project.workspace)} title={project.workspace}>
                 <span className="folder-icon" aria-hidden="true"><UiIcon name="folder" /></span>
-                <span>{workspaceName(project.workspace)}</span>
+                <span>{project.label || workspaceName(project.workspace)}</span>
                 {project.running
                   ? <span className="project-running-dot" title="项目中有任务正在执行" />
-                  : completed && <span className="project-complete-dot" role="status" aria-label="项目任务已完成，点击查看" />}
-              </button>
+                  : (project.unreadCount ?? 0) > 0 && <span className="project-complete-dot" role="status" aria-label="项目有未读活动" />}
+              </button><button className="project-more" onClick={() => setProjectMenu((value) => value === project.workspace ? undefined : project.workspace)} aria-label="管理项目">•••</button>
+              {projectMenu === project.workspace && <div className="project-menu" role="menu">
+                <button onClick={() => renameProject(project.workspace, project.label)}>修改显示名称</button>
+                <button onClick={() => void updateProjectMeta(project.workspace, { pinned: !project.pinned })}>{project.pinned ? "取消置顶" : "置顶项目"}</button>
+                <button onClick={() => void window.flavorDesktop.revealProject(project.workspace)}>在资源管理器中打开</button>
+                <button onClick={() => void window.flavorDesktop.copyProjectPath(project.workspace)}>复制路径</button>
+                <button className="danger-item" onClick={() => void closeProject(project.workspace, project.running)}>关闭项目</button>
+              </div>}</div>
               {expanded && project.sessions.length === 0 && <p className="no-sessions">还没有任务</p>}
-              {expanded && project.sessions.map((session) => {
+              {expanded && project.sessions.filter((session) => (sessionGroup === "archived" ? session.archived : !session.archived)
+                && (sessionGroup !== "running" || project.runningSessions?.includes(session.sessionId))
+                && (sessionGroup !== "unread" || session.unread)
+                && (!sessionQuery.trim() || sessionTitle(session).toLowerCase().includes(sessionQuery.trim().toLowerCase()))).map((session) => {
                 const sessionActive = selected && session.sessionId === snapshot.activeSession?.sessionId;
-                const sessionRunning = project.running && session.sessionId === project.activeSession?.sessionId;
-                const sessionCompleted = completedSessionId === session.sessionId;
+                const sessionRunning = project.runningSessions?.includes(session.sessionId) ?? (project.running && session.sessionId === project.activeSession?.sessionId);
+                const sessionCompleted = session.unread && session.activity === "completed";
                 return <div className="session-item-shell" key={session.sessionId}
                 onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setSessionMenu(undefined); }}>
                 <button className="session-item" data-active={sessionActive} data-running={sessionRunning}
                   disabled={selected && busy && !sessionActive}
                   onClick={() => void openProjectSession(project.workspace, session)}>
-                  <span>{sessionTitle(session)}</span>
+                  <span>{session.pinned && <i className="pin-mark">◆</i>}{sessionTitle(session)}</span>
                   {sessionRunning
                     ? <span className="session-spinner" role="status" aria-label="任务正在执行" />
                     : sessionCompleted
@@ -612,6 +734,9 @@ export function DesktopApp(): React.JSX.Element {
                   onClick={() => setSessionMenu((current) => current === session.sessionId ? undefined : session.sessionId)}>•••</button>
                 }
                 {selected && sessionMenu === session.sessionId && <div className="session-menu" role="menu">
+                  <button role="menuitem" onClick={() => renameSession(session)}>重命名</button>
+                  <button role="menuitem" onClick={() => void updateSessionMeta(session, { pinned: !session.pinned })}>{session.pinned ? "取消置顶" : "置顶"}</button>
+                  <button role="menuitem" onClick={() => void updateSessionMeta(session, { archived: !session.archived })}>{session.archived ? "取消归档" : "归档"}</button>
                   <button role="menuitem" className="danger-item"
                     disabled={busy && session.sessionId === snapshot.activeSession?.sessionId}
                     onClick={() => { setPendingDelete(session); setSessionMenu(undefined); }}>删除会话</button>
@@ -628,7 +753,9 @@ export function DesktopApp(): React.JSX.Element {
       {view === "skills" && snapshot.workspace !== undefined ? <SkillManagerView onClose={() => setView("conversation")} onError={setError} />
         : view === "memory" && snapshot.workspace !== undefined ? <MemoryManagerView onClose={() => setView("conversation")} onError={setError} />
           : view === "mcp" && snapshot.workspace !== undefined ? <McpManagerView onClose={() => setView("conversation")} onError={setError} />
-            : view === "e2e" && snapshot.workspace !== undefined ? <E2eViewer onClose={() => setView("conversation")} onInterrupt={() => void window.flavorDesktop.interrupt()} onError={setError} refreshKey={d2cRefreshKey}
+            : view === "activity" ? <ActivityCenter activities={snapshot.activities ?? []} onClose={() => setView("conversation")} onOpen={(workspace, sessionId) => void openActivity(workspace, sessionId)} onClear={() => void window.flavorDesktop.acknowledgeSession().then(setSnapshot)} />
+              : view === "git" && snapshot.workspace !== undefined ? <GitChangesView onClose={() => setView("conversation")} onError={setError} onReview={() => { setView("conversation"); void send("/review", "prompt"); }} />
+          : view === "e2e" && snapshot.workspace !== undefined ? <E2eViewer onClose={() => setView("conversation")} onInterrupt={() => void window.flavorDesktop.interrupt()} onError={setError} refreshKey={d2cRefreshKey}
                     pending={d2cPending}
                     disabled={busy}
                     onLaunch={(task, framework) => setD2cPending(createD2cPendingTask(task, framework))}
@@ -647,6 +774,14 @@ export function DesktopApp(): React.JSX.Element {
           <button title="更多选项">•••</button>
         </div>
       </header>
+
+      {(snapshot.recoveryItems?.filter((item) => item.workspace === snapshot.workspace).length ?? 0) > 0 && <div className="recovery-banner">
+        <div><strong>检测到上次未完成的任务</strong><span>应用异常退出时，这些任务仍在运行。</span></div>
+        {snapshot.recoveryItems!.filter((item) => item.workspace === snapshot.workspace).map((item) => <div className="recovery-action" key={item.sessionId}>
+          <code>{shortSessionId(item.sessionId)}</code><button onClick={() => { const session = snapshot.sessions.find((entry) => entry.sessionId === item.sessionId); if (session !== undefined) void selectSession(session); }}>恢复 / 查看</button>
+          <button onClick={() => void window.flavorDesktop.dismissRecovery(item.sessionId).then(setSnapshot)}>忽略</button>
+        </div>)}
+      </div>}
 
       <div className="conversation-scroll" ref={scrollRef}>
         {loading ? <LoadingState /> : snapshot.workspace === undefined ? <OpenProjectState onOpen={chooseWorkspace} />
@@ -689,20 +824,66 @@ export function DesktopApp(): React.JSX.Element {
     />}
     {pendingDelete !== undefined && <DeleteSessionSheet session={pendingDelete} deleting={deletingSession}
       onCancel={() => setPendingDelete(undefined)} onDelete={() => void deletePendingSession()} />}
+    {palette !== undefined && <CommandPalette mode={palette} query={paletteQuery} setQuery={setPaletteQuery} projects={projects}
+      onClose={() => setPalette(undefined)} onProject={(workspace) => { setPalette(undefined); void switchWorkspace(workspace); }}
+      onCommand={(command) => {
+        setPalette(undefined);
+        if (command === "new") void startSession(); else if (command === "open") void chooseWorkspace();
+        else if (command === "activity") setView("activity"); else if (command === "git") setView("git");
+        else if (command === "skills") setView("skills");
+      }} />}
   </div>;
 }
 
-function AppTitleBar({ railCollapsed, onToggleRail, onMenu }: {
+function ActivityCenter({ activities, onClose, onOpen, onClear }: {
+  activities: NonNullable<DesktopSnapshot["activities"]>;
+  onClose(): void;
+  onOpen(workspace: string, sessionId?: string): void;
+  onClear(): void;
+}): React.JSX.Element {
+  return <section className="manager-view activity-center"><header className="manager-header"><div><button onClick={onClose}>←</button><h2>活动</h2></div><button onClick={onClear}>全部标为已读</button></header>
+    <div className="activity-list">{activities.length === 0 ? <p className="manager-empty">还没有任务活动</p> : activities.map((item) => <button className="activity-row" data-kind={item.kind} data-unread={item.unread} key={item.id} onClick={() => onOpen(item.workspace, item.sessionId)}>
+      <i /><div><strong>{item.title}</strong><span>{workspaceName(item.workspace)}{item.detail ? ` · ${item.detail}` : ""}</span></div><time>{formatSessionTime(item.createdAt)}</time>
+    </button>)}</div>
+  </section>;
+}
+
+function CommandPalette({ mode, query, setQuery, projects, onClose, onProject, onCommand }: {
+  mode: "commands" | "projects";
+  query: string;
+  setQuery(value: string): void;
+  projects: NonNullable<DesktopSnapshot["projects"]>;
+  onClose(): void;
+  onProject(workspace: string): void;
+  onCommand(command: "new" | "open" | "activity" | "git" | "skills"): void;
+}): React.JSX.Element {
+  const commands = [
+    { id: "new" as const, label: "新建任务", hint: "Ctrl N" }, { id: "open" as const, label: "打开项目", hint: "Ctrl O" },
+    { id: "activity" as const, label: "查看活动", hint: "" }, { id: "git" as const, label: "打开 Git 变更", hint: "" }, { id: "skills" as const, label: "管理技能", hint: "" },
+  ].filter((item) => item.label.toLowerCase().includes(query.toLowerCase()));
+  const filteredProjects = projects.filter((project) => `${project.label ?? ""} ${workspaceName(project.workspace)} ${project.workspace}`.toLowerCase().includes(query.toLowerCase()));
+  return <div className="palette-layer" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="command-palette" role="dialog" aria-modal="true">
+    <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") onClose(); }} placeholder={mode === "projects" ? "切换到项目…" : "键入命令…"} />
+    <div>{mode === "projects" ? filteredProjects.map((project) => <button key={project.workspace} onClick={() => onProject(project.workspace)}><UiIcon name="folder" /><span>{project.label || workspaceName(project.workspace)}</span><small>{project.workspace}</small></button>)
+      : commands.map((command) => <button key={command.id} onClick={() => onCommand(command.id)}><span>{command.label}</span><kbd>{command.hint}</kbd></button>)}</div>
+  </section></div>;
+}
+
+function AppTitleBar({ railCollapsed, onToggleRail, onMenu, canBack, canForward, onBack, onForward }: {
   railCollapsed: boolean;
   onToggleRail(): void;
   onMenu(menu: "file" | "edit" | "view" | "help", event: React.MouseEvent<HTMLButtonElement>): void;
+  canBack: boolean;
+  canForward: boolean;
+  onBack(): void;
+  onForward(): void;
 }): React.JSX.Element {
   return <header className="window-titlebar">
     <button className="titlebar-icon sidebar-toggle" data-collapsed={railCollapsed} onClick={onToggleRail} aria-label={railCollapsed ? "显示项目栏" : "隐藏项目栏"} title={railCollapsed ? "显示项目栏" : "隐藏项目栏"}>
       <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="11" rx="2"/><path d="M6 3v10"/></svg>
     </button>
-    <button className="titlebar-icon nav-button" disabled aria-label="后退"><span>‹</span></button>
-    <button className="titlebar-icon nav-button" disabled aria-label="前进"><span>›</span></button>
+    <button className="titlebar-icon nav-button" disabled={!canBack} onClick={onBack} aria-label="后退" title="后退 (Ctrl+[)"><span>‹</span></button>
+    <button className="titlebar-icon nav-button" disabled={!canForward} onClick={onForward} aria-label="前进" title="前进 (Ctrl+])"><span>›</span></button>
     <nav className="titlebar-menus" aria-label="应用菜单">
       <button onClick={(event) => onMenu("file", event)}>文件</button>
       <button onClick={(event) => onMenu("edit", event)}>编辑</button>
@@ -1222,7 +1403,7 @@ function useAppIcon(): string | undefined {
   return url;
 }
 
-type UiIconName = "plus" | "folder" | "sparkles" | "database" | "server" | "checklist" | "image" | "at" | "monitor";
+type UiIconName = "plus" | "folder" | "sparkles" | "database" | "server" | "checklist" | "image" | "at" | "monitor" | "bell" | "git" | "search";
 
 function UiIcon({ name }: { name: UiIconName }): React.JSX.Element {
   let content: React.JSX.Element;
@@ -1236,6 +1417,9 @@ function UiIcon({ name }: { name: UiIconName }): React.JSX.Element {
     case "image": content = <><rect x="2.75" y="3.25" width="14.5" height="13.5" rx="2" /><circle cx="7" cy="7.25" r="1.25" /><path d="m4.75 14 3.5-3.5 2.25 2.25 2.25-2.5 2.5 3.75" /></>; break;
     case "at": content = <><circle cx="9.5" cy="10" r="3" /><path d="M12.5 10v1.25c0 1.15.8 1.75 1.75 1.75 1.4 0 2.25-1.2 2.25-3a6.5 6.5 0 1 0-2.1 4.78" /></>; break;
     case "monitor": content = <><rect x="2.75" y="3.5" width="14.5" height="10.5" rx="2" /><path d="M7 17h6M10 14v3" /></>; break;
+    case "bell": content = <><path d="M5.25 8.5a4.75 4.75 0 0 1 9.5 0c0 5 2 5.5 2 5.5H3.25s2-.5 2-5.5Z" /><path d="M8 16a2.25 2.25 0 0 0 4 0" /></>; break;
+    case "git": content = <><circle cx="5" cy="4" r="1.75" /><circle cx="15" cy="6.5" r="1.75" /><circle cx="5" cy="16" r="1.75" /><path d="M5 5.75v8.5M6.75 7.5C11 7.5 10.5 6.5 13.25 6.5" /></>; break;
+    case "search": content = <><circle cx="8.75" cy="8.75" r="5.25" /><path d="m12.5 12.5 4 4" /></>; break;
   }
   return <svg className="ui-icon" viewBox="0 0 20 20" aria-hidden="true" focusable="false">{content}</svg>;
 }
@@ -1277,6 +1461,9 @@ export function ModelMenu({ models, activeModel, busy, onSelect, onAdd }: {
   const [draft, setDraft] = useState<AddDesktopModelInput>({
     provider: "", model: "", baseURL: "", apiKey: "", protocol: "openai-compatible",
   });
+  const effectiveModel = activeModel ?? models[0]?.id;
+  const selectedModel = models.find((model) => model.id === effectiveModel);
+  const modelLabel = selectedModel?.label ?? shortModel(effectiveModel);
   const update = <Key extends keyof AddDesktopModelInput>(key: Key, value: AddDesktopModelInput[Key]) => {
     setDraft((current) => ({ ...current, [key]: value }));
     setFormError(undefined);
@@ -1296,7 +1483,11 @@ export function ModelMenu({ models, activeModel, busy, onSelect, onAdd }: {
     finally { setSaving(false); }
   };
 
-  return <details className="model-menu"><summary>{shortModel(activeModel)}⌄</summary><div className="popover model-popover">
+  return <details className="model-menu"><summary aria-label={`主模型：${modelLabel}`} title="切换主模型">
+    <span className="model-status-dot" data-configured={selectedModel !== undefined} />
+    <span className="model-summary-label">{modelLabel}</span>
+    <span className="model-summary-chevron" aria-hidden="true" />
+  </summary><div className="popover model-popover">
     <div className="model-popover-heading"><div><strong>{adding ? "添加厂商模型" : "切换主模型"}</strong><span>{adding ? "连接 OpenAI 兼容或 Anthropic 服务" : "DeepSeek 默认可用，也可接入其他厂商"}</span></div>
       {!adding && <button type="button" onClick={() => setAdding(true)} disabled={busy}>＋ 新增</button>}
     </div>
@@ -1320,7 +1511,7 @@ export function ModelMenu({ models, activeModel, busy, onSelect, onAdd }: {
         <button type="submit" className="primary" disabled={saving || busy}>{saving ? "正在连接…" : "保存并切换"}</button></div>
     </form> : <div className="model-options" role="listbox" aria-label="主模型">
       {models.map((model) => {
-        const selected = activeModel === model.id;
+        const selected = effectiveModel === model.id;
         return <button type="button" role="option" aria-selected={selected} className="model-option" key={model.id}
           disabled={busy || selected}
           onClick={(event) => {
