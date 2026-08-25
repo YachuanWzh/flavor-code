@@ -8,14 +8,18 @@ import type { TerminalSnapshot } from "../../terminal/service.js";
 import {
   buildAstGraphModel,
   parseReviewDiff,
+  projectAstGraphPoint,
   reconcileTerminalSelection,
   sessionTreeRows,
   terminalShellName,
+  zoomAstGraphViewport,
+  type AstGraphCanvasSize,
+  type AstGraphViewport,
   type AstGraphModel,
   type ReviewFile,
 } from "./agent-workbench-models.js";
 
-export { buildAstGraphModel, parseReviewDiff, reconcileTerminalSelection, renderTerminalBuffer, sessionTreeRows, terminalGridSize, terminalShellName } from "./agent-workbench-models.js";
+export { buildAstGraphModel, parseReviewDiff, projectAstGraphPoint, reconcileTerminalSelection, renderTerminalBuffer, sessionTreeRows, terminalGridSize, terminalShellName, zoomAstGraphViewport } from "./agent-workbench-models.js";
 
 type Tab = "cockpit" | "timeline" | "terminal" | "review" | "preview" | "context" | "ast" | "pals" | "worktrees";
 const TABS: readonly { id: Tab; label: string }[] = [
@@ -165,20 +169,53 @@ function AstPane({ onError, onCompose }: { onError(message: string): void; onCom
   const choose = async (node: DesktopAstNode, depth = hops) => { setSelected(node); setLoading(true); try { setRelations(await window.flavorDesktop.astRelations(node.id, depth)); } catch (e) { onError(errorText(e)); } finally { setLoading(false); } };
   const graph = selected === undefined || relations === undefined ? undefined : buildAstGraphModel(selected, relations);
   return <div className="ast-layout">
-    <aside className="ast-symbols"><header><strong>代码索引</strong><span data-ready={status?.available}>{status?.available ? `${status.nodes} symbols · ${status.edges} edges` : "尚未建立索引"}</span></header><form onSubmit={(e) => { e.preventDefault(); void search(); }}><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索函数、类型或模块"/><button>搜索</button></form>{nodes.map((node) => <button data-active={node.id === selected?.id} key={node.id} onClick={() => void choose(node)}><strong>{node.name}</strong><small>{node.kind} · {node.filePath}:{node.startLine}</small></button>)}</aside>
-    <main className="ast-graph-stage"><header><div><small>CODE RELATION MAP</small><h3>{selected?.qualifiedName ?? "代码图浏览器"}</h3><code>{selected ? `${selected.filePath}:${selected.startLine}-${selected.endLine}` : "搜索并选择一个符号作为图中心"}</code></div><div className="ast-depth" aria-label="影响深度"><span>深度</span>{[1, 2, 3, 4].map((depth) => <button data-active={hops === depth} key={depth} onClick={() => { setHops(depth); if (selected) void choose(selected, depth); }}>{depth}</button>)}</div></header>
-      {loading ? <div className="ast-graph-empty">正在展开关系图…</div> : graph ? <AstGraphCanvas graph={graph} selected={selected!} onSelect={(node) => void choose(node)} /> : <div className="ast-graph-empty"><strong>从符号开始</strong><p>搜索函数、类或模块，查看 callers、callees 和多跳影响范围。</p></div>}
+    <aside className="ast-symbols"><header><div><small>SYMBOL INDEX</small><strong>代码索引</strong></div><span data-ready={status?.available}>{status?.available ? <><b>{status.nodes}</b> symbols<br/><b>{status.edges}</b> edges</> : "尚未建立索引"}</span></header><form onSubmit={(e) => { e.preventDefault(); void search(); }}><span aria-hidden="true">⌕</span><input aria-label="搜索代码符号" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="函数、类型或模块"/><button>搜索</button></form><div className="ast-symbol-list">{nodes.length === 0 ? <p>{status?.available === false ? "项目尚未建立代码索引" : "输入名称，定位代码中的关键符号"}</p> : nodes.map((node) => <button data-active={node.id === selected?.id} key={node.id} onClick={() => void choose(node)}><span><strong>{node.name}</strong><em>{node.kind}</em></span><small>{node.filePath}:{node.startLine}</small></button>)}</div></aside>
+    <main className="ast-graph-stage"><header><div><small>RELATION MAP</small><h3>{selected?.qualifiedName ?? "代码关系浏览器"}</h3><code>{selected ? `${selected.filePath}:${selected.startLine}-${selected.endLine}` : "搜索并选择一个符号作为图中心"}</code></div><div className="ast-depth" aria-label="影响深度"><span>影响深度</span>{[1, 2, 3, 4].map((depth) => <button aria-label={`${depth} 层影响深度`} data-active={hops === depth} key={depth} onClick={() => { setHops(depth); if (selected) void choose(selected, depth); }}>{depth}</button>)}</div></header>
+      {loading ? <div className="ast-graph-empty">正在展开关系图…</div> : graph ? <AstGraphCanvas graph={graph} selected={selected!} onSelect={(node) => void choose(node)} /> : <div className="ast-graph-empty"><strong>从一个符号开始</strong><p>搜索函数、类或模块，在同一张图上查看调用者、被调用项和多跳影响范围。</p></div>}
     </main>
-    <aside className="ast-inspector"><header><small>SYMBOL INSPECTOR</small><h3>{selected?.name ?? "未选择"}</h3></header>{selected && <><dl><dt>类型</dt><dd>{selected.kind}</dd><dt>语言</dt><dd>{selected.language}</dd><dt>位置</dt><dd>{selected.filePath}:{selected.startLine}</dd>{selected.signature && <><dt>签名</dt><dd>{selected.signature}</dd></>}</dl><button className="ast-compose" onClick={() => onCompose(`请查看 @${selected.filePath}#L${selected.startLine}-L${selected.endLine} 中的 ${selected.qualifiedName}`)}>加入输入框</button><Relation title="Callers" nodes={relations?.callers ?? []} onSelect={(node) => void choose(node)}/><Relation title="Callees" nodes={relations?.callees ?? []} onSelect={(node) => void choose(node)}/><Relation title="Impact" nodes={relations?.impact ?? []} onSelect={(node) => void choose(node)}/></>}</aside>
+    <aside className="ast-inspector"><header><div><small>SYMBOL INSPECTOR</small><h3>{selected?.name ?? "未选择符号"}</h3></div>{selected && <span>{selected.kind}</span>}</header>{selected ? <><dl><dt>语言</dt><dd>{selected.language}</dd><dt>位置</dt><dd>{selected.filePath}:{selected.startLine}</dd>{selected.signature && <><dt>签名</dt><dd>{selected.signature}</dd></>}</dl><button className="ast-compose" onClick={() => onCompose(`请查看 @${selected.filePath}#L${selected.startLine}-L${selected.endLine} 中的 ${selected.qualifiedName}`)}><span>加入输入框</span><b aria-hidden="true">↗</b></button><Relation title="Callers" nodes={relations?.callers ?? []} onSelect={(node) => void choose(node)}/><Relation title="Callees" nodes={relations?.callees ?? []} onSelect={(node) => void choose(node)}/><Relation title="Impact" nodes={relations?.impact ?? []} onSelect={(node) => void choose(node)}/></> : <p className="ast-inspector-empty">选择一个符号后，这里会显示源码位置和完整关系。</p>}</aside>
   </div>;
 }
 
 function AstGraphCanvas({ graph, selected, onSelect }: { graph: AstGraphModel; selected: DesktopAstNode; onSelect(node: DesktopAstNode): void }): React.JSX.Element {
+  const initialViewport: AstGraphViewport = { x: 0, y: 0, scale: 1 };
+  const [viewport, setViewport] = useState<AstGraphViewport>(initialViewport);
+  const [canvasSize, setCanvasSize] = useState<AstGraphCanvasSize>({ width: 0, height: 0 });
+  const [dragging, setDragging] = useState(false);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ pointerId: number; x: number; y: number } | undefined>(undefined);
   const byId = new Map(graph.nodes.map((node) => [node.id, node]));
-  return <div className="ast-graph" aria-label={`${selected.name} 代码关系图`}>
+  useEffect(() => { setViewport(initialViewport); }, [selected.id]);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (canvas === null) return;
+    const measure = () => { const bounds = canvas.getBoundingClientRect(); setCanvasSize({ width: bounds.width, height: bounds.height }); };
+    measure();
+    const observer = new ResizeObserver(measure); observer.observe(canvas);
+    return () => observer.disconnect();
+  }, []);
+  const zoom = (requestedScale: number, point?: { x: number; y: number }) => {
+    const bounds = canvasRef.current?.getBoundingClientRect();
+    const center = point ?? { x: (bounds?.width ?? 0) / 2, y: (bounds?.height ?? 0) / 2 };
+    setViewport((current) => zoomAstGraphViewport(current, center, requestedScale));
+  };
+  const finishDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (dragRef.current?.pointerId !== event.pointerId) return;
+    dragRef.current = undefined; setDragging(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+  return <div ref={canvasRef} className="ast-graph" data-dragging={dragging} role="region" aria-label={`${selected.name} 代码关系图，可拖动和滚轮缩放`}
+    onWheel={(event) => { event.preventDefault(); const bounds = event.currentTarget.getBoundingClientRect(); zoom(viewport.scale * Math.exp(-event.deltaY * 0.0014), { x: event.clientX - bounds.left, y: event.clientY - bounds.top }); }}
+    onPointerDown={(event) => { if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return; event.currentTarget.setPointerCapture(event.pointerId); dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }; setDragging(true); }}
+    onPointerMove={(event) => { const drag = dragRef.current; if (drag?.pointerId !== event.pointerId) return; const dx = event.clientX - drag.x; const dy = event.clientY - drag.y; dragRef.current = { ...drag, x: event.clientX, y: event.clientY }; setViewport((current) => ({ ...current, x: current.x + dx, y: current.y + dy })); }}
+    onPointerUp={finishDrag} onPointerCancel={finishDrag}>
+    <div className="ast-graph-viewport" style={{ transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})` }}>
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">{graph.edges.map((edge, index) => { const from = byId.get(edge.from); const to = byId.get(edge.to); if (!from || !to) return null; const middle = (from.x + to.x) / 2; return <path data-kind={edge.kind} key={`${edge.from}-${edge.to}-${index}`} d={`M ${from.x} ${from.y} C ${middle} ${from.y}, ${middle} ${to.y}, ${to.x} ${to.y}`}/>; })}</svg>
+    </div>
+    {graph.nodes.map((node) => { const point = projectAstGraphPoint(node, viewport, canvasSize); return <button className="ast-graph-node" data-role={node.role} key={node.id} style={{ left: point.x, top: point.y, visibility: canvasSize.width > 0 ? "visible" : "hidden" }} onClick={() => onSelect(node)} title={`${node.qualifiedName}\n${node.filePath}:${node.startLine}`}><i/><span><strong>{node.name}</strong><small>{node.role === "impact" ? `hop ${node.hop}` : node.kind}</small></span></button>; })}
+    <div className="ast-graph-hint"><span aria-hidden="true">↔</span> 拖动平移 <i/> 滚轮缩放</div>
+    <div className="ast-graph-controls" aria-label="画布缩放"><button aria-label="放大" onClick={() => zoom(viewport.scale * 1.2)}>＋</button><span>{Math.round(viewport.scale * 100)}%</span><button aria-label="缩小" onClick={() => zoom(viewport.scale / 1.2)}>−</button><button className="ast-graph-reset" aria-label="复位画布" onClick={() => setViewport(initialViewport)}>复位</button></div>
     <div className="ast-graph-legend"><span data-kind="caller">调用者</span><span data-kind="origin">中心符号</span><span data-kind="callee">被调用</span><span data-kind="impact">影响范围</span></div>
-    <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">{graph.edges.map((edge, index) => { const from = byId.get(edge.from); const to = byId.get(edge.to); return from && to ? <line data-kind={edge.kind} key={`${edge.from}-${edge.to}-${index}`} x1={from.x} y1={from.y} x2={to.x} y2={to.y}/> : null; })}</svg>
-    {graph.nodes.map((node) => <button className="ast-graph-node" data-role={node.role} key={node.id} style={{ left: `${node.x}%`, top: `${node.y}%` }} onClick={() => onSelect(node)} title={`${node.qualifiedName}\n${node.filePath}:${node.startLine}`}><i/><strong>{node.name}</strong><small>{node.role === "impact" ? `hop ${node.hop}` : node.kind}</small></button>)}
   </div>;
 }
 

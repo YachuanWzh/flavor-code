@@ -7,11 +7,13 @@ import {
   PalsPane,
   buildAstGraphModel,
   parseReviewDiff,
+  projectAstGraphPoint,
   renderTerminalBuffer,
   reconcileTerminalSelection,
   sessionTreeRows,
   terminalShellName,
   terminalGridSize,
+  zoomAstGraphViewport,
 } from "../../src/desktop/renderer/agent-workbench.js";
 
 describe("AgentWorkbench", () => {
@@ -60,6 +62,34 @@ describe("AgentWorkbench", () => {
       expect.objectContaining({ from: "caller", to: "target", kind: "caller" }),
       expect.objectContaining({ from: "target", to: "callee", kind: "callee" }),
     ]));
+  });
+
+  it("zooms the code graph around the pointer and clamps extreme scales", () => {
+    expect(zoomAstGraphViewport({ x: 0, y: 0, scale: 1 }, { x: 200, y: 100 }, 2)).toEqual({
+      x: -200, y: -100, scale: 2,
+    });
+    expect(zoomAstGraphViewport({ x: 12, y: 18, scale: 1 }, { x: 0, y: 0 }, 99).scale).toBe(2.4);
+    expect(zoomAstGraphViewport({ x: 12, y: 18, scale: 1 }, { x: 0, y: 0 }, 0.01).scale).toBe(0.55);
+  });
+
+  it("projects graph nodes onto crisp integer pixels without scaling their DOM", () => {
+    expect(projectAstGraphPoint({ x: 50, y: 25 }, { x: -20.4, y: 10.2, scale: 2 }, { width: 400, height: 300 })).toEqual({
+      x: 380, y: 160,
+    });
+  });
+
+  it("lays dense impact nodes into readable rows of at most three", () => {
+    const origin = { id: "target", kind: "function", name: "target", qualifiedName: "target", filePath: "src/a.ts", language: "typescript", startLine: 8, endLine: 10 };
+    const impact = Array.from({ length: 12 }, (_, index) => ({ ...origin, id: `impact-${index}`, name: `impact-${index}`, hop: 2 }));
+    const graph = buildAstGraphModel(origin, { origin, callers: [], callees: [], impact });
+    const impactNodes = graph.nodes.filter((node) => node.role === "impact");
+    const rows = new Map<number, typeof impactNodes>();
+    for (const node of impactNodes) rows.set(node.y, [...(rows.get(node.y) ?? []), node]);
+    expect([...rows.values()].map((row) => row.length)).toEqual([3, 3, 3, 3]);
+    for (const row of rows.values()) {
+      const positions = row.map((node) => node.x).sort((a, b) => a - b);
+      expect(positions[1]! - positions[0]!).toBeGreaterThanOrEqual(25);
+    }
   });
 
   it("derives tree depth and terminal dimensions within IPC limits", () => {

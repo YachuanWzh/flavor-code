@@ -51,6 +51,37 @@ export interface AstGraphNode extends DesktopAstNode {
 }
 export interface AstGraphEdge { from: string; to: string; kind: "caller" | "callee" | "impact"; hop?: number }
 export interface AstGraphModel { nodes: readonly AstGraphNode[]; edges: readonly AstGraphEdge[] }
+export interface AstGraphViewport { x: number; y: number; scale: number }
+export interface AstGraphCanvasSize { width: number; height: number }
+
+export function clampAstGraphScale(scale: number): number {
+  return Math.min(2.4, Math.max(0.55, scale));
+}
+
+export function zoomAstGraphViewport(
+  viewport: AstGraphViewport,
+  point: { x: number; y: number },
+  requestedScale: number,
+): AstGraphViewport {
+  const scale = clampAstGraphScale(requestedScale);
+  const ratio = scale / viewport.scale;
+  return {
+    x: point.x - (point.x - viewport.x) * ratio,
+    y: point.y - (point.y - viewport.y) * ratio,
+    scale,
+  };
+}
+
+export function projectAstGraphPoint(
+  point: { x: number; y: number },
+  viewport: AstGraphViewport,
+  canvas: AstGraphCanvasSize,
+): { x: number; y: number } {
+  return {
+    x: Math.round(viewport.x + point.x * canvas.width * viewport.scale / 100),
+    y: Math.round(viewport.y + point.y * canvas.height * viewport.scale / 100),
+  };
+}
 
 export function buildAstGraphModel(origin: DesktopAstNode, relations: DesktopAstRelations): AstGraphModel {
   const nodes = new Map<string, AstGraphNode>();
@@ -65,11 +96,16 @@ export function buildAstGraphModel(origin: DesktopAstNode, relations: DesktopAst
   lane(relations.callers, "caller", 14);
   lane(relations.callees, "callee", 86);
   const impact = relations.impact.filter((node) => !nodes.has(node.id)).slice(0, 12);
+  const topCount = Math.ceil(impact.length / 2);
   impact.forEach((node, index) => {
-    const upper = index % 2 === 0;
-    const column = Math.floor(index / 2);
-    const x = 25 + (column % 6) * 10;
-    const y = upper ? 13 : 87;
+    const upper = index < topCount;
+    const bandIndex = upper ? index : index - topCount;
+    const bandCount = upper ? topCount : impact.length - topCount;
+    const row = Math.floor(bandIndex / 3);
+    const indexInRow = bandIndex % 3;
+    const itemsInRow = Math.min(3, bandCount - row * 3);
+    const x = ((indexInRow + 1) * 100) / (itemsInRow + 1);
+    const y = upper ? 13 + row * 11 : 87 - row * 11;
     nodes.set(node.id, { ...node, role: "impact", x, y, hop: node.hop });
     edges.push({ from: origin.id, to: node.id, kind: "impact", hop: node.hop });
   });
