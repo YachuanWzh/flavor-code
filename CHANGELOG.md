@@ -2,7 +2,17 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.3.3 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.3.4 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.3.4] - 2026-08-25
+
+### 修复
+- 修复 Durable Harness journal 重复保存完整模型消息、turn prompt、工具输入与结果，导致长会话快速达到 32 MiB 上限并持续报错、`/compact` 也无法恢复的问题；这些大对象现仅记录 SHA-256 哈希和崩溃恢复所需元数据
+- journal 达到容量边界时自动压缩已完成历史，仅保留待处理队列、未完成 turn、模型请求、工具调用与最后 savepoint，不再因可靠性旁路日志阻断正常会话
+- 旧格式及已发生前缀轮转的 journal 在加载时自动校验、迁移和压缩，现有 session 无需删除聊天记录即可继续使用
+
+### 测试
+- 新增大对象去重、受限容量自动压缩、未完成非幂等工具恢复和 journal 前缀轮转兼容回归测试
 
 ## [1.3.3] - 2026-08-25
 

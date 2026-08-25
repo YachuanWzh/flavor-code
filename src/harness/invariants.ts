@@ -7,8 +7,10 @@ export function harnessInvariantViolations(records: readonly HarnessJournalRecor
   const tools = new Set<string>();
   const models = new Set<string>();
   const turns = new Set<string>();
+  const firstSequence = records[0]?.sequence ?? 1;
   records.forEach((record, index) => {
-    if (record.sequence !== index + 1) violations.push(`sequence ${record.sequence} is not ${index + 1}`);
+    const expectedSequence = firstSequence + index;
+    if (record.sequence !== expectedSequence) violations.push(`sequence ${record.sequence} is not ${expectedSequence}`);
     const id = typeof record.payload.id === "string" ? record.payload.id : "";
     if (record.type === "queue.admitted") {
       if (queues.has(id)) violations.push(`queue ${id} was admitted twice`);
@@ -24,19 +26,23 @@ export function harnessInvariantViolations(records: readonly HarnessJournalRecor
       if (!tools.delete(id)) violations.push(`${record.type} references unknown tool ${id}`);
     } else if (record.type === "model.requested") {
       if (models.has(id)) violations.push(`model ${id} was requested twice`);
-      if (!Array.isArray(record.payload.messages)) violations.push(`model ${id} has no replayable messages`);
+      if (!isHash(record.payload.messagesHash)) violations.push(`model ${id} has no valid messages hash`);
       models.add(id);
     } else if (record.type === "model.completed") {
       if (!models.delete(id)) violations.push(`model.completed references unknown model ${id}`);
     } else if (record.type === "turn.started") {
       if (turns.has(id)) violations.push(`turn ${id} was started twice`);
-      if (!("prompt" in record.payload)) violations.push(`turn ${id} has no replayable prompt`);
+      if (!isHash(record.payload.promptHash)) violations.push(`turn ${id} has no valid prompt hash`);
       turns.add(id);
     } else if (record.type === "turn.completed" || record.type === "turn.interrupted") {
       if (!turns.delete(id)) violations.push(`${record.type} references unknown turn ${id}`);
     }
   });
   return violations;
+}
+
+function isHash(value: unknown): boolean {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 }
 
 export function assertHarnessInvariants(records: readonly HarnessJournalRecord[]): void {

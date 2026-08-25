@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, truncateSync, writeSync } from "node:fs";
+import { closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, truncateSync, unlinkSync, writeSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { assertHarnessInvariants } from "./invariants.js";
@@ -105,7 +105,7 @@ export class HarnessJournal {
 
   startTurn(config: unknown, prompt: unknown): string {
     const id = randomUUID();
-    this.#append("turn.started", { id, config: structuredClone(config), configHash: hashJson(config), prompt: structuredClone(prompt), promptHash: hashJson(prompt) });
+    this.#append("turn.started", { id, configHash: hashJson(config), promptHash: hashJson(prompt) });
     return id;
   }
 
@@ -114,7 +114,14 @@ export class HarnessJournal {
 
   startModel(input: { agent: string; model: string; iteration: number; attempt: number; messages: unknown }): string {
     const id = randomUUID();
-    this.#append("model.requested", { id, ...structuredClone(input), messagesHash: hashJson(input.messages) });
+    this.#append("model.requested", {
+      id,
+      agent: input.agent,
+      model: input.model,
+      iteration: input.iteration,
+      attempt: input.attempt,
+      messagesHash: hashJson(input.messages),
+    });
     return id;
   }
 
@@ -124,11 +131,11 @@ export class HarnessJournal {
 
   startTool(tool: string, input: unknown, retrySafe: boolean): string {
     const id = randomUUID();
-    this.#append("tool.started", { id, tool, input: structuredClone(input), inputHash: hashJson(input), retrySafe });
+    this.#append("tool.started", { id, tool, inputHash: hashJson(input), retrySafe });
     return id;
   }
 
-  completeTool(id: string, result: unknown): void { this.#append("tool.completed", { id, result: structuredClone(result) }); }
+  completeTool(id: string, result: unknown): void { this.#append("tool.completed", { id, resultHash: hashJson(result) }); }
   interruptTool(id: string, reason: string): void { this.#append("tool.interrupted", { id, reason }); }
 
   savepoint(phase: string, config: unknown): string {
@@ -208,35 +215,40 @@ export class HarnessJournal {
     const committed = raw.endsWith("\n") ? raw : raw.slice(0, Math.max(0, raw.lastIndexOf("\n") + 1));
     if (committed.length !== raw.length) truncateSync(this.#path, Buffer.byteLength(committed));
     const lines = committed.split("\n").filter(Boolean);
-    let previousHash: string | null = null;
+    let previousHash: string | null | undefined;
+    let expectedSequence: number | undefined;
     for (const line of lines) {
       const record = JournalRecordSchema.parse(JSON.parse(line) as unknown);
-      if (record.sequence !== this.#records.length + 1) throw new Error("Harness journal sequence is not contiguous");
+      expectedSequence ??= record.sequence;
+      previousHash ??= record.previousHash;
+      if (record.sequence !== expectedSequence) throw new Error("Harness journal sequence is not contiguous");
       if (record.previousHash !== previousHash) throw new Error("Harness journal hash chain is broken");
       if (record.hash !== recordHash(record)) throw new Error("Harness journal record hash is invalid");
       this.#records.push(record);
       previousHash = record.hash;
+      expectedSequence += 1;
     }
-    this.#sequence = this.#records.length;
-    this.#lastHash = previousHash;
+    this.#sequence = this.#records.at(-1)?.sequence ?? 0;
+    this.#lastHash = previousHash ?? null;
     assertHarnessInvariants(this.#records);
+    const hasRotatedPrefix = (this.#records[0]?.sequence ?? 1) !== 1;
+    if (metadata.size > this.#maxBytes * 0.75 || hasRotatedPrefix || this.#records.some(hasLegacyPayload)) this.#compact();
   }
 
   #append(type: HarnessJournalEventType, payload: Record<string, unknown>): void {
     const normalizedPayload = jsonSafeRecord(payload);
-    const unsigned = {
-      version: HARNESS_JOURNAL_VERSION,
-      sequence: this.#sequence + 1,
-      id: randomUUID(),
-      timestamp: this.#now(),
-      type,
-      payload: normalizedPayload,
-      previousHash: this.#lastHash,
-    } as const;
-    const record = JournalRecordSchema.parse({ ...unsigned, hash: hashJson(unsigned) });
-    const line = `${JSON.stringify(record)}\n`;
-    const priorBytes = existsSync(this.#path) ? statSync(this.#path).size : 0;
-    if (priorBytes + Buffer.byteLength(line) > this.#maxBytes) throw new Error(`Harness journal exceeds ${this.#maxBytes} bytes`);
+    let record = this.#createRecord(type, normalizedPayload);
+    let line = `${JSON.stringify(record)}\n`;
+    let priorBytes = existsSync(this.#path) ? statSync(this.#path).size : 0;
+    if (priorBytes + Buffer.byteLength(line) > this.#maxBytes) {
+      this.#compact();
+      record = this.#createRecord(type, normalizedPayload);
+      line = `${JSON.stringify(record)}\n`;
+      priorBytes = existsSync(this.#path) ? statSync(this.#path).size : 0;
+      if (priorBytes + Buffer.byteLength(line) > this.#maxBytes) {
+        throw new Error(`Harness journal event exceeds the ${this.#maxBytes} byte bounded journal capacity`);
+      }
+    }
     const fd = openSync(this.#path, constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY, 0o600);
     try { writeSync(fd, line, undefined, "utf8"); fsyncSync(fd); }
     finally { closeSync(fd); }
@@ -244,6 +256,111 @@ export class HarnessJournal {
     this.#sequence = record.sequence;
     this.#lastHash = record.hash;
   }
+
+  #createRecord(type: HarnessJournalEventType, payload: Record<string, unknown>): HarnessJournalRecord {
+    const unsigned = {
+      version: HARNESS_JOURNAL_VERSION,
+      sequence: this.#sequence + 1,
+      id: randomUUID(),
+      timestamp: this.#now(),
+      type,
+      payload,
+      previousHash: this.#lastHash,
+    } as const;
+    return JournalRecordSchema.parse({ ...unsigned, hash: hashJson(unsigned) });
+  }
+
+  #compact(): void {
+    const queues = new Map<string, HarnessJournalRecord>();
+    const claims = new Map<string, HarnessJournalRecord>();
+    const tools = new Map<string, HarnessJournalRecord>();
+    const models = new Map<string, HarnessJournalRecord>();
+    const turns = new Map<string, HarnessJournalRecord>();
+    let savepoint: HarnessJournalRecord | undefined;
+
+    for (const record of this.#records) {
+      const id = typeof record.payload.id === "string" ? record.payload.id : "";
+      if (record.type === "queue.admitted") queues.set(id, record);
+      else if (record.type === "queue.claimed") claims.set(id, record);
+      else if (record.type === "queue.released") claims.delete(id);
+      else if (record.type === "queue.acked") { queues.delete(id); claims.delete(id); }
+      else if (record.type === "tool.started") tools.set(id, record);
+      else if (record.type === "tool.completed" || record.type === "tool.interrupted") tools.delete(id);
+      else if (record.type === "model.requested") models.set(id, record);
+      else if (record.type === "model.completed") models.delete(id);
+      else if (record.type === "turn.started") turns.set(id, record);
+      else if (record.type === "turn.completed" || record.type === "turn.interrupted") turns.delete(id);
+      else if (record.type === "savepoint.created") savepoint = record;
+    }
+
+    const retained = [
+      ...queues.values(),
+      ...claims.values(),
+      ...tools.values(),
+      ...models.values(),
+      ...turns.values(),
+      ...(savepoint === undefined ? [] : [savepoint]),
+    ].sort((left, right) => left.sequence - right.sequence);
+
+    const compacted: HarnessJournalRecord[] = [];
+    let previousHash: string | null = null;
+    for (const source of retained) {
+      const unsigned = {
+        version: HARNESS_JOURNAL_VERSION,
+        sequence: compacted.length + 1,
+        id: randomUUID(),
+        timestamp: source.timestamp,
+        type: source.type,
+        payload: compactPayload(source),
+        previousHash,
+      } as const;
+      const record = JournalRecordSchema.parse({ ...unsigned, hash: hashJson(unsigned) });
+      compacted.push(record);
+      previousHash = record.hash;
+    }
+
+    const contents = compacted.map((record) => `${JSON.stringify(record)}\n`).join("");
+    if (Buffer.byteLength(contents) > this.#maxBytes) return;
+    const temporary = `${this.#path}.compact-${process.pid}-${randomUUID()}`;
+    const fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+    try {
+      writeSync(fd, contents, undefined, "utf8");
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    try { renameSync(temporary, this.#path); }
+    catch (error) {
+      if (existsSync(temporary)) unlinkSync(temporary);
+      throw error;
+    }
+    this.#records = compacted;
+    this.#sequence = compacted.length;
+    this.#lastHash = previousHash;
+  }
+}
+
+function compactPayload(record: HarnessJournalRecord): Record<string, unknown> {
+  const payload = record.payload;
+  if (record.type === "queue.admitted") return payload;
+  if (record.type === "queue.claimed") return { id: payload.id };
+  if (record.type === "tool.started") return pick(payload, ["id", "tool", "inputHash", "retrySafe"]);
+  if (record.type === "model.requested") return pick(payload, ["id", "agent", "model", "iteration", "attempt", "messagesHash"]);
+  if (record.type === "turn.started") return pick(payload, ["id", "configHash", "promptHash"]);
+  if (record.type === "savepoint.created") return pick(payload, ["id", "phase", "configHash"]);
+  return payload;
+}
+
+function hasLegacyPayload(record: HarnessJournalRecord): boolean {
+  if (record.type === "turn.started") return "config" in record.payload || "prompt" in record.payload;
+  if (record.type === "model.requested") return "messages" in record.payload;
+  if (record.type === "tool.started") return "input" in record.payload;
+  if (record.type === "tool.completed") return "result" in record.payload;
+  return false;
+}
+
+function pick(source: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
+  return Object.fromEntries(keys.flatMap((key) => key in source ? [[key, source[key]]] : []));
 }
 
 function jsonSafeRecord(value: Record<string, unknown>): Record<string, unknown> {
