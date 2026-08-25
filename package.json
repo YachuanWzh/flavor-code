@@ -1,6 +1,6 @@
 {
   "name": "flavor-code",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "author": "YachuanWzh",
   "type": "module",
   "publishConfig": {
@@ -31,7 +31,7 @@
   "scripts": {
     "build": "npm run build:icons && npm run build:cli && npm run build:desktop",
     "build:icons": "node scripts/build-icons.mjs",
-    "build:cli": "tsup && tsc -p tsconfig.sdk.json && node -e \"require('fs').cpSync('src/init/codeisland','dist/codeisland',{recursive:true});require('fs').cpSync('src/init/astgraph','dist/astgraph',{recursive:true})\"",
+    "build:cli": "tsup && tsc -p tsconfig.sdk.json && node -e \"require('fs').cpSync('src/init/astgraph','dist/astgraph',{recursive:true})\"",
     "build:desktop": "npm run build:desktop:main && npm run build:desktop:renderer",
     "build:desktop:main": "tsup --config tsup.desktop.config.ts",
     "build:desktop:renderer": "vite build --config vite.desktop.config.ts",

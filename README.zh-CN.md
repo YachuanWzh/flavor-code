@@ -252,10 +252,10 @@ flavor mcp disable docs
 
 Skill 是带有 YAML 头信息的 `SKILL.md`，放在 `.flavor/skills/<name>/` 或 `~/.flavor-code/skills/<name>/`。Flavor 会按任务渐进加载，也支持通过 `/<skill-name>` 显式调用。Skill 正文支持 `$ARGUMENTS`、`$ARGUMENTS[N]` 和 `$N` 参数占位符；运行中的组合 Skill 可以使用只读 `Skill` 工具继续加载依赖 Skill，插件限定名称（如 `superharness:test-driven-development`）会安全解析到已发现的 Skill。
 
-插件放在 `.flavor/plugins/`，可以注册命令、工具、Hook、Skill 根目录和模型适配器。`SessionStart` 与 `UserPromptSubmit` Hook 返回的 `additionalContext` 会进入当前任务上下文，可用于注入项目级工程规则。产品运行时默认在 Worker/vm 隔离环境激活插件，并记录内容指纹与声明的能力。
+插件放在 `.flavor/plugins/`，可以注册命令、工具、Hook、Skill 根目录和模型适配器。`SessionStart` 与 `UserPromptSubmit` Hook 返回的 `additionalContext` 会进入当前任务上下文，可用于注入项目级工程规则。插件加载会记录内容指纹与声明的能力。可通过嵌入 API 的 `pluginSandbox: true` 启用 Worker/vm 隔离；由于内置插件和已有插件依赖沙箱尚未代理的 Node.js API，当前兼容默认值仍为进程内运行。
 
 > [!WARNING]
-> 沙箱会降低环境权限，但不能让不可信指令自动变安全。只安装和启用可信插件；旧版兼容选项 `pluginSandbox: false` 会授予完整的进程内 Node.js 权限。
+> 默认的进程内插件运行时拥有完整 Node.js 权限，只安装和启用你信任的插件。沙箱会降低环境权限，但不能让不可信指令自动变安全；目前导入 Node.js 内置模块的插件在 `pluginSandbox: true` 下仍无法加载。
 
 ## 会话、记忆与执行记录
 

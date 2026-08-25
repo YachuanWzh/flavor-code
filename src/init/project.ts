@@ -1,5 +1,5 @@
 import { lstat, mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
-import { copyFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readdirSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -579,31 +579,12 @@ async function createExampleFlavorConfig(cwd: string): Promise<void> {
   await writeFile(configPath, JSON.stringify(example, null, 2) + "\n");
 }
 
-const CODEISLAND_SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), "codeisland");
-
-const CODEISLAND_FILES = ["flavor-plugin.json", "activate.mjs", "bridge.mjs"] as const;
-
-async function copyCodeIslandPlugin(cwd: string): Promise<void> {
-  const pluginDir = join(cwd, ".flavor", "plugins", "codeisland");
-  try {
-    await lstat(pluginDir);
-    return; // already exists, leave user modifications alone
-  } catch (error) {
-    if (!isMissingPathError(error)) throw error;
-  }
-  await mkdir(pluginDir, { recursive: true, mode: 0o700 });
-  for (const name of CODEISLAND_FILES) {
-    const content = readFileSync(join(CODEISLAND_SRC_DIR, name), "utf8");
-    await writeFile(join(pluginDir, name), content);
-  }
-}
-
 const ASTGRAPH_SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), "astgraph");
 
 /**
  * Copy the astgraph plugin (runtime + vendored WASM grammars + zod) into the
- * workspace's project plugin directory. Mirrors the codeisland distribution
- * pattern: an existing installation is never overwritten.
+ * workspace's project plugin directory. An existing installation is never
+ * overwritten.
  */
 export async function copyAstgraphPlugin(cwd: string): Promise<void> {
   const pluginDir = join(cwd, ".flavor", "plugins", "astgraph");
@@ -628,7 +609,6 @@ function copyDirectory(from: string, to: string): void {
 
 export async function initializeFlavor(cwd: string): Promise<InitResult> {
   await ensureFlavorDirectories(cwd);
-  await copyCodeIslandPlugin(cwd);
   await copyAstgraphPlugin(cwd);
   await createExampleFlavorConfig(cwd);
   const facts = await inspectProject(cwd);

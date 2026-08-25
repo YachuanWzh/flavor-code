@@ -252,10 +252,10 @@ flavor mcp disable docs
 
 A Skill is a `SKILL.md` with YAML frontmatter, placed in `.flavor/skills/<name>/` or `~/.flavor-code/skills/<name>/`. Flavor loads skills progressively based on the task, and you can invoke one explicitly with `/<skill-name>`. Skill bodies support `$ARGUMENTS`, `$ARGUMENTS[N]`, and `$N` substitutions. A running composite Skill can load a dependency through the read-only `Skill` tool; plugin-qualified names such as `superharness:test-driven-development` resolve to discovered skills.
 
-Plugins live in `.flavor/plugins/` and can register commands, tools, hooks, Skill roots, and model adapters. `additionalContext` returned by `SessionStart` and `UserPromptSubmit` hooks is added to the current task context, enabling reliable project-level engineering policy injection. Production plugin activation is isolated in a Worker/vm realm by default and records a content fingerprint plus declared capabilities.
+Plugins live in `.flavor/plugins/` and can register commands, tools, hooks, Skill roots, and model adapters. `additionalContext` returned by `SessionStart` and `UserPromptSubmit` hooks is added to the current task context, enabling reliable project-level engineering policy injection. Plugin loads record a content fingerprint plus declared capabilities. Worker/vm isolation is available through the embedding API's `pluginSandbox: true` option; the compatibility default remains in-process because bundled and existing plugins use Node.js APIs that the isolated runtime does not yet mediate.
 
 > [!WARNING]
-> Sandboxing reduces ambient access but does not make untrusted instructions safe. Only install and enable plugins you trust; legacy `pluginSandbox: false` activation grants full in-process Node.js access.
+> The default in-process plugin runtime grants full Node.js access. Only install and enable plugins you trust. Sandboxing reduces ambient access but does not make untrusted instructions safe, and plugins that import Node.js built-ins will not load with `pluginSandbox: true` yet.
 
 ## Sessions, Memory & Execution Records
 

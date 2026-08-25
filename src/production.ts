@@ -180,8 +180,8 @@ export interface ProductionRuntimeOptions {
   shutdownStepTimeoutMs?: number;
   /** Additional tools provided by embedders (e.g. desktop-only D2C tools). */
   extraTools?: readonly ToolDefinition<unknown>[];
-  /** Compatibility seam for explicitly trusted legacy plugins. Product
-   * runtimes default to Worker/vm isolation. */
+  /** Opt into Worker/vm isolation. The compatibility default remains false
+   * until sandbox capabilities cover the Node.js APIs used by bundled plugins. */
   pluginSandbox?: boolean;
   /** Explicitly opt into CLI-local collaboration. Omit for print/RPC/eval callers. */
   collaboration?: {
@@ -496,7 +496,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     globalPluginDirs: [join(home, ".flavor-code", "plugins")],
     projectPluginDirs: [join(workspace, ".flavor", "plugins")],
     config,
-    sandbox: options.pluginSandbox ?? true,
+    // Existing project plugins (including astgraph and superharness) use Node.js
+    // built-ins. The Worker/vm sandbox deliberately blocks those imports, so it
+    // must stay opt-in until equivalent mediated capabilities are available.
+    sandbox: options.pluginSandbox ?? false,
     registrations: {
       command(name, handler, description) {
         if (typeof handler !== "function") throw new Error(`Plugin command "${name}" must be a function.`);

@@ -46,20 +46,60 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("production runtime", () => {
-  it("isolates project plugins by default and exposes their content fingerprint", async () => {
-    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-plugin-sandbox-")); roots.push(workspace);
-    const plugin = join(workspace, ".flavor", "plugins", "safe-default");
-    await mkdir(plugin, { recursive: true });
+  it("loads legacy Node plugins and their skill roots by default", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-plugin-compat-")); roots.push(workspace);
+    const plugin = join(workspace, ".flavor", "plugins", "legacy-default");
+    const skillRoot = join(plugin, "skills", "go");
+    await mkdir(skillRoot, { recursive: true });
     await writeFile(join(plugin, "flavor-plugin.json"), JSON.stringify({
-      name: "safe-default", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
-      contributes: { commands: [], tools: [], hooks: [], skillRoots: [], modelAdapters: [] },
+      name: "legacy-default", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
+      contributes: {
+        commands: [{ name: "legacy-read" }], tools: [], hooks: [],
+        skillRoots: [{ name: "legacy-skills", path: "skills" }], modelAdapters: [],
+      },
     }));
-    await writeFile(join(plugin, "index.mjs"), "export function activate() {}", "utf8");
+    await writeFile(join(plugin, "content.txt"), "plugin content", "utf8");
+    await writeFile(join(skillRoot, "SKILL.md"), [
+      "---", "name: go", "description: Run the legacy workflow", "---", "", "Go skill body.", "",
+    ].join("\n"), "utf8");
+    await writeFile(join(plugin, "index.mjs"), `
+      import { readFileSync } from "node:fs";
+      import { dirname, join } from "node:path";
+      import { fileURLToPath } from "node:url";
+      const root = dirname(fileURLToPath(import.meta.url));
+      export function activate(context) {
+        context.registerCommand("legacy-read", () => readFileSync(join(root, "content.txt"), "utf8"));
+        context.registerSkillRoot("legacy-skills", "skills");
+      }
+    `, "utf8");
 
     const runtime = await createRuntime({ workspace, home: workspace, environment: {}, approvalPolicy: "deny", output: () => {} });
     try {
       expect(runtime.services.plugins()).toEqual([
-        expect.objectContaining({ name: "safe-default", sandboxed: true, fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+        expect.objectContaining({ name: "legacy-default", sandboxed: false, fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+      ]);
+      expect(runtime.services.pluginCommands()).toContainEqual(expect.objectContaining({ name: "legacy-read" }));
+      await expect(runtime.services.runPluginCommand("legacy-read", [], new AbortController().signal)).resolves.toBe("plugin content");
+      expect((await runtime.services.skills()).map(({ name }) => name)).toContain("go");
+    } finally { await runtime.dispose(); }
+  });
+
+  it("keeps Worker/vm plugin isolation available as an explicit opt-in", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-plugin-sandbox-")); roots.push(workspace);
+    const plugin = join(workspace, ".flavor", "plugins", "safe-opt-in");
+    await mkdir(plugin, { recursive: true });
+    await writeFile(join(plugin, "flavor-plugin.json"), JSON.stringify({
+      name: "safe-opt-in", version: "1.0.0", apiVersion: "1", main: "index.mjs", permissions: [],
+      contributes: { commands: [], tools: [], hooks: [], skillRoots: [], modelAdapters: [] },
+    }));
+    await writeFile(join(plugin, "index.mjs"), "export function activate() {}", "utf8");
+
+    const runtime = await createRuntime({
+      workspace, home: workspace, environment: {}, approvalPolicy: "deny", pluginSandbox: true, output: () => {},
+    });
+    try {
+      expect(runtime.services.plugins()).toEqual([
+        expect.objectContaining({ name: "safe-opt-in", sandboxed: true, fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/) }),
       ]);
     } finally { await runtime.dispose(); }
   });

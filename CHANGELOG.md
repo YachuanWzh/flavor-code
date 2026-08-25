@@ -2,7 +2,13 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.3.2 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.3.3 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.3.3] - 2026-08-25
+
+### 修复
+- 修复 1.3.0 将插件沙箱设为默认值后，依赖 Node.js API 的 astgraph、superharness 等已有插件无法加载，进而导致 `/ast` 与插件 Skill `/go` 消失的问题；Worker/vm 沙箱保留为显式 opt-in，待文件系统等能力完成代理后再安全切换默认值
+- 移除已由全局 `flavor-island` 取代的项目级 `codeisland` 内置插件及 `flavor init` 自动安装逻辑，避免同一 Hook 事件被重复转发
 
 ## [1.3.2] - 2026-08-25
 

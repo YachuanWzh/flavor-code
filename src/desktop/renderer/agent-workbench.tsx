@@ -47,7 +47,7 @@ export function AgentWorkbench({ snapshot, onClose, onError, onCompose }: {
     return () => { cancelled = true; };
   }, [snapshot.jobs]);
   return <section className="agent-workbench manager-view">
-    <header className="manager-header workbench-header"><div><button onClick={onClose}>‹</button><div><small>FLAVOR DESKTOP 1.3.2</small><h2>Agent 工作台</h2></div></div><span>{snapshot.activeSession?.environment === "worktree" ? "隔离工作树" : "本地检出"}</span></header>
+    <header className="manager-header workbench-header"><div><button onClick={onClose}>‹</button><div><small>FLAVOR DESKTOP 1.3.3</small><h2>Agent 工作台</h2></div></div><span>{snapshot.activeSession?.environment === "worktree" ? "隔离工作树" : "本地检出"}</span></header>
     <nav className="workbench-tabs" aria-label="工作台功能">{TABS.map((item) => <button key={item.id} data-active={tab === item.id} onClick={() => setTab(item.id)}>{item.label}</button>)}</nav>
     <div className="workbench-stage">
       {tab === "cockpit" && <Cockpit snapshot={snapshot} onCompose={onCompose} />}

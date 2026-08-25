@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
@@ -225,6 +225,14 @@ it("generates deterministic concise instructions without reading environment fil
   expect(secondContent).not.toContain("npm run build");
   expect(secondContent).not.toContain("never-copy-this-secret");
   expect(secondContent.length).toBeLessThan(2_500);
+});
+
+it("does not install the retired codeisland project plugin", async () => {
+  const cwd = await createRepository();
+
+  await initializeFlavor(cwd);
+
+  await expect(lstat(join(cwd, ".flavor", "plugins", "codeisland"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 it("advises pairing ast_search with grep/glob only when a code graph index exists", async () => {
