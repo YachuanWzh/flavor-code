@@ -2,7 +2,27 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.3.4 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.3.6 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.3.6] - 2026-08-26
+
+### 新增
+- Hook 处理器收到协议 v2 运行时元数据：稳定 `sessionId`、唯一 `eventId`、会话内 `sequence`、`timestamp` 与 `workspace`；元数据在 payload 校验后附加，不会泄漏进 hook 修改后的工具输入
+- 工具生命周期 hook 新增稳定 `toolCallId`，覆盖 `PreToolUse`、`PermissionRequest`、`PostToolUse` 与 `PostToolUseFailure`，支持 Flavor Island 正确匹配并行、乱序完成的只读工具调用
+- `PermissionRequest` 新增宿主判定的 `toolCategory` 与 `allowAlways`，使审批 UI 只对可缓存类别展示会话级授权，破坏性及不可缓存协作操作继续要求逐次确认
+
+### 测试
+- 增加 Hook 协议元数据稳定性、不可伪造更新输入及工具生命周期兼容回归覆盖
+
+## [1.3.5] - 2026-08-26
+
+### 新增
+- `QuestionBridge` 的所有交互问题统一先通过 `PermissionRequest + AskUserQuestion` hook 中继；经代码路径核对，当前直接使用者 `/commit` 与 `/go` loop budget 现在可由 Flavor Island 回答，后续命令接入 `QuestionBridge` 时也自动获得该能力；中继不可用或未返回完整答案时仍回退到 TUI
+- TaskPlan、Todo 与子 Agent 图的实时 `TaskSnapshot` 通过 `Notification` hook 推送，包含任务状态、activeForm、依赖、前台任务和子 Agent 计时
+- `/go` 结束时发出 `LoopEnd` hook，携带 loop outcome、终止原因及最后一次宿主验证证据
+
+### 测试
+- 新增 QuestionBridge hook 中继成功、无答案回退 TUI 的回归覆盖
 
 ## [1.3.4] - 2026-08-25
 

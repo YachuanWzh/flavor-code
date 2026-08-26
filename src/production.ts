@@ -30,7 +30,7 @@ import { GoalOrchestrator } from "./goal/orchestrator.js";
 import { GoalStore } from "./goal/store.js";
 import { prepareLoopWorkspace } from "./loop/isolation.js";
 import { LoopStore } from "./loop/store.js";
-import type { LoopStatus } from "./loop/types.js";
+import type { LoopStatus, LoopVerificationEvidence } from "./loop/types.js";
 import { inferVerificationPlan, runVerificationPlan } from "./loop/verifier.js";
 import { AnthropicModelAdapter, CLAUDE_CLIENT_HEADERS } from "./models/anthropic.js";
 import { isDashScopeBaseURL, resolveCacheProfile, type CacheStrategy } from "./models/cache-profile.js";
@@ -368,7 +368,14 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       Object.values("command" in server ? server.env : server.headers)),
     environment.OPENAI_API_KEY, environment.ANTHROPIC_API_KEY,
   ].filter((value): value is string => typeof value === "string" && value.length > 0);
-  const hooks = new HookBus();
+  let hookSessionId: string | undefined;
+  const hooks = new HookBus({
+    eventContext: () => ({
+      protocolVersion: 2,
+      workspace,
+      ...(hookSessionId === undefined ? {} : { sessionId: hookSessionId }),
+    }),
+  });
 
   // Wire the incident reporter — reports tool failures to langgraph-claw for
   // automated root-cause analysis. Enabled via incidents.enabled in flavor.json
@@ -401,8 +408,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const resolveToolApproval = options.approvalPolicy === "deny" && options.rpcToolApprovals !== true
     ? () => "deny" as ApprovalDecision
     : (request: PermissionRequest & { reason?: string }, signal: AbortSignal) => approvals.request(request, signal);
-  const questions = new QuestionBridge(options.onApprovalChange);
-  const askUserQuestionHandler: AskUserQuestionHandler = async (qs, signal) => {
+  const relayQuestions = async (qs: Parameters<AskUserQuestionHandler>[0], signal: AbortSignal) => {
     if (options.approvalPolicy === "deny") throw new Error("AskUserQuestion is not available in non-interactive mode");
     // Hook-relayed UIs (e.g. the Flavor Island desktop app) get first refusal:
     // they answer an AskUserQuestion PermissionRequest whose updatedInput
@@ -424,8 +430,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       const hookAnswers = hookAnswersFromUpdatedInput(decision.updatedInput, qs);
       if (hookAnswers !== undefined) return hookAnswers;
     }
-    return questions.ask(qs, signal);
+    return undefined;
   };
+  const questions = new QuestionBridge(options.onApprovalChange, relayQuestions);
+  const askUserQuestionHandler: AskUserQuestionHandler = (qs, signal) => questions.ask(qs, signal);
   const executionEnvironment = createExecutionEnvironment(workspace, config.execution);
   const jobs = new JobRegistry();
   const terminals = new TerminalService(workspace, { jobs });
@@ -714,6 +722,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const subagentStartedAt: Record<string, number> = {};
   const subagentElapsedMs: Record<string, number> = {};
   let sessionId = recovered?.sessionId ?? `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
+  hookSessionId = sessionId;
   let harnessJournal = new HarnessJournal({ workspace, sessionId });
   const harnessRecovery = harnessJournal.recover();
   if (harnessRecovery.queue.length > 0 || harnessRecovery.incompleteTools.length > 0
@@ -798,7 +807,13 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const publishTaskState = async (): Promise<void> => {
     harness.main.context.updateTaskState(serializedTaskState());
     await persist();
-    emitOutput({ type: "tasks", snapshot: taskSnapshot() });
+    const snapshot = taskSnapshot();
+    emitOutput({ type: "tasks", snapshot });
+    await hooks.emit({
+      version: 1,
+      type: "Notification",
+      payload: { kind: "task_snapshot", taskSnapshot: snapshot },
+    }).catch(() => undefined);
   };
 
   for (const tool of createTaskPlanTools({
@@ -1474,7 +1489,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     runSkill: (skill, prompt, signal) => persistAfter(
       runExplicitSkill(harness, skills, skill, prompt, signal, selectedModels.mainError), persist,
     ),
-    runLoop: (goal, signal) => runLoopSession(loopOrchestrator, goal, signal),
+    runLoop: (goal, signal) => runLoopSession(loopOrchestrator, hooks, goal, signal),
     runGoal: (goal, signal) => persistEach(runGoalSession(goalOrchestrator, goal, signal), persist),
     mcp: async (command, signal) => {
       signal.throwIfAborted();
@@ -1626,6 +1641,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       for (const key of Object.keys(subagentElapsedMs)) delete subagentElapsedMs[key];
       const previousIdeSessionId = ideSessionId;
       sessionId = `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
+      hookSessionId = sessionId;
       harnessJournal = new HarnessJournal({ workspace, sessionId });
       setUsageSession(sessionId);
       ideSessionId = sessionId;
@@ -1949,10 +1965,11 @@ function formatMcpReconnect(server: McpServerSummary): string {
 }
 
 async function* runLoopSession(
-  orchestrator: LoopOrchestrator, goal: string, signal: AbortSignal,
+  orchestrator: LoopOrchestrator, hooks: HookBus, goal: string, signal: AbortSignal,
 ): AsyncIterable<AgentEvent> {
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
+  let latestVerification: LoopVerificationEvidence | undefined;
   for await (const event of orchestrator.run({ goal, signal })) {
     if (event.type === "worker-event") {
       if (event.event.type === "usage") {
@@ -1966,8 +1983,19 @@ async function* runLoopSession(
       } else if (event.event.type !== "done") yield event.event;
       continue;
     }
+    if (event.type === "loop-verification") latestVerification = event.evidence;
     yield loopProgressEvent(event);
     if (event.type === "loop-terminal") {
+      await hooks.emit({
+        version: 1,
+        type: "LoopEnd",
+        payload: {
+          loopId: event.loopId,
+          outcome: event.status,
+          reason: event.reason,
+          verification: latestVerification ?? null,
+        },
+      }).catch(() => undefined);
       yield { type: "done", usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens } };
     }
   }

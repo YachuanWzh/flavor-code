@@ -23,6 +23,10 @@ export interface AskUserQuestionHandler {
   (questions: readonly Question[], signal: AbortSignal): Promise<Record<number, string>>;
 }
 
+export interface QuestionRelay {
+  (questions: readonly Question[], signal: AbortSignal): Promise<Record<number, string> | undefined>;
+}
+
 /**
  * Extracts answers a hook-relayed UI (e.g. the Flavor Island app) returned for
  * an AskUserQuestion PermissionRequest. The decision's updatedInput carries the
@@ -59,9 +63,12 @@ export class QuestionBridge {
     | { questions: readonly Question[]; resolve: (answers: Record<number, string>) => void; reject: (reason: Error) => void }
     | undefined;
   #onChange: (() => void) | undefined;
+  #relay: QuestionRelay | undefined;
+  #active = false;
 
-  constructor(onChange?: () => void) {
+  constructor(onChange?: () => void, relay?: QuestionRelay) {
     this.#onChange = onChange;
+    this.#relay = relay;
   }
 
   get pending(): readonly Question[] | undefined {
@@ -69,11 +76,32 @@ export class QuestionBridge {
   }
 
   ask(questions: readonly Question[], signal: AbortSignal): Promise<Record<number, string>> {
-    if (this.#pending !== undefined) return Promise.reject(new Error("A question is already pending"));
+    if (this.#active) return Promise.reject(new Error("A question is already pending"));
     if (signal.aborted) return Promise.reject(signal.reason);
+    this.#active = true;
+    if (this.#relay !== undefined) return this.#askRelayed(questions, signal);
+    return this.#askLocally(questions, signal);
+  }
+
+  async #askRelayed(questions: readonly Question[], signal: AbortSignal): Promise<Record<number, string>> {
+    try {
+      const answers = await this.#relay!(questions, signal);
+      if (answers !== undefined) {
+        this.#active = false;
+        return answers;
+      }
+      return await this.#askLocally(questions, signal);
+    } catch (error) {
+      this.#active = false;
+      throw error;
+    }
+  }
+
+  #askLocally(questions: readonly Question[], signal: AbortSignal): Promise<Record<number, string>> {
     return new Promise<Record<number, string>>((resolve, reject) => {
       const onAbort = () => {
         this.#pending = undefined;
+        this.#active = false;
         reject(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason)));
       };
       signal.addEventListener("abort", onAbort, { once: true });
@@ -82,12 +110,14 @@ export class QuestionBridge {
         resolve: (answers) => {
           signal.removeEventListener("abort", onAbort);
           this.#pending = undefined;
+          this.#active = false;
           this.#onChange?.();
           resolve(answers);
         },
         reject: (error) => {
           signal.removeEventListener("abort", onAbort);
           this.#pending = undefined;
+          this.#active = false;
           this.#onChange?.();
           reject(error);
         },

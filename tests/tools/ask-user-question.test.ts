@@ -86,6 +86,27 @@ describe("AskUserQuestion tool", () => {
 });
 
 describe("QuestionBridge", () => {
+  it("returns a hook-relayed answer without opening the local prompt", async () => {
+    const qs = [{ question: "Proceed?", header: "Confirm", options: [{ label: "Yes", description: "Go" }] }];
+    const bridge = new QuestionBridge(undefined, async (received) => {
+      expect(received).toEqual(qs);
+      return { 0: "Yes" };
+    });
+
+    await expect(bridge.ask(qs, new AbortController().signal)).resolves.toEqual({ 0: "Yes" });
+    expect(bridge.pending).toBeUndefined();
+  });
+
+  it("falls back to the local prompt when the relay has no complete answer", async () => {
+    const qs = [{ question: "Proceed?", header: "Confirm", options: [{ label: "Yes", description: "Go" }] }];
+    const bridge = new QuestionBridge(undefined, async () => undefined);
+    const promise = bridge.ask(qs, new AbortController().signal);
+    await Promise.resolve();
+    expect(bridge.pending).toEqual(qs);
+    bridge.answer({ 0: "Yes" });
+    await expect(promise).resolves.toEqual({ 0: "Yes" });
+  });
+
   it("sends questions to ask and resolves when answered", async () => {
     const bridge = new QuestionBridge();
     const qs = [{ question: "Proceed?", header: "Confirm", options: [{ label: "Yes", description: "Go" }] }];

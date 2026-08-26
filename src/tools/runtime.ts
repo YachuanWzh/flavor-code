@@ -60,11 +60,18 @@ export type ToolInputValidation =
   | { ok: false; error: { code: "unknown_tool" | "invalid_input"; message: string } };
 
 const PreToolUsePayload = z.object({
+  // Optional for backwards-compatible hook updatedInput payloads; runtime
+  // emissions always populate it.
+  toolCallId: z.string().optional(),
   tool: z.string(),
   input: z.unknown(),
   agent: z.enum(["main", "subagent"]),
 });
-const PermissionRequestPayload = PreToolUsePayload.extend({ reason: z.string().optional() });
+const PermissionRequestPayload = PreToolUsePayload.extend({
+  reason: z.string().optional(),
+  toolCategory: z.string(),
+  allowAlways: z.boolean(),
+});
 const PostToolUsePayload = PreToolUsePayload.extend({ output: z.unknown() });
 const PostToolUseFailurePayload = PreToolUsePayload.extend({
   error: z.object({ code: z.string(), message: z.string() }),
@@ -194,27 +201,28 @@ export class ToolRuntime {
     const tool = this.#tools.get(call.name);
     if (tool === undefined) return { ok: false, error: { code: "unknown_tool", message: `Unknown tool: ${call.name}` } };
     const signal = context.signal ?? new AbortController().signal;
+    const toolCallId = call.id ?? randomUUID();
 
     const validation = this.validate(call);
     if (!validation.ok) {
-      return this.#fail(call.name, call.input, context.agent, validation.error.code, validation.error.message);
+      return this.#fail(toolCallId, call.name, call.input, context.agent, validation.error.code, validation.error.message);
     }
     let input = validation.input;
 
     try {
       const pre = await this.#hooks.emit({
-        version: 1, type: "PreToolUse", payload: { tool: tool.name, input, agent: context.agent },
+        version: 1, type: "PreToolUse", payload: { toolCallId, tool: tool.name, input, agent: context.agent },
       });
       if (pre.updatedInput !== undefined) {
         const payload = PreToolUsePayload.parse(pre.updatedInput);
         if (payload.tool !== tool.name || payload.agent !== context.agent) {
-          return this.#fail(tool.name, input, context.agent, "invalid_input", "PreToolUse cannot change the tool or agent");
+          return this.#fail(toolCallId, tool.name, input, context.agent, "invalid_input", "PreToolUse cannot change the tool or agent");
         }
         try { input = tool.inputSchema.parse(payload.input); }
-        catch (error) { return this.#fail(tool.name, payload.input, context.agent, "invalid_input", message(error)); }
+        catch (error) { return this.#fail(toolCallId, tool.name, payload.input, context.agent, "invalid_input", message(error)); }
       }
       if (pre.decision === "deny") {
-        return this.#fail(tool.name, input, context.agent, "hook_denied", pre.reason ?? "Tool use denied by hook");
+        return this.#fail(toolCallId, tool.name, input, context.agent, "hook_denied", pre.reason ?? "Tool use denied by hook");
       }
 
       const request: PermissionRequest = {
@@ -226,7 +234,7 @@ export class ToolRuntime {
       let permission = this.#permissions.decide(request);
       const nonCacheableApproval = request.allowAlways === false || permission.allowAlways === false;
       if (permission.decision === "deny") {
-        return this.#fail(tool.name, input, context.agent, "permission_denied", permission.reason ?? "Tool use denied");
+        return this.#fail(toolCallId, tool.name, input, context.agent, "permission_denied", permission.reason ?? "Tool use denied");
       }
       if (
         permission.decision === "ask" && context.agent === "main"
@@ -237,7 +245,7 @@ export class ToolRuntime {
         try {
           const classified = await this.#classify(request, signal);
           if (classified.decision === "deny") {
-            return this.#fail(tool.name, input, context.agent, "permission_denied", classified.reason ?? "Auto classifier denied tool use");
+            return this.#fail(toolCallId, tool.name, input, context.agent, "permission_denied", classified.reason ?? "Auto classifier denied tool use");
           }
           if (classified.decision === "allow") permission = classified;
           else {
@@ -259,13 +267,21 @@ export class ToolRuntime {
         const requestDecision = await this.#hooks.emit({
           version: 1,
           type: "PermissionRequest",
-          payload: { tool: tool.name, input: tool.permissionInput?.(input) ?? input, agent: context.agent, reason },
+          payload: {
+            toolCallId,
+            tool: tool.name,
+            input: tool.permissionInput?.(input) ?? input,
+            agent: context.agent,
+            reason,
+            toolCategory: getToolCategory(tool.name),
+            allowAlways,
+          },
         });
         if (requestDecision.decision === "deny") {
-          return this.#fail(tool.name, input, context.agent, "permission_denied", requestDecision.reason ?? "Permission request denied");
+          return this.#fail(toolCallId, tool.name, input, context.agent, "permission_denied", requestDecision.reason ?? "Permission request denied");
         }
         if (requestDecision.updatedInput !== undefined) {
-          return this.#fail(tool.name, input, context.agent, "invalid_input", "PermissionRequest cannot modify an already-authorized tool call");
+          return this.#fail(toolCallId, tool.name, input, context.agent, "invalid_input", "PermissionRequest cannot modify an already-authorized tool call");
         }
 
         // When a PermissionRequest hook handler explicitly approves:
@@ -278,7 +294,7 @@ export class ToolRuntime {
             if (allowAlways && category !== "destructive") this.#alwaysAllowed.add(category);
           }
         } else if (context.agent !== "main" && this.#permissions.mode !== "bubble") {
-          return this.#fail(tool.name, input, context.agent, "approval_required", reason);
+          return this.#fail(toolCallId, tool.name, input, context.agent, "approval_required", reason);
         } else if (signal.aborted) {
           throw signal.reason;
         } else {
@@ -289,11 +305,11 @@ export class ToolRuntime {
           if (allowAlways && this.#alwaysAllowed.has(category)) {
             // Skip the approval callback — already authorized for this tool type.
           } else if (this.#approve === undefined) {
-            return this.#fail(tool.name, input, context.agent, "permission_denied", reason);
+            return this.#fail(toolCallId, tool.name, input, context.agent, "permission_denied", reason);
           } else {
             const decision = await this.#approve({ ...request, reason, ...(allowAlways ? {} : { allowAlways: false }) }, signal);
             if (decision === "deny") {
-              return this.#fail(tool.name, input, context.agent, "user_denied", reason);
+              return this.#fail(toolCallId, tool.name, input, context.agent, "user_denied", reason);
             }
             if (decision === "always" && allowAlways && category !== "destructive") {
               this.#alwaysAllowed.add(category);
@@ -306,7 +322,7 @@ export class ToolRuntime {
       const executed = await tool.execute(input, signal, context);
       let rawOutput: unknown;
       try { rawOutput = tool.outputSchema === undefined ? executed : tool.outputSchema.parse(executed); }
-      catch (error) { return this.#fail(tool.name, input, context.agent, "invalid_output", message(error)); }
+      catch (error) { return this.#fail(toolCallId, tool.name, input, context.agent, "invalid_output", message(error)); }
       const declaredPresentation = tool.presentResult?.(rawOutput, input);
       const presentation = declaredPresentation ?? getToolPresentation(rawOutput);
       const rendered = tool.renderForModel?.(rawOutput, input);
@@ -314,12 +330,12 @@ export class ToolRuntime {
       const content = rendered === undefined ? undefined : await this.#limitText(tool.name, rendered);
       const additionalContext = await this.#afterSuccess?.(tool.name, tool.paths(input), input, rawOutput, context);
       await this.#hooks.emit({
-        version: 1, type: "PostToolUse", payload: { tool: tool.name, input, agent: context.agent, output },
+        version: 1, type: "PostToolUse", payload: { toolCallId, tool: tool.name, input, agent: context.agent, output },
       });
       return { ok: true, output, ...(content === undefined ? {} : { content }), ...(presentation === undefined ? {} : { presentation }),
         ...(additionalContext === undefined || additionalContext.length === 0 ? {} : { additionalContext }) };
     } catch (error) {
-      return this.#fail(tool.name, input, context.agent, "tool_error", message(error));
+      return this.#fail(toolCallId, tool.name, input, context.agent, "tool_error", message(error));
     }
   }
 
@@ -369,11 +385,11 @@ export class ToolRuntime {
     return typeof limited === "string" ? limited : serializeToolOutput(limited);
   }
 
-  async #fail(tool: string, input: unknown, agent: ToolContext["agent"], code: string, errorMessage: string): Promise<ToolResult> {
+  async #fail(toolCallId: string, tool: string, input: unknown, agent: ToolContext["agent"], code: string, errorMessage: string): Promise<ToolResult> {
     const result: ToolResult = { ok: false, error: { code, message: errorMessage } };
     try {
       await this.#hooks.emit({
-        version: 1, type: "PostToolUseFailure", payload: { tool, input, agent, error: result.error },
+        version: 1, type: "PostToolUseFailure", payload: { toolCallId, tool, input, agent, error: result.error },
       });
     } catch {
       // Preserve the original tool failure when a failure-reporting hook also fails.

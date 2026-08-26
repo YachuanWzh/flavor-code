@@ -41,6 +41,29 @@ describe("HookBus", () => {
     });
   });
 
+  it("attaches stable protocol metadata without leaking it into updated input", async () => {
+    const bus = new HookBus({
+      eventContext: () => ({ protocolVersion: 2, sessionId: "session-a", workspace: "C:/repo" }),
+      eventId: () => "event-a",
+      now: () => "2026-08-26T00:00:00.000Z",
+    });
+    const seen: Record<string, unknown>[] = [];
+    bus.registerPayloadSchema("PreToolUse", z.object({ tool: z.string() }));
+    bus.on("PreToolUse", (event) => {
+      seen.push(event.payload);
+      return { decision: "allow", updatedInput: { tool: "Write", eventId: "forged" } };
+    });
+    bus.on("PreToolUse", (event) => { seen.push(event.payload); return { decision: "allow" }; });
+
+    const decision = await bus.emit({ version: 1, type: "PreToolUse", payload: { tool: "Read" } });
+
+    expect(seen).toEqual([
+      expect.objectContaining({ tool: "Read", eventId: "event-a", sessionId: "session-a", sequence: 1 }),
+      expect.objectContaining({ tool: "Write", eventId: "event-a", sessionId: "session-a", sequence: 1 }),
+    ]);
+    expect(decision.updatedInput).toEqual({ tool: "Write" });
+  });
+
   it("rejects invalid modified input", async () => {
     const bus = new HookBus();
     bus.on("PreToolUse", async () => ({ decision: "allow", updatedInput: "invalid" }));

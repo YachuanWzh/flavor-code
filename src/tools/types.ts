@@ -132,6 +132,8 @@ export interface ToolDefinition<T, O = unknown> {
 }
 
 export interface ToolCall {
+  /** Provider call identity, preserved across lifecycle hooks when available. */
+  id?: string;
   name: string;
   input: unknown;
 }

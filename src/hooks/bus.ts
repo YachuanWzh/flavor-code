@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import type { z } from "zod";
 
 import {
@@ -27,9 +28,22 @@ interface RegisteredPayloadSchema {
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1_048_576;
 
+export interface HookBusOptions {
+  /** Stable runtime context attached to every handler-facing event. */
+  eventContext?: () => Readonly<Record<string, unknown>>;
+  eventId?: () => string;
+  now?: () => string;
+}
+
 export class HookBus {
   readonly #handlers = new Map<HookEventName, RegisteredHandler[]>();
   readonly #payloadSchemas = new Map<HookEventName, RegisteredPayloadSchema[]>();
+  readonly #options: HookBusOptions;
+  #sequence = 0;
+
+  constructor(options: HookBusOptions = {}) {
+    this.#options = options;
+  }
 
   registerPayloadSchema(type: HookEventName, schema: z.ZodType<Record<string, unknown>>): () => void {
     const registrations = this.#payloadSchemas.get(type) ?? [];
@@ -70,7 +84,9 @@ export class HookBus {
   async emit(rawEvent: HookEvent, externalSignal?: AbortSignal): Promise<HookDecision> {
     externalSignal?.throwIfAborted();
     let event = HookEventSchema.parse(rawEvent);
-    event = { ...event, payload: this.#validatePayload(event.type, event.payload) } as HookEvent;
+    const validatedPayload = this.#validatePayload(event.type, event.payload);
+    const envelope = this.#eventEnvelope();
+    event = { ...event, payload: decoratePayload(validatedPayload, envelope) } as HookEvent;
     let aggregate: HookDecision = { decision: "allow" };
 
     for (const registered of this.#handlers.get(event.type) ?? []) {
@@ -87,8 +103,9 @@ export class HookBus {
 
       if (decision.updatedInput !== undefined) {
         const payload = this.#validatePayload(event.type, decision.updatedInput);
-        event = HookEventSchema.parse({ ...event, payload });
-        aggregate = { ...aggregate, updatedInput: event.payload };
+        event = HookEventSchema.parse({ ...event, payload: decoratePayload(payload, envelope) });
+        // Envelope metadata is transport context, not mutable tool input.
+        aggregate = { ...aggregate, updatedInput: payload };
       }
       if (decision.additionalContext !== undefined) {
         aggregate = {
@@ -107,6 +124,16 @@ export class HookBus {
     return schema ? schema.parse(payload) : zodRecord(payload);
   }
 
+  #eventEnvelope(): Readonly<Record<string, unknown>> | undefined {
+    if (this.#options.eventContext === undefined) return undefined;
+    return {
+      ...this.#options.eventContext(),
+      eventId: (this.#options.eventId ?? randomUUID)(),
+      sequence: ++this.#sequence,
+      timestamp: (this.#options.now ?? (() => new Date().toISOString()))(),
+    };
+  }
+
   async #invoke(registered: RegisteredHandler, event: HookEvent, externalSignal?: AbortSignal): Promise<HookDecision> {
     const timeoutSignal = AbortSignal.timeout(registered.timeoutMs);
     const signal = externalSignal === undefined ? timeoutSignal : AbortSignal.any([timeoutSignal, externalSignal]);
@@ -119,6 +146,13 @@ export class HookBus {
     });
     return HookDecisionSchema.parse(await Promise.race([invocation, timeout]));
   }
+}
+
+function decoratePayload(
+  payload: Record<string, unknown>,
+  envelope: Readonly<Record<string, unknown>> | undefined,
+): Record<string, unknown> {
+  return envelope === undefined ? payload : { ...payload, ...envelope };
 }
 
 function runShellHandler(descriptor: ShellHookHandler, event: HookEvent, signal: AbortSignal): Promise<HookDecision> {
