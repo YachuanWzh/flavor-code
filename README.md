@@ -33,6 +33,7 @@ Flavor Code connects to OpenAI, Anthropic, or compatible services and works with
 | --- | --- | --- |
 | 🖥️ | **One runtime, three entry points** | CLI, Electron, and VS Code share model configuration, sessions, and tooling |
 | 🧭 | **Controlled progress on complex tasks** | Task plans, sub-agents, steering, follow-ups, `/loop`, `/goal`, and conflict-safe parallel execution (tasks owning overlapping files run serially) |
+| 🏝️ | **Flavor Island local control** | Host apps steer a running session over a token-authenticated local IPC channel (Windows named pipes / Unix sockets): abort, steering, follow-ups, and window focus; model duration, token usage, task summaries, and deliverables are reported via hook events |
 | ⏪ | **Traceable, resumable results** | Full timeline, checkpoints, rewind, traces, diffs, and failure audits |
 | 🧱 | **Crash-consistent execution** | Fsync-backed event journal, durable steering queue, savepoints, and no automatic replay of non-idempotent tools |
 | 🧠 | **Local long-term context** | Memory, Skills, plugins, and project guides stored on your machine |
@@ -253,6 +254,8 @@ flavor mcp disable docs
 A Skill is a `SKILL.md` with YAML frontmatter, placed in `.flavor/skills/<name>/` or `~/.flavor-code/skills/<name>/`. Flavor loads skills progressively based on the task, and you can invoke one explicitly with `/<skill-name>`. Skill bodies support `$ARGUMENTS`, `$ARGUMENTS[N]`, and `$N` substitutions. A running composite Skill can load a dependency through the read-only `Skill` tool; plugin-qualified names such as `superharness:test-driven-development` resolve to discovered skills.
 
 Plugins live in `.flavor/plugins/` and can register commands, tools, hooks, Skill roots, and model adapters. `additionalContext` returned by `SessionStart` and `UserPromptSubmit` hooks is added to the current task context, enabling reliable project-level engineering policy injection. Plugin loads record a content fingerprint plus declared capabilities. Worker/vm isolation is available through the embedding API's `pluginSandbox: true` option; the compatibility default remains in-process because bundled and existing plugins use Node.js APIs that the isolated runtime does not yet mediate.
+
+When the `flavor-island` plugin is loaded, Flavor also starts a Flavor Island local control channel: a loopback-only IPC service (Windows named pipe, or Unix socket on macOS/Linux) secured by a random token. A host app (such as the Flavor Island desktop) can use it to abort, steer, or send follow-ups to a running session, and desktop hosts can also bring their window into focus. The channel's endpoint, token, and capability list are exposed to the host plugin via hook event context (`islandControlEndpoint`/`islandControlToken`/`islandControlCapabilities`); model-call duration and token usage, plus the final task summary and deliverables, are reported through hook events so the host can show live status and a result overview.
 
 > [!WARNING]
 > The default in-process plugin runtime grants full Node.js access. Only install and enable plugins you trust. Sandboxing reduces ambient access but does not make untrusted instructions safe, and plugins that import Node.js built-ins will not load with `pluginSandbox: true` yet.

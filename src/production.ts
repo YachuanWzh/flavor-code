@@ -23,6 +23,7 @@ import { HarnessJournal } from "./harness/journal.js";
 import { HookBus } from "./hooks/bus.js";
 import { HOOK_EVENT_NAMES, type HookDecision, type HookEventName } from "./hooks/types.js";
 import { createIncidentReporter } from "./incidents/reporter.js";
+import { createIslandControlServer, type IslandControlServer } from "./island/control-server.js";
 import { createEvolveService } from "./evolve/service.js";
 import { initializeFlavor } from "./init/project.js";
 import { LoopOrchestrator, type LoopRuntimeEvent } from "./loop/orchestrator.js";
@@ -183,6 +184,8 @@ export interface ProductionRuntimeOptions {
   /** Opt into Worker/vm isolation. The compatibility default remains false
    * until sandbox capabilities cover the Node.js APIs used by bundled plugins. */
   pluginSandbox?: boolean;
+  /** Optional host affordance exposed to the local Flavor Island control channel. */
+  islandControl?: { focus?(): void | Promise<void> };
   /** Explicitly opt into CLI-local collaboration. Omit for print/RPC/eval callers. */
   collaboration?: {
     instanceId: string;
@@ -369,11 +372,21 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     environment.OPENAI_API_KEY, environment.ANTHROPIC_API_KEY,
   ].filter((value): value is string => typeof value === "string" && value.length > 0);
   let hookSessionId: string | undefined;
+  let islandControlMetadata: {
+    endpoint: string;
+    token: string;
+    capabilities: readonly string[];
+  } | undefined;
   const hooks = new HookBus({
     eventContext: () => ({
       protocolVersion: 2,
       workspace,
       ...(hookSessionId === undefined ? {} : { sessionId: hookSessionId }),
+      ...(islandControlMetadata === undefined ? {} : {
+        islandControlEndpoint: islandControlMetadata.endpoint,
+        islandControlToken: islandControlMetadata.token,
+        islandControlCapabilities: islandControlMetadata.capabilities,
+      }),
     }),
   });
 
@@ -561,6 +574,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const pendingCollaborationEvents: BrokerEvent[] = [];
   let collaborationEventPump: Promise<void> | undefined;
   let collaborationEventsOpen = true;
+  let islandControlServer: IslandControlServer | undefined;
   const pumpCollaborationEvents = (): void => {
     if (collaborationEventPump !== undefined || collaborationSession === undefined || deliverCollaborationEvent === undefined) return;
     collaborationEventPump = (async () => {
@@ -1871,6 +1885,22 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     sleepScheduler.start();
   }
   const session = new FlavorSession(services);
+  if (pluginHost.loadedPlugins.some((plugin) => plugin.name === "flavor-island")) {
+    try {
+      islandControlServer = await createIslandControlServer({
+        sessionId,
+        session,
+        ...(options.islandControl?.focus === undefined ? {} : { focus: options.islandControl.focus }),
+      });
+      islandControlMetadata = {
+        endpoint: islandControlServer.endpoint,
+        token: islandControlServer.token,
+        capabilities: islandControlServer.capabilities,
+      };
+    } catch (error) {
+      diagnostics.push(`Flavor Island control channel unavailable: ${message(error)}`);
+    }
+  }
   collaborationSession = session;
   pumpCollaborationEvents();
   const authorization = {
@@ -1897,6 +1927,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       if (persistTail !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "persist-tail", persistTail);
       if (ideSessionId !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "ide-end-session", ide.endSession(ideSessionId));
       if (executionEnvironment !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "execution-environment", executionEnvironment.dispose());
+      if (islandControlServer !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "island-control", islandControlServer.close());
       terminals.dispose();
       await boundedStep(stepTimeoutMs, diagnostics, "jobs", jobs.dispose());
       auditLogger.close();
@@ -1910,6 +1941,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     collaborationEventsOpen = false;
     mcpDiscarded = true;
     memoryReviews.dispose();
+    await islandControlServer?.close().catch(() => undefined);
     try {
       const stepTimeoutMs = options.shutdownStepTimeoutMs ?? DEFAULT_SHUTDOWN_STEP_TIMEOUT_MS;
       if (ideSessionId !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "ide-end-session", ide.endSession(ideSessionId));

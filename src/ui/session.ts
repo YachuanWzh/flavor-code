@@ -430,6 +430,8 @@ export class FlavorSession {
     this.#activeSubmission = submission;
     this.#interrupted = false;
     let outcome = "completed";
+    let assistantSummary = "";
+    let deliverables: readonly import("../agent/types.js").TurnDeliverable[] = [];
     try {
       const decision = await this.#services.hooks.emit({
         version: 1, type: "UserPromptSubmit", payload: { prompt: submission.displayText },
@@ -456,6 +458,8 @@ export class FlavorSession {
           : { initialUserMessage: submission.initialUserMessage }),
       })) {
         this.#services.output(event);
+        if (event.type === "text") assistantSummary = `${assistantSummary}${event.text}`.slice(-2_000);
+        if (event.type === "deliverables") deliverables = event.files.slice(0, 100);
         if (event.type === "error") outcome = "failed";
       }
       if (controller.signal.aborted) outcome = "cancelled";
@@ -477,7 +481,15 @@ export class FlavorSession {
         this.#activeSubmission = undefined;
         if (submission.coWorkPlanningKey !== undefined) this.#finishActivePlanning(submission.coWorkPlanningKey);
         try {
-          await this.#services.hooks.emit({ version: 1, type: "Stop", payload: { outcome } });
+          await this.#services.hooks.emit({
+            version: 1,
+            type: "Stop",
+            payload: {
+              outcome,
+              ...(assistantSummary.trim() ? { summary: assistantSummary.trim() } : {}),
+              ...(deliverables.length === 0 ? {} : { deliverables }),
+            },
+          });
         } catch (error) {
           // Stop-hook failures (e.g. handler timeouts) must not reject the
           // submission chain — remote submissions are fire-and-forget, and an

@@ -235,6 +235,7 @@ export class AgentLoop {
         const journalModelId = this.#options.modelJournal?.start({
           agent: this.#options.agent, model: attemptedModelId, iteration, attempt, messages: modelRequest.messages,
         });
+        const modelStartedAt = Date.now();
         yield { type: "model-start", id: modelCallId };
         try {
           for await (const event of adapter.stream(modelRequest)) {
@@ -297,6 +298,13 @@ export class AgentLoop {
                 completed,
                 agent: this.#options.agent,
                 providerError,
+                durationMs: Math.max(0, Date.now() - modelStartedAt),
+                ...(usage === undefined ? {} : {
+                  inputTokens: usage.inputTokens,
+                  outputTokens: usage.outputTokens,
+                  ...(usage.cacheReadTokens === undefined ? {} : { cacheReadTokens: usage.cacheReadTokens }),
+                  ...(usage.cacheCreationTokens === undefined ? {} : { cacheCreationTokens: usage.cacheCreationTokens }),
+                }),
                 ...(terminalError === undefined ? {} : {
                   errorCode: terminalError.code,
                   errorMessage: terminalError.message,

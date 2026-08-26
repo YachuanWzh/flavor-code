@@ -33,6 +33,7 @@ Flavor Code 接入 OpenAI、Anthropic 或兼容服务，在受控工作区内使
 | --- | --- | --- |
 | 🖥️ | **一个运行时，三个入口** | CLI、Electron 与 VS Code 共享模型配置、会话和工具能力 |
 | 🧭 | **复杂任务可控推进** | 任务计划、子 Agent、steering、follow-up、`/loop`、`/goal`，并行任务自动避免写冲突（拥有重叠文件的任务串行执行） |
+| 🏝️ | **Flavor Island 本地控制** | 宿主应用通过 token 认证的本机 IPC（Windows named pipe / Unix socket）控制运行中的会话：中止、steering、follow-up 与窗口聚焦；模型耗时、token 用量、任务摘要和交付物随 Hook 事件上报 |
 | ⏪ | **结果可追溯、可恢复** | 完整时间线、checkpoint、rewind、trace、Diff 和失败审计 |
 | 🧱 | **崩溃一致执行** | fsync 事件日志、持久 steering 队列、savepoint，非幂等工具不自动重放 |
 | 🧠 | **本地长期上下文** | 记忆、Skill、插件和项目指南均保存在本机 |
@@ -253,6 +254,8 @@ flavor mcp disable docs
 Skill 是带有 YAML 头信息的 `SKILL.md`，放在 `.flavor/skills/<name>/` 或 `~/.flavor-code/skills/<name>/`。Flavor 会按任务渐进加载，也支持通过 `/<skill-name>` 显式调用。Skill 正文支持 `$ARGUMENTS`、`$ARGUMENTS[N]` 和 `$N` 参数占位符；运行中的组合 Skill 可以使用只读 `Skill` 工具继续加载依赖 Skill，插件限定名称（如 `superharness:test-driven-development`）会安全解析到已发现的 Skill。
 
 插件放在 `.flavor/plugins/`，可以注册命令、工具、Hook、Skill 根目录和模型适配器。`SessionStart` 与 `UserPromptSubmit` Hook 返回的 `additionalContext` 会进入当前任务上下文，可用于注入项目级工程规则。插件加载会记录内容指纹与声明的能力。可通过嵌入 API 的 `pluginSandbox: true` 启用 Worker/vm 隔离；由于内置插件和已有插件依赖沙箱尚未代理的 Node.js API，当前兼容默认值仍为进程内运行。
+
+加载 `flavor-island` 插件时，Flavor 会额外启动一个 Flavor Island 本地控制通道：这是一个只监听本机回环的 IPC 服务（Windows 使用 named pipe，macOS/Linux 使用 Unix socket），通过随机 token 认证。宿主应用（如 Flavor Island 桌面端）可以借此对运行中的会话执行中止、steering、follow-up 等操作，桌面端还支持把窗口带到前台（focus）。通道的地址、token 与能力列表会通过 Hook 事件上下文（`islandControlEndpoint`/`islandControlToken`/`islandControlCapabilities`）提供给宿主插件，模型调用的耗时与 token 用量、任务结束时的摘要和交付文件也会随 Hook 事件上报，方便宿主展示运行状态与结果概览。
 
 > [!WARNING]
 > 默认的进程内插件运行时拥有完整 Node.js 权限，只安装和启用你信任的插件。沙箱会降低环境权限，但不能让不可信指令自动变安全；目前导入 Node.js 内置模块的插件在 `pluginSandbox: true` 下仍无法加载。

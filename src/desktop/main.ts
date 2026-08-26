@@ -322,6 +322,15 @@ function createDesktopController(workspace?: string, owner?: ManagedDesktopTask)
     },
     createRuntime: async (runtimeOptions) => createProductionRuntime({
       ...runtimeOptions,
+      islandControl: {
+        focus: () => {
+          const target = mainWindow;
+          if (target === undefined || target.isDestroyed()) return;
+          if (target.isMinimized()) target.restore();
+          target.show();
+          target.focus();
+        },
+      },
       collaboration: {
         instanceId: collaborationId,
         alias: `desktop-${basename(workspace ?? runtimeOptions.workspace ?? "flavor")}`.slice(0, 64),

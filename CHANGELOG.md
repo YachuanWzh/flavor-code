@@ -2,7 +2,18 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.3.6 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.3.7 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.3.7] - 2026-08-26
+
+### 新增
+- 新增 Flavor Island 本地控制通道：加载 `flavor-island` 插件时自动启动经 token 认证的本机 IPC 服务（Windows named pipe / Unix socket），Flavor Island 可通过 `abort`、`steer`、`follow_up` 与 `focus` 命令控制运行中的会话；`focus` 由宿主提供（Electron 桌面端已接入窗口聚焦）
+- Hook 事件上下文新增 `islandControlEndpoint`、`islandControlToken` 与 `islandControlCapabilities` 元数据，宿主侧插件可安全发现并连接控制通道，无需猜测端点
+- 模型调用完成事件（`model-completed`）新增 `durationMs` 与 token 用量（`inputTokens`/`outputTokens`，可选 `cacheReadTokens`/`cacheCreationTokens`），便于统计成本与延迟
+- `Stop` Hook 新增 `summary`（最近助手文本摘录）与 `deliverables`（最多 100 个交付文件），宿主可在任务结束时展示结果概览与产物清单
+
+### 测试
+- 新增 Flavor Island 控制服务器测试，覆盖 token 认证、非法命令、命令分派与能力声明
 
 ## [1.3.6] - 2026-08-26
 
@@ -442,6 +453,12 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.3.7 | 2026-08-26 | Flavor Island 本地控制通道（token 认证 IPC：abort/steer/follow_up/focus）、模型调用耗时与 token 用量上报、Stop hook 摘要与交付物 |
+| 1.3.6 | 2026-08-26 | Hook 协议 v2 运行时元数据、稳定 toolCallId、PermissionRequest toolCategory/allowAlways 审批能力声明 |
+| 1.3.5 | 2026-08-26 | QuestionBridge 交互经 PermissionRequest/AskUserQuestion hook 中继、TaskSnapshot 实时推送、LoopEnd hook |
+| 1.3.4 | 2026-08-25 | Durable Harness journal 大对象去重、容量自动压缩与旧格式迁移恢复 |
+| 1.3.3 | 2026-08-25 | 修复插件沙箱默认值导致内置插件无法加载；移除 codeisland 插件 |
+| 1.3.2 | 2026-08-25 | Electron Agent 工作台、Git worktree、Session Time Machine、Review Workbench、代码图浏览器、Pals 可视化和记忆热度标签 |
 | 1.3.1 | 2026-08-25 | Electron 多项目切换、后台任务保活、运行/完成状态提醒与项目列表持久化 |
 | 1.3.0 | 2026-08-24 | Durable Harness、Context Epoch/Prompt Cache、分层权限、插件默认隔离与 fail-closed Goal Verification |
 | 1.2.20 | 2026-08-24 | 组合 Skill 工具、Claude 风格 Skill 参数展开、SessionStart additionalContext 持久注入 |
