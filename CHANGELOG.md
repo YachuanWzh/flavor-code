@@ -2,7 +2,16 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.3.7 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.3.8 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.3.8] - 2026-08-27
+
+### 新增
+- 自动长期记忆提取改为后台执行：任务结束后不再同步等待记忆模型调用，排队中的后续请求可以立即继续执行，不受慢速记忆分析拖累；提取完成后的高置信记忆写入与候选生成结果通过 notice 输出通知
+- 记忆收尾按任务隔离：自动存储的内容按任务分别追踪，后台完成的旧任务不会复活已失效的 review 卡片，也不会覆盖新任务占据的生命周期槽；记忆评估失败时保留 `/finish` 手动重试路径，且不会被后续任务静默覆盖
+
+### 测试
+- 新增回归测试：自动记忆收尾不再阻塞排队中的后续请求
 
 ## [1.3.7] - 2026-08-26
 
@@ -453,6 +462,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.3.8 | 2026-08-27 | 自动长期记忆提取后台化（不再阻塞后续请求）、记忆收尾按任务隔离、失败可 /finish 手动重试 |
 | 1.3.7 | 2026-08-26 | Flavor Island 本地控制通道（token 认证 IPC：abort/steer/follow_up/focus）、模型调用耗时与 token 用量上报、Stop hook 摘要与交付物 |
 | 1.3.6 | 2026-08-26 | Hook 协议 v2 运行时元数据、稳定 toolCallId、PermissionRequest toolCategory/allowAlways 审批能力声明 |
 | 1.3.5 | 2026-08-26 | QuestionBridge 交互经 PermissionRequest/AskUserQuestion hook 中继、TaskSnapshot 实时推送、LoopEnd hook |

@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createProductionRuntime as createRuntime, type ProductionRuntimeOptions } from "../../src/production.js";
 import { MemoryStore } from "../../src/memory/store.js";
@@ -10,8 +10,12 @@ const createProductionRuntime = (options: ProductionRuntimeOptions) => createRun
 
 const roots: string[] = [];
 afterEach(async () => {
+  const release = (globalThis as { __flavorReleaseMemory?: () => void }).__flavorReleaseMemory;
+  release?.();
+  await Promise.resolve();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   delete (globalThis as { __flavorMemoryRequests?: unknown }).__flavorMemoryRequests;
+  delete (globalThis as { __flavorReleaseMemory?: unknown }).__flavorReleaseMemory;
 });
 
 async function workspace(memory: Record<string, unknown>, config: Record<string, unknown> = {}): Promise<string> {
@@ -37,6 +41,9 @@ async function workspace(memory: Record<string, unknown>, config: Record<string,
       const text = request.messages.map((message) => message.content).join("\\n");
       const latestUserText = [...request.messages].reverse().find((message) => message.role === "user")?.content ?? "";
       if (text.includes("Evaluate this completed coding task")) {
+        if (text.includes("BLOCK_MEMORY")) {
+          await new Promise((resolve) => { globalThis.__flavorReleaseMemory = resolve; });
+        }
         const memories = text.includes("NO_MEMORY") ? [] : text.includes("HIGH_SCORE") ? [
           {"type":"project","summary":"Use pnpm for repository scripts","content":"Use pnpm for all repository scripts.","topicKey":"project.package-manager","keywords":["pnpm","scripts"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":3}}
         ] : text.includes("zh-CN") ? [
@@ -305,6 +312,7 @@ describe("production long-term memory", () => {
     });
 
     await runtime.session.submit(`HIGH_SCORE Remember our durable package-manager convention. ${"Useful durable context. ".repeat(12)}`);
+    await runtime.services.finishTask();
 
     const store = new MemoryStore({ workspace: root, maxEntries: 200, maxEntryChars: 1000 });
     expect(await store.list()).toMatchObject([{ type: "project", content: "Use pnpm for repository scripts" }]);
@@ -315,6 +323,31 @@ describe("production long-term memory", () => {
     await runtime.dispose();
   });
 
+  it("does not let automatic memory finalization block a queued follow-up", async () => {
+    const root = await workspace({ autoExtract: true, autoExtractMinChars: 200 });
+    const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
+
+    const first = runtime.session.submit(`BLOCK_MEMORY FIRST_TASK_MARKER ${"Useful durable context. ".repeat(12)}`);
+    await vi.waitFor(() => {
+      expect((globalThis as { __flavorReleaseMemory?: unknown }).__flavorReleaseMemory).toBeTypeOf("function");
+    });
+    runtime.session.followUp("NO_MEMORY FOLLOW_UP_EXECUTED");
+
+    // The first foreground submission and its queued successor must both make
+    // progress while the unrelated memory model call is still unresolved.
+    await first;
+    await vi.waitFor(() => {
+      const requests = (globalThis as { __flavorMemoryRequests?: Array<Array<{ content: string }>> })
+        .__flavorMemoryRequests ?? [];
+      expect(requests.some((messages) => messages.some((message) => message.content.includes("FOLLOW_UP_EXECUTED")))).toBe(true);
+    });
+
+    const release = (globalThis as { __flavorReleaseMemory?: () => void }).__flavorReleaseMemory;
+    release?.();
+    await runtime.session.whenIdle();
+    await runtime.dispose();
+  });
+
   it("pauses automatic extraction after repeated dismissals and resumes after an explicit store", async () => {
     const root = await workspace({ autoExtract: true, autoExtractMinChars: 200, ignoreStreakLimit: 2 });
     const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
@@ -322,10 +355,12 @@ describe("production long-term memory", () => {
       .__flavorMemoryRequests ?? []).filter((messages) => messages.some((message) => message.content.includes("Evaluate this completed coding task")));
 
     await runtime.session.submit(`First durable task. ${"Useful durable context. ".repeat(12)}`);
+    await runtime.services.finishTask();
     expect(runtime.memoryReviews.pending).toHaveLength(1);
     runtime.memoryReviews.dismiss(runtime.memoryReviews.pending[0]!.id);
 
     await runtime.session.submit(`Second durable task. ${"Useful durable context. ".repeat(12)}`);
+    await runtime.services.finishTask();
     expect(runtime.memoryReviews.pending).toHaveLength(1);
     runtime.memoryReviews.dismiss(runtime.memoryReviews.pending[0]!.id);
 
@@ -342,6 +377,7 @@ describe("production long-term memory", () => {
     // the shared extraction prompt once, so the count advances by one here.
     await runtime.session.submit("请帮我记住：仓库脚本统一使用 pnpm。");
     await runtime.session.submit(`Fourth durable task. ${"Useful durable context. ".repeat(12)}`);
+    await runtime.services.finishTask();
     expect(runtime.memoryReviews.pending).toHaveLength(1);
     expect(extractions()).toHaveLength(5);
     await runtime.dispose();

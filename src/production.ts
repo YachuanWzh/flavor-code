@@ -292,7 +292,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     maxEntries: config.memory.maxEntries,
     maxEntryChars: config.memory.maxEntryChars,
   }) : undefined;
-  const autoStoredContents: string[] = [];
+  const autoStoredContents = new Map<string, string[]>();
   let memoryBehavior = DEFAULT_MEMORY_BEHAVIOR;
   if (memoryStore !== undefined) {
     try {
@@ -1032,14 +1032,21 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   });
   const memoryCoordinator = memoryStore !== undefined
     ? new MemoryCoordinator({
-      review: (taskId, candidates) => { memoryReviews.offer(taskId, candidates); },
+      review: (taskId, candidates) => {
+        // A newer foreground task invalidates review cards from older tasks. An
+        // automatic extraction may finish after that boundary now that it runs
+        // in the background, so do not resurrect a stale review card.
+        if (memoryLifecycle.taskId === taskId) memoryReviews.offer(taskId, candidates);
+      },
       remember: async (taskId, candidates) => {
         let stored = 0;
         for (const candidate of candidates) {
           const result = await memoryStore.rememberForTask(taskId, candidate);
           if (result.added) {
             stored += 1;
-            autoStoredContents.push(candidate.content);
+            const contents = autoStoredContents.get(taskId) ?? [];
+            contents.push(candidate.content);
+            autoStoredContents.set(taskId, contents);
           }
         }
         if (stored > 0) await refreshMemoryState();
@@ -1057,35 +1064,98 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   if (memoryCoordinator !== undefined) {
     memoryCoordinator.onError = (error) => diagnostics.push(`Long-term memory extraction failed: ${message(error)}`);
   }
+  type MemoryTaskSnapshot = {
+    taskId: string;
+    messageStart: number;
+    messages: readonly ModelMessage[];
+    transcriptHash: string;
+  };
+  const backgroundMemoryTasks = new Map<string, Promise<string>>();
+  const memoryTaskKey = (task: Pick<MemoryTaskSnapshot, "taskId" | "transcriptHash">): string =>
+    `${task.taskId}:${task.transcriptHash}`;
+  const captureMemoryTask = (): MemoryTaskSnapshot => {
+    const messageStart = memoryLifecycle.messageStart ?? 0;
+    const messages = harness.main.context.snapshot().messages.slice(messageStart);
+    return {
+      taskId: memoryLifecycle.taskId ?? sessionId,
+      messageStart,
+      messages,
+      transcriptHash: memoryTranscriptHash(messages),
+    };
+  };
+  const evaluateMemoryTask = async (task: MemoryTaskSnapshot): Promise<string> => {
+    autoStoredContents.delete(task.taskId);
+    const finalization = memoryCoordinator === undefined || !config.memory.autoExtract || options.approvalPolicy === "deny"
+      ? { evaluated: true, candidates: false, stored: 0 }
+      : await memoryCoordinator.finalize(task.taskId, task.messages);
+    if (!finalization.evaluated) {
+      // Keep a failed task manually retryable when no newer task has replaced
+      // it. A newer task owns the lifecycle slot and must never be overwritten.
+      if (memoryLifecycle.taskId === task.taskId && memoryLifecycle.transcriptHash === task.transcriptHash) {
+        memoryLifecycle = { status: "active", taskId: task.taskId, messageStart: task.messageStart };
+        await persist();
+      }
+      return "Long-term-memory evaluation failed; retry /finish after checking diagnostics.";
+    }
+    if (memoryLifecycle.taskId === task.taskId) {
+      memoryLifecycle = {
+        status: "completed", taskId: task.taskId, messageStart: task.messageStart,
+        finalizedAt: new Date().toISOString(), transcriptHash: task.transcriptHash,
+      };
+      await persist();
+    }
+    if (finalization.candidates && finalization.stored > 0) {
+      const storedText = autoStoredContents.get(task.taskId)?.[0] ?? "a high-confidence memory";
+      autoStoredContents.delete(task.taskId);
+      return `Long-term memory updated. Stored high-confidence entry: "${storedText}". Run /forget to remove it if undesired.`;
+    }
+    autoStoredContents.delete(task.taskId);
+    return finalization.candidates
+      ? "Long-term-memory evaluation completed. Review the generated candidates before anything is stored."
+      : "Long-term-memory evaluation completed; no durable candidates passed the threshold.";
+  };
   const finalizeMemoryTask = async (manual = false): Promise<string> => {
-    const allMessages = harness.main.context.snapshot().messages;
-    const messages = allMessages.slice(memoryLifecycle.messageStart ?? 0);
-    const transcriptHash = memoryTranscriptHash(messages);
-    if (memoryLifecycle.status === "completed" && memoryLifecycle.transcriptHash === transcriptHash) {
+    const task = captureMemoryTask();
+    const key = memoryTaskKey(task);
+    if (memoryLifecycle.status === "completed" && memoryLifecycle.transcriptHash === task.transcriptHash) {
+      const backgroundResult = await backgroundMemoryTasks.get(key);
+      if (backgroundResult?.startsWith("Long-term-memory evaluation failed")) return backgroundResult;
       return "This conversation segment was already evaluated for long-term memory.";
     }
     if (!manual && memoryBehavior.autoExtractPaused) {
       return "Automatic long-term-memory extraction is paused after repeated dismissals; use /finish, /remember, or an explicit “remember” request to store memory manually.";
     }
-    autoStoredContents.length = 0;
-    const finalization = memoryCoordinator === undefined || !config.memory.autoExtract || options.approvalPolicy === "deny"
-      ? { evaluated: true, candidates: false, stored: 0 }
-      : await memoryCoordinator.finalize(memoryLifecycle.taskId ?? sessionId, messages);
-    if (!finalization.evaluated) {
-      return "Long-term-memory evaluation failed; retry /finish after checking diagnostics.";
-    }
+    return evaluateMemoryTask(task);
+  };
+  const scheduleAutomaticMemoryTask = (): void => {
+    const task = captureMemoryTask();
+    const key = memoryTaskKey(task);
+    // Rotate the lifecycle boundary before starting slow memory work. The next
+    // queued prompt can now create its own task instead of being merged into
+    // this transcript while extraction is still running.
     memoryLifecycle = {
-      status: "completed", taskId: memoryLifecycle.taskId ?? sessionId,
-      messageStart: memoryLifecycle.messageStart ?? 0, finalizedAt: new Date().toISOString(), transcriptHash,
+      status: "completed", taskId: task.taskId, messageStart: task.messageStart,
+      finalizedAt: new Date().toISOString(), transcriptHash: task.transcriptHash,
     };
-    await persist();
-    if (finalization.candidates && finalization.stored > 0) {
-      const storedText = autoStoredContents[0] ?? "a high-confidence memory";
-      return `Long-term memory updated. Stored high-confidence entry: "${storedText}". Run /forget to remove it if undesired.`;
-    }
-    return finalization.candidates
-      ? "Long-term-memory evaluation completed. Review the generated candidates before anything is stored."
-      : "Long-term-memory evaluation completed; no durable candidates passed the threshold.";
+    const operation = evaluateMemoryTask(task).then((result) => {
+      if (result.startsWith("Long-term-memory evaluation failed")) {
+        emitOutput({ type: "notice", message: "Automatic long-term-memory evaluation failed; use /finish to retry after checking diagnostics." });
+      } else if (result.startsWith("Long-term-memory evaluation completed. Review")
+        || result.startsWith("Long-term memory updated.")) {
+        emitOutput({ type: "notice", message: result });
+      }
+      return result;
+    }).finally(() => {
+      if (backgroundMemoryTasks.get(key) === operation) backgroundMemoryTasks.delete(key);
+    });
+    backgroundMemoryTasks.set(key, operation);
+    // The operation is deliberately detached from the Stop hook. Coordinator
+    // and background-task flushes still give it a bounded shutdown path.
+    void operation.catch(() => undefined);
+  };
+  const flushMemoryTasks = async (): Promise<void> => {
+    await memoryCoordinator?.flush();
+    await Promise.allSettled([...backgroundMemoryTasks.values()]);
   };
   let explicitMemoryRequest: { taskId: string; messageStart: number } | undefined;
   let automaticMemoryTask = false;
@@ -1129,6 +1199,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       const result = await memoryCoordinator.rememberExplicit(
         explicit.taskId, harness.main.context.snapshot().messages.slice(explicit.messageStart),
       );
+      autoStoredContents.delete(explicit.taskId);
       if (!result.evaluated) {
         emitOutput({ type: "notice", message: "Explicit long-term-memory request could not be analyzed; nothing was stored." });
       } else if (result.stored > 0) {
@@ -1146,13 +1217,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     if (explicit === undefined && automatic && event.payload.outcome === "completed"
       && memoryCoordinator !== undefined && config.memory.autoExtract && options.approvalPolicy !== "deny"
       && !memoryBehavior.autoExtractPaused) {
-      const result = await finalizeMemoryTask();
-      if (result.startsWith("Long-term-memory evaluation failed")) {
-        emitOutput({ type: "notice", message: "Automatic long-term-memory evaluation failed; use /finish to retry after checking diagnostics." });
-      } else if (result.startsWith("Long-term-memory evaluation completed. Review")
-        || result.startsWith("Long-term memory updated.")) {
-        emitOutput({ type: "notice", message: result });
-      }
+      scheduleAutomaticMemoryTask();
     }
     if (event.payload.outcome === "cancelled" && (taskPlan !== undefined || taskGraph !== undefined)) {
       interruptedTaskPlanNeedsReassessment = true;
@@ -1167,14 +1232,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     emitOutput({ type: "tasks-cleared" });
     await persist();
     return { decision: "allow" };
-  }, {
-    // This handler awaits long-term-memory model calls; the 10s default timeout
-    // would abort them mid-flight and surface a TimeoutError through the Stop hook.
-    timeoutMs: 300_000,
-    failurePolicy: "allow",
-  });
+  }, { failurePolicy: "allow" });
   hooks.on("SessionEnd", async () => {
-    await memoryCoordinator?.flush();
+    await flushMemoryTasks();
     await persist();
     return { decision: "allow" };
   }, { timeoutMs: 300_000, failurePolicy: "allow" });
@@ -1922,7 +1982,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       if (collaborationEventPump !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "collaboration-event-pump", collaborationEventPump);
       mcpDiscarded = true;
       if (sleepScheduler !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "sleep-scheduler", sleepScheduler.dispose());
-      if (memoryCoordinator !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "memory-flush", memoryCoordinator.flush());
+      if (memoryCoordinator !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "memory-flush", flushMemoryTasks());
       await boundedStep(stepTimeoutMs, diagnostics, "persist", persist());
       if (persistTail !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "persist-tail", persistTail);
       if (ideSessionId !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "ide-end-session", ide.endSession(ideSessionId));
