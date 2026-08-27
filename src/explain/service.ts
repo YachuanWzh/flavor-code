@@ -31,8 +31,11 @@ export type ExplainTarget
 export async function resolveExplainTarget(graph: ExplainGraph, query: string): Promise<ExplainTarget> {
   const trimmed = query.trim();
   if (trimmed.includes("#")) {
-    const { origin } = await graph.relations(trimmed);
-    if (origin !== undefined) return { kind: "resolved", node: origin };
+    // An id-shaped query is attempted as an exact lookup; the graph rejects
+    // malformed ids (e.g. 'Foo#bar()') by throwing, which here simply means
+    // "not a node id" — fall through to ranked name search.
+    const hit = await graph.relations(trimmed).catch(() => undefined);
+    if (hit?.origin !== undefined) return { kind: "resolved", node: hit.origin };
   }
   const hits = await graph.search(trimmed, 10);
   if (hits.length === 0) return { kind: "not-found", query: trimmed };

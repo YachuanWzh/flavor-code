@@ -192,6 +192,18 @@ describe("runExplain", () => {
   it("reports not-found with a sync hint", async () => {
     expect(await runExplain(explainDeps({ graph: fakeGraph([]) }), "zzz", undefined, abort())).toContain("/ast sync");
   });
+  it("degrades when a '#'-bearing query is not a valid node id (relations throws)", async () => {
+    const graph: ExplainGraph = {
+      async status() { return { available: true }; },
+      async search() { return [node("src/a.ts#parse")]; },
+      async relations(id) {
+        if (!/^[\w./-]+#[\w:.-]+$/.test(id)) throw new Error(`explainTargetInvalid: ${id}`);
+        return { callers: [], callees: [] };
+      },
+    };
+    const out = await runExplain(explainDeps({ graph }), "parse#foo()", undefined, abort());
+    expect(out).toContain("src/a.ts#parse"); // falls back to name search instead of throwing
+  });
   it("explains a unique hit and grounds the prompt in the source slice", async () => {
     const captured: { prompt?: string } = {};
     const out = await runExplain(explainDeps({ registry: capturingRegistry("解释正文", captured) }), "cancelOrder", "并发问题", abort());
