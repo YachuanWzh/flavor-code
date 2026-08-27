@@ -152,3 +152,84 @@ export async function explainWithModel(
   if (cleaned === "") throw new Error("explain generation returned no text");
   return cleaned;
 }
+
+export interface ExplainDeps {
+  graph: ExplainGraph;
+  /** Read a workspace-relative file (production enforces workspace containment). */
+  readFile(path: string): Promise<string>;
+  history?(path: string, limit: number): Promise<readonly { date: string; author: string; subject: string }[]>;
+  questions?: QuestionBridge;
+  registry: ModelRegistry;
+  modelId(): string;
+  language: string;
+  notify?(message: string): void;
+}
+
+const HISTORY_LIMIT = 8;
+const MAX_RESOLVE_ROUNDS = 2;
+
+/** Orchestrate one /explain turn: resolve the symbol (asking the user to pick
+ *  on ambiguity), gather grounded evidence and stream a cheap-model answer.
+ *  Every failure path returns user-facing text instead of throwing, matching
+ *  the /review semantics in src/ui/session.ts. */
+export async function runExplain(
+  deps: ExplainDeps,
+  query: string | undefined,
+  focus: string | undefined,
+  signal: AbortSignal,
+): Promise<string> {
+  if (query === undefined) {
+    return "Usage: /explain <symbol | file.ts#symbol> [what to focus on]. Example: /explain src/order.ts#cancelOrder error handling";
+  }
+  if (!(await deps.graph.status()).available) {
+    return "The code graph is not built yet — run /ast init, then try /explain again.";
+  }
+  let target = await resolveExplainTarget(deps.graph, query);
+  for (let round = 1; round <= MAX_RESOLVE_ROUNDS; round += 1) {
+    if (target.kind !== "ambiguous") break;
+    if (deps.questions === undefined) {
+      return `"${query}" is ambiguous. Use the exact node id, e.g. /explain ${target.candidates[0]?.id ?? "path/file.ts#name"}.`;
+    }
+    const selection = await selectExplainCandidate(target.candidates, deps.questions, signal);
+    if (selection.kind === "cancelled") return "/explain cancelled — no symbol was selected.";
+    if (selection.kind === "picked") {
+      target = { kind: "resolved", node: selection.node };
+      break;
+    }
+    target = await resolveExplainTarget(deps.graph, selection.query);
+    if (round === MAX_RESOLVE_ROUNDS && target.kind === "ambiguous") {
+      return `"${selection.query}" is still ambiguous. Pick one node id explicitly: /explain ${target.candidates[0]?.id ?? "path/file.ts#name"}`;
+    }
+  }
+  if (target.kind === "not-found") {
+    return `No matching symbol for "${target.query}" — check the name, or refresh the graph with /ast sync.`;
+  }
+  const anchor = target.node;
+  signal.throwIfAborted();
+  deps.notify?.(`Explaining ${anchor.id} …`);
+  const { callers, callees } = await deps.graph.relations(anchor.id, 1);
+  const raw = await deps.readFile(anchor.filePath).catch(() => "");
+  const lines = raw.split("\n");
+  const anchorSource = lines.slice(Math.max(0, anchor.startLine - 1), anchor.endLine).join("\n") || raw;
+  const history = deps.history === undefined
+    ? []
+    : await deps.history(anchor.filePath, HISTORY_LIMIT).catch(() => []);
+  try {
+    const explanation = await explainWithModel(
+      { registry: deps.registry, modelId: deps.modelId },
+      buildExplainPrompt({
+        anchor, anchorSource,
+        callers: callers.map((n) => ({ name: n.name, filePath: n.filePath, startLine: n.startLine })),
+        callees: callees.map((n) => ({ name: n.name, filePath: n.filePath, startLine: n.startLine })),
+        history,
+        ...(focus === undefined ? {} : { focus }),
+        language: deps.language,
+      }),
+      signal,
+    );
+    return `Explain ${anchor.id}\n\n${explanation}`;
+  } catch (error) {
+    if (signal.aborted) throw error;
+    return `/explain failed: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
