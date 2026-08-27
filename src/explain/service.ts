@@ -36,3 +36,44 @@ export async function resolveExplainTarget(graph: ExplainGraph, query: string): 
   if (hits.length === 1) return { kind: "resolved", node: hits[0]! };
   return { kind: "ambiguous", candidates: hits };
 }
+
+import type { QuestionBridge } from "../tools/ask-user-question.js";
+
+/** Label shared by the picker options and the answer matching below. The
+ *  graph node id is unique, so it doubles as an unambiguous picker label. */
+export function explainCandidateLabel(candidate: ExplainNode): string {
+  return candidate.id;
+}
+
+export type ExplainSelection
+  = { kind: "picked"; node: ExplainNode }
+  | { kind: "typed"; query: string }
+  | { kind: "cancelled" };
+
+/** Interactive disambiguation: top-3 candidates (label = `name (filePath)`,
+ *  description = kind + file:line) plus Cancel. The terminal question cards
+ *  always append a free-text choice, so the user can type a more exact symbol
+ *  instead; that raw text comes back as `typed` for the caller to re-resolve. */
+export async function selectExplainCandidate(
+  candidates: readonly ExplainNode[],
+  questions: QuestionBridge,
+  signal: AbortSignal,
+): Promise<ExplainSelection> {
+  const shown = candidates.slice(0, 3);
+  const answers = await questions.ask([{
+    header: "Symbol",
+    question: "Multiple symbols match. Which one should /explain cover? (Pick one, or type a more exact name.)",
+    options: [
+      ...shown.map((candidate) => ({
+        label: explainCandidateLabel(candidate),
+        description: `${candidate.kind} · ${candidate.filePath}:${candidate.startLine}-${candidate.endLine}`,
+      })),
+      { label: "Cancel", description: "Abort /explain without choosing." },
+    ],
+  }], signal);
+  const answer = (answers[0] ?? "").trim();
+  if (answer === "Cancel" || answer === "") return { kind: "cancelled" };
+  const picked = shown.find((candidate) => explainCandidateLabel(candidate) === answer);
+  if (picked !== undefined) return { kind: "picked", node: picked };
+  return { kind: "typed", query: answer };
+}
