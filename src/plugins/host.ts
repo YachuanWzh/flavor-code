@@ -228,6 +228,7 @@ export class PluginHost {
             description: contribution.description,
             inputSchema: z.unknown(),
             ...(contribution.modelInputSchema === undefined ? {} : { modelInputSchema: contribution.modelInputSchema }),
+            ...(contribution.modelInputSchema === undefined ? {} : { modelStrict: false }),
             ...(contribution.readOnly === undefined ? {} : { readOnly: contribution.readOnly }),
             paths: () => [],
             execute: (input, _signal, toolContext) => session.invoke("tool", contribution.name, [

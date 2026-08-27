@@ -91,6 +91,32 @@ describe("DesktopRuntimeController", () => {
     expect(events).toContainEqual(expect.objectContaining({ type: "snapshot", snapshot: expect.objectContaining({ jobs: [running] }) }));
     await controller.dispose();
   });
+
+  it("publishes newly registered tools for immediate desktop slash completion", async () => {
+    const events: unknown[] = [];
+    const runtime = fakeRuntime(() => undefined);
+    let tools: readonly { name: string; description?: string }[] = [];
+    runtime.services.managedToolCommands = () => tools;
+    let onToolsChange: (() => void) | undefined;
+    const controller = new DesktopRuntimeController({
+      home: demoHome,
+      createRuntime: async (options) => { onToolsChange = options.onToolsChange; return runtime; },
+      listSessions: async () => [],
+      emit: (event) => events.push(event),
+    });
+    await controller.openWorkspace(workDemoDir);
+    await controller.startSession();
+
+    tools = [{ name: "EchoUpper", description: "Uppercase text" }];
+    onToolsChange?.();
+
+    expect(controller.snapshot().managedTools).toEqual(tools);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "snapshot",
+      snapshot: expect.objectContaining({ managedTools: tools }),
+    }));
+    await controller.dispose();
+  });
   it("scopes the D2C permission profile to one complete Electron submission", async () => {
     let release!: () => void;
     const runtime = fakeRuntime(() => undefined);

@@ -20,13 +20,15 @@ describe("slash completion", () => {
     ],
     [{ name: "deploy" }, { name: "doctor", description: "Run plugin diagnostics" }],
     [{ name: "frontend-design", description: "Design interfaces", source: "project" }],
+    [{ name: "EchoUpper", description: "Uppercase text" }, { name: "doctor", description: "shadowed" }],
   );
 
-  it("merges sources with command then plugin then skill precedence", () => {
+  it("merges sources with command, plugin, tool, then skill precedence", () => {
     expect(candidates.map(({ name, kind }) => [name, kind])).toEqual([
       ["deploy", "command"],
       ["help", "command"],
       ["doctor", "plugin"],
+      ["EchoUpper", "tool"],
       ["frontend-design", "skill"],
     ]);
     expect(candidates[0]?.description).toBe("Deploy the current project");
@@ -36,6 +38,7 @@ describe("slash completion", () => {
   it("activates only inside the leading slash token and ranks prefixes first", () => {
     expect(deriveSlashCompletion("/de", 3, candidates, 0)?.items.map((item) => item.name))
       .toEqual(["deploy", "frontend-design"]);
+    expect(deriveSlashCompletion("/echo", 5, candidates, 0)?.items[0]).toMatchObject({ name: "EchoUpper", kind: "tool" });
     expect(deriveSlashCompletion("say /de", 7, candidates, 0)).toBeNull();
     expect(deriveSlashCompletion("/deploy now", 11, candidates, 0)).toBeNull();
   });

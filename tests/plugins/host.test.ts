@@ -78,6 +78,8 @@ describe("PluginHost", () => {
 
     await host.loadAll();
     expect(host.diagnostics).toEqual([]);
+    expect(tool.modelInputSchema).toEqual({ type: "object" });
+    expect(tool.modelStrict).toBe(false);
     expect(await command(["a", "b"], { workspace: f.root, signal: new AbortController().signal })).toBe("rpc:a:b");
     expect(await tool.execute({ value: 1 }, new AbortController().signal)).toEqual({ echoed: { value: 1 } });
     expect(await hook({ version: 1, type: "SessionStart", payload: {} }, new AbortController().signal)).toEqual({ decision: "allow", reason: "sandbox" });

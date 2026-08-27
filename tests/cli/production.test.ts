@@ -1347,7 +1347,11 @@ describe("production runtime", () => {
     delete state.__flavorManagedResult;
     delete state.__flavorManagedRestart;
 
-    const first = await createProductionRuntime({ workspace, home: workspace, environment: {}, output: () => {} });
+    const onToolsChange = vi.fn();
+    const first = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, output: () => {}, onToolsChange,
+    });
+    const initialToolChanges = onToolsChange.mock.calls.length;
     const firstSubmission = first.session.submit("create and use a reusable uppercase tool");
     await vi.waitFor(() => expect(first.approvals.pending?.tool).toBe("EchoUpper"));
     first.approvals.resolve("once");
@@ -1357,6 +1361,12 @@ describe("production runtime", () => {
     expect(state.__flavorManagedSnapshots?.[0]).not.toContain("EchoUpper");
     expect(state.__flavorManagedSnapshots?.[1]).toContain("EchoUpper");
     expect(state.__flavorManagedResult).toContain("FLAVOR");
+    expect(first.services.managedToolCommands()).toContainEqual({ name: "EchoUpper", description: "Uppercase text" });
+    expect(onToolsChange.mock.calls.length).toBeGreaterThan(initialToolChanges);
+    const slashCall = first.services.runManagedTool("echoupper", '{"text":"slash route"}', new AbortController().signal);
+    await vi.waitFor(() => expect(first.approvals.pending?.tool).toBe("EchoUpper"));
+    first.approvals.resolve("once");
+    await expect(slashCall).resolves.toEqual({ value: "SLASH ROUTE" });
     expect(JSON.parse(await readFile(
       join(workspace, ".flavor", "tools", "echoupper.json"), "utf8",
     ))).toMatchObject({ name: "EchoUpper" });

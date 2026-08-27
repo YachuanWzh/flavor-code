@@ -181,6 +181,127 @@ describe("withStructuredOutput", () => {
     expect(coerceByJsonSchema({ query: "x", limit: "ten" }, schema)).toEqual({ query: "x", limit: "ten" });
   });
 
+  it("strictifies nested optional fields and drops provider nulls before runtime validation", async () => {
+    const requests: ModelRequest[] = [];
+    const schema = z.object({
+      tasks: z.array(z.object({
+        subject: z.string(),
+        result: z.string().optional(),
+      }).strict()),
+      limit: z.number().int().optional(),
+    }).strict();
+    const registry = registryWith(fakeAdapter([[
+      {
+        type: "tool-call",
+        id: "repair-1",
+        name: "TaskPlan",
+        input: { tasks: [{ subject: "audit", result: null }], limit: null },
+      },
+      { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+    ]], requests));
+    const model = withStructuredOutput({
+      registry,
+      modelId: "cheap:model",
+      name: "TaskPlan",
+      description: "Plan tasks",
+      schema,
+    });
+
+    await expect(model.invoke({ messages: [{ role: "user", content: "Repair" }] })).resolves.toMatchObject({
+      value: { tasks: [{ subject: "audit" }] },
+      attempts: 1,
+    });
+    const toolSchema = requests[0]?.tools[0]?.inputSchema;
+    expect(toolSchema).toMatchObject({
+      required: expect.arrayContaining(["tasks", "limit"]),
+      properties: {
+        tasks: {
+          items: {
+            required: expect.arrayContaining(["subject", "result"]),
+            properties: { result: { anyOf: expect.arrayContaining([{ type: "null" }]) } },
+          },
+        },
+      },
+    });
+  });
+
+  it("restores collapsed arrays and JSON-serialized objects without changing fields that allow their original type", async () => {
+    const { coerceByJsonSchema } = await import("../../src/models/structured.js");
+    const schema = {
+      type: "object",
+      additionalProperties: false,
+      required: ["agents", "optionalAgents", "questions", "stringOrArray"],
+      properties: {
+        agents: { type: "array", items: { type: "string", enum: ["main", "subagent"] } },
+        optionalAgents: {
+          anyOf: [
+            { type: "array", items: { type: "integer" } },
+            { type: "null" },
+          ],
+        },
+        questions: {
+          type: "array",
+          items: {
+            type: "object",
+            required: ["count"],
+            properties: { count: { type: "integer" } },
+          },
+        },
+        stringOrArray: {
+          anyOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" } },
+          ],
+        },
+      },
+    };
+
+    expect(coerceByJsonSchema({
+      agents: "main",
+      optionalAgents: "[\"1\",\"2\"]",
+      questions: "{\"count\":\"1\"}",
+      stringOrArray: "keep me",
+    }, schema)).toEqual({
+      agents: ["main"],
+      optionalAgents: [1, 2],
+      questions: [{ count: 1 }],
+      stringOrArray: "keep me",
+    });
+  });
+
+  it("uses a supplied provider schema and strictness for dynamic-tool repair", async () => {
+    const requests: ModelRequest[] = [];
+    const providerSchema = {
+      type: "object",
+      properties: { values: { oneOf: [{ type: "array", items: { type: "integer" } }, { type: "null" }] } },
+      required: ["values"],
+    };
+    const registry = registryWith(fakeAdapter([[
+      { type: "tool-call", id: "repair-1", name: "Dynamic", input: { values: "1" } },
+      { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+    ]], requests));
+    const model = withStructuredOutput({
+      registry,
+      modelId: "cheap:model",
+      name: "Dynamic",
+      description: "Dynamic tool",
+      schema: z.object({ values: z.array(z.number().int()).nullable() }),
+      modelInputSchema: providerSchema,
+      modelStrict: false,
+    });
+
+    await expect(model.invoke({ messages: [{ role: "user", content: "Repair" }] })).resolves.toMatchObject({
+      value: { values: [1] },
+      attempts: 1,
+    });
+    expect(requests[0]?.tools).toEqual([{
+      name: "Dynamic",
+      description: "Dynamic tool",
+      inputSchema: providerSchema,
+      strict: false,
+    }]);
+  });
+
   it("cancels during backoff without making another model call", async () => {
     vi.useFakeTimers();
     const requests: ModelRequest[] = [];

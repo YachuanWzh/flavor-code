@@ -676,6 +676,47 @@ describe("AgentLoop", () => {
     }
   });
 
+  it("normalizes weakly typed tool arguments without invoking the repair model", async () => {
+    const fallbackRequests: ModelRequest[] = [];
+    const executions: unknown[] = [];
+    const fixture = createLoop({
+      adapter: fakeAdapter([[
+        {
+          type: "tool-call",
+          id: "weak-types",
+          name: "echo",
+          input: {
+            questions: { label: "only item" },
+            optionalNote: null,
+            enabled: "TRUE",
+          },
+        },
+        { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      ], [
+        { type: "text", text: "done" },
+        { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      ]]),
+      fallbackAdapter: fakeAdapter([], fallbackRequests),
+      fallbackModelId: "cheap:small",
+      inputSchema: z.object({
+        questions: z.array(z.object({ label: z.string() })),
+        optionalNote: z.string().optional(),
+        enabled: z.boolean().optional(),
+      }),
+      execute: async (input) => { executions.push(input); return input; },
+    });
+
+    const events = await collect(fixture.loop.run({ prompt: "normalize" }));
+
+    expect(fallbackRequests).toEqual([]);
+    expect(executions).toEqual([{
+      questions: [{ label: "only item" }],
+      enabled: true,
+    }]);
+    expect(events.some((event) => event.type === "structured-output-retry")).toBe(false);
+    expect(events.at(-1)?.type).toBe("done");
+  });
+
   it("retries completed streams that contain neither visible text nor tool calls", async () => {
     vi.useFakeTimers();
     try {
@@ -971,12 +1012,15 @@ function createLoop(options: {
   adapter: ModelAdapter;
   fallbackAdapter?: ModelAdapter;
   fallbackModelId?: string;
-  execute?: (input: { value: string }, signal: AbortSignal) => Promise<unknown>;
+  execute?: (input: any, signal: AbortSignal) => Promise<unknown>;
+  inputSchema?: z.ZodType<any>;
+  modelInputSchema?: Record<string, unknown>;
+  modelStrict?: boolean;
   maxIterations?: number;
   extendIterations?: number;
   recentTurns?: number;
   summarize?: () => Promise<string>;
-  toolSummarize?: (input: { value: string }) => string | undefined;
+  toolSummarize?: (input: any) => string | undefined;
   toolNames?: readonly string[];
   afterSuccess?: import("../../src/tools/runtime.js").ToolRuntimeOptions["afterSuccess"];
 }) {
@@ -984,7 +1028,9 @@ function createLoop(options: {
   const tools = (options.toolNames ?? ["echo"]).map((name) => ({
     name,
     description: "echo input",
-    inputSchema: z.object({ value: z.string() }),
+    inputSchema: options.inputSchema ?? z.object({ value: z.string() }),
+    ...(options.modelInputSchema === undefined ? {} : { modelInputSchema: options.modelInputSchema }),
+    ...(options.modelStrict === undefined ? {} : { modelStrict: options.modelStrict }),
     paths: () => ["Read", "Glob", "Grep", "Write"].includes(name) ? [process.cwd()] : [],
     ...(options.toolSummarize === undefined ? {} : { summarize: options.toolSummarize }),
     execute: options.execute ?? (async (input: { value: string }) => input),

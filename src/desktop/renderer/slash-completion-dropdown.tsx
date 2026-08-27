@@ -5,12 +5,14 @@ import { matchRanges } from "../../ui/slash-completion.js";
 const KIND_LABELS: Record<SlashCandidate["kind"], string> = {
   command: "命令",
   plugin: "插件",
+  tool: "工具",
   skill: "技能",
 };
 
 const KIND_CLASSES: Record<SlashCandidate["kind"], string> = {
   command: "slash-kind-command",
   plugin: "slash-kind-plugin",
+  tool: "slash-kind-tool",
   skill: "slash-kind-skill",
 };
 

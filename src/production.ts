@@ -95,6 +95,7 @@ import { redactSecrets } from "./utils/redact.js";
 import { HallucinationGuard } from "./hallucination/guard.js";
 import { AuditLogger, setUsageSession, usageLogPath } from "./utils/log.js";
 import { formatUsageSummary, parseUsageEntries, summarizeUsage } from "./utils/usage-summary.js";
+import { normalizeToolCallInput } from "./utils/json.js";
 import { MemoryCoordinator } from "./memory/coordinator.js";
 import { isExplicitMemoryIntent } from "./memory/intent.js";
 import { DEFAULT_MEMORY_BEHAVIOR, MemoryStore, renderMemoryDocument } from "./memory/store.js";
@@ -167,6 +168,8 @@ export interface ProductionRuntimeOptions {
   environment?: NodeJS.ProcessEnv;
   output(event: SessionOutput): void;
   onApprovalChange?(): void;
+  /** Called whenever the active registerTool-managed command set changes. */
+  onToolsChange?(): void;
   /** Non-interactive callers must deny requests instead of waiting for input. */
   approvalPolicy?: "prompt" | "deny";
   /** Allow a protocol host to resolve tool approvals without enabling other interactive UI bridges. */
@@ -493,6 +496,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       managedTools.push(tool);
     }
     if (harnessCreated) harness.replaceMainTools(tools);
+    options.onToolsChange?.();
   };
   tools.push(...createManagedToolManagementTools({
     store: managedToolStore,
@@ -1794,6 +1798,27 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       if (handler === undefined) throw new Error(`Plugin command /${name} is no longer registered.`);
       signal.throwIfAborted();
       return awaitWithSignal(Promise.resolve(handler(args, { workspace, signal })), signal);
+    },
+    managedToolCommands: () => managedTools
+      .map(({ name, description }) => ({ name, description }))
+      .sort((left, right) => left.name.localeCompare(right.name)),
+    runManagedTool: async (name, rawInput, signal) => {
+      const tool = managedTools.find((candidate) => sameToolName(candidate.name, name));
+      if (tool === undefined) throw new Error(`Registered tool "${name}" is no longer available.`);
+      signal.throwIfAborted();
+      const input = normalizeToolCallInput(rawInput);
+      const call = { name: tool.name, input };
+      const validation = harness.main.runtime.normalize(call);
+      if (!validation.ok) throw new Error(`Invalid input for registered tool "${tool.name}": ${validation.error.message}`);
+      harness.main.runtime.beginTurn();
+      const result = await harness.main.runtime.execute(
+        { name: tool.name, input: validation.input },
+        { agent: "main", ownerId: "main", signal },
+      );
+      if (!result.ok) {
+        throw new Error(`Registered tool "${tool.name}" failed (${result.error?.code ?? "unknown"}): ${result.error?.message ?? "Unknown error"}`);
+      }
+      return result.output !== undefined ? result.output : result.content;
     },
     output: emitOutput,
     questions,

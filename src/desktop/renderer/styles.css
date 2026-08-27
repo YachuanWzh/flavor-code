@@ -459,6 +459,7 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .slash-item-selected .slash-item-marker { color: #4a9fe8; }
 .slash-kind-command,
 .slash-kind-plugin,
+.slash-kind-tool,
 .slash-kind-skill {
   display: inline-block;
   padding: 1px 5px;
@@ -469,6 +470,7 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 }
 .slash-kind-command { background: #eaf3fc; color: #316a9e; }
 .slash-kind-plugin { background: #f0eef8; color: #5e4d95; }
+.slash-kind-tool { background: #fff3e4; color: #9a5a16; }
 .slash-kind-skill { background: #eef6ee; color: #407550; }
 .slash-item-name {
   overflow: hidden;

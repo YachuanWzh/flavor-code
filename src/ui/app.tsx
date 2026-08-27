@@ -270,6 +270,7 @@ export function appRuntimeOptions(
     },
     output,
     onApprovalChange,
+    onToolsChange: onApprovalChange,
   };
 }
 
@@ -371,13 +372,17 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
       if (disposed) { await created.dispose(); return; }
       dispatch({ type: "restore", state: created.restoredTranscript });
       runtimeRef.current = created;
-      setSlashCandidates(buildSlashCandidates(BUILTIN_SLASH_CANDIDATES, created.services.pluginCommands(), []));
+      setSlashCandidates(buildSlashCandidates(
+        BUILTIN_SLASH_CANDIDATES, created.services.pluginCommands(), [], created.services.managedToolCommands(),
+      ));
       setRuntime(created);
       await created.session.start();
       try {
         const skills = await created.services.skills();
         if (!disposed) {
-          setSlashCandidates(buildSlashCandidates(BUILTIN_SLASH_CANDIDATES, created.services.pluginCommands(), skills));
+          setSlashCandidates(buildSlashCandidates(
+            BUILTIN_SLASH_CANDIDATES, created.services.pluginCommands(), skills, created.services.managedToolCommands(),
+          ));
         }
       } catch {
         // Invalid skill files are reported by runtime diagnostics; static candidates remain usable.
@@ -392,6 +397,27 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
       void closeAndDisposeRuntime(runtimeRef.current, (error) => process.stderr.write(`flavor cleanup: ${error}\n`));
     };
   }, [workspace, home, resumeSession, instanceId, palAlias]);
+
+  useEffect(() => {
+    if (runtime === undefined) return;
+    let disposed = false;
+    void runtime.services.skills().then((skills) => {
+      if (!disposed) setSlashCandidates(buildSlashCandidates(
+        BUILTIN_SLASH_CANDIDATES,
+        runtime.services.pluginCommands(),
+        skills,
+        runtime.services.managedToolCommands(),
+      ));
+    }).catch(() => {
+      if (!disposed) setSlashCandidates(buildSlashCandidates(
+        BUILTIN_SLASH_CANDIDATES,
+        runtime.services.pluginCommands(),
+        [],
+        runtime.services.managedToolCommands(),
+      ));
+    });
+    return () => { disposed = true; };
+  }, [runtime, revision]);
 
   useEffect(() => installSigintHandler(process, interrupt), [interrupt]);
 
@@ -762,7 +788,6 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
     }
   });
 
-  void revision;
   if (runtime === undefined) return <StartingLayout
     workspaceName={basename(workspace)}
     completed={transcript.completed}

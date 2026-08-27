@@ -4,6 +4,7 @@ import { basename, join, resolve } from "node:path";
 import { z } from "zod";
 
 import type { HookBus } from "../hooks/bus.js";
+import { coerceByJsonSchema, jsonSchemaFromZod } from "../models/structured.js";
 import { type PermissionEngine, type PermissionRequest, getToolCategory, type ToolCategory } from "../permissions/engine.js";
 import type { PermissionClassifier } from "../permissions/classifier.js";
 import { getToolPresentation, type ToolCall, type ToolContext, type ToolDefinition, type ToolResult } from "./types.js";
@@ -197,13 +198,26 @@ export class ToolRuntime {
     }
   }
 
+  /**
+   * Validates a call and applies the same conservative provider-argument
+   * normalization used by the agent loop before falling back to repair.
+   */
+  normalize(call: ToolCall): ToolInputValidation {
+    const validation = this.validate(call);
+    if (validation.ok || validation.error.code === "unknown_tool") return validation;
+    const tool = this.#tools.get(call.name);
+    if (tool === undefined) return validation;
+    const input = coerceByJsonSchema(call.input, jsonSchemaFromZod(tool.inputSchema));
+    return this.validate({ ...call, input });
+  }
+
   async #execute(call: ToolCall, context: ToolContext): Promise<ToolResult> {
     const tool = this.#tools.get(call.name);
     if (tool === undefined) return { ok: false, error: { code: "unknown_tool", message: `Unknown tool: ${call.name}` } };
     const signal = context.signal ?? new AbortController().signal;
     const toolCallId = call.id ?? randomUUID();
 
-    const validation = this.validate(call);
+    const validation = this.normalize(call);
     if (!validation.ok) {
       return this.#fail(toolCallId, call.name, call.input, context.agent, validation.error.code, validation.error.message);
     }

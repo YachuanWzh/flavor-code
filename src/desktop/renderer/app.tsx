@@ -356,7 +356,8 @@ export function DesktopApp(): React.JSX.Element {
     BUILTIN_SLASH_CANDIDATES,
     [],
     skills.filter((skill) => skill.enabled),
-  ), [skills]);
+    snapshot.managedTools ?? [],
+  ), [skills, snapshot.managedTools]);
   const slashCompletion = useMemo(() => {
     if (busy || snapshot.approval !== undefined || snapshot.questions !== undefined) return null;
     if (dismissedSlashInput === input) return null;

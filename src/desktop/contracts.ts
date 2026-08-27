@@ -345,6 +345,8 @@ export interface DesktopSnapshot {
   memoryReviews?: readonly MemoryReviewItem[];
   /** Seconds an unconfirmed memory review stays visible before auto-dismissal; 0 disables it. */
   memoryAutoDismissSeconds?: number;
+  /** Active registerTool-managed tools available as slash commands. */
+  managedTools?: readonly { name: string; description?: string }[];
   diagnostics: readonly string[];
   models: readonly DesktopModelOption[];
   jobs: readonly JobSnapshot[];

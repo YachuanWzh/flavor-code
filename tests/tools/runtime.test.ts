@@ -40,6 +40,35 @@ function fixture(decision: "allow" | "deny" | "ask" = "allow") {
 }
 
 describe("ToolRuntime", () => {
+  it("normalizes weak provider argument shapes inside the runtime before execution", async () => {
+    const f = fixture();
+    let received: unknown;
+    const tool: ToolDefinition<{
+      agents: string[];
+      enabled: boolean;
+      count: number;
+      note?: string | undefined;
+    }> = {
+      name: "Normalize",
+      description: "normalize arguments",
+      inputSchema: z.object({
+        agents: z.array(z.string()).max(2),
+        enabled: z.boolean(),
+        count: z.number().int(),
+        note: z.string().optional(),
+      }),
+      paths: () => [],
+      execute: async (input) => { received = input; return input; },
+    };
+    const runtime = new ToolRuntime({ tools: [tool], hooks: f.hooks, permissions: f.permissions });
+
+    await expect(runtime.execute({
+      name: "Normalize",
+      input: { agents: "main", enabled: "true", count: "2", note: null },
+    }, { agent: "main" })).resolves.toMatchObject({ ok: true });
+    expect(received).toEqual({ agents: ["main"], enabled: true, count: 2 });
+  });
+
   it("validates canonical outputs and renders bounded model content independently", async () => {
     const f = fixture();
     const tool: ToolDefinition<{ path: string }, { value: number }> = {

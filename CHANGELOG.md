@@ -2,7 +2,22 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.3.10 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.3.11 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.3.11] - 2026-08-27
+
+### 新增
+- `registerTool` 注册的托管工具支持通过 `/<工具名> [JSON 对象]` 直接调用，并提供不会受内置命令、插件或 Skill 名称冲突影响的 `/tool <工具名> [JSON 对象]` 稳定入口
+- CLI 与 Electron 桌面端会在工具注册、删除后即时刷新斜杠命令补全；桌面端新增独立的“工具”补全类型标识
+
+### 修复
+- 修复工具参数修复流程可能把 `agents` 等数组字段错误地当作字符串约束，导致连续四次修复仍出现 “expected array, received string” 与字符串长度错误的问题
+- 工具参数标准化统一下沉到 `ToolRuntime`：模型调用和斜杠调用现在共享数组包装、JSON 字符串解码、字符串数字/布尔值转换及可选 `null` 字段清理逻辑，新增调用入口无法绕过该防线
+- 修复 OpenAI 严格工具 Schema 的递归规范化，补齐对象字段的 `required`、`additionalProperties: false` 以及组合 Schema 处理；保留不兼容沙箱工具的非严格模式，避免过度收紧造成回归
+- 托管工具斜杠调用复用现有权限审批、Hook、审计日志、执行 journal 与输出限制，不再形成绕过安全边界的独立执行路径
+
+### 测试
+- 新增 registerTool 热注册后直接调用、CLI/桌面动态补全、命令冲突回退、运行时弱类型参数标准化及严格 Schema 的回归测试；全量测试覆盖 196 个测试文件
 
 ## [1.3.10] - 2026-08-27
 
@@ -484,6 +499,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.3.11 | 2026-08-27 | registerTool 工具支持斜杠调用与动态补全；统一工具参数标准化和严格 Schema，修复 agents 数组修复循环 |
 | 1.3.10 | 2026-08-27 | HTTP 5xx 错误归类为 network、配置提示不再附加到 network/rate_limit 错误、Glob/Grep includeIgnored 支持字符串布尔值标准化 |
 | 1.3.9 | 2026-08-27 | Glob/Grep 新增 includeIgnored 参数可显式包含被忽略文件，.git 元数据始终排除，ripgrep 与 Node 后端行为一致 |
 | 1.3.8 | 2026-08-27 | 自动长期记忆提取后台化（不再阻塞后续请求）、记忆收尾按任务隔离、失败可 /finish 手动重试 |

@@ -6,8 +6,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createManagedToolManagementTools,
   ManagedToolStore,
+  RegisterManagedToolInputSchema,
   type RegisterManagedToolInput,
 } from "../../src/tools/managed.js";
+import { coerceByJsonSchema, strictJsonSchema } from "../../src/models/structured.js";
 
 const roots: string[] = [];
 
@@ -60,7 +62,11 @@ describe("ManagedToolStore", () => {
     const restarted = new ManagedToolStore({ workspace: f.workspace, home: f.home });
     await restarted.load();
     expect(restarted.definitions().map((tool) => tool.name)).toContain("EchoUpper");
-    expect(restarted.definitions()[0]?.modelInputSchema).toEqual(echoInput().inputSchema);
+    expect(restarted.definitions()[0]?.modelInputSchema).toMatchObject({
+      ...echoInput().inputSchema,
+      additionalProperties: false,
+      required: ["text"],
+    });
 
     const removed = await restarted.remove({ name: "EchoUpper" });
     expect(removed).toMatchObject({ name: "EchoUpper", scope: "project" });
@@ -151,6 +157,13 @@ describe("ManagedToolStore", () => {
 });
 
 describe("managed tool management definitions", () => {
+  it("normalizes a provider-collapsed agents value before RegisterTool validation", () => {
+    const rawInput = { ...echoInput(), agents: "main" };
+    const normalized = coerceByJsonSchema(rawInput, strictJsonSchema(RegisterManagedToolInputSchema));
+
+    expect(RegisterManagedToolInputSchema.parse(normalized).agents).toEqual(["main"]);
+  });
+
   it("registers and removes tools through a hot-replacement callback", async () => {
     const f = await fixture();
     const changed = vi.fn();

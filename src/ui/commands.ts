@@ -7,6 +7,7 @@ export const MVP_COMMANDS = [
   "memory", "remember", "forget", "forget-cold",
   "checkpoint", "tree", "rewind", "unrevert", "fork",
   "pals", "chat", "co-work",
+  "tool",
 ] as const;
 
 export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string> = {
@@ -46,6 +47,7 @@ export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string>
   pals: "List, rename, or inspect active Flavor pals",
   chat: "Send a task to another Flavor pal",
   "co-work": "Coordinate a shared goal with another Flavor pal",
+  tool: "Run a registered managed tool with a JSON object",
 };
 
 export type PermissionCommandMode = PermissionMode;
@@ -70,6 +72,7 @@ export type SlashCommand =
   | { name: "permissions"; mode: PermissionCommandMode }
   | { name: "plugin"; command: string; args: string[] }
   | { name: "skill"; skill: string; prompt: string }
+  | { name: "managed-tool"; tool: string; input: string }
   | { name: "loop"; goal: string }
   | { name: "goal"; goal: string }
   | { name: "commit"; hint?: string }
@@ -82,7 +85,7 @@ export type SlashCommand =
   | PalsSlashCommand
   | { name: "chat"; target: string; goal: string }
   | CoWorkSlashCommand
-  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop" | "goal" | "evolve" | "commit" | "review" | "mcp" | "remember" | "forget" | "checkpoint" | "rewind" | "fork" | "pals" | "chat" | "co-work"> }
+  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop" | "goal" | "evolve" | "commit" | "review" | "mcp" | "remember" | "forget" | "checkpoint" | "rewind" | "fork" | "pals" | "chat" | "co-work" | "tool"> }
   | { name: "audit"; toolFilter?: string | undefined }
   | { name: "evolve"; args: string[] }
   | { name: "unknown"; input: string; suggestions: string[] }
@@ -92,13 +95,21 @@ export function parseSlashCommand(
   input: string,
   dynamicCommands: readonly string[] = [],
   skillCommands: readonly string[] = [],
+  managedTools: readonly string[] = [],
 ): SlashCommand | null {
   const trimmed = input.trim();
   if (!trimmed.startsWith("/")) return null;
-  const [rawName = "", ...args] = trimmed.slice(1).split(/\s+/);
+  const match = /^(\S+)(?:\s+([\s\S]*))?$/u.exec(trimmed.slice(1));
+  const rawName = match?.[1] ?? "";
+  const rawArguments = match?.[2] ?? "";
+  const args = rawArguments.length === 0 ? [] : rawArguments.split(/\s+/u);
   const name = rawName.toLowerCase();
   if (!(MVP_COMMANDS as readonly string[]).includes(name) && dynamicCommands.includes(name)) {
     return { name: "plugin", command: name, args };
+  }
+  if (!(MVP_COMMANDS as readonly string[]).includes(name)) {
+    const managedTool = managedTools.find((tool) => tool.toLowerCase() === name);
+    if (managedTool !== undefined) return { name: "managed-tool", tool: managedTool, input: rawArguments };
   }
   if (!(MVP_COMMANDS as readonly string[]).includes(name) && skillCommands.includes(name)) {
     return { name: "skill", skill: name, prompt: args.join(" ") };
@@ -120,6 +131,17 @@ export function parseSlashCommand(
       return { name: "invalid", command: name, message: `Use /permissions <${PERMISSION_MODES.join("|")}>.` };
     }
     return { name, mode: normalized as PermissionMode };
+  }
+  if (name === "tool") {
+    const [requested] = args;
+    const managedTool = requested === undefined
+      ? undefined
+      : managedTools.find((candidate) => candidate.toLowerCase() === requested.toLowerCase());
+    if (managedTool === undefined) {
+      return { name: "invalid", command: name, message: "Use /tool <registered-tool> [JSON object]." };
+    }
+    const inputStart = rawArguments.search(/\s/u);
+    return { name: "managed-tool", tool: managedTool, input: inputStart < 0 ? "" : rawArguments.slice(inputStart).trimStart() };
   }
   if (name === "audit") {
     const toolFilter = args.length > 0 ? args.join(" ") : undefined;

@@ -65,6 +65,25 @@ describe("parseSlashCommand", () => {
       .toEqual({ name: "loop", goal: "ship it" });
   });
 
+  it("parses registered tools directly or through the stable /tool command", () => {
+    expect(parseSlashCommand('/EchoUpper {"text":"hello world"}', [], [], ["EchoUpper"]))
+      .toEqual({ name: "managed-tool", tool: "EchoUpper", input: '{"text":"hello world"}' });
+    expect(parseSlashCommand('/echoupper', [], [], ["EchoUpper"]))
+      .toEqual({ name: "managed-tool", tool: "EchoUpper", input: "" });
+    expect(parseSlashCommand('/tool ECHOUPPER  {"text": "hello world"}', [], [], ["EchoUpper"]))
+      .toEqual({ name: "managed-tool", tool: "EchoUpper", input: '{"text": "hello world"}' });
+    expect(parseSlashCommand("/tool missing {}", [], [], ["EchoUpper"]))
+      .toEqual({ name: "invalid", command: "tool", message: "Use /tool <registered-tool> [JSON object]." });
+  });
+
+  it("keeps built-in and plugin precedence while registered tools precede skills", () => {
+    expect(parseSlashCommand("/help", [], [], ["help"])).toEqual({ name: "help" });
+    expect(parseSlashCommand("/taste value", ["taste"], ["taste"], ["taste"]))
+      .toEqual({ name: "plugin", command: "taste", args: ["value"] });
+    expect(parseSlashCommand("/paint value", [], ["paint"], ["paint"]))
+      .toEqual({ name: "managed-tool", tool: "paint", input: "value" });
+  });
+
   it("reports invalid arguments without throwing", () => {
     expect(parseSlashCommand("/permissions reckless")).toMatchObject({ name: "invalid", command: "permissions" });
     expect(parseSlashCommand("/model sidekick foo:bar")).toMatchObject({ name: "invalid", command: "model" });

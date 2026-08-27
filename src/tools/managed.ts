@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 
 import type { ToolDefinition } from "./types.js";
+import { strictJsonSchemaObject } from "../models/structured.js";
 import { message } from "../utils/error.js";
 
 const MANAGED_TOOL_VERSION = 1;
@@ -320,7 +321,7 @@ function compileDefinition(
     name: record.name,
     description: record.description,
     inputSchema,
-    modelInputSchema: record.inputSchema,
+    modelInputSchema: strictJsonSchemaObject(record.inputSchema),
     modelStrict: true,
     ...(record.agents === undefined ? {} : { agents: record.agents }),
     paths: () => [],

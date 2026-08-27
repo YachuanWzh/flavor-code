@@ -130,6 +130,8 @@ export interface SessionServices {
   finishTask(): Promise<string>;
   pluginCommands(): readonly { name: string; description?: string }[];
   runPluginCommand(name: string, args: readonly string[], signal: AbortSignal): Promise<unknown>;
+  managedToolCommands(): readonly { name: string; description?: string }[];
+  runManagedTool(name: string, input: string, signal: AbortSignal): Promise<unknown>;
   output(event: SessionOutput): void;
   questions: QuestionBridge;
   login(): Promise<string>;
@@ -181,6 +183,7 @@ const HELP = [
   "/review [focus]                         review uncommitted changes before committing",
   "/evolve <signals|suggest|improve <id>|verify <name>|reload <name>|test|revert <name>|done <id>>  self-improvement loop",
   "/mcp [status|tools|reconnect|enable|disable]  manage MCP servers",
+  "/tool <registered-tool> [JSON object]      run a registered tool (or use /<tool-name>)",
   "/ide                                     show VS Code connection and cursor/selection",
   "/pals [--verbose|rename <alias>|info <alias-or-uuid>]",
   "/chat <alias-or-uuid> <goal>             send a task that starts on the receiving pal",
@@ -446,7 +449,12 @@ export class FlavorSession {
         try { skillNames = (await this.#services.skills()).map(({ name }) => name); }
         catch { /* Built-in and plugin commands remain available when skill discovery fails. */ }
       }
-      const command = parseSlashCommand(prompt, this.#services.pluginCommands().map(({ name }) => name), skillNames);
+      const command = parseSlashCommand(
+        prompt,
+        this.#services.pluginCommands().map(({ name }) => name),
+        skillNames,
+        this.#services.managedToolCommands().map(({ name }) => name),
+      );
       if (command !== null) await this.#dispatch(command, controller.signal);
       else for await (const event of this.#services.run(prompt, controller.signal, {
         getSteeringMessages: () => this.#drainMessages("steer", true).map((item) => item.text),
@@ -550,6 +558,8 @@ export class FlavorSession {
       this.#notice(`Main permissions set to ${command.mode}. Child approvals use bubble mode unless plan mode is active.`);
     } else if (command.name === "plugin") {
       this.#notice(format(await this.#services.runPluginCommand(command.command, command.args, signal)));
+    } else if (command.name === "managed-tool") {
+      this.#notice(format(await this.#services.runManagedTool(command.tool, command.input, signal)));
     } else if (command.name === "skill") {
       for await (const event of this.#services.runSkill(command.skill, command.prompt, signal)) this.#services.output(event);
     } else if (command.name === "loop") {

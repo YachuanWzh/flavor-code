@@ -38,6 +38,7 @@ function services(events: string[], outputs: string[]): SessionServices {
     forgetCold: async () => "forgotten cold",
     finishTask: async () => "Task completed; no durable memory candidates.",
     pluginCommands: () => [], runPluginCommand: async () => undefined,
+    managedToolCommands: () => [], runManagedTool: async () => undefined,
     output: (event) => outputs.push(event.type === "text" ? event.text : event.type === "notice" ? event.message : event.type),
     questions,
     login: async () => "authenticated",
@@ -46,6 +47,28 @@ function services(events: string[], outputs: string[]): SessionServices {
 }
 
 describe("FlavorSession", () => {
+  it("dispatches both registered-tool slash forms without sending a model prompt", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const calls: Array<{ name: string; input: string }> = [];
+    base.managedToolCommands = () => [{ name: "EchoUpper", description: "Uppercase text" }];
+    base.runManagedTool = async (name, input) => {
+      calls.push({ name, input });
+      return { value: "DONE" };
+    };
+    base.run = async function* () { throw new Error("model should not run"); };
+    const session = new FlavorSession(base);
+
+    await session.submit('/echoupper {"text":"hello world"}');
+    await session.submit('/tool ECHOUPPER {"text": "second call"}');
+
+    expect(calls).toEqual([
+      { name: "EchoUpper", input: '{"text":"hello world"}' },
+      { name: "EchoUpper", input: '{"text": "second call"}' },
+    ]);
+    expect(outputs.join("\n")).toContain('"value": "DONE"');
+  });
+
   it("resumes and acknowledges prompts recovered from the durable queue", async () => {
     const events: string[] = []; const outputs: string[] = [];
     const base = services(events, outputs);

@@ -133,6 +133,7 @@ export interface RuntimeLike {
     mainModel(): string;
     subagentModel(): string;
     permissionMode(): PermissionMode;
+    managedToolCommands?(): readonly { name: string; description?: string }[];
     setModel(role: "main" | "subagent", modelId: string): void | Promise<void>;
     finishTask(): Promise<string>;
     refreshMemory?(): Promise<void>;
@@ -172,7 +173,7 @@ export interface RuntimeLike {
 }
 
 export interface RuntimeFactoryOptions extends Pick<ProductionRuntimeOptions,
-  "workspace" | "home" | "output" | "onApprovalChange" | "approvalPolicy" | "resumeSession" | "extraTools" | "collaboration"> {}
+  "workspace" | "home" | "output" | "onApprovalChange" | "onToolsChange" | "approvalPolicy" | "resumeSession" | "extraTools" | "collaboration"> {}
 
 export interface DesktopTerminalServiceLike {
   open(input: { owner: string; cwd?: string; shell?: string; args?: string[]; columns?: number; rows?: number }): TerminalSnapshot;
@@ -336,6 +337,9 @@ export class DesktopRuntimeController {
         ...(runtime.services.questions.pending === undefined ? {} : { questions: runtime.services.questions.pending }),
         ...(runtime.memoryReviews.pending.length === 0 ? {} : { memoryReviews: runtime.memoryReviews.pending }),
         ...((runtime.memoryReviews.autoDismissSeconds ?? 0) > 0 ? { memoryAutoDismissSeconds: runtime.memoryReviews.autoDismissSeconds } : {}),
+        ...((runtime.services.managedToolCommands?.().length ?? 0) === 0
+          ? {}
+          : { managedTools: runtime.services.managedToolCommands!() }),
       }),
       diagnostics: runtime?.diagnostics ?? [],
       models: this.#models,
@@ -391,6 +395,9 @@ export class DesktopRuntimeController {
         this.#emit({ type: "session-output", sessionId: outputSessionId, event });
       },
       onApprovalChange: () => {
+        if (this.#runtime !== undefined) this.#publishSnapshot();
+      },
+      onToolsChange: () => {
         if (this.#runtime !== undefined) this.#publishSnapshot();
       },
     });

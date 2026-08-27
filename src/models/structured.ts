@@ -22,6 +22,10 @@ export interface StructuredOutputOptions<T> {
   name: string;
   description: string;
   schema: z.ZodType<T>;
+  /** Provider-facing schema when runtime validation was derived from another source (for example MCP). */
+  modelInputSchema?: Record<string, unknown>;
+  /** Preserve the original tool's provider strictness during argument repair. */
+  modelStrict?: boolean;
   retry?: StructuredOutputRetryPolicy;
   beforeAttempt?(attempt: StructuredOutputAttempt): void | Promise<void>;
   afterAttempt?(attempt: StructuredOutputAttemptResult): void | Promise<void>;
@@ -96,9 +100,14 @@ export function withStructuredOutput<T>(options: StructuredOutputOptions<T>): St
     }
   }
 
-  const tool = modelToolFromZod(options.name, options.description, options.schema);
+  const generatedTool = options.modelInputSchema === undefined
+    ? modelToolFromZod(options.name, options.description, options.schema)
+    : { name: options.name, description: options.description, inputSchema: options.modelInputSchema };
+  const tool: ModelTool = options.modelStrict === undefined
+    ? generatedTool
+    : { ...generatedTool, strict: options.modelStrict };
   const maxAttempts = retry.maxRetries + 1;
-  const jsonSchema = tool.inputSchema;
+  const validationSchema = jsonSchemaFromZod(options.schema);
 
   const model: StructuredModel<T> = {
     async *stream(request) {
@@ -182,7 +191,7 @@ export function withStructuredOutput<T>(options: StructuredOutputOptions<T>): St
           if (candidateCount === 1 && candidate !== null && typeof candidate === "object") {
             // Providers may serialize typed fields as strings; normalize before
             // schema validation so a coercible payload does not burn a retry.
-            candidate = coerceByJsonSchema(candidate, jsonSchema);
+            candidate = coerceByJsonSchema(candidate, validationSchema);
           }
           if (candidateCount !== 1) {
             attemptError = {
@@ -259,7 +268,17 @@ export function withStructuredOutput<T>(options: StructuredOutputOptions<T>): St
 }
 
 export function strictJsonSchema(schema: z.ZodType<unknown>): Record<string, unknown> {
-  return ensureStrictSchema(z.toJSONSchema(schema) as Record<string, unknown>);
+  return strictJsonSchemaObject(jsonSchemaFromZod(schema));
+}
+
+/** Runtime-facing JSON Schema before provider strictness rewrites optional fields. */
+export function jsonSchemaFromZod(schema: z.ZodType<unknown>): Record<string, unknown> {
+  return z.toJSONSchema(schema) as Record<string, unknown>;
+}
+
+/** Recursively adapts an existing JSON Schema for providers that require strict function tools. */
+export function strictJsonSchemaObject(schema: Record<string, unknown>): Record<string, unknown> {
+  return ensureStrictSchema(schema);
 }
 
 /**
@@ -308,16 +327,18 @@ export function extractJsonObject(text: string): unknown {
 
 /**
  * Best-effort type coercion guided by a JSON schema. Some providers serialize
- * typed fields as strings (`"10"` for an integer). This rewrites string→number /
- * string→boolean where the schema demands those types, recursing into object
- * properties and anyOf branches. Values already matching the schema are
- * returned unchanged, so a valid payload is a no-op.
+ * typed fields as strings (`"10"` for an integer) or collapse a single-item
+ * array to its item (`"main"` instead of `["main"]`). This rewrites those
+ * provider representations where the schema demands another type, recursing
+ * into object properties and anyOf branches. Values already matching the
+ * schema are returned unchanged, so a valid payload is a no-op.
  */
 export function coerceByJsonSchema(value: unknown, schema: unknown): unknown {
   if (schema === null || schema === undefined || typeof schema !== "object") return value;
   const node = schema as Record<string, unknown>;
   const branches = [
     ...(Array.isArray(node.anyOf) ? node.anyOf : []) as unknown[],
+    ...(Array.isArray(node.oneOf) ? node.oneOf : []) as unknown[],
     ...(Array.isArray(node.allOf) ? node.allOf : []) as unknown[],
   ].filter((branch): branch is Record<string, unknown> => branch !== null && typeof branch === "object");
 
@@ -340,20 +361,82 @@ export function coerceByJsonSchema(value: unknown, schema: unknown): unknown {
     if (lowered === "true") return true;
     if (lowered === "false") return false;
   }
+  if (types.includes("object") && !types.includes("string") && typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.startsWith("{")) {
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+          return coerceByJsonSchema(parsed, node);
+        }
+      } catch { /* Leave malformed JSON for normal validation and repair. */ }
+    }
+  }
+  if (
+    types.includes("array")
+    && !Array.isArray(value)
+    && value !== null
+    && value !== undefined
+    && !types.some((type) => matchesJsonSchemaType(value, type))
+  ) {
+    const arraySchema = [node, ...branches].find((candidate) => {
+      const type = candidate.type;
+      return type === "array" || (Array.isArray(type) && type.includes("array"));
+    });
+    if (typeof value === "string" && value.trim().startsWith("[")) {
+      try {
+        const parsed = JSON.parse(value.trim()) as unknown;
+        if (Array.isArray(parsed)) return coerceByJsonSchema(parsed, arraySchema ?? node);
+      } catch { /* Treat a non-JSON value as one array item. */ }
+    }
+    return [arraySchema?.items === undefined
+      ? value
+      : coerceByJsonSchema(value, arraySchema.items)];
+  }
   if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-    const properties = (node.properties ?? branches.find((branch) => branch.properties)?.properties) as Record<string, unknown> | undefined;
+    const objectSchema = [node, ...branches].find((candidate) =>
+      candidate.type === "object" || candidate.properties !== undefined);
+    const properties = objectSchema?.properties as Record<string, unknown> | undefined;
     if (properties !== undefined) {
       const output: Record<string, unknown> = {};
+      const required = new Set(Array.isArray(objectSchema?.required) ? objectSchema.required as string[] : []);
       for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-        output[key] = properties[key] !== undefined ? coerceByJsonSchema(child, properties[key]) : child;
+        const childSchema = properties[key];
+        if (child === null && childSchema !== undefined && !required.has(key) && !jsonSchemaAllowsNull(childSchema)) {
+          continue;
+        }
+        output[key] = childSchema !== undefined ? coerceByJsonSchema(child, childSchema) : child;
       }
       return output;
     }
   }
-  if (types.includes("array") && Array.isArray(value) && node.items !== undefined) {
-    return value.map((item) => coerceByJsonSchema(item, node.items));
+  if (types.includes("array") && Array.isArray(value)) {
+    const arraySchema = [node, ...branches].find((candidate) => {
+      const type = candidate.type;
+      return type === "array" || (Array.isArray(type) && type.includes("array"));
+    });
+    if (arraySchema?.items !== undefined) {
+      return value.map((item) => coerceByJsonSchema(item, arraySchema.items));
+    }
   }
   return value;
+}
+
+function matchesJsonSchemaType(value: unknown, type: string): boolean {
+  if (type === "null") return value === null;
+  if (type === "array") return Array.isArray(value);
+  if (type === "object") return value !== null && typeof value === "object" && !Array.isArray(value);
+  if (type === "integer") return typeof value === "number" && Number.isInteger(value);
+  if (type === "number") return typeof value === "number";
+  return typeof value === type;
+}
+
+function jsonSchemaAllowsNull(schema: unknown): boolean {
+  if (schema === null || typeof schema !== "object") return false;
+  const node = schema as Record<string, unknown>;
+  if (node.type === "null" || (Array.isArray(node.type) && node.type.includes("null"))) return true;
+  return [node.anyOf, node.oneOf].some((branches) =>
+    Array.isArray(branches) && branches.some((branch) => jsonSchemaAllowsNull(branch)));
 }
 
 export function modelToolFromZod(
@@ -365,23 +448,43 @@ export function modelToolFromZod(
 }
 
 function ensureStrictSchema(schema: Record<string, unknown>): Record<string, unknown> {
-  if (schema.type !== "object" || typeof schema.properties !== "object" || schema.properties === null) {
-    return schema;
+  const output: Record<string, unknown> = { ...schema };
+  for (const keyword of ["anyOf", "oneOf", "allOf", "prefixItems"] as const) {
+    const branches = schema[keyword];
+    if (Array.isArray(branches)) {
+      output[keyword] = branches.map((branch) => typeof branch === "object" && branch !== null
+        ? ensureStrictSchema(branch as Record<string, unknown>)
+        : branch);
+    }
   }
-  const required = Array.isArray(schema.required) ? [...schema.required] as string[] : [];
-  const requiredSet = new Set(required);
+  if (typeof schema.items === "object" && schema.items !== null) {
+    output.items = ensureStrictSchema(schema.items as Record<string, unknown>);
+  }
+  for (const keyword of ["$defs", "definitions"] as const) {
+    const definitions = schema[keyword];
+    if (typeof definitions === "object" && definitions !== null && !Array.isArray(definitions)) {
+      output[keyword] = Object.fromEntries(Object.entries(definitions).map(([key, definition]) => [
+        key,
+        typeof definition === "object" && definition !== null
+          ? ensureStrictSchema(definition as Record<string, unknown>)
+          : definition,
+      ]));
+    }
+  }
+  if (schema.type !== "object" || typeof schema.properties !== "object" || schema.properties === null) {
+    return output;
+  }
+  const requiredSet = new Set(Array.isArray(schema.required) ? schema.required as string[] : []);
   const properties: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(schema.properties)) {
     const child = typeof value === "object" && value !== null
       ? ensureStrictSchema(value as Record<string, unknown>)
       : value;
-    if (requiredSet.has(key)) properties[key] = child;
-    else {
-      properties[key] = { anyOf: [child, { type: "null" }] };
-      requiredSet.add(key);
-    }
+    if (requiredSet.has(key) || jsonSchemaAllowsNull(child)) properties[key] = child;
+    else properties[key] = { anyOf: [child, { type: "null" }] };
+    requiredSet.add(key);
   }
-  return { ...schema, additionalProperties: false, required: [...requiredSet], properties };
+  return { ...output, additionalProperties: false, required: [...requiredSet], properties };
 }
 
 function repairMessages(

@@ -1,4 +1,4 @@
-export type SlashCandidateKind = "command" | "plugin" | "skill";
+export type SlashCandidateKind = "command" | "plugin" | "tool" | "skill";
 
 export interface SlashCandidate {
   name: string;
@@ -32,6 +32,7 @@ export function buildSlashCandidates(
   commands: readonly { name: string; description: string }[],
   plugins: readonly { name: string; description?: string }[],
   skills: readonly { name: string; description: string; source: string }[],
+  tools: readonly { name: string; description?: string }[] = [],
 ): SlashCandidate[] {
   const candidates = new Map<string, SlashCandidate>();
   for (const command of commands) {
@@ -42,6 +43,13 @@ export function buildSlashCandidates(
       candidates.set(plugin.name, plugin.description === undefined
         ? { name: plugin.name, kind: "plugin" }
         : { name: plugin.name, kind: "plugin", description: plugin.description });
+    }
+  }
+  for (const tool of tools) {
+    if (!candidates.has(tool.name)) {
+      candidates.set(tool.name, tool.description === undefined
+        ? { name: tool.name, kind: "tool" }
+        : { name: tool.name, kind: "tool", description: tool.description });
     }
   }
   for (const skill of skills) {

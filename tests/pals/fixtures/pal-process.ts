@@ -127,6 +127,8 @@ async function runPeerFixture(args: string[]): Promise<void> {
     finishTask: async () => "",
     pluginCommands: () => [],
     runPluginCommand: async () => undefined,
+    managedToolCommands: () => [],
+    runManagedTool: async () => undefined,
     output: () => undefined,
     questions: new QuestionBridge(),
     login: async () => "",
