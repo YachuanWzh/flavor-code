@@ -29,3 +29,5 @@ FLAVOR.md
 md_docs
 # superharness ralph runtime state (per-task tracking + retry)
 .flavor/superharness/ralph/
+
+.worktrees/
