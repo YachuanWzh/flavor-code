@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   attachmentTranscriptPrompt,
+  desktopThinkingPreview,
   DesktopImageAttachmentStrip,
   DesktopTurnView,
 } from "../../src/desktop/renderer/app.js";
@@ -52,6 +53,37 @@ describe("desktop restored timeline rendering", () => {
 
     expect(renderToStaticMarkup(<DesktopTurnView turn={turn} active />)).toContain("Build feature");
     expect(renderToStaticMarkup(<DesktopTurnView turn={turn} />)).not.toContain("Build feature");
+  });
+
+  it("renders streamed model reasoning as a quiet timeline continuation", () => {
+    const turn: TranscriptTurn = {
+      id: 1,
+      prompt: "inspect",
+      assistantText: "",
+      statusLines: ["Flavoring"],
+      blocks: [{
+        kind: "status",
+        id: "model:1",
+        state: "running",
+        text: "Flavoring",
+        activity: "model",
+        thinkingText: "Reading the project structure before choosing an implementation path.",
+      }],
+    };
+
+    const html = renderToStaticMarkup(<DesktopTurnView turn={turn} active />);
+
+    expect(html).toContain("data-activity=\"model\"");
+    expect(html).toContain("正在思考");
+    expect(html).toContain("class=\"reasoning-preview\"");
+    expect(html).toContain("Reading the project structure");
+  });
+
+  it("keeps the newest tail in long desktop reasoning previews", () => {
+    const preview = desktopThinkingPreview(`old ${"x".repeat(300)} newest`, 20);
+    expect(preview.startsWith("…")).toBe(true);
+    expect(preview.endsWith("newest")).toBe(true);
+    expect(preview).toHaveLength(21);
   });
 
   it("renders historical tool input and result in a collapsed details region", () => {

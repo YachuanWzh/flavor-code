@@ -25,6 +25,13 @@ export const ProviderConfigSchema = z.object({
   cheapModel: z.string().min(1).optional(),
   models: z.array(z.string().min(1)).max(100).optional(),
   maxOutputTokens: z.number().int().positive().optional(),
+  // Extended-thinking budget in output tokens for the Anthropic protocol.
+  // Defaults to DEFAULT_THINKING_BUDGET; set to 0 to disable the request
+  // parameter. Provider thinking deltas are forwarded whenever they arrive.
+  thinkingBudget: z.number().int().min(0).optional(),
+  // Reasoning effort requested from the OpenAI Responses protocol. Omitted by
+  // default so strict compatible gateways never see an unknown parameter.
+  thinkingEffort: z.enum(["low", "medium", "high"]).optional(),
   // Send the Claude Code client fingerprint (User-Agent/x-app) with Anthropic requests,
   // for gateways that restrict the Anthropic protocol to Claude clients.
   claudeClient: z.boolean().optional(),

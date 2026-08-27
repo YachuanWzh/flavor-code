@@ -8,6 +8,9 @@ export interface StatusPresentation {
   glyph: string;
   text: string;
   color?: Color;
+  /** Quiet secondary information, kept separate from the action label. */
+  metaLabel?: string;
+  metaColor?: Color;
   badge?: string;
   badgeColor?: Color;
   /** The status word rendered after " · " (e.g. "running", "pending", "done"). */
@@ -50,16 +53,14 @@ export function statusPresentation(
   if (block.state === "running" && block.activity === "model") {
     return interactive ? {
       glyph: activityFrame(elapsedMs),
-      text: `Flavoring… (${formatElapsed(elapsedMs)} · thinking)`,
+      text: "Flavoring",
       color: "#81c8f2",
-      statusLabel: "thinking",
-      statusColor: "ansi:blackBright",
+      metaLabel: formatElapsed(elapsedMs),
+      metaColor: "ansi:blackBright",
     } : {
       glyph: "·",
-      text: "Flavoring · thinking",
+      text: "Flavoring",
       color: "#81c8f2",
-      statusLabel: "thinking",
-      statusColor: "ansi:blackBright",
     };
   }
   if (block.state === "running" && block.task !== undefined) {

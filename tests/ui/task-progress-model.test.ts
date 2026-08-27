@@ -23,7 +23,7 @@ describe("task progress presentation", () => {
     expect(formatElapsed(4_900)).toBe("4s");
   });
 
-  it("presents model activity with Flavor copy, elapsed time, and thinking status", () => {
+  it("presents model activity with a quiet elapsed-time label", () => {
     const result = statusPresentation({
       kind: "status",
       id: "model:1",
@@ -34,10 +34,10 @@ describe("task progress presentation", () => {
 
     expect(result).toEqual({
       glyph: activityFrame(6_000),
-      text: "Flavoring… (6s · thinking)",
+      text: "Flavoring",
       color: "#81c8f2",
-      statusLabel: "thinking",
-      statusColor: "ansi:blackBright",
+      metaLabel: "6s",
+      metaColor: "ansi:blackBright",
     });
   });
 

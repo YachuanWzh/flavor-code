@@ -937,7 +937,7 @@ export function DesktopTurnView({ turn, active = false }: { turn: TranscriptTurn
       <div className="assistant-avatar"><FlavorMark /></div>
       <div className="turn-content">
         {blocks.map((block, index) => <BlockView block={block} key={block.kind === "status" ? block.id : `text-${index}`} />)}
-        {active && blocks.length === 0 && <div className="thinking-line"><i /><span>正在理解任务…</span></div>}
+        {active && blocks.length === 0 && <div className="thinking-line" role="status"><i /><span><strong>Flavoring</strong><small>正在理解任务</small></span></div>}
       </div>
     </div>
   </article>;
@@ -946,9 +946,12 @@ export function DesktopTurnView({ turn, active = false }: { turn: TranscriptTurn
 function BlockView({ block }: { block: TranscriptBlock }): React.JSX.Element {
   if (block.kind === "text") return <div className="assistant-copy"><MarkdownContent text={block.text} /></div>;
   const stateSymbol = block.state === "completed" ? "✓" : block.state === "failed" ? "×" : block.state === "cancelled" ? "–" : block.state === "running" ? "" : "·";
-  return <div className="activity-card" data-state={block.state} data-tone={block.tone}>
+  const modelActivity = block.activity === "model";
+  const thinkingPreview = modelActivity && block.thinkingText ? desktopThinkingPreview(block.thinkingText) : undefined;
+  return <div className="activity-card" data-state={block.state} data-tone={block.tone} data-activity={block.activity}>
     <span className="activity-node">{stateSymbol}</span>
-    <div className="activity-body"><div className="activity-title"><span>{block.text.replace(/^[·✓×]\s*/, "")}</span>{block.hint && <code>{block.hint}</code>}</div>
+    <div className="activity-body"><div className="activity-title"><span>{block.text.replace(/^[·✓×]\s*/, "")}</span>{modelActivity && block.state === "running" && <small>正在思考</small>}{block.hint && <code>{block.hint}</code>}</div>
+      {thinkingPreview && <div className="reasoning-preview">{thinkingPreview}</div>}
       {block.progress !== undefined && <div className="progress-track"><i style={{ width: `${block.progress}%` }} /></div>}
       {block.presentation?.kind === "file-change" && <DiffPreview presentation={block.presentation} />}
       {block.presentation?.kind === "generic" && <div className="tool-presentation"><strong>{block.presentation.title}</strong>{block.presentation.summary && <span>{block.presentation.summary}</span>}</div>}
@@ -961,6 +964,13 @@ function BlockView({ block }: { block: TranscriptBlock }): React.JSX.Element {
       {block.details && <details className="timeline-details"><summary>压缩摘要</summary><MarkdownContent text={block.details} /></details>}
     </div>
   </div>;
+}
+
+export function desktopThinkingPreview(text: string, maxChars = 280): string {
+  const normalized = text.replace(/\s+/gu, " ").trim();
+  const limit = Math.max(1, Math.floor(maxChars));
+  const characters = [...normalized];
+  return characters.length <= limit ? normalized : `…${characters.slice(-limit).join("")}`;
 }
 
 function boundedJson(value: unknown, maxChars = 10_000): string {

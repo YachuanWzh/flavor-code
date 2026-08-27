@@ -1882,9 +1882,13 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         registry.register(next.providerId, next.apiType === "anthropic"
           ? new AnthropicModelAdapter({
             ...adapterOptions,
+            ...(providerConfig?.thinkingBudget === undefined ? {} : { thinkingBudget: providerConfig.thinkingBudget }),
             ...(providerConfig?.claudeClient === true ? { headers: CLAUDE_CLIENT_HEADERS } : {}),
           })
-          : new OpenAIModelAdapter(adapterOptions));
+          : new OpenAIModelAdapter({
+            ...adapterOptions,
+            ...(providerConfig?.thinkingEffort === undefined ? {} : { thinkingEffort: providerConfig.thinkingEffort }),
+          }));
         effectiveLlm = next;
         mainModel = `${next.providerId}:${next.defaultModel}`;
         childModel = `${next.providerId}:${next.cheapModel}`;
@@ -2528,9 +2532,13 @@ async function registerConfiguredAdapters(
       const adapter: ModelAdapter = apiProtocol === "anthropic"
         ? new AnthropicModelAdapter({
           ...adapterOptions,
+          ...(runtimeProvider.thinkingBudget === undefined ? {} : { thinkingBudget: runtimeProvider.thinkingBudget }),
           ...(runtimeProvider.claudeClient === true ? { headers: CLAUDE_CLIENT_HEADERS } : {}),
         })
-        : new OpenAIModelAdapter(adapterOptions);
+        : new OpenAIModelAdapter({
+          ...adapterOptions,
+          ...(runtimeProvider.thinkingEffort === undefined ? {} : { thinkingEffort: runtimeProvider.thinkingEffort }),
+        });
 
       // Step 4: Identify cache capability from apiType (flavor.json) and baseURL
       const cacheProfile = resolveCacheProfile({ apiType: apiProtocol, baseURL: runtimeProvider.baseURL });
@@ -2560,6 +2568,10 @@ interface ProviderRuntimeConfig {
   defaultModel?: string | undefined;
   cheapModel?: string | undefined;
   maxOutputTokens?: number | undefined;
+  /** Extended-thinking budget (Anthropic protocol); unset uses the adapter default. */
+  thinkingBudget?: number | undefined;
+  /** Reasoning effort (OpenAI Responses protocol); unset means never requested. */
+  thinkingEffort?: "low" | "medium" | "high" | undefined;
   models?: string[] | undefined;
   claudeClient?: boolean | undefined;
   // OAuth PKCE fields — all have built-in defaults when type=oauth-callback

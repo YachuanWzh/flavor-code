@@ -345,7 +345,42 @@ describe("TerminalLayout", () => {
     />, { columns: 80 }));
 
     expect(output).toContain("explain the system");
-    expect(output).toContain("Flavoring… (0s · thinking)");
+    expect(output).toContain("Flavoring  0s");
+  });
+
+  it("renders the fixed-width typewriter line for streamed thinking text", () => {
+    const thinking: TranscriptTurn = {
+      id: 1,
+      prompt: "explain the system",
+      assistantText: "",
+      statusLines: ["Flavoring"],
+      blocks: [{
+        kind: "status",
+        id: "model:1",
+        state: "running",
+        text: "Flavoring",
+        activity: "model",
+        startedAt: Date.now(),
+        thinkingText: "Considering how the transcript reducer folds events.",
+      }],
+    };
+
+    const output = stripAnsi(renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[]}
+      active={thinking}
+      input=""
+      promptCursor={0}
+      columns={80}
+      rows={24}
+      activeSession
+    />, { columns: 80 }));
+
+    // The thinking line is visually tied to model activity by a quiet rail;
+    // it does not look like editable input with a second caret.
+    expect(output).toContain("│ Considering how the transcript reducer folds events.");
+    expect(output).not.toContain("▌");
   });
 
   it("renders compact progress as three blue and seven gray cells at thirty percent", () => {

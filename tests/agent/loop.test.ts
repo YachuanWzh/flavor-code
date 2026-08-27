@@ -109,8 +109,7 @@ describe("AgentLoop", () => {
     ]);
   });
 
-  it("streams text, executes a tool once, feeds back its result, and records usage", async () => {
-    const requests: ModelRequest[] = [];
+  it("streams text, executes a tool once, feeds back its result, and records usage", async () => {    const requests: ModelRequest[] = [];
     const streams: ModelEvent[][] = [
       [
         { type: "text", text: "Checking " },
@@ -146,6 +145,30 @@ describe("AgentLoop", () => {
     expect(requests[1]?.messages).toContainEqual(expect.objectContaining({ role: "tool", toolCallId: "call-1" }));
     expect(requests[1]?.messages.find((message) => message.role === "tool")?.content).toContain("\"value\":\"hi\"");
     expect(fixture.context.lastRecordedInputTokens).toBe(12);
+  });
+
+  it("forwards thinking events and echoes sealed blocks into the next request", async () => {
+    const requests: ModelRequest[] = [];
+    const fixture = createLoop({
+      adapter: fakeAdapter([[
+        { type: "thinking", text: "Reasoning " },
+        { type: "thinking", text: "about it" },
+        { type: "thinking-block", text: "Reasoning about it", signature: "sig_1" },
+        { type: "tool-call", id: "call-1", name: "echo", input: { value: "hi" } },
+        { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      ], [
+        { type: "text", text: "done" },
+        { type: "done", usage: { inputTokens: 1, outputTokens: 1 } },
+      ]], requests),
+    });
+
+    const events = await collect(fixture.loop.run({ prompt: "think first" }));
+
+    expect(events.filter((event) => event.type === "thinking").map((event) => event.text))
+      .toEqual(["Reasoning ", "about it"]);
+    const assistant = requests[1]?.messages.find((message) => message.role === "assistant") as
+      { thinkingBlocks?: Array<{ text: string; signature?: string }> } | undefined;
+    expect(assistant?.thinkingBlocks).toEqual([{ text: "Reasoning about it", signature: "sig_1" }]);
   });
 
   it("executes consecutive read-only tool calls concurrently", async () => {

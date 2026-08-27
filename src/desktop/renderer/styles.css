@@ -109,7 +109,7 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .rail-footer button { width: 24px; height: 24px; border: 1px solid #b8c5d1; border-radius: 50%; background: transparent; color: #6d7e8d; cursor: pointer; }
 
 @media (prefers-reduced-motion: reduce) {
-  .session-spinner, .project-running-dot, .job-pulse { animation: none; }
+  .session-spinner, .project-running-dot, .job-pulse, .thinking-line > i, .activity-card[data-state="running"] .activity-node { animation: none; }
 }
 
 .workspace-panel { position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: 0; overflow: hidden; background: var(--paper); }
@@ -158,8 +158,11 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .markdown-content th, .markdown-content td { min-width: 90px; padding: 7px 9px; border-right: 1px solid #e5eaef; border-bottom: 1px solid #e5eaef; vertical-align: top; }
 .markdown-content tr:last-child td { border-bottom: 0; } .markdown-content th:last-child, .markdown-content td:last-child { border-right: 0; }
 .markdown-image-label { color: #87939e; font-style: italic; }
-.thinking-line { display: flex; align-items: center; height: 28px; gap: 10px; color: #72808d; font-size: 13px; }
-.thinking-line i { width: 8px; height: 8px; border-radius: 50%; background: var(--sky); animation: pulse 1.3s ease-in-out infinite; }
+.thinking-line { display: grid; min-height: 32px; grid-template-columns: 20px minmax(0, 1fr); align-items: start; color: #61707d; font-size: 12px; }
+.thinking-line > i { width: 15px; height: 15px; margin-top: 2px; border: 3px solid #d9edfc; border-radius: 50%; background: var(--sky); box-shadow: inset 0 0 0 2px #fff; animation: pulse 1.3s ease-in-out infinite; }
+.thinking-line > span { display: flex; align-items: baseline; padding-left: 4px; gap: 9px; line-height: 1.45; }
+.thinking-line strong { color: #327ca1; font-weight: 650; }
+.thinking-line small, .activity-card[data-activity="model"] .activity-title small { color: #97a3ad; font-size: 10px; font-weight: 500; }
 
 .activity-card { position: relative; display: grid; grid-template-columns: 20px minmax(0, 1fr); margin: 0; min-height: 33px; color: #61707d; font-size: 12px; }
 .activity-card::before { position: absolute; top: 20px; bottom: -12px; left: 7px; width: 1px; background: #d7e8f6; content: ""; }
@@ -172,6 +175,8 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .activity-body { min-width: 0; padding: 0 0 12px 4px; }
 .activity-title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; line-height: 1.45; }
 .activity-title code { max-width: 100%; overflow: hidden; color: #98a2ad; font: 10px/1.4 "Cascadia Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.activity-card[data-activity="model"] .activity-title > span { color: #327ca1; font-weight: 650; }
+.reasoning-preview { max-width: 100%; margin-top: 5px; overflow: hidden; color: #84939e; font: 11px/1.55 "Cascadia Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .tool-details, .timeline-details { margin-top: 8px; border: 1px solid #e3e9ee; border-radius: 8px; background: #fafcfd; }
 .tool-details > summary, .timeline-details > summary { padding: 6px 9px; cursor: pointer; color: #71808d; font-size: 10px; font-weight: 600; }
 .tool-details label { display: block; padding: 3px 9px 0; color: #87939e; font-size: 9px; font-weight: 700; text-transform: uppercase; }

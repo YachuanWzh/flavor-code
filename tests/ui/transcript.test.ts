@@ -268,6 +268,32 @@ describe("transcriptReducer", () => {
     expect(state.active?.statusLines).toEqual([]);
   });
 
+  it("accumulates thinking deltas on the running model activity block", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "wait" });
+    state = transcriptReducer(state, { type: "session", event: { type: "model-start", id: "1" } });
+
+    state = transcriptReducer(state, { type: "session", event: { type: "thinking", text: "First " } });
+    state = transcriptReducer(state, { type: "session", event: { type: "thinking", text: "part" } });
+
+    expect(state.active?.blocks).toEqual([expect.objectContaining({
+      id: "model:1",
+      activity: "model",
+      thinkingText: "First part",
+    })]);
+
+    // Visible text removes the activity card along with the thinking line.
+    state = transcriptReducer(state, { type: "session", event: { type: "text", text: "answer" } });
+    expect(state.active?.blocks).toEqual([{ kind: "text", text: "answer" }]);
+  });
+
+  it("drops thinking deltas that arrive without a running model activity", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "wait" });
+
+    state = transcriptReducer(state, { type: "session", event: { type: "thinking", text: "orphan" } });
+
+    expect(state.active?.blocks).toEqual([]);
+  });
+
   it("ends tool-only activity and starts a fresh timer for the next model call", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-19T00:00:00.000Z"));

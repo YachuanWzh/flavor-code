@@ -34,6 +34,8 @@ export interface OpenAIModelAdapterOptions {
   client?: OpenAIClient;
   /** Mirror the per-request cache breakdown to stderr. Defaults to FLAVOR_DEBUG_USAGE=1. File logging to usage.jsonl is always on. */
   debugUsage?: boolean;
+  /** Reasoning effort requested from the Responses API; omitted when undefined. */
+  thinkingEffort?: "low" | "medium" | "high";
 }
 
 async function toInput(message: ModelMessage): Promise<ResponseInputItem[]> {
@@ -126,6 +128,7 @@ function formatOpenAIUsage(model: string, breakdown: OpenAIUsageBreakdown): stri
 export class OpenAIModelAdapter implements ModelAdapter {
   private readonly client: OpenAIClient;
   private readonly debugUsage: boolean;
+  private readonly thinkingEffort: "low" | "medium" | "high" | undefined;
 
   constructor(options: OpenAIModelAdapterOptions) {
     this.client =
@@ -135,6 +138,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
         ...(options.baseURL === undefined ? {} : { baseURL: options.baseURL }),
       });
     this.debugUsage = options.debugUsage ?? isEnvTruthy(process.env.FLAVOR_DEBUG_USAGE);
+    this.thinkingEffort = options.thinkingEffort;
   }
 
   #logUsage(model: string, breakdown: OpenAIUsageBreakdown | undefined): void {
@@ -159,6 +163,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
       const body: OpenAIStreamRequest = {
         model: request.model,
         input: (await Promise.all(request.messages.map(toInput))).flat(),
+        ...(this.thinkingEffort === undefined ? {} : { reasoning: { effort: this.thinkingEffort } }),
         tools: [...request.tools].sort((a, b) => a.name.localeCompare(b.name)).map((tool) => ({
           type: "function",
           name: tool.name,
@@ -202,6 +207,14 @@ export class OpenAIModelAdapter implements ModelAdapter {
           }
         } else if (event.type === "response.output_text.delta" && event.delta) {
           yield { type: "text", text: event.delta };
+        } else if (
+          (event.type === "response.reasoning_summary_text.delta" || event.type === "response.reasoning_text.delta") &&
+          event.delta
+        ) {
+          // Reasoning channels are display-only: providers that expose them
+          // either encrypt the blocks or omit them from replay, so there is
+          // nothing to echo back and no thinking-block event is emitted.
+          yield { type: "thinking", text: event.delta };
         } else if (
           event.type === "response.function_call_arguments.done" &&
           event.output_index !== undefined &&

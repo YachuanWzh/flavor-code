@@ -24,9 +24,19 @@ interface ModelMessageMetadata {
   cacheBreakpoint?: boolean;
 }
 
+export interface ModelThinkingBlock {
+  text: string;
+  /** Provider-signed integrity token; Anthropic requires it echoed back verbatim. */
+  signature?: string;
+}
+
 export type ModelMessage =
   | (ModelMessageMetadata & { role: "user"; content: ModelContent })
-  | (ModelMessageMetadata & { role: "system" | "assistant" | "tool"; content: string });
+  | (ModelMessageMetadata & {
+    role: "system" | "assistant" | "tool";
+    content: string;
+    thinkingBlocks?: ModelThinkingBlock[];
+  });
 
 export function modelContentText(content: ModelContent): string {
   if (typeof content === "string") return content;
@@ -90,6 +100,13 @@ export interface ProviderError {
 
 export type ModelEvent =
   | { type: "text"; text: string }
+  | { type: "thinking"; text: string }
+  /**
+   * Sealed thinking block emitted once per provider thinking block. Carries the
+   * provider signature that must be echoed back verbatim on the next request
+   * when extended thinking is combined with tool use.
+   */
+  | { type: "thinking-block"; text: string; signature?: string }
   | { type: "tool-call"; id: string; name: string; input: unknown }
   | {
     type: "invalid-tool-call";

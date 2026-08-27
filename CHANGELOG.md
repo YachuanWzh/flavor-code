@@ -2,7 +2,22 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.3.11 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.3.12 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.3.12] - 2026-08-27
+
+### 新增
+- 支持模型扩展思考（extended thinking）的流式展示：Anthropic 协议默认请求 8192 token 思考预算，OpenAI Responses 协议支持 `low`/`medium`/`high` 推理力度；模型输出思考内容时，CLI 状态行下方会出现独立的固定宽度“思考行”，以打字机方式滚动展示最新推理文本
+- 提供商配置新增 `thinkingBudget`（Anthropic 协议，0 表示关闭请求参数）与 `thinkingEffort`（OpenAI Responses 协议，默认不下发该参数，避免不兼容网关收到未知字段）
+- 思考块以带提供商签名（signature）的形式随助手消息保留在上下文中：与 tool_use 同轮时按 Anthropic 要求逐字回显签名块；上下文压缩过滤消息时同步保留 `thinkingBlocks`，不会丢失回显所需的签名
+
+### 改进
+- 网关不支持 `thinking` 参数时自动降级：识别到参数被拒绝（400 且错误信息指向 thinking 参数）后仅移除该参数重试一次，后续请求不再下发 `thinking`，并清理历史中已无签名要求的思考块，端点不支持时退化为普通非思考流式输出而非报错
+- 思考增量在 UI 侧按动画节奏批量合并（与正文文本缓冲同样处理），逐 token 的思考流不会造成高频重渲染；思考文本本地累积上限 4000 字符，只保留最新尾部
+- 思考内容仅用于实时状态行展示：附加在运行中的 model 活动块上，不进入正文文本，也不会混入最终回复（`assistantText` 仍只累积 `text` 事件）
+
+### 测试
+- 新增 Anthropic/OpenAI 适配器思考回归测试：覆盖 thinking 参数下发与预算钳制、不支持端点的自动降级重试、签名块回显、思考/文本增量事件流；新增思考行窗口滚动与文本裁剪、CLI 渲染测试
 
 ## [1.3.11] - 2026-08-27
 
@@ -499,6 +514,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.3.12 | 2026-08-27 | 扩展思考流式展示：Anthropic 默认 8192 思考预算与 OpenAI reasoning effort 配置、CLI 打字机思考行、签名思考块回显、不支持端点自动降级 |
 | 1.3.11 | 2026-08-27 | registerTool 工具支持斜杠调用与动态补全；统一工具参数标准化和严格 Schema，修复 agents 数组修复循环 |
 | 1.3.10 | 2026-08-27 | HTTP 5xx 错误归类为 network、配置提示不再附加到 network/rate_limit 错误、Glob/Grep includeIgnored 支持字符串布尔值标准化 |
 | 1.3.9 | 2026-08-27 | Glob/Grep 新增 includeIgnored 参数可显式包含被忽略文件，.git 元数据始终排除，ripgrep 与 Node 后端行为一致 |

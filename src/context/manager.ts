@@ -655,7 +655,12 @@ function providerValidMessages(input: readonly ModelMessage[]): ModelMessage[] {
       const calls = original.toolCalls.filter((call) => call.id && call.name && availableResults.has(call.id));
       calls.forEach((call) => announced.add(call.id));
       if (!original.content && calls.length === 0) continue;
-      output.push({ role: "assistant", content: original.content, ...(calls.length === 0 ? {} : { toolCalls: calls.map((call) => ({ ...call })) }) });
+      output.push({
+        role: "assistant",
+        content: original.content,
+        ...(calls.length === 0 ? {} : { toolCalls: calls.map((call) => ({ ...call })) }),
+        ...(original.thinkingBlocks === undefined ? {} : { thinkingBlocks: original.thinkingBlocks.map((block) => ({ ...block })) }),
+      });
       continue;
     }
     if (original.role === "tool") {

@@ -35,6 +35,12 @@ export interface AnthropicModelAdapterOptions {
   baseURL?: string;
   client?: AnthropicClient;
   maxOutputTokens?: number;
+  /**
+   * Extended-thinking token budget sent as `thinking.budget_tokens`.
+   * Defaults to 8192; set to 0 to omit the parameter. Clamp stays below
+   * maxOutputTokens so the provider never rejects the pair.
+   */
+  thinkingBudget?: number;
   /** Extra headers sent with every request; override SDK defaults such as User-Agent. */
   headers?: Record<string, string>;
   /** Mirror the per-request cache breakdown to stderr. Defaults to FLAVOR_DEBUG_USAGE=1. File logging to usage.jsonl is always on. */
@@ -48,6 +54,13 @@ export const CLAUDE_CLIENT_HEADERS: Record<string, string> = {
 };
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
+/**
+ * Extended-thinking budget requested from Anthropic-compatible providers.
+ * The visible reasoning text is surfaced in the UI as a typewriter line, so
+ * the feature is on by default; the adapter downgrades once automatically if
+ * an endpoint rejects the `thinking` parameter.
+ */
+const DEFAULT_THINKING_BUDGET = 8_192;
 
 type AnthropicUsage = Pick<
   Usage | MessageDeltaUsage,
@@ -63,7 +76,13 @@ interface PendingToolCall {
   json: string;
 }
 
+interface PendingThinking {
+  text: string;
+  signature?: string;
+}
+
 type AnthropicAssistantBlock =
+  | { type: "thinking"; thinking: string; signature?: string }
   | { type: "text"; text: string; cache_control?: { type: "ephemeral" } }
   | { type: "tool_use"; id: string; name: string; input: unknown; cache_control?: { type: "ephemeral" } };
 
@@ -157,9 +176,39 @@ function formatCacheUsage(model: string, snapshot: InputUsageSnapshot, shape?: R
   });
 }
 
+/**
+ * Remove thinking blocks from outgoing assistant turns. Used after a thinking
+ * downgrade: an endpoint that never accepted the `thinking` parameter also
+ * rejects thinking blocks replayed in message history.
+ */
+function stripThinkingBlocks(messages: MessageParam[]): void {
+  for (const message of messages) {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+    const blocks = message.content as Array<{ type?: unknown }>;
+    if (!blocks.some((block) => block?.type === "thinking")) continue;
+    message.content = blocks.filter((block) => block?.type !== "thinking") as typeof message.content;
+  }
+}
+
+/**
+ * True when an endpoint rejected the extended-thinking request parameter
+ * itself (as opposed to a payload-size or content error). Only a rejection of
+ * this specific kind justifies retrying without `thinking`.
+ */
+function isThinkingParamRejected(error: unknown): boolean {
+  const status = (error as { status?: unknown } | undefined)?.status;
+  if (status !== undefined && status !== 400) return false;
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /\bthinking\b/iu.test(message)
+    && /(budget_tokens|expected|not supported|unsupported|unknown|invalid|extra inputs|unrecognized)/iu.test(message);
+}
+
 export class AnthropicModelAdapter implements ModelAdapter {
   private readonly client: AnthropicClient;
   private readonly maxOutputTokens: number;
+  private readonly thinkingBudget: number;
+  /** Set once an endpoint rejects the `thinking` parameter; later requests stop sending it. */
+  #thinkingRejected = false;
   private readonly debugUsage: boolean;
 
   constructor(options: AnthropicModelAdapterOptions) {
@@ -168,6 +217,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
       throw new Error("maxOutputTokens must be a positive integer");
     }
     this.maxOutputTokens = maxOutputTokens;
+    this.thinkingBudget = options.thinkingBudget ?? DEFAULT_THINKING_BUDGET;
     this.debugUsage = options.debugUsage ?? isEnvTruthy(process.env.FLAVOR_DEBUG_USAGE);
     this.client =
       options.client ??
@@ -176,6 +226,17 @@ export class AnthropicModelAdapter implements ModelAdapter {
         ...(options.baseURL === undefined ? {} : { baseURL: options.baseURL }),
         ...(options.headers === undefined ? {} : { defaultHeaders: options.headers }),
       });
+  }
+
+  /**
+   * Extended-thinking request parameter when enabled, otherwise undefined.
+   * Anthropic requires the budget to fit inside max_tokens with a 1024 floor.
+   */
+  #thinkingParam(): { type: "enabled"; budget_tokens: number } | undefined {
+    if (this.#thinkingRejected || this.thinkingBudget <= 0) return undefined;
+    const budget = Math.min(this.thinkingBudget, this.maxOutputTokens - 1);
+    if (budget < 1_024) return undefined;
+    return { type: "enabled" as const, budget_tokens: budget };
   }
 
   #logUsage(request: ModelRequest, snapshot: InputUsageSnapshot, shape?: RequestShape): void {
@@ -243,7 +304,18 @@ export class AnthropicModelAdapter implements ModelAdapter {
           }
           messages.push({ role: "user" as const, content: results });
         } else if (message.role === "assistant" && message.toolCalls?.length) {
+          // Anthropic requires provider-signed thinking blocks to be echoed
+          // back verbatim when the same turn also contains tool_use blocks.
+          // Unsigned blocks (from thinking-less gateways) are never required.
+          const echoThinking = this.#thinkingRejected
+            ? []
+            : (message.thinkingBlocks ?? []).filter((block) => block.signature !== undefined);
           const content: AnthropicAssistantBlock[] = [
+            ...echoThinking.map((block) => ({
+              type: "thinking" as const,
+              thinking: block.text,
+              signature: block.signature!,
+            })),
             ...(modelContentText(message.content)
               ? [{ type: "text" as const, text: modelContentText(message.content) }]
               : []),
@@ -255,10 +327,12 @@ export class AnthropicModelAdapter implements ModelAdapter {
             })),
           ];
           if (message.cacheBreakpoint && content.length > 0) {
+            // The trailing block is always text or tool_use (toolCalls is
+            // non-empty here), never a thinking block, so the marker is legal.
             content[content.length - 1] = {
               ...content[content.length - 1]!,
               cache_control: { type: "ephemeral" as const },
-            };
+            } as AnthropicAssistantBlock;
           }
           messages.push({
             role: "assistant",
@@ -326,19 +400,78 @@ export class AnthropicModelAdapter implements ModelAdapter {
         stream: true,
         messages,
         ...(system ? { system } : {}),
+        ...(() => {
+          const thinking = this.#thinkingParam();
+          return thinking === undefined ? {} : { thinking };
+        })(),
         tools: [...request.tools].sort((a, b) => a.name.localeCompare(b.name)).map((tool) => ({
           name: tool.name,
           description: tool.description,
           input_schema: { ...tool.inputSchema, type: "object" as const },
         })),
       };
-      const stream = await this.client.messages.create(body, { signal: request.signal });
+      let stream: Awaited<ReturnType<AnthropicClient["messages"]["create"]>>;
+      try {
+        stream = await this.client.messages.create(body, { signal: request.signal });
+      } catch (error) {
+        // Gateways that predate extended thinking reject the `thinking`
+        // parameter outright. Drop it once and retry so a mis-supported
+        // endpoint degrades to non-thinking streaming instead of failing.
+        if (this.thinkingBudget > 0 && !this.#thinkingRejected && isThinkingParamRejected(error)) {
+          this.#thinkingRejected = true;
+          delete body.thinking;
+          stripThinkingBlocks(body.messages);
+          stream = await this.client.messages.create(body, { signal: request.signal });
+        } else {
+          throw error;
+        }
+      }
 
+      const thinkingBuffers = new Map<number, PendingThinking>();
       for await (const event of stream) {
         if (event.type === "message_start") {
           hasUsage = event.message?.usage !== undefined;
           inputTokens = updateInputUsage(inputUsage, event.message?.usage);
           outputTokens = event.message?.usage?.output_tokens ?? outputTokens;
+        } else if (
+          event.type === "content_block_start" &&
+          event.content_block?.type === "thinking" &&
+          event.index !== undefined
+        ) {
+          thinkingBuffers.set(event.index, { text: "" });
+        } else if (
+          event.type === "content_block_delta" &&
+          event.delta?.type === "thinking_delta"
+        ) {
+          if (event.index !== undefined && event.delta.thinking) {
+            const pending = thinkingBuffers.get(event.index);
+            if (pending) pending.text += event.delta.thinking;
+          }
+          if (event.delta.thinking) yield { type: "thinking", text: event.delta.thinking };
+        } else if (
+          event.type === "content_block_delta" &&
+          event.delta?.type === "signature_delta" &&
+          event.index !== undefined
+        ) {
+          const pending = thinkingBuffers.get(event.index);
+          if (pending) pending.signature = (pending.signature ?? "") + (event.delta.signature ?? "");
+        } else if (
+          event.type === "content_block_stop" &&
+          event.index !== undefined &&
+          thinkingBuffers.has(event.index)
+        ) {
+          // Seal the block. The signature (when present) is what lets the agent
+          // loop echo this thinking block back on the next tool-use request —
+          // Anthropic rejects a thinking+tool_use assistant turn without it.
+          const pending = thinkingBuffers.get(event.index)!;
+          if (pending.text.length > 0 || pending.signature !== undefined) {
+            yield {
+              type: "thinking-block",
+              text: pending.text,
+              ...(pending.signature === undefined ? {} : { signature: pending.signature }),
+            };
+          }
+          thinkingBuffers.delete(event.index);
         } else if (
           event.type === "content_block_start" &&
           event.content_block?.type === "tool_use" &&

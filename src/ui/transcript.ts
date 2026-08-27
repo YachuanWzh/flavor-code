@@ -1,6 +1,7 @@
 import type { SessionOutput } from "./session.js";
 import type { TaskSnapshot } from "../agent/types.js";
 import type { ToolPresentation } from "../tools/types.js";
+import { appendThinkingText } from "./thinking-line.js";
 import {
   modelContentText,
   modelContentTranscriptText,
@@ -55,6 +56,8 @@ export type TranscriptBlock =
     hint?: string;
     task?: { subject: string; activeForm: string; role: "main" | "subagent" };
     activity?: "model";
+    /** Accumulated streamed thinking text while a model activity is running. */
+    thinkingText?: string;
     presentation?: ToolPresentation;
     tool?: TranscriptToolDetails;
     details?: string;
@@ -177,6 +180,9 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
   }
   if (event.type === "text") {
     return { ...state, active: addText(withoutModelActivity(state.active), event.text) };
+  }
+  if (event.type === "thinking") {
+    return { ...state, active: attachThinking(state.active, event.text) };
   }
   if (event.type === "tool-start") return upsertStatus({ ...state, active: withoutModelActivity(state.active) }, {
     kind: "status", id: `tool:${event.id}`, state: "running", text: `${event.name}${event.label ? ` ${event.label}` : ""}`,
@@ -538,8 +544,26 @@ function finishActive(state: TranscriptState): TranscriptState {
   };
 }
 
-function withoutModelActivity(turn: TranscriptTurn, id?: string): TranscriptTurn {
-  const blocks = turn.blocks.filter((block) => block.kind !== "status"
+/**
+ * Attach streamed thinking text to the running model activity block. Falls
+ * back to the last running model status block so a delayed activity card does
+ * not orphan the text; if neither exists, thinking is dropped (display-only).
+ */
+function attachThinking(turn: TranscriptTurn, text: string): TranscriptTurn {
+  const blocks = [...turn.blocks];
+  const index = blocks.findIndex((block): block is Extract<TranscriptBlock, { kind: "status" }> =>
+    block.kind === "status" && block.activity === "model" && block.state === "running");
+  if (index < 0) return turn;
+  const block = blocks[index];
+  if (block === undefined || block.kind !== "status") return turn;
+  blocks[index] = {
+    ...block,
+    thinkingText: appendThinkingText(block.thinkingText, text),
+  };
+  return { ...turn, blocks };
+}
+
+function withoutModelActivity(turn: TranscriptTurn, id?: string): TranscriptTurn {  const blocks = turn.blocks.filter((block) => block.kind !== "status"
     || block.activity !== "model"
     || (id !== undefined && block.id !== id));
   if (blocks.length === turn.blocks.length) return turn;

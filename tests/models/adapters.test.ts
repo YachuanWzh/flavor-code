@@ -168,6 +168,40 @@ describe("OpenAIModelAdapter", () => {
     );
   });
 
+  it("requests reasoning effort and forwards reasoning summary deltas", async () => {
+    const stream = vi.fn(() =>
+      events(
+        { type: "response.reasoning_summary_text.delta", item_id: "rs_1", output_index: 0, summary_index: 0, delta: "Analyzing " },
+        { type: "response.reasoning_summary_text.delta", item_id: "rs_1", output_index: 0, summary_index: 0, delta: "the request" },
+        { type: "response.output_text.delta", delta: "Hello" },
+        { type: "response.completed", response: { usage: { input_tokens: 4, output_tokens: 3 } } },
+      ),
+    );
+    const client = { responses: { stream } };
+
+    const output = await collect(
+      new OpenAIModelAdapter({ client: asOpenAIClient(client), thinkingEffort: "medium" }).stream(request),
+    );
+
+    expect(output.filter((event) => event.type === "thinking")).toEqual([
+      { type: "thinking", text: "Analyzing " },
+      { type: "thinking", text: "the request" },
+    ]);
+    expect(stream).toHaveBeenCalledWith(
+      expect.objectContaining({ reasoning: { effort: "medium" } }),
+      { signal },
+    );
+  });
+
+  it("omits the reasoning parameter when no effort is configured", async () => {
+    const stream = vi.fn((_body?: unknown, _options?: unknown) => events());
+    const client = { responses: { stream } };
+
+    await collect(new OpenAIModelAdapter({ client: asOpenAIClient(client) }).stream(request));
+
+    expect(stream.mock.calls[0]?.[0]).not.toHaveProperty("reasoning");
+  });
+
   it("emits a tool call from a completed output item when the arguments-done event is omitted", async () => {
     const client = {
       responses: {
@@ -564,6 +598,98 @@ describe("OpenAIModelAdapter", () => {
 });
 
 describe("AnthropicModelAdapter", () => {
+  it("requests extended thinking and forwards thinking deltas plus sealed blocks", async () => {
+    const create = vi.fn(() => events(
+      { type: "content_block_start", index: 0, content_block: { type: "thinking" } },
+      { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "Let me " } },
+      { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "think." } },
+      { type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "sig_abc" } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_stop" },
+    ));
+    const client = { messages: { create } };
+
+    const output = await collect(
+      new AnthropicModelAdapter({ client: asAnthropicClient(client), thinkingBudget: 4_096 }).stream(request),
+    );
+
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({ thinking: { type: "enabled", budget_tokens: 4_096 } }),
+      { signal },
+    );
+    expect(output).toEqual([
+      { type: "thinking", text: "Let me " },
+      { type: "thinking", text: "think." },
+      { type: "thinking-block", text: "Let me think.", signature: "sig_abc" },
+      { type: "usage", inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
+      { type: "done", usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 } },
+    ]);
+  });
+
+  it("echoes signed thinking blocks in assistant history before tool results", async () => {
+    const create = vi.fn(() => events());
+    const client = { messages: { create } };
+    const mappingRequest: ModelRequest = {
+      ...request,
+      messages: [
+        {
+          role: "assistant", content: "checking",
+          thinkingBlocks: [{ text: "reasoned", signature: "sig_1" }, { text: "unsigned" }],
+          toolCalls: [{ id: "t1", name: "weather", input: { city: "Paris" } }],
+        },
+        { role: "tool", toolCallId: "t1", content: "sunny" },
+      ],
+    };
+
+    await collect(new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream(mappingRequest));
+
+    // Signed blocks must be echoed verbatim; unsigned gateway blocks are dropped.
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "reasoned", signature: "sig_1" },
+            { type: "text", text: "checking" },
+            { type: "tool_use", id: "t1", name: "weather", input: { city: "Paris" } },
+          ],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "t1", content: "sunny", cache_control: { type: "ephemeral" } }],
+        },
+      ],
+    }), { signal });
+  });
+
+  it("omits the thinking parameter when the budget is zero", async () => {
+    const create = vi.fn((_body?: unknown, _options?: unknown) => events());
+    const client = { messages: { create } };
+
+    await collect(new AnthropicModelAdapter({ client: asAnthropicClient(client), thinkingBudget: 0 }).stream(request));
+
+    expect(create.mock.calls[0]?.[0]).not.toHaveProperty("thinking");
+  });
+
+  it("drops the thinking parameter and retries once when the endpoint rejects it", async () => {
+    const rejection = Object.assign(new Error("400 {\"error\":{\"message\":\"Field \\\"thinking\\\": budget_tokens not supported\"}}"), { status: 400 });
+    const create = vi
+      .fn((_body?: unknown, _options?: unknown) => Promise.resolve(events({ type: "message_stop" })))
+      .mockRejectedValueOnce(rejection)
+      .mockResolvedValueOnce(events({ type: "message_stop" }));
+    const client = { messages: { create } };
+
+    await collect(new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream(request));
+
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(create.mock.calls[1]?.[0]).not.toHaveProperty("thinking");
+
+    // A fresh adapter resets the downgrade state and tries thinking again.
+    await collect(new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream(request));
+    const latest = create.mock.calls.at(-1)?.[0];
+    expect(latest).toHaveProperty("thinking");
+  });
+
   it("maps local image blocks to Anthropic base64 image sources", async () => {
     const path = await imageFile();
     const stream = vi.fn(() => events());

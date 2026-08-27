@@ -3,7 +3,7 @@ import type { HallucinationGuard } from "../hallucination/guard.js";
 import type { HookBus } from "../hooks/bus.js";
 import type { ModelRegistry } from "../models/registry.js";
 import { withStructuredOutput } from "../models/structured.js";
-import { normalizeProviderError, type ModelMessage, type ModelTool, type ProviderError } from "../models/types.js";
+import { normalizeProviderError, type ModelMessage, type ModelThinkingBlock, type ModelTool, type ProviderError } from "../models/types.js";
 import type { ToolRuntime } from "../tools/runtime.js";
 import type { ToolResult } from "../tools/types.js";
 import type { AgentError, AgentEvent, AgentRunRequest, TurnDeliverable } from "./types.js";
@@ -182,6 +182,8 @@ export class AgentLoop {
 
       let assistantText = "";
       const collectedToolCalls: CollectedToolCall[] = [];
+      /** Sealed provider thinking blocks of the current turn, echoed back on the next request. */
+      const collectedThinking: ModelThinkingBlock[] = [];
       let completed = false;
       let reactiveRetried = false;
       let attempt = 1;
@@ -222,6 +224,7 @@ export class AgentLoop {
 
         assistantText = "";
         collectedToolCalls.length = 0;
+        collectedThinking.length = 0;
         completed = false;
         let terminalError: AgentError | undefined;
         let providerError = false;
@@ -243,6 +246,10 @@ export class AgentLoop {
               assistantText += event.text;
               accumulatedText += event.text;
               yield event;
+            } else if (event.type === "thinking") {
+              yield event;
+            } else if (event.type === "thinking-block") {
+              collectedThinking.push({ text: event.text, ...(event.signature === undefined ? {} : { signature: event.signature }) });
             } else if (event.type === "tool-call") {
               collectedToolCalls.push({ kind: "valid", id: event.id, name: event.name, input: event.input });
             } else if (event.type === "invalid-tool-call") {
@@ -621,6 +628,7 @@ export class AgentLoop {
         role: "assistant",
         content: assistantText,
         toolCalls: toolCalls.map(({ id, name, input }) => ({ id, name, input })),
+        ...(collectedThinking.length === 0 ? {} : { thinkingBlocks: collectedThinking.map((block) => ({ ...block })) }),
       };
       this.#options.context.appendMany([assistantMessage, ...stagedMessages]);
       for (const { call, result } of stagedResults) {

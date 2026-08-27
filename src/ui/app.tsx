@@ -311,16 +311,36 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
   const closing = useRef(false);
   const clipboardBusy = useRef(false);
   const textBuf = useRef<{ pending: string; timer: ReturnType<typeof setTimeout> | null }>({ pending: "", timer: null });
+  // Thinking deltas arrive per token; batch them at the animation cadence so
+  // each reducer pass covers everything streamed since the last flush.
+  const thinkingBuf = useRef<{ pending: string; timer: ReturnType<typeof setTimeout> | null }>({ pending: "", timer: null });
 
   useTerminalTitle("Flavor Code");
 
   const flushText = (): void => {
+    // Thinking must be attached to the model activity before text can remove it.
+    flushThinking();
     const t = textBuf.current;
     if (t.timer !== null) { clearTimeout(t.timer); t.timer = null; }
     if (t.pending.length > 0) {
       dispatch({ type: "session", event: { type: "text", text: t.pending } });
       t.pending = "";
     }
+  };
+
+  const flushThinking = (): void => {
+    const t = thinkingBuf.current;
+    if (t.timer !== null) { clearTimeout(t.timer); t.timer = null; }
+    if (t.pending.length > 0) {
+      dispatch({ type: "session", event: { type: "thinking", text: t.pending } });
+      t.pending = "";
+    }
+  };
+
+  /** Ordered flush: thinking must reach the activity card before text removes it. */
+  const flushStreamBuffers = (): void => {
+    flushThinking();
+    flushText();
   };
 
   const shutdown = async (active: ProductionRuntime | undefined) => {
@@ -350,7 +370,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
         return;
       }
       if (event.type === "clear") {
-        flushText();
+        flushStreamBuffers();
         dispatch({ type: "clear" });
         return;
       }
@@ -360,7 +380,13 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
         if (t.timer === null) t.timer = setTimeout(flushText, FLUSH_MS);
         return;
       }
-      flushText();
+      if (event.type === "thinking") {
+        const t = thinkingBuf.current;
+        t.pending += event.text;
+        if (t.timer === null) t.timer = setTimeout(flushThinking, FLUSH_MS);
+        return;
+      }
+      flushStreamBuffers();
       dispatch({ type: "session", event });
     };
     void createProductionRuntime(appRuntimeOptions({
