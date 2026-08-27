@@ -1267,6 +1267,7 @@ describe("normalizeProviderError", () => {
   it.each([
     [{ status: 401, message: "bad key" }, "authentication"],
     [{ status: 429, message: "slow" }, "rate_limit"],
+    [{ status: 502, message: "Upstream provider unreachable" }, "network"],
     [{ status: 404, message: "model not found" }, "model_not_found"],
     [{ code: "context_length_exceeded", message: "too long" }, "context_overflow"],
     [{ name: "AbortError", message: "aborted" }, "cancelled"],

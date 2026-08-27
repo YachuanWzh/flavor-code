@@ -2203,7 +2203,12 @@ async function* runMain(
       ...(additionalContext === undefined ? {} : { additionalContext }),
       ...(getSteeringMessages === undefined ? {} : { getSteeringMessages }),
     })) {
-      if (event.type === "error" && /adapter|provider|api.?key|model/i.test(event.error.message)) {
+      if (
+        event.type === "error"
+        && event.error.code !== "network"
+        && event.error.code !== "rate_limit"
+        && /adapter|provider|api.?key|model/i.test(event.error.message)
+      ) {
         yield { ...event, error: { ...event.error,
           message: `${event.error.message}. Configure providers and agents in .flavor/flavor.json or set OPENAI_API_KEY/ANTHROPIC_API_KEY.`,
         } };

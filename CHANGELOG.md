@@ -2,7 +2,19 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.3.9 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.3.10 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.3.10] - 2026-08-27
+
+### 新增
+- Glob/Grep 搜索工具的 `includeIgnored` 参数支持字符串布尔值标准化：`"true"`/`"false"`（忽略大小写与首尾空白）会在工具边界被转换为布尔值，与 Shell/Terminal 的字符串布尔值输入约定保持一致；无法识别的值仍按参数校验失败处理
+
+### 改进
+- 模型错误分类将 HTTP 5xx 状态码统一归类为 `network` 错误，不再落入未分类或误判为其他错误类型；上游服务不可用（如 502/503）时可按网络错误路径处理与重试
+- 配置提示逻辑改进：`network`（上游不可达）与 `rate_limit`（限流）错误不再附加 “请在 .flavor/flavor.json 或环境变量中配置 provider/API key” 的提示，避免把非配置类故障误导为配置问题；仅 adapter、provider、api key、model 相关错误保留该提示
+
+### 测试
+- 新增 5xx 状态码归类为 `network` 的回归用例；更新运行时测试验证 `network` 错误不再附加配置提示；新增 Glob/Grep `includeIgnored` 布尔字符串标准化边界测试
 
 ## [1.3.9] - 2026-08-27
 
@@ -472,6 +484,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.3.10 | 2026-08-27 | HTTP 5xx 错误归类为 network、配置提示不再附加到 network/rate_limit 错误、Glob/Grep includeIgnored 支持字符串布尔值标准化 |
 | 1.3.9 | 2026-08-27 | Glob/Grep 新增 includeIgnored 参数可显式包含被忽略文件，.git 元数据始终排除，ripgrep 与 Node 后端行为一致 |
 | 1.3.8 | 2026-08-27 | 自动长期记忆提取后台化（不再阻塞后续请求）、记忆收尾按任务隔离、失败可 /finish 手动重试 |
 | 1.3.7 | 2026-08-26 | Flavor Island 本地控制通道（token 认证 IPC：abort/steer/follow_up/focus）、模型调用耗时与 token 用量上报、Stop hook 摘要与交付物 |

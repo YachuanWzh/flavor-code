@@ -151,6 +151,8 @@ export function normalizeProviderError(error: unknown): ProviderError {
     code = "context_overflow";
   } else if (status === 404 || /model.*not.?found|not.?found.*model/.test(searchable)) {
     code = "model_not_found";
+  } else if (status !== undefined && status >= 500 && status <= 599) {
+    code = "network";
   } else if (
     status === undefined &&
     /econn|enet|socket|network|fetch failed|connection|timeout/.test(searchable)

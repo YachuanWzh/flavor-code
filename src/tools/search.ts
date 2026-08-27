@@ -36,12 +36,20 @@ const FILE_TYPE_EXTENSIONS: Record<FileType, readonly string[]> = {
   python: [".py", ".pyi"], typescript: [".ts", ".tsx", ".mts", ".cts"],
 };
 
+const BooleanInput = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true") return true;
+  if (normalized === "false") return false;
+  return value;
+}, z.boolean());
+
 const GlobInput = z.object({
   pattern: z.string().min(1),
   path: z.string().min(1)
     .describe('Workspace-relative search directory. Use JSON null, not the string "null", for the workspace root.')
     .nullable().optional(),
-  includeIgnored: z.boolean()
+  includeIgnored: BooleanInput
     .describe("Include files excluded by .gitignore or .ignore. Git metadata remains excluded.")
     .nullable().optional(),
   limit: z.coerce.number().int().positive().max(100_000).nullable().optional(),
@@ -54,7 +62,7 @@ const GrepInput = z.object({
     .nullable().optional(),
   glob: z.string().min(1).nullable().optional(),
   fileType: z.enum(FILE_TYPES).nullable().optional(),
-  includeIgnored: z.boolean()
+  includeIgnored: BooleanInput
     .describe("Include files excluded by .gitignore or .ignore. Git metadata remains excluded.")
     .nullable().optional(),
   context: z.coerce.number().int().nonnegative().max(100).nullable().optional(),

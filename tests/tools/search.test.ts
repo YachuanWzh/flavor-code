@@ -72,6 +72,14 @@ describe("search tools", () => {
     }
   });
 
+  it("normalizes boolean strings for includeIgnored at the tool boundary", () => {
+    for (const tool of [createGlobTool(fixture()), createGrepTool(fixture())]) {
+      expect(tool.inputSchema.parse({ pattern: "needle", includeIgnored: "true" }).includeIgnored).toBe(true);
+      expect(tool.inputSchema.parse({ pattern: "needle", includeIgnored: " FALSE " }).includeIgnored).toBe(false);
+      expect(tool.inputSchema.safeParse({ pattern: "needle", includeIgnored: "yes" }).success).toBe(false);
+    }
+  });
+
   it("keeps regex, glob, context, and limits in parity", async () => {
     const root = fixture();
     const input = { pattern: "needle\\s+(one|two)", glob: "**/*.ts", context: 1, limit: 1 };

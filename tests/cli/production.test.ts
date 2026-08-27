@@ -1207,7 +1207,7 @@ describe("production runtime", () => {
         globalThis.__flavorRetryModels ??= [];
         globalThis.__flavorRetryModels.push(request.model);
         yield { type: "error", error: {
-          code: "network", message: "terminated-" + globalThis.__flavorRetryModels.length,
+          code: "network", message: "Upstream provider unreachable-" + globalThis.__flavorRetryModels.length,
         } };
       }});
     }`);
@@ -1229,10 +1229,10 @@ describe("production runtime", () => {
       .toEqual(["main", "main", "main", "cheap", "cheap"]);
     expect(outputs.filter((event): event is { type: "error"; error: { message: string } } =>
       typeof event === "object" && event !== null && (event as { type?: string }).type === "error"))
-      .toEqual([{ type: "error", error: { code: "network", message: "terminated-5" } }]);
+      .toEqual([{ type: "error", error: { code: "network", message: "Upstream provider unreachable-5" } }]);
     expect(JSON.stringify(outputs.filter((event) =>
       typeof event === "object" && event !== null && (event as { type?: string }).type === "model-retry")))
-      .not.toContain("terminated-");
+      .not.toContain("Upstream provider unreachable-");
 
     const auditEntries = (await readFile(join(workspace, ".flavor", "audit.jsonl"), "utf8"))
       .trim().split("\n").map((line) => JSON.parse(line));
