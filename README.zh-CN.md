@@ -160,6 +160,7 @@ OAuth PKCE 的运行时行为与配置约定见 [PKCE 规范](./docs/specs/pkce-
 | `/goal <objective>` | 运行规划、执行、对抗审查流程 |
 | `/commit [hint]` | 为暂存改动生成 Conventional Commits 提交信息，确认后提交 |
 | `/review [focus]` | 提交前审查未提交改动的缺陷与风险 |
+| `/explain <符号 \| file.ts#符号> [关注点]` | 面向新人讲解一个符号：结合代码图、真实源码与 Git 历史，歧义时弹卡片选择符号 |
 | `/evolve <signals\|suggest\|improve ...>` | 自进化循环：查看重复工具失败、脚手架修复插件、管理运行趋势与 guardrail 规则、验证并热重载 |
 | `/pals`、`/chat`、`/co-work` | 发现并协作其他本机 CLI 实例 |
 | `/audit` | 查看工具失败审计 |

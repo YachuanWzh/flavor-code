@@ -160,6 +160,7 @@ Common commands:
 | `/goal <objective>` | Run the plan, execute, adversarial-review workflow |
 | `/commit [hint]` | Draft a Conventional-Commits message for staged changes and commit after confirmation |
 | `/review [focus]` | Review uncommitted changes for bugs and risks before committing |
+| `/explain <symbol \| file.ts#symbol> [focus]` | Explain a symbol for newcomers using the code graph, real source and git history (interactive picker on ambiguity) |
 | `/evolve <signals\|suggest\|improve ...>` | Self-improvement loop: review repeated tool failures, scaffold fix plugins, manage run trends and learned guardrail rules, verify and hot-reload |
 | `/pals`, `/chat`, `/co-work` | Discover and collaborate with other local CLI instances |
 | `/audit` | View tool failure audits |
