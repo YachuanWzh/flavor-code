@@ -71,6 +71,7 @@ import { createLspTools } from "./tools/lsp.js";
 import {
   changeSummary,
   commit as gitCommitChange,
+  fileHistory,
   gitMarker,
   isGitRepository,
   stageAll,
@@ -78,6 +79,8 @@ import {
   uncommittedDiff,
 } from "./git/service.js";
 import { formatReviewReport, reviewDiff, suggestCommitMessage } from "./git/insights.js";
+import { runExplain } from "./explain/service.js";
+import { DesktopAstGraphService } from "./desktop/astgraph-service.js";
 import { createGitHistoryTool } from "./git/tools.js";
 import { createAskUserQuestionTool, hookAnswersFromUpdatedInput, QuestionBridge, type AskUserQuestionHandler } from "./tools/ask-user-question.js";
 import { createTaskOutputTool } from "./tools/task-output.js";
@@ -1647,6 +1650,21 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       modelId: () => harness.subagentModelId,
       notify: (message) => emitOutput({ type: "notice", message }),
     }, focus, signal),
+    explain: (query, focus, signal) => runExplain({
+      graph: new DesktopAstGraphService(workspace),
+      readFile: async (path) => {
+        const root = resolve(workspace);
+        const abs = resolve(root, path);
+        if (abs !== root && !abs.startsWith(root + sep)) throw new Error(`path outside workspace: ${path}`);
+        return readFile(abs, "utf8");
+      },
+      history: async (path, limit) => fileHistory(workspace, path, limit),
+      questions,
+      registry,
+      modelId: () => harness.subagentModelId,
+      language,
+      notify: (message) => emitOutput({ type: "notice", message }),
+    }, query, focus, signal),
     audit: async (toolFilter?: string) => {
       try {
         const raw = await readFile(auditLogger.path, "utf8");

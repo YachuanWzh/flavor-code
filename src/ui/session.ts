@@ -113,6 +113,7 @@ export interface SessionServices {
   evolve(args: readonly string[]): string | Promise<string>;
   gitCommit?(hint: string | undefined, signal: AbortSignal): Promise<string>;
   gitReview?(focus: string | undefined, signal: AbortSignal): Promise<string>;
+  explain?(query: string | undefined, focus: string | undefined, signal: AbortSignal): Promise<string>;
   usage(): string | Promise<string>;
   cancelActiveTask(): void | Promise<void>;
   clearContext(): void | Promise<void>;
@@ -570,6 +571,8 @@ export class FlavorSession {
       this.#notice(await required(this.#services.gitCommit, "commit")(command.hint, signal));
     } else if (command.name === "review") {
       this.#notice(await required(this.#services.gitReview, "review")(command.focus, signal));
+    } else if (command.name === "explain") {
+      this.#notice(await required(this.#services.explain, "explain")(command.query, command.focus, signal));
     } else if (command.name === "mcp") {
       this.#notice(await this.#services.mcp(command, signal));
     } else if (command.name === "pals") {

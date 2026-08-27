@@ -204,6 +204,9 @@ export async function runExplain(
   if (target.kind === "not-found") {
     return `No matching symbol for "${target.query}" — check the name, or refresh the graph with /ast sync.`;
   }
+  if (target.kind !== "resolved") {
+    return `"${query}" is ambiguous. Pick one node id explicitly: /explain ${target.candidates[0]?.id ?? "path/file.ts#name"}`;
+  }
   const anchor = target.node;
   signal.throwIfAborted();
   deps.notify?.(`Explaining ${anchor.id} …`);
