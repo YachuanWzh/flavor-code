@@ -2,7 +2,7 @@ export const MVP_COMMANDS = [
   "model", "init", "config", "login", "logout", "permissions", "skills", "plugins", "hooks",
   "tasks", "finish", "compact", "clear", "help", "exit", "audit", "usage",
   "loop", "goal", "evolve", "mcp",
-  "commit", "review",
+  "commit", "review", "explain",
   "ide",
   "memory", "remember", "forget", "forget-cold",
   "checkpoint", "tree", "rewind", "unrevert", "fork",
@@ -33,6 +33,7 @@ export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string>
   evolve: "Self-improvement loop: capture failures, suggest fixes, verify with tests",
   commit: "Generate a commit message for staged changes and commit after confirmation",
   review: "Review uncommitted changes for bugs and risks before committing",
+  explain: "Explain a symbol for newcomers (AST graph + source + git history)",
   mcp: "Manage MCP servers",
   ide: "Show the connected IDE and editor context",
   memory: "Show long-term project memory",
@@ -77,6 +78,7 @@ export type SlashCommand =
   | { name: "goal"; goal: string }
   | { name: "commit"; hint?: string }
   | { name: "review"; focus?: string }
+  | { name: "explain"; query?: string; focus?: string }
   | { name: "remember"; type: MemoryType; text: string }
   | { name: "forget"; query: string }
   | { name: "checkpoint"; label?: string }
@@ -85,7 +87,7 @@ export type SlashCommand =
   | PalsSlashCommand
   | { name: "chat"; target: string; goal: string }
   | CoWorkSlashCommand
-  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop" | "goal" | "evolve" | "commit" | "review" | "mcp" | "remember" | "forget" | "checkpoint" | "rewind" | "fork" | "pals" | "chat" | "co-work" | "tool"> }
+  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop" | "goal" | "evolve" | "commit" | "review" | "explain" | "mcp" | "remember" | "forget" | "checkpoint" | "rewind" | "fork" | "pals" | "chat" | "co-work" | "tool"> }
   | { name: "audit"; toolFilter?: string | undefined }
   | { name: "evolve"; args: string[] }
   | { name: "unknown"; input: string; suggestions: string[] }
@@ -157,6 +159,12 @@ export function parseSlashCommand(
   if (name === "review") {
     const focus = args.join(" ").trim();
     return focus.length === 0 ? { name } : { name, focus };
+  }
+  if (name === "explain") {
+    const [query, ...focusParts] = args;
+    if (query === undefined) return { name };
+    const focus = focusParts.join(" ").trim();
+    return focus.length === 0 ? { name, query } : { name, query, focus };
   }
   if (name === "loop") {
     const goal = args.join(" ").trim();

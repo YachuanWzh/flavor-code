@@ -40,6 +40,9 @@ describe("parseSlashCommand", () => {
     ["/commit fix the parser", { name: "commit", hint: "fix the parser" }],
     ["/review", { name: "review" }],
     ["/review error handling", { name: "review", focus: "error handling" }],
+    ["/explain", { name: "explain" }],
+    ["/explain cancelOrder", { name: "explain", query: "cancelOrder" }],
+    ["/explain src/order.ts#cancelOrder 错误处理", { name: "explain", query: "src/order.ts#cancelOrder", focus: "错误处理" }],
     ["/help", { name: "help" }], ["/exit", { name: "exit" }],
   ])("parses %s", (input, expected) => expect(parseSlashCommand(input)).toEqual(expected));
 
