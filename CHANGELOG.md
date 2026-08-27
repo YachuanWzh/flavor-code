@@ -2,7 +2,17 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.3.8 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.3.9 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.3.9] - 2026-08-27
+
+### 新增
+- Glob 与 Grep 搜索工具新增 `includeIgnored` 参数，可显式包含被 `.gitignore`/`.ignore` 排除的文件（如依赖目录、生成输出），默认行为不变
+- 开启 `includeIgnored` 时 `.git` 元数据目录仍然始终排除，不会把仓库内部结构暴露给搜索工具；ripgrep 与 Node 两种后端行为保持一致
+- 系统提示中的 Glob/Grep 工具规则补充 `includeIgnored` 使用说明，引导仅在用户明确要求时检查被忽略文件
+
+### 测试
+- 新增回归测试：覆盖 `includeIgnored` 下 ripgrep 与 Node 后端结果一致性，以及 `.git` 路径在两种后端下均返回空结果
 
 ## [1.3.8] - 2026-08-27
 
@@ -462,6 +472,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.3.9 | 2026-08-27 | Glob/Grep 新增 includeIgnored 参数可显式包含被忽略文件，.git 元数据始终排除，ripgrep 与 Node 后端行为一致 |
 | 1.3.8 | 2026-08-27 | 自动长期记忆提取后台化（不再阻塞后续请求）、记忆收尾按任务隔离、失败可 /finish 手动重试 |
 | 1.3.7 | 2026-08-26 | Flavor Island 本地控制通道（token 认证 IPC：abort/steer/follow_up/focus）、模型调用耗时与 token 用量上报、Stop hook 摘要与交付物 |
 | 1.3.6 | 2026-08-26 | Hook 协议 v2 运行时元数据、稳定 toolCallId、PermissionRequest toolCategory/allowAlways 审批能力声明 |

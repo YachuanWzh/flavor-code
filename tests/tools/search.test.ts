@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { createGlobTool, createGrepTool } from "../../src/tools/search.js";
+import { createGlobTool, createGrepTool, type GrepMatch, type SearchResult } from "../../src/tools/search.js";
 
 function fixture(): string {
   const root = mkdtempSync(join(tmpdir(), "flavor-search-"));
@@ -34,6 +34,42 @@ describe("search tools", () => {
 
     expect(node).toEqual(ripgrep);
     expect(node).toEqual({ matches: ["src/a.ts", "src/nested/b.ts"], truncated: false });
+  });
+
+  it("can explicitly include ignored files without exposing .git in either backend", async () => {
+    const root = fixture();
+    mkdirSync(join(root, ".git"), { recursive: true });
+    writeFileSync(join(root, ".git", "private.ts"), "needle git metadata\n");
+    const signal = new AbortController().signal;
+
+    const globInput = { pattern: "**/*.ts", includeIgnored: true };
+    const ripgrepGlob = await createGlobTool(root).execute(globInput, signal);
+    const nodeGlob = await createGlobTool(root, { forceNode: true }).execute(globInput, signal);
+    expect(nodeGlob).toEqual(ripgrepGlob);
+    expect(nodeGlob).toEqual({
+      matches: ["ignored/secret.ts", "src/a.ts", "src/nested/b.ts"],
+      truncated: false,
+    });
+
+    const grepInput = { pattern: "needle", includeIgnored: true };
+    const ripgrepGrep = await createGrepTool(root).execute(grepInput, signal);
+    const nodeGrep = await createGrepTool(root, { forceNode: true }).execute(grepInput, signal) as SearchResult<GrepMatch>;
+    expect(nodeGrep).toEqual(ripgrepGrep);
+    expect(nodeGrep.matches.map((match) => match.path)).toEqual([
+      "debug.log",
+      "ignored/secret.ts",
+      "src/a.ts",
+      "src/nested/b.ts",
+    ]);
+
+    for (const options of [{}, { forceNode: true }]) {
+      await expect(createGlobTool(root, options).execute(
+        { pattern: "**/*", path: ".git", includeIgnored: true }, signal,
+      )).resolves.toEqual({ matches: [], truncated: false });
+      await expect(createGrepTool(root, options).execute(
+        { pattern: "needle", path: ".git", includeIgnored: true }, signal,
+      )).resolves.toEqual({ matches: [], truncated: false });
+    }
   });
 
   it("keeps regex, glob, context, and limits in parity", async () => {

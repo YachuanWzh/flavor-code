@@ -41,6 +41,9 @@ const GlobInput = z.object({
   path: z.string().min(1)
     .describe('Workspace-relative search directory. Use JSON null, not the string "null", for the workspace root.')
     .nullable().optional(),
+  includeIgnored: z.boolean()
+    .describe("Include files excluded by .gitignore or .ignore. Git metadata remains excluded.")
+    .nullable().optional(),
   limit: z.coerce.number().int().positive().max(100_000).nullable().optional(),
 });
 
@@ -51,6 +54,9 @@ const GrepInput = z.object({
     .nullable().optional(),
   glob: z.string().min(1).nullable().optional(),
   fileType: z.enum(FILE_TYPES).nullable().optional(),
+  includeIgnored: z.boolean()
+    .describe("Include files excluded by .gitignore or .ignore. Git metadata remains excluded.")
+    .nullable().optional(),
   context: z.coerce.number().int().nonnegative().max(100).nullable().optional(),
   limit: z.coerce.number().int().positive().max(100_000).nullable().optional(),
 });
@@ -119,23 +125,26 @@ export function createGlobTool(
     paths: (input) => [scope(root, searchPath(input.path))],
     summarize: (input) => {
       const path = searchPath(input.path);
-      return path ? `pattern: "${input.pattern}" in ${path}` : `pattern: "${input.pattern}"`;
+      const ignored = input.includeIgnored === true ? " (including ignored files)" : "";
+      return (path ? `pattern: "${input.pattern}" in ${path}` : `pattern: "${input.pattern}"`) + ignored;
     },
     execute: async (input, signal) => {
       const limit = input.limit ?? options.defaultLimit ?? DEFAULT_RESULT_LIMIT;
       const start = scope(root, searchPath(input.path));
+      if (isGitMetadataPath(root, start)) return { matches: [], truncated: false };
       const matcher = globRegex(input.pattern);
       const ignoreBudget = createIgnoreBudget(resources);
+      const includeIgnored = input.includeIgnored === true;
       let paths: string[];
       if (options.forceNode === true) {
-        paths = await nodeFiles(root, start, signal, (path) => matcher.test(path), limit + 1, resources, ignoreBudget);
+        paths = await nodeFiles(root, start, signal, (path) => matcher.test(path), limit + 1, resources, ignoreBudget, includeIgnored);
       } else {
         try {
-          paths = await rgFiles(root, start, input.pattern, signal, options.rgPath ?? bundledRgPath, options.rgArgsPrefix ?? [], limit + 1, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, resources, ignoreBudget);
+          paths = await rgFiles(root, start, input.pattern, signal, options.rgPath ?? bundledRgPath, options.rgArgsPrefix ?? [], limit + 1, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, resources, ignoreBudget, includeIgnored);
         } catch (error) {
           if (signal.aborted) throw signal.reason;
           if (!(error instanceof SearchSpawnError) || !error.fallbackSafe) throw error;
-          paths = await nodeFiles(root, start, signal, (path) => matcher.test(path), limit + 1, resources, createIgnoreBudget(resources));
+          paths = await nodeFiles(root, start, signal, (path) => matcher.test(path), limit + 1, resources, createIgnoreBudget(resources), includeIgnored);
         }
       }
       const matches = paths.filter((path) => matcher.test(path)).sort(comparePaths);
@@ -159,7 +168,8 @@ export function createGrepTool(
       const path = searchPath(input.path);
       const where = path ? ` in ${path}` : "";
       const kind = input.fileType ? ` [${input.fileType}]` : "";
-      return `pattern: /${input.pattern}/${kind}${where}`;
+      const ignored = input.includeIgnored === true ? " (including ignored files)" : "";
+      return `pattern: /${input.pattern}/${kind}${where}${ignored}`;
     },
     execute: async (input, signal) => {
       // Compile eagerly so both backends report invalid expressions consistently.
@@ -167,17 +177,19 @@ export function createGrepTool(
       const limit = input.limit ?? options.defaultLimit ?? DEFAULT_RESULT_LIMIT;
       const context = input.context ?? 0;
       const start = await resolveGrepPath(root, searchPath(input.path));
+      if (isGitMetadataPath(root, start)) return { matches: [], truncated: false };
       const ignoreBudget = createIgnoreBudget(resources);
+      const includeIgnored = input.includeIgnored === true;
       let matches: GrepMatch[];
       if (options.forceNode === true) {
-        matches = await nodeGrep(root, start, input.glob ?? undefined, input.fileType ?? undefined, expression, context, signal, limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, resources, ignoreBudget);
+        matches = await nodeGrep(root, start, input.glob ?? undefined, input.fileType ?? undefined, expression, context, signal, limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, resources, ignoreBudget, includeIgnored);
       } else {
         try {
           matches = await rgGrep(root, start, input, context, signal, options.rgPath ?? bundledRgPath, options.rgArgsPrefix ?? [], limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, resources, ignoreBudget);
         } catch (error) {
           if (signal.aborted) throw signal.reason;
           if (!(error instanceof SearchSpawnError) || !error.fallbackSafe) throw error;
-          matches = await nodeGrep(root, start, input.glob ?? undefined, input.fileType ?? undefined, expression, context, signal, limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, resources, createIgnoreBudget(resources));
+          matches = await nodeGrep(root, start, input.glob ?? undefined, input.fileType ?? undefined, expression, context, signal, limit + 1, options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES, options.maxSearchBytes ?? DEFAULT_MAX_SEARCH_BYTES, resources, createIgnoreBudget(resources), includeIgnored);
         }
       }
       matches.sort(compareGrepMatches);
@@ -187,11 +199,11 @@ export function createGrepTool(
 }
 
 async function rgFiles(
-  root: string, start: string, pattern: string, signal: AbortSignal, executable: string, argsPrefix: string[], limit: number, maxBytes: number, resources: SearchResources, ignoreBudget: IgnoreBudget,
+  root: string, start: string, pattern: string, signal: AbortSignal, executable: string, argsPrefix: string[], limit: number, maxBytes: number, resources: SearchResources, ignoreBudget: IgnoreBudget, includeIgnored: boolean,
 ): Promise<string[]> {
   const target = relative(root, start) || ".";
   const matcher = globRegex(pattern);
-  const ignoreLayers = await collectIgnoreLayers(root, start, signal, resources, ignoreBudget);
+  const ignoreLayers = includeIgnored ? [] : await collectIgnoreLayers(root, start, signal, resources, ignoreBudget);
   const paths: string[] = [];
   const parser = delimitedParser(0, (record) => {
     if (record.length === 0) return true;
@@ -200,7 +212,10 @@ async function rgFiles(
     retainTopK(paths, path, limit, comparePaths);
     return true;
   });
-  const output = await runStreaming(executable, [...argsPrefix, "--files", "--null", "--sort", "path", "--hidden", "--glob", "!.git", "--glob", pattern, "--", target], root, signal, maxBytes, parser);
+  const args = [...argsPrefix, "--files", "--null", "--sort", "path", "--hidden", "--glob", "!.git", "--glob", "!.git/**"];
+  if (includeIgnored) args.push("--no-ignore");
+  args.push("--glob", pattern, "--", target);
+  const output = await runStreaming(executable, args, root, signal, maxBytes, parser);
   if (!output.stoppedEarly && output.code !== 0 && output.code !== 1) throw new Error(output.stderr || `ripgrep exited with ${output.code}`);
   parser.finish();
   return paths;
@@ -226,12 +241,13 @@ async function rgGrep(
   if (input.fileType !== undefined && input.fileType !== null && typeExtensions === undefined) {
     throw new Error(`Unsupported file type: ${input.fileType}`);
   }
-  const args = ["--json", "--line-number", "--column", "--sort", "path", "--hidden", "--glob", "!.git", "--max-filesize", String(maxFileBytes), "--context", String(context)];
+  const args = ["--json", "--line-number", "--column", "--sort", "path", "--hidden", "--glob", "!.git", "--glob", "!.git/**", "--max-filesize", String(maxFileBytes), "--context", String(context)];
+  if (input.includeIgnored === true) args.push("--no-ignore");
   if (input.glob !== undefined && input.glob !== null) args.push("--glob", input.glob);
   else for (const extension of typeExtensions ?? []) args.push("--glob", `*${extension}`);
   args.push("--regexp", input.pattern, "--", relative(root, start) || ".");
   const matches: GrepMatch[] = [];
-  const ignoreLayers = await collectIgnoreLayers(root, start, signal, resources, ignoreBudget);
+  const ignoreLayers = input.includeIgnored === true ? [] : await collectIgnoreLayers(root, start, signal, resources, ignoreBudget);
   const parser = delimitedParser(10, (record) => {
     if (record.length === 0) return true;
     const event = JSON.parse(decodeUtf8(record, "ripgrep JSON")) as RgEvent;
@@ -313,8 +329,9 @@ async function nodeGrep(
   maxSearchBytes: number,
   resources: SearchResources,
   ignoreBudget: IgnoreBudget,
+  includeIgnored: boolean,
 ): Promise<GrepMatch[]> {
-  const files = await nodeFiles(root, start, signal, () => true, resources.maxDiscoveredFiles + 1, resources, ignoreBudget);
+  const files = await nodeFiles(root, start, signal, () => true, resources.maxDiscoveredFiles + 1, resources, ignoreBudget, includeIgnored);
   if (files.length > resources.maxDiscoveredFiles) throw new Error(`Aggregate discovered file limit of ${resources.maxDiscoveredFiles} exceeded`);
   const matcher = glob === undefined ? undefined : globRegex(glob);
   const extension = type === undefined ? undefined : typeExtension(type);
@@ -362,23 +379,26 @@ async function nodeFiles(
   limit: number,
   resources: SearchResources,
   ignoreBudget: IgnoreBudget,
+  includeIgnored: boolean,
 ): Promise<string[]> {
   const ignores: IgnoreLayer[] = [];
   const output: string[] = [];
   const delta = relative(root, start);
   const segments = delta === "" ? [] : delta.split(sep);
   let ancestor = root;
-  for (let index = 0; index < segments.length; index += 1) {
-    noteIgnoreDirectory(ignoreBudget);
-    await loadIgnoreFiles(ancestor, normalizedRelative(root, ancestor), ignores, ignoreBudget, signal);
-    ancestor = resolve(ancestor, segments[index]!);
+  if (!includeIgnored) {
+    for (let index = 0; index < segments.length; index += 1) {
+      noteIgnoreDirectory(ignoreBudget);
+      await loadIgnoreFiles(ancestor, normalizedRelative(root, ancestor), ignores, ignoreBudget, signal);
+      ancestor = resolve(ancestor, segments[index]!);
+    }
   }
   async function walk(directory: string): Promise<void> {
     abort(signal);
     const relativeDirectory = normalizedRelative(root, directory);
     const ruleCount = ignores.length;
     noteIgnoreDirectory(ignoreBudget);
-    await loadIgnoreFiles(directory, relativeDirectory, ignores, ignoreBudget, signal);
+    if (!includeIgnored) await loadIgnoreFiles(directory, relativeDirectory, ignores, ignoreBudget, signal);
     const handle = await opendir(directory);
     const entries = [];
     for await (const entry of handle) {
@@ -391,7 +411,7 @@ async function nodeFiles(
       abort(signal);
       const absolute = resolve(directory, entry.name);
       const path = normalizedRelative(root, absolute);
-      if (entry.name === ".git" || ignored(path, entry.isDirectory(), ignores)) continue;
+      if (entry.name === ".git" || (!includeIgnored && ignored(path, entry.isDirectory(), ignores))) continue;
       if (entry.isDirectory()) await walk(absolute);
       else if (entry.isFile() && accept(path)) output.push(path);
       if (output.length >= limit) break;
@@ -585,6 +605,9 @@ function normalizedRelative(root: string, path: string): string {
 }
 
 function normalizePath(path: string): string { return path.replaceAll("\\", "/"); }
+function isGitMetadataPath(root: string, path: string): boolean {
+  return normalizedRelative(root, path).split("/").some((segment) => segment.toLowerCase() === ".git");
+}
 function comparePaths(a: string, b: string): number { return a < b ? -1 : a > b ? 1 : 0; }
 function compareGrepMatches(a: GrepMatch, b: GrepMatch): number {
   return comparePaths(a.path, b.path) || a.line - b.line || a.column - b.column;
