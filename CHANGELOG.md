@@ -2,7 +2,18 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.3.12 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.3.13 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.3.13] - 2026-08-28
+
+### 新增
+- 新增面向新人上手的 `/explain <符号 | file.ts#符号> [关注点]` 命令：结合 AST 代码图（调用者/被调用者关系）、符号真实源码切片与所在文件近期 Git 提交历史，用廉价子代理模型生成五段式讲解（它是做什么的 / 关键实现点 / 调用关系 / 为什么这样写 / 新人注意事项）
+- 歧义处理：多个符号命中时弹出与 AskUserQuestion 同款的终端选择卡片（top 3 候选 + Cancel），候选以唯一 node-id 标注并附 kind 与 文件:行号；自由输入更精确名称可原地重解析（最多追问 2 轮，避免循环弹窗）
+- 全链路优雅降级为提示文本（对齐 `/review` 语义，不抛错）：代码图未建立时提示 `/ast init`、查询无命中时提示 `/ast sync`、非 git 仓库时跳过历史证据继续解释、模型不可用时返回错误文本、含 `#` 的非法 node-id 查询自动回退为名称搜索
+- 生成前通过 notice 输出进度提示（`Explaining <symbol> …`）；证据 prompt 中源码切片上限 20000 字符，超长自动截断标注
+
+### 测试
+- 新增 explain 服务 24 个单元测试：覆盖 node-id/名称目标解析、歧义选择卡片与重解析回路、prompt 构造与源码截断、全部降级路径、模型流式错误语义；`/explain` 命令解析新增 3 个用例
 
 ## [1.3.12] - 2026-08-27
 
@@ -514,6 +525,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.3.13 | 2026-08-28 | 新人上手命令 /explain：代码图 + 真实源码 + Git 历史生成五段式讲解，歧义时选择卡片选符号，无索引/非 git/模型失败均优雅降级 |
 | 1.3.12 | 2026-08-27 | 扩展思考流式展示：Anthropic 默认 8192 思考预算与 OpenAI reasoning effort 配置、CLI 打字机思考行、签名思考块回显、不支持端点自动降级 |
 | 1.3.11 | 2026-08-27 | registerTool 工具支持斜杠调用与动态补全；统一工具参数标准化和严格 Schema，修复 agents 数组修复循环 |
 | 1.3.10 | 2026-08-27 | HTTP 5xx 错误归类为 network、配置提示不再附加到 network/rate_limit 错误、Glob/Grep includeIgnored 支持字符串布尔值标准化 |
