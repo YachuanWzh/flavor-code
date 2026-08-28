@@ -1,6 +1,6 @@
 {
   "name": "superharness",
-  "version": "1.0.4",
+  "version": "2.3.0",
   "apiVersion": "1",
   "main": "./index.js",
   "permissions": [],

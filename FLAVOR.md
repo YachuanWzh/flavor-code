@@ -51,17 +51,19 @@ Token budget matters. When inspecting this repository:
 ## Superharness
 
 This project has **superharness** installed as a flavor-code plugin under
-`.flavor/plugins/superharness/`. It registers a skill root that provides
-engineering-discipline skills for autonomous development, plus SessionStart /
-UserPromptSubmit / Stop hooks that inject `HARNESS.md` into every session and
-track `/go` tasks under `.flavor/superharness/ralph/`.
+`.flavor/plugins/superharness/`. It registers a skill root plus eight session,
+planning, and subagent lifecycle hooks. On flavor-code 1.2.20+, SessionStart
+injects `HARNESS.md` into the persistent context and the host `Skill` tool
+loads required sub-skills during `/go`. Ralph checkpoints live under
+`.flavor/superharness/ralph/` and remain resumable across host sessions.
 
-Installed skills: `brainstorm`, `finishing-a-development-branch`, `go`, `light`, `requesting-code-review`, `subagent-driven-development`, `systematic-debugging`, `test-driven-development`, `using-git-worktrees`, `verification-before-completion`, `writing-plans`
+Installed skills: `brainstorm`, `finishing-a-development-branch`, `go`, `light`, `onboarding`, `requesting-code-review`, `subagent-driven-development`, `systematic-debugging`, `test-driven-development`, `using-git-worktrees`, `verification-before-completion`, `writing-plans`
 
 Key capabilities:
 - **go** -- Drive a task end-to-end under strict TDD + verification + code review discipline.
 - **light** -- Lightweight mode for small focused tasks: TDD with exemptions, real-output verification, no worktree/plan-file/ralph overhead.
 - **brainstorm** -- Explore requirements with a live browser mind map (manual trigger only).
+- **onboarding** -- Deep-analyze the workspace's business logic for newcomers: ONBOARDING.md + interactive module mind map, astgraph-powered with fallback, incremental via cache.
 - **test-driven-development** -- RED-GREEN-REFACTOR cycle. No production code without a failing test first.
 - **systematic-debugging** -- Root-cause tracing, defense-in-depth, no guess-and-patch.
 - **verification-before-completion** -- Run the full test suite and show real output before claiming done.

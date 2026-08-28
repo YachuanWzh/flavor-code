@@ -32,3 +32,5 @@ docs/onboarding
 .flavor/superharness/ralph/
 
 .worktrees/
+# superharness onboarding analysis cache (regenerable, never committed)
+.flavor/superharness/onboarding/

@@ -117,33 +117,17 @@ Every step must contain the actual content an engineer needs. These are **plan f
 - Exact commands with expected output
 - DRY, YAGNI, TDD, frequent commits
 
-## Self-Review → Analysis Findings (mandatory)
+## Self-Review
 
-After writing the complete plan, look at the spec with fresh eyes and check the plan against it. This is a checklist you run yourself — not a subagent dispatch. It produces a named **Analysis Findings** block appended to the plan document — go Phase 2 does not start until that block exists.
+After writing the complete plan, look at the spec with fresh eyes and check the plan against it. This is a checklist you run yourself — not a subagent dispatch.
 
-**1. Spec coverage:** Skim each section/requirement in the spec (or the goal + your Phase 0 assumptions when there is no spec file). Build a **coverage matrix**: one row per requirement, one column pointing at the task number that implements it. Any requirement with no task is a gap — add the task.
+**1. Spec coverage:** Skim each section/requirement in the spec. Can you point to a task that implements it? List any gaps.
 
-**2. Contradiction check:** Does any task contradict the spec, another task, the project's stack guidance (STACK.md), or an existing architectural decision in the code? List each **contradiction** with both sides quoted; resolve them (fix the plan or ask your human partner) before proceeding.
+**2. Placeholder scan:** Search your plan for red flags — any of the patterns from the "No Placeholders" section above. Fix them.
 
-**3. Ambiguity scan:** Which steps could two competent engineers implement differently? List each **ambiguity** and remove it by making the plan concrete (exact file, exact signature, exact command) — not by asking, when the codebase already answers.
+**3. Type consistency:** Do the types, method signatures, and property names you used in later tasks match what you defined in earlier tasks? A function called `clearLayers()` in Task 3 but `clearFullLayers()` in Task 7 is a bug.
 
-**4. Placeholder scan:** Search your plan for red flags — any of the patterns from the "No Placeholders" section above. Fix them.
-
-**5. Type consistency:** Do the types, method signatures, and property names you used in later tasks match what you defined in earlier tasks? A function called `clearLayers()` in Task 3 but `clearFullLayers()` in Task 7 is a bug.
-
-Fix issues inline. Then append this block to the end of the saved plan file:
-
-```markdown
----
-## Analysis Findings
-
-**Coverage:** <N> requirements checked, <M> gaps found and closed (Task X, Task Y added)
-**Contradictions:** <none | list with resolutions>
-**Ambiguities:** <none | list with how each was made concrete>
-**Verdict:** READY — plan covers the spec, no open contradictions or ambiguities
-```
-
-If you cannot reach READY, note what is open and raise it with your human partner before execution.
+If you find issues, fix them inline. No need to re-review — just fix and move on. If you find a spec requirement with no task, add the task.
 
 ## Execution Handoff
 
