@@ -57,7 +57,7 @@ injects `HARNESS.md` into the persistent context and the host `Skill` tool
 loads required sub-skills during `/go`. Ralph checkpoints live under
 `.flavor/superharness/ralph/` and remain resumable across host sessions.
 
-Installed skills: `brainstorm`, `finishing-a-development-branch`, `go`, `light`, `onboarding`, `requesting-code-review`, `subagent-driven-development`, `systematic-debugging`, `test-driven-development`, `using-git-worktrees`, `verification-before-completion`, `writing-plans`
+Installed skills: `brainstorm`, `converge`, `finishing-a-development-branch`, `go`, `light`, `onboarding`, `receiving-code-review`, `requesting-code-review`, `subagent-driven-development`, `systematic-debugging`, `test-driven-development`, `using-git-worktrees`, `verification-before-completion`, `writing-plans`
 
 Key capabilities:
 - **go** -- Drive a task end-to-end under strict TDD + verification + code review discipline.
@@ -68,9 +68,20 @@ Key capabilities:
 - **systematic-debugging** -- Root-cause tracing, defense-in-depth, no guess-and-patch.
 - **verification-before-completion** -- Run the full test suite and show real output before claiming done.
 - **requesting-code-review** -- Dispatch a reviewer subagent over the diff.
+- **receiving-code-review** -- Verify review findings against the code before implementing; no performative agreement, no blind fixes.
+- **converge** -- Audit implementation vs spec/plan after review; append leftovers as tasks and sink a living spec (go Phase 4.5).
 - **writing-plans** -- Break down multi-step work into bite-sized TDD tasks.
 - **using-git-worktrees** -- Isolate work in a disposable workspace.
 - **subagent-driven-development** -- Execute multi-task plans with parallel subagents.
 
 Usage in flavor-code: `/<skill-name> <args>`, e.g. `/go refactor login module` or `/brainstorm payment plan`.
+
+### Latest update (v1.1.0)
+
+- Added an npm-distributed, cross-platform `superharness` command for Windows and macOS/Linux.
+- Installing through `@flavor-code/plugin-manager` now initializes `FLAVOR.md`, `CLAUDE.md`, or both and can expose the CLI globally.
+- Added `receiving-code-review`: verify review findings before implementation instead of applying feedback blindly.
+- Added `converge`: audit the implementation against the specification and plan before finishing.
+- Added living specifications so verified behavior survives across sessions as durable project context.
+- Strengthened stack guidance for command verification, test boundaries, contract-first full-stack changes, and end-to-end testing.
 <!-- SUPERHARNESS:FLAVOR-END -->
