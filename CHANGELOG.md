@@ -2,7 +2,18 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.3.14 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.3.15 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.3.15] - 2026-08-29
+
+### 严重修复
+- 修复 Windows 11 build 26200 在 Node.js 24 及以上版本运行长会话时可能发生的 V8 Maglev 原生崩溃：典型表现为 Shell 工具启动前后直接打印 `node::OnFatalError` / libuv / V8 原生栈并返回 PowerShell，且不会经过 JavaScript 异常、退出事件或 Flavor 崩溃日志
+- CLI 入口拆分为不加载业务模块的轻量兼容启动器与主程序；受影响环境会在任何 Ink、模型、插件或工具代码加载前自动使用 `--no-maglev` 启动主程序，从源头避开已知崩溃路径，用户无需修改命令或手动设置参数
+- 启动器在规避进程运行期间保留终端并把 Ctrl+C 交给真实 CLI 处理，避免父进程提前退出、终端模式未恢复或子进程残留
+
+### 测试
+- 新增 Windows/Node 运行时矩阵与实际启动参数回归测试，覆盖 Node 24、未来 Node 主版本、已显式禁用 Maglev 及非受影响系统；未来升级 Node 不会静默绕过保护
+- 安装 smoke test 改为执行 npm 实际生成的 `flavor`/`flavor.cmd` 命令入口，不再直接调用构建产物，确保发布包持续覆盖兼容启动器链路
 
 ## [1.3.14] - 2026-08-28
 
@@ -539,6 +550,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.3.15 | 2026-08-29 | 严重稳定性修复：Windows 11 build 26200 + Node 24 及以上版本自动禁用 Maglev，轻量启动器在业务代码加载前规避 V8 原生闪退，并由真实 npm 命令链路回归验证 |
 | 1.3.14 | 2026-08-28 | 长程任务稳定性修复：流式转录批量合并、CLI/桌面实时渲染窗口、连续退格同步输入草稿、桌面 mention 标签编辑修复 |
 | 1.3.13 | 2026-08-28 | 新人上手命令 /explain：代码图 + 真实源码 + Git 历史生成五段式讲解，歧义时选择卡片选符号，无索引/非 git/模型失败均优雅降级 |
 | 1.3.12 | 2026-08-27 | 扩展思考流式展示：Anthropic 默认 8192 思考预算与 OpenAI reasoning effort 配置、CLI 打字机思考行、签名思考块回显、不支持端点自动降级 |

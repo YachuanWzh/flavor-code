@@ -1,10 +1,11 @@
-import { execFile } from "node:child_process";
+import { exec as execCommand, execFile } from "node:child_process";
 import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
+const execShell = promisify(execCommand);
 const cwd = resolve(import.meta.dirname, "..");
 const expectedVersion = JSON.parse(await readFile(join(cwd, "package.json"), "utf8")).version;
 const npmCli = process.env.npm_execpath
@@ -23,15 +24,17 @@ try {
   tarball = resolve(cwd, report[0].filename);
   await exec(npm, [...npmArgs, "install", "--global", "--prefix", prefix, tarball], { cwd, windowsHide: true, maxBuffer: 10 * 1024 * 1024 });
   const binary = process.platform === "win32" ? join(prefix, "flavor.cmd") : join(prefix, "bin", "flavor");
-  const installedCli = process.platform === "win32"
-    ? join(prefix, "node_modules", "flavor-code", "dist", "cli.js")
-    : join(prefix, "lib", "node_modules", "flavor-code", "dist", "cli.js");
   await access(binary);
+  // Exercise the generated npm shim exactly as users do. This keeps the tiny
+  // compatibility launcher in the release smoke path instead of bypassing it
+  // by invoking a bundled JavaScript file directly.
   const binaryOptions = { cwd: prefix, windowsHide: true };
-  const version = await exec(process.execPath, [installedCli, "--version"], binaryOptions);
+  const invokeBinary = (args, options = {}) => process.platform === "win32"
+    ? execShell(`"${binary}" ${args.join(" ")}`, { ...binaryOptions, ...options })
+    : exec(binary, args, { ...binaryOptions, ...options });
+  const version = await invokeBinary(["--version"]);
   if (version.stdout.trim() !== expectedVersion) throw new Error(`Unexpected installed version: ${version.stdout.trim()}`);
-  const help = await exec(process.execPath, [installedCli, "--help"], {
-    ...binaryOptions,
+  const help = await invokeBinary(["--help"], {
     env: { ...process.env, OPENAI_API_KEY: "", ANTHROPIC_API_KEY: "", NO_PROXY: "*" },
   });
   if (!help.stdout.includes("--print") || !help.stdout.includes("--resume")) throw new Error("Installed CLI help is incomplete");

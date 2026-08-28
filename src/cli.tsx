@@ -290,17 +290,21 @@ function safeError(error: unknown): string {
   return redactErrorText(message(error));
 }
 
+export async function runCli(argv: string[] = process.argv): Promise<void> {
+  // Escape hatch for any uncaught failure: write a crash log and restore the
+  // terminal instead of dying silently with ANSI garbage on screen.
+  installCrashGuard();
+  try {
+    await createProgram().parseAsync(argv);
+  } catch (error) {
+    process.stderr.write(`flavor: ${safeError(error)}\n`);
+    process.exitCode = 1;
+  }
+}
+
 if (process.argv[1]) {
   const scriptPath = fileURLToPath(import.meta.url);
   if (realpathSync(scriptPath) === realpathSync(process.argv[1])) {
-    // Escape hatch for any uncaught failure: write a crash log and restore the
-    // terminal instead of dying silently with ANSI garbage on screen.
-    installCrashGuard();
-    try {
-      await createProgram().parseAsync(process.argv);
-    } catch (error) {
-      process.stderr.write(`flavor: ${safeError(error)}\n`);
-      process.exitCode = 1;
-    }
+    await runCli();
   }
 }

@@ -4,7 +4,8 @@ const sourceMap = process.env.FLAVOR_SOURCEMAP === "1";
 
 export default defineConfig({
   entry: {
-    cli: "src/cli.tsx",
+    cli: "src/launcher.ts",
+    "cli-main": "src/cli.tsx",
     "sdk/index": "src/sdk/index.ts",
     "plugin-worker-entry": "src/plugins/plugin-worker-entry.ts",
   },
