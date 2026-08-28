@@ -27,6 +27,7 @@ FLAVOR.md
 .claude/superharness/brainstorm/
 .flavor
 md_docs
+docs/onboarding
 # superharness ralph runtime state (per-task tracking + retry)
 .flavor/superharness/ralph/
 
