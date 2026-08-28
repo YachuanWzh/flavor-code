@@ -1650,7 +1650,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       modelId: () => harness.subagentModelId,
       notify: (message) => emitOutput({ type: "notice", message }),
     }, focus, signal),
-    explain: (query, focus, signal) => runExplain({
+    explain: (query, focus, signal, onText) => runExplain({
       graph: new DesktopAstGraphService(workspace),
       readFile: async (path) => {
         const root = resolve(workspace);
@@ -1664,6 +1664,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       modelId: () => harness.subagentModelId,
       language,
       notify: (message) => emitOutput({ type: "notice", message }),
+      ...(onText === undefined ? {} : { onText }),
     }, query, focus, signal),
     audit: async (toolFilter?: string) => {
       try {

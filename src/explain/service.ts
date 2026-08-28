@@ -133,11 +133,14 @@ export interface ExplainModelOptions {
 
 /** One streaming completion from the cheap (subagent) model, mirroring
  *  src/git/insights.ts. Throws on stream errors or empty output; runExplain
- *  turns the throw into user-facing text. */
+ *  turns the throw into user-facing text. When `onText` is provided every
+ *  streamed text delta is forwarded as it arrives, so callers can surface
+ *  incremental (SSE-style) output instead of one buffered blob. */
 export async function explainWithModel(
   options: ExplainModelOptions,
   prompt: string,
   signal: AbortSignal,
+  onText?: (chunk: string) => void,
 ): Promise<string> {
   const { adapter, model } = options.registry.get(options.modelId());
   let text = "";
@@ -147,7 +150,10 @@ export async function explainWithModel(
     tools: [],
     signal,
   })) {
-    if (event.type === "text") text += event.text;
+    if (event.type === "text") {
+      text += event.text;
+      onText?.(event.text);
+    }
     else if (event.type === "error") throw new Error(`explain generation failed: ${event.error.message}`);
     else if (event.type === "done") break;
   }
@@ -166,6 +172,10 @@ export interface ExplainDeps {
   modelId(): string;
   language: string;
   notify?(message: string): void;
+  /** Forwarded per streamed text delta. When present, runExplain emits the
+   *  whole answer incrementally through it and returns an empty string on
+   *  success (the caller must not re-print the answer as one notice). */
+  onText?(chunk: string): void;
 }
 
 const HISTORY_LIMIT = 8;
@@ -221,6 +231,7 @@ export async function runExplain(
     ? []
     : await deps.history(anchor.filePath, HISTORY_LIMIT).catch(() => []);
   try {
+    if (deps.onText !== undefined) deps.onText(`Explain ${anchor.id}\n\n`);
     const explanation = await explainWithModel(
       { registry: deps.registry, modelId: deps.modelId },
       buildExplainPrompt({
@@ -232,8 +243,9 @@ export async function runExplain(
         language: deps.language,
       }),
       signal,
+      deps.onText,
     );
-    return `Explain ${anchor.id}\n\n${explanation}`;
+    return deps.onText === undefined ? `Explain ${anchor.id}\n\n${explanation}` : "";
   } catch (error) {
     if (signal.aborted) throw error;
     return `/explain failed: ${error instanceof Error ? error.message : String(error)}`;

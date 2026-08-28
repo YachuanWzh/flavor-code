@@ -69,6 +69,33 @@ describe("FlavorSession", () => {
     expect(outputs.join("\n")).toContain('"value": "DONE"');
   });
 
+  it("streams /explain output as text events instead of one buffered notice", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    base.explain = async (query, _focus, _signal, onText) => {
+      onText?.("Explain src/a.ts#run\n\n");
+      onText?.("第一段");
+      onText?.("第二段");
+      return "";
+    };
+    const session = new FlavorSession(base);
+
+    await session.submit("/explain run");
+
+    expect(outputs).toEqual(["Explain src/a.ts#run\n\n", "第一段", "第二段"]);
+  });
+
+  it("still notices buffered /explain text when the service does not stream", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    base.explain = async () => "Explain src/a.ts#run\n\n完整解释。";
+    const session = new FlavorSession(base);
+
+    await session.submit("/explain run");
+
+    expect(outputs).toContain("Explain src/a.ts#run\n\n完整解释。");
+  });
+
   it("resumes and acknowledges prompts recovered from the durable queue", async () => {
     const events: string[] = []; const outputs: string[] = [];
     const base = services(events, outputs);

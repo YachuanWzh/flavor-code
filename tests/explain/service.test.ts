@@ -149,6 +149,18 @@ describe("explainWithModel", () => {
     await expect(explainWithModel({ registry: boom, modelId: () => "fake:cheap" }, "p", new AbortController().signal))
       .rejects.toThrow("down");
   });
+  it("forwards every text delta to onText as it streams", async () => {
+    const chunked = {
+      get: () => ({
+        adapter: { async * stream() { yield { type: "text", text: "第一段" }; yield { type: "text", text: "第二段" }; yield { type: "done" }; } },
+        model: "x",
+      }),
+    } as unknown as ModelRegistry;
+    const chunks: string[] = [];
+    const out = await explainWithModel({ registry: chunked, modelId: () => "fake:cheap" }, "p", new AbortController().signal, (chunk) => chunks.push(chunk));
+    expect(chunks).toEqual(["第一段", "第二段"]);
+    expect(out).toBe("第一段第二段");
+  });
 });
 
 const capturingRegistry = (text: string, captured: { prompt?: string }): ModelRegistry => ({
@@ -260,5 +272,16 @@ describe("runExplain", () => {
     const out = await runExplain(explainDeps({ registry: boom }), "cancelOrder", undefined, abort());
     expect(out).toContain("/explain failed");
     expect(out).toContain("provider down");
+  });
+  it("streams the answer through onText and returns an empty string", async () => {
+    const chunks: string[] = [];
+    const out = await runExplain(explainDeps({ onText: (chunk) => chunks.push(chunk) }), "cancelOrder", undefined, abort());
+    expect(out).toBe("");
+    expect(chunks[0]).toBe("Explain src/order.ts#cancelOrder\n\n");
+    expect(chunks.slice(1).join("")).toBe("解释正文");
+  });
+  it("keeps buffered semantics without onText and still reports failures as text", async () => {
+    const out = await runExplain(explainDeps(), "cancelOrder", undefined, abort());
+    expect(out).toBe("Explain src/order.ts#cancelOrder\n\n解释正文");
   });
 });

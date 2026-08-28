@@ -113,7 +113,7 @@ export interface SessionServices {
   evolve(args: readonly string[]): string | Promise<string>;
   gitCommit?(hint: string | undefined, signal: AbortSignal): Promise<string>;
   gitReview?(focus: string | undefined, signal: AbortSignal): Promise<string>;
-  explain?(query: string | undefined, focus: string | undefined, signal: AbortSignal): Promise<string>;
+  explain?(query: string | undefined, focus: string | undefined, signal: AbortSignal, onText?: (chunk: string) => void): Promise<string>;
   usage(): string | Promise<string>;
   cancelActiveTask(): void | Promise<void>;
   clearContext(): void | Promise<void>;
@@ -572,7 +572,13 @@ export class FlavorSession {
     } else if (command.name === "review") {
       this.#notice(await required(this.#services.gitReview, "review")(command.focus, signal));
     } else if (command.name === "explain") {
-      this.#notice(await required(this.#services.explain, "explain")(command.query, command.focus, signal));
+      // Stream the answer as incremental text events (SSE-visible); the result
+      // is "" once streamed, otherwise it is the buffered fallback text.
+      const result = await required(this.#services.explain, "explain")(
+        command.query, command.focus, signal,
+        (chunk) => this.#services.output({ type: "text", text: chunk }),
+      );
+      if (result !== "") this.#notice(result);
     } else if (command.name === "mcp") {
       this.#notice(await this.#services.mcp(command, signal));
     } else if (command.name === "pals") {
