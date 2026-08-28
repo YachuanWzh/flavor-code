@@ -2,7 +2,7 @@ import React from "react";
 import { renderToString } from "ink";
 import { describe, expect, it, vi } from "vitest";
 
-import { appRuntimeOptions, ideFooterPresentation, MentionMenu, TerminalLayout, statusLineColor } from "../../src/ui/app.js";
+import { appRuntimeOptions, boundedCliTurn, cliTranscriptWindow, ideFooterPresentation, MentionMenu, TerminalLayout, statusLineColor } from "../../src/ui/app.js";
 import {
   COMPACT_PROGRESS_COMPLETE,
   COMPACT_PROGRESS_REMAINING,
@@ -26,6 +26,48 @@ const turn = (id: number, prompt: string, assistantText: string): TranscriptTurn
 const stripAnsi = (value: string): string => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/gu, "");
 
 describe("TerminalLayout", () => {
+  it("keeps only a bounded tail of long transcripts in the live Ink tree", () => {
+    const completed = Array.from({ length: 50 }, (_, index): TranscriptTurn => ({
+      id: index + 1,
+      prompt: `prompt ${index + 1}`,
+      assistantText: "",
+      statusLines: [],
+      blocks: Array.from({ length: 10 }, (_unused, blockIndex) => ({
+        kind: "status" as const,
+        id: `tool:${index}:${blockIndex}`,
+        state: "completed" as const,
+        text: `tool ${index}:${blockIndex}`,
+      })),
+    }));
+
+    const window = cliTranscriptWindow(completed, 40, 120);
+    expect(window.turns.at(-1)?.id).toBe(50);
+    expect(window.turns.length).toBe(12);
+    expect(window.hiddenTurns).toBe(38);
+    expect(window.hiddenBlocks).toBe(380);
+  });
+
+  it("bounds blocks and large text inside a single long-running turn", () => {
+    const source: TranscriptTurn = {
+      id: 1,
+      prompt: "work",
+      assistantText: "",
+      statusLines: [],
+      blocks: [
+        { kind: "status", id: "old", state: "completed", text: "old" },
+        { kind: "text", text: "x".repeat(40_000) },
+        { kind: "status", id: "new", state: "completed", text: "new" },
+      ],
+    };
+
+    const bounded = boundedCliTurn(source, 2);
+    expect(bounded.hiddenBlocks).toBe(1);
+    expect(bounded.turn.blocks[0]).toMatchObject({ id: "display-window:1" });
+    expect(bounded.turn.blocks[1]).toMatchObject({ kind: "text" });
+    expect((bounded.turn.blocks[1] as { text: string }).text.length).toBeLessThan(33_000);
+    expect(source.blocks).toHaveLength(3);
+  });
+
   it("passes the CLI instance identity into the production runtime", () => {
     const output = vi.fn();
     const onApprovalChange = vi.fn();

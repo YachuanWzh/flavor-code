@@ -314,6 +314,38 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
   // Thinking deltas arrive per token; batch them at the animation cadence so
   // each reducer pass covers everything streamed since the last flush.
   const thinkingBuf = useRef<{ pending: string; timer: ReturnType<typeof setTimeout> | null }>({ pending: "", timer: null });
+  // Ink drains all keypresses already buffered by the terminal inside one
+  // discrete update. React state captured by the input callback does not change
+  // between those keypresses, so a burst of Backspace used to repeatedly edit
+  // the same stale value and remove only one character. This ref is advanced
+  // synchronously for every edit while React state remains the render source.
+  const promptDraftRef = useRef({
+    text: input,
+    cursor: promptCursor,
+    pastedBlocks,
+    imageAttachments,
+  });
+  promptDraftRef.current = { text: input, cursor: promptCursor, pastedBlocks, imageAttachments };
+
+  const commitPromptDraft = (next: {
+    text: string;
+    cursor: number;
+    pastedBlocks?: PastedBlock[];
+    imageAttachments?: ModelImageContentBlock[];
+  }): void => {
+    const current = promptDraftRef.current;
+    const resolved = {
+      text: next.text,
+      cursor: next.cursor,
+      pastedBlocks: next.pastedBlocks ?? current.pastedBlocks,
+      imageAttachments: next.imageAttachments ?? current.imageAttachments,
+    };
+    promptDraftRef.current = resolved;
+    setInput(resolved.text);
+    setPromptCursor(resolved.cursor);
+    if (next.pastedBlocks !== undefined) setPastedBlocks(next.pastedBlocks);
+    if (next.imageAttachments !== undefined) setImageAttachments(next.imageAttachments);
+  };
 
   useTerminalTitle("Flavor Code");
 
@@ -531,9 +563,9 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
   const selection = useSelection();
 
   const selectMention = (path: string): void => {
-    const next = completeMentionSelection(input, promptCursor, path);
-    setInput(next.text);
-    setPromptCursor(next.cursor);
+    const draft = promptDraftRef.current;
+    const next = completeMentionSelection(draft.text, draft.cursor, path);
+    commitPromptDraft(next);
     setMentionSelection(0);
     setDismissedMentionInput(next.text);
   };
@@ -735,6 +767,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
       setInput("");
       setPastedBlocks([]);
       setImageAttachments([]);
+      promptDraftRef.current = { text: "", cursor: 0, pastedBlocks: [], imageAttachments: [] };
       setClipboardNotice(undefined);
       setPromptCursor(0);
       setSlashSelection(0);
@@ -769,46 +802,57 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
       return;
     }
     if (key.backspace) {
-      const imageEdit = removeLastCliImageOnBackspace(input, promptCursor, imageAttachments);
+      const draft = promptDraftRef.current;
+      const imageEdit = removeLastCliImageOnBackspace(draft.text, draft.cursor, draft.imageAttachments);
       if (imageEdit.handled) {
         setImageAttachments(imageEdit.images);
+        promptDraftRef.current = { ...draft, imageAttachments: imageEdit.images };
         setClipboardNotice(imageEdit.images.length === 0
           ? "Removed image attachment."
           : `Removed image attachment; ${imageEdit.images.length} remaining.`);
         return;
       }
       const next = editPromptWithPastedBlocks(
-        { text: input, cursor: promptCursor },
+        { text: draft.text, cursor: draft.cursor },
         { type: "backspace" },
-        pastedBlocks,
+        draft.pastedBlocks,
       );
-      setInput(next.text);
-      setPromptCursor(next.cursor);
-      setPastedBlocks(next.pastedBlocks);
+      commitPromptDraft(next);
       setSlashSelection(0); setDismissedSlashInput(undefined);
       setMentionSelection(0); setDismissedMentionInput(undefined);
     } else if (key.delete) {
-      updatePrompt({ type: "delete" }, input, promptCursor, setInput, setPromptCursor);
+      const draft = promptDraftRef.current;
+      commitPromptDraft({ ...editPrompt({ text: draft.text, cursor: draft.cursor }, { type: "delete" }), pastedBlocks: draft.pastedBlocks });
       setSlashSelection(0); setDismissedSlashInput(undefined);
       setMentionSelection(0); setDismissedMentionInput(undefined);
     }
-    else if (key.leftArrow) setPromptCursor((value) => Math.max(0, value - 1));
-    else if (key.rightArrow) setPromptCursor((value) => Math.min([...input].length, value + 1));
+    else if (key.leftArrow) {
+      const draft = promptDraftRef.current;
+      commitPromptDraft({ ...editPrompt({ text: draft.text, cursor: draft.cursor }, { type: "left" }), pastedBlocks: draft.pastedBlocks });
+    }
+    else if (key.rightArrow) {
+      const draft = promptDraftRef.current;
+      commitPromptDraft({ ...editPrompt({ text: draft.text, cursor: draft.cursor }, { type: "right" }), pastedBlocks: draft.pastedBlocks });
+    }
     else if (terminalAction?.type === "history" && terminalAction.direction === "up" && history.length) {
       const next = navigateHistory({ history, cursor: historyCursor }, "up");
-      setHistoryCursor(next.cursor); setInput(next.input); setPromptCursor(next.promptCursor);
+      setHistoryCursor(next.cursor); commitPromptDraft({ text: next.input, cursor: next.promptCursor, pastedBlocks: [] });
       setSlashSelection(0); setDismissedSlashInput(undefined);
       setMentionSelection(0); setDismissedMentionInput(undefined);
     } else if (terminalAction?.type === "history" && terminalAction.direction === "down" && history.length) {
       const next = navigateHistory({ history, cursor: historyCursor }, "down");
-      setHistoryCursor(next.cursor); setInput(next.input); setPromptCursor(next.promptCursor);
+      setHistoryCursor(next.cursor); commitPromptDraft({ text: next.input, cursor: next.promptCursor, pastedBlocks: [] });
       setSlashSelection(0); setDismissedSlashInput(undefined);
       setMentionSelection(0); setDismissedMentionInput(undefined);
     } else if (!key.ctrl && !key.meta && character) {
-      updatePrompt({ type: "insert", value: character }, input, promptCursor, setInput, setPromptCursor);
-      if (/[\r\n]/u.test(character)) {
-        setPastedBlocks((current) => [...current, { id: current.length + 1, text: character }]);
-      }
+      const draft = promptDraftRef.current;
+      const nextPastedBlocks = /[\r\n]/u.test(character)
+        ? [...draft.pastedBlocks, { id: draft.pastedBlocks.length + 1, text: character }]
+        : draft.pastedBlocks;
+      commitPromptDraft({
+        ...editPrompt({ text: draft.text, cursor: draft.cursor }, { type: "insert", value: character }),
+        pastedBlocks: nextPastedBlocks,
+      });
       setSlashSelection(0); setDismissedSlashInput(undefined);
       setMentionSelection(0); setDismissedMentionInput(undefined);
     }
@@ -904,6 +948,91 @@ export interface TerminalLayoutProps {
   onTaskPanelHoverChange?: (hovered: boolean) => void;
 }
 
+export const CLI_VISIBLE_TURN_LIMIT = 40;
+export const CLI_VISIBLE_BLOCK_LIMIT = 320;
+export const CLI_VISIBLE_BLOCKS_PER_TURN = 80;
+export const CLI_VISIBLE_TEXT_CHARS = 32_000;
+
+export interface CliTranscriptWindow {
+  turns: TranscriptTurn[];
+  hiddenTurns: number;
+  hiddenBlocks: number;
+}
+
+function boundedCliDisplayText(text: string, limit = CLI_VISIBLE_TEXT_CHARS): string {
+  if (text.length <= limit) return text;
+  const half = Math.floor((limit - 80) / 2);
+  return `${text.slice(0, half)}\n\n… ${text.length - half * 2} characters hidden to keep the terminal responsive …\n\n${text.slice(-half)}`;
+}
+
+function boundedCliPresentation(presentation: ToolPresentation): ToolPresentation {
+  if (presentation.kind === "terminal") return {
+    ...presentation,
+    ...(presentation.stdout === undefined ? {} : { stdout: boundedCliDisplayText(presentation.stdout) }),
+    ...(presentation.stderr === undefined ? {} : { stderr: boundedCliDisplayText(presentation.stderr) }),
+  };
+  if (presentation.kind === "job" && presentation.output !== undefined) return {
+    ...presentation,
+    output: boundedCliDisplayText(presentation.output),
+  };
+  return presentation;
+}
+
+export function boundedCliTurn(turn: TranscriptTurn, maxBlocks = CLI_VISIBLE_BLOCKS_PER_TURN): {
+  turn: TranscriptTurn;
+  hiddenBlocks: number;
+} {
+  const blockLimit = Math.max(1, Math.floor(maxBlocks));
+  const hiddenBlocks = Math.max(0, turn.blocks.length - blockLimit);
+  const visible = turn.blocks.slice(-blockLimit).map((block): TranscriptBlock => block.kind === "text"
+    ? { ...block, text: boundedCliDisplayText(block.text) }
+    : {
+      ...block,
+      ...(block.details === undefined ? {} : { details: boundedCliDisplayText(block.details) }),
+      ...(block.presentation === undefined ? {} : { presentation: boundedCliPresentation(block.presentation) }),
+    });
+  const blocks: TranscriptBlock[] = hiddenBlocks === 0 ? visible : [{
+    kind: "status",
+    id: `display-window:${turn.id}`,
+    state: "info",
+    text: `· ${hiddenBlocks} earlier output items hidden to keep the terminal responsive`,
+  }, ...visible];
+  return {
+    hiddenBlocks,
+    turn: {
+      ...turn,
+      prompt: boundedCliDisplayText(turn.prompt, 16_000),
+      blocks,
+      statusLines: blocks
+        .filter((block): block is Extract<TranscriptBlock, { kind: "status" }> => block.kind === "status")
+        .map((block) => block.text),
+    },
+  };
+}
+
+export function cliTranscriptWindow(
+  completed: readonly TranscriptTurn[],
+  maxTurns = CLI_VISIBLE_TURN_LIMIT,
+  maxBlocks = CLI_VISIBLE_BLOCK_LIMIT,
+): CliTranscriptWindow {
+  const turns: TranscriptTurn[] = [];
+  let remainingBlocks = Math.max(1, Math.floor(maxBlocks));
+  let hiddenBlocks = 0;
+  for (let index = completed.length - 1; index >= 0 && turns.length < Math.max(1, Math.floor(maxTurns)); index -= 1) {
+    const source = completed[index]!;
+    if (remainingBlocks <= 0) break;
+    const allowance = Math.min(CLI_VISIBLE_BLOCKS_PER_TURN, remainingBlocks);
+    const bounded = boundedCliTurn(source, allowance);
+    turns.push(bounded.turn);
+    hiddenBlocks += bounded.hiddenBlocks;
+    remainingBlocks -= Math.min(source.blocks.length, allowance);
+  }
+  turns.reverse();
+  const hiddenTurns = completed.length - turns.length;
+  for (let index = 0; index < hiddenTurns; index += 1) hiddenBlocks += completed[index]?.blocks.length ?? 0;
+  return { turns, hiddenTurns, hiddenBlocks };
+}
+
 export function TerminalLayout({
   model, serviceName, workspaceName, completed, active, input, pastedBlocks = [], imageAttachments = [], clipboardNotice,
   promptCursor, columns, rows = 24, activeSession, pendingPrompt, approval,
@@ -920,12 +1049,16 @@ export function TerminalLayout({
     (block): block is Extract<TranscriptBlock, { kind: "status" }> =>
       block.kind === "status" && block.task !== undefined,
   ) ?? [];
-  const activeWithoutTasks = active === undefined ? undefined : {
+  const rawActiveWithoutTasks = active === undefined ? undefined : {
     ...active,
     blocks: active.blocks.filter((block) =>
       !(block.kind === "status" && block.task !== undefined),
     ),
   };
+  const activeWithoutTasks = rawActiveWithoutTasks === undefined
+    ? undefined
+    : boundedCliTurn(rawActiveWithoutTasks).turn;
+  const completedWindow = cliTranscriptWindow(completed);
 
   const questionRows = questions === undefined ? 0
     : 4 + (questions[questionIndex]?.options.length ?? 0) + questions.length * 2;
@@ -944,7 +1077,10 @@ export function TerminalLayout({
         ? <WelcomeCard model={model} {...(serviceName === undefined ? {} : { serviceName })} workspaceName={workspaceName} columns={columns} />
         : <Text dimColor>{"flavor · "}{model}{" · "}{workspaceName}</Text>}
       <Box height={1} />
-      {completed.map((turn, index) => (
+      {completedWindow.hiddenTurns > 0 || completedWindow.hiddenBlocks > 0
+        ? <Text dimColor>… {completedWindow.hiddenTurns} earlier turns and {completedWindow.hiddenBlocks} output items are outside the live render window</Text>
+        : null}
+      {completedWindow.turns.map((turn, index) => (
         <Box key={turn.id} flexDirection="column">
           {index > 0 ? <TurnSeparator width={columns} /> : null}
           <TurnView turn={turn} interactive={false} workspaceName={workspaceName} />
@@ -952,7 +1088,7 @@ export function TerminalLayout({
       ))}
       {activeWithoutTasks === undefined ? null : (
         <Box flexDirection="column">
-          {completed.length > 0 ? <TurnSeparator width={columns} /> : null}
+          {completedWindow.turns.length > 0 ? <TurnSeparator width={columns} /> : null}
           <TurnView turn={activeWithoutTasks} interactive={activeSession} workspaceName={workspaceName} />
         </Box>
       )}

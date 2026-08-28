@@ -54,6 +54,27 @@ const MAX_DESKTOP_IMAGES = 5;
 const MAX_DESKTOP_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_DESKTOP_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024;
 const IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+const DESKTOP_STREAM_FLUSH_MS = 50;
+
+/** Coalesce only adjacent deltas so tool/model ordering remains exact. */
+export function coalesceDesktopEvents(events: readonly DesktopEvent[]): DesktopEvent[] {
+  const result: DesktopEvent[] = [];
+  for (const event of events) {
+    const previous = result.at(-1);
+    if (event.type === "session-output"
+      && previous?.type === "session-output"
+      && event.sessionId === previous.sessionId
+      && event.workspace === previous.workspace
+      && (event.event.type === "text" || event.event.type === "thinking")
+      && previous.event.type === event.event.type) {
+      result[result.length - 1] = {
+        ...event,
+        event: { type: event.event.type, text: previous.event.text + event.event.text },
+      };
+    } else result.push(event);
+  }
+  return result;
+}
 
 export interface PendingDesktopImage extends DesktopImageAttachmentInput {
   id: string;
@@ -101,7 +122,7 @@ export function DesktopApp(): React.JSX.Element {
   const [mentionCandidates, setMentionCandidates] = useState<string[]>([]);
   const [mentionSelection, setMentionSelection] = useState(0);
   const [dismissedMentionInput, setDismissedMentionInput] = useState<string>();
-  const [mentionSpan, setMentionSpan] = useState<{ start: number; end: number }>();
+  const [mentionSpan, setMentionSpan] = useState<{ start: number; end: number; text: string }>();
   const [cursorPos, setCursorPos] = useState(0);
   const [view, setView] = useState<"conversation" | "skills" | "memory" | "mcp" | "e2e" | "activity" | "git" | "workbench">("conversation");
   const [newTaskChooser, setNewTaskChooser] = useState(false);
@@ -239,7 +260,9 @@ export function DesktopApp(): React.JSX.Element {
   }, []);
 
   useEffect(() => {
-    const unsubscribe = window.flavorDesktop.onEvent((event) => {
+    const pendingEvents: DesktopEvent[] = [];
+    let streamTimer: ReturnType<typeof setTimeout> | undefined;
+    const applyEvent = (event: DesktopEvent): void => {
       if (event.type === "snapshot" && event.workspace !== undefined && event.snapshot.workspace === event.workspace) {
         const previous = activeWorkspaceRef.current;
         if (previous !== undefined && previous !== event.workspace) {
@@ -296,13 +319,34 @@ export function DesktopApp(): React.JSX.Element {
         setD2cPending(undefined);
       }
       handleEvent(event, activeSessionIdRef, setSnapshot, setTranscript, setError);
+    };
+    const flushEvents = (): void => {
+      if (streamTimer !== undefined) {
+        clearTimeout(streamTimer);
+        streamTimer = undefined;
+      }
+      const batch = coalesceDesktopEvents(pendingEvents.splice(0));
+      for (const event of batch) applyEvent(event);
+    };
+    const unsubscribe = window.flavorDesktop.onEvent((event) => {
+      pendingEvents.push(event);
+      const stream = event.type === "session-output"
+        && (event.event.type === "text" || event.event.type === "thinking");
+      if (!stream) {
+        flushEvents();
+        return;
+      }
+      streamTimer ??= setTimeout(flushEvents, DESKTOP_STREAM_FLUSH_MS);
     });
     window.flavorDesktop.bootstrap().then((next) => {
       activeWorkspaceRef.current = next.workspace;
       activeSessionIdRef.current = next.activeSession?.sessionId;
       setSnapshot(next);
     }).catch((cause) => setError(errorMessage(cause))).finally(() => setLoading(false));
-    return unsubscribe;
+    return () => {
+      if (streamTimer !== undefined) clearTimeout(streamTimer);
+      unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -404,7 +448,10 @@ export function DesktopApp(): React.JSX.Element {
     setInput(next.text);
     setDismissedMentionInput(next.text);
     setMentionSelection(0);
-    setMentionSpan(next.span);
+    setMentionSpan(next.span === undefined ? undefined : {
+      ...next.span,
+      text: next.text.slice(next.span.start, next.span.end),
+    });
     setCursorPos(next.cursor);
     setTimeout(() => {
       const el = inputRef.current;
@@ -793,7 +840,10 @@ export function DesktopApp(): React.JSX.Element {
           : transcript.completed.length === 0 && transcript.active === undefined
             ? <WelcomeState project={workspaceName(snapshot.workspace)} onStart={(prompt) => void send(prompt)} />
             : <div className="conversation-column">
-              {transcript.completed.map((turn) => <DesktopTurnView key={turn.id} turn={turn} />)}
+              {transcript.completed.length > 60 && <div className="transcript-window-notice">
+                更早的 {transcript.completed.length - 60} 轮仍保存在会话中，已从实时渲染窗口隐藏
+              </div>}
+              {transcript.completed.slice(-60).map((turn) => <DesktopTurnView key={turn.id} turn={turn} />)}
               {transcript.active !== undefined && <DesktopTurnView turn={transcript.active} active />}
             </div>}
       </div>
@@ -927,15 +977,18 @@ function handleEvent(event: DesktopEvent, activeSessionId: React.MutableRefObjec
   }
 }
 
-export function DesktopTurnView({ turn, active = false }: { turn: TranscriptTurn; active?: boolean }): React.JSX.Element {
-  const blocks = active
+function DesktopTurnViewInner({ turn, active = false }: { turn: TranscriptTurn; active?: boolean }): React.JSX.Element {
+  const allBlocks = active
     ? turn.blocks
     : turn.blocks.filter((block) => block.kind !== "status" || block.task === undefined);
+  const hiddenBlocks = Math.max(0, allBlocks.length - 200);
+  const blocks = allBlocks.slice(-200);
   return <article className="turn" data-active={active} data-kind={turn.kind ?? "conversation"}>
-    <div className="user-message"><span>{turn.prompt}</span></div>
+    <div className="user-message"><span>{boundedDesktopText(turn.prompt, 16_000)}</span></div>
     <div className="assistant-message">
       <div className="assistant-avatar"><FlavorMark /></div>
       <div className="turn-content">
+        {hiddenBlocks > 0 && <div className="transcript-window-notice">更早的 {hiddenBlocks} 条任务输出已从实时渲染窗口隐藏</div>}
         {blocks.map((block, index) => <BlockView block={block} key={block.kind === "status" ? block.id : `text-${index}`} />)}
         {active && blocks.length === 0 && <div className="thinking-line" role="status"><i /><span><strong>Flavoring</strong><small>正在理解任务</small></span></div>}
       </div>
@@ -943,8 +996,10 @@ export function DesktopTurnView({ turn, active = false }: { turn: TranscriptTurn
   </article>;
 }
 
+export const DesktopTurnView = React.memo(DesktopTurnViewInner);
+
 function BlockView({ block }: { block: TranscriptBlock }): React.JSX.Element {
-  if (block.kind === "text") return <div className="assistant-copy"><MarkdownContent text={block.text} /></div>;
+  if (block.kind === "text") return <div className="assistant-copy"><MarkdownContent text={boundedDesktopText(block.text)} /></div>;
   const stateSymbol = block.state === "completed" ? "✓" : block.state === "failed" ? "×" : block.state === "cancelled" ? "–" : block.state === "running" ? "" : "·";
   const modelActivity = block.activity === "model";
   const thinkingPreview = modelActivity && block.thinkingText ? desktopThinkingPreview(block.thinkingText) : undefined;
@@ -955,15 +1010,21 @@ function BlockView({ block }: { block: TranscriptBlock }): React.JSX.Element {
       {block.progress !== undefined && <div className="progress-track"><i style={{ width: `${block.progress}%` }} /></div>}
       {block.presentation?.kind === "file-change" && <DiffPreview presentation={block.presentation} />}
       {block.presentation?.kind === "generic" && <div className="tool-presentation"><strong>{block.presentation.title}</strong>{block.presentation.summary && <span>{block.presentation.summary}</span>}</div>}
-      {block.presentation?.kind === "terminal" && <div className="tool-presentation"><strong>{block.presentation.title}</strong>{block.presentation.stdout && <pre>{block.presentation.stdout}</pre>}</div>}
+      {block.presentation?.kind === "terminal" && <div className="tool-presentation"><strong>{block.presentation.title}</strong>{block.presentation.stdout && <pre>{boundedDesktopText(block.presentation.stdout)}</pre>}</div>}
       {block.presentation?.kind === "web" && <div className="tool-presentation"><strong>{block.presentation.title}</strong>{block.presentation.summary && <span>{block.presentation.summary}</span>}</div>}
       {block.tool && <details className="tool-details"><summary>调用详情</summary>
         <label>Input</label><pre>{boundedJson(block.tool.input)}</pre>
         {block.tool.result === undefined ? null : <><label>Result</label><pre>{boundedJson(block.tool.result)}</pre></>}
       </details>}
-      {block.details && <details className="timeline-details"><summary>压缩摘要</summary><MarkdownContent text={block.details} /></details>}
+      {block.details && <details className="timeline-details"><summary>压缩摘要</summary><MarkdownContent text={boundedDesktopText(block.details)} /></details>}
     </div>
   </div>;
+}
+
+function boundedDesktopText(text: string, maxChars = 32_000): string {
+  if (text.length <= maxChars) return text;
+  const half = Math.floor((maxChars - 64) / 2);
+  return `${text.slice(0, half)}\n\n… ${text.length - half * 2} 个字符已隐藏 …\n\n${text.slice(-half)}`;
 }
 
 export function desktopThinkingPreview(text: string, maxChars = 280): string {
@@ -1036,8 +1097,8 @@ interface ComposerProps {
   onMentionSelect(path: string): void;
   onMentionDismiss(): void;
   onMentionMove(delta: -1 | 1): void;
-  mentionSpan?: { start: number; end: number } | undefined;
-  setMentionSpan(value: { start: number; end: number } | undefined): void;
+  mentionSpan?: { start: number; end: number; text: string } | undefined;
+  setMentionSpan(value: { start: number; end: number; text: string } | undefined): void;
   completedTokenLen: number;
   cursorPos: number;
   setCursorPos(value: number): void;
@@ -1061,7 +1122,7 @@ function Composer(props: ComposerProps): React.JSX.Element {
   const hasMentionTag = span !== undefined
     && span.start >= 0 && span.end > span.start
     && span.start < props.input.length && span.end <= props.input.length
-    && props.input.slice(span.start, span.end) === props.input.slice(span.start, span.end);
+    && props.input.slice(span.start, span.end) === span.text;
   const mentionBefore = hasMentionTag ? props.input.slice(0, span!.start) : "";
   const mentionTagText = hasMentionTag ? props.input.slice(span!.start, span!.end) : "";
   const mentionAfter = hasMentionTag ? props.input.slice(span!.end) : "";

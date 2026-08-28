@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   attachmentTranscriptPrompt,
+  coalesceDesktopEvents,
   desktopThinkingPreview,
   DesktopImageAttachmentStrip,
   DesktopTurnView,
@@ -11,6 +12,22 @@ import {
 import type { TranscriptTurn } from "../../src/ui/transcript.js";
 
 describe("desktop restored timeline rendering", () => {
+  it("coalesces adjacent stream deltas without crossing an ordering boundary", () => {
+    const events = coalesceDesktopEvents([
+      { type: "session-output", sessionId: "one", event: { type: "text", text: "a" } },
+      { type: "session-output", sessionId: "one", event: { type: "text", text: "b" } },
+      { type: "session-output", sessionId: "one", event: { type: "model-end", id: "m" } },
+      { type: "session-output", sessionId: "one", event: { type: "text", text: "c" } },
+      { type: "session-output", sessionId: "two", event: { type: "text", text: "d" } },
+    ]);
+
+    expect(events).toHaveLength(4);
+    expect(events[0]).toMatchObject({ sessionId: "one", event: { type: "text", text: "ab" } });
+    expect(events[1]).toMatchObject({ event: { type: "model-end" } });
+    expect(events[2]).toMatchObject({ sessionId: "one", event: { type: "text", text: "c" } });
+    expect(events[3]).toMatchObject({ sessionId: "two", event: { type: "text", text: "d" } });
+  });
+
   it("renders Claude-style numbered image chips and transcript references", () => {
     const attachments = [
       {
@@ -133,5 +150,25 @@ describe("desktop restored timeline rendering", () => {
 
     expect(html).toContain("data-kind=\"compaction\"");
     expect(html).toContain("Saved compact summary");
+  });
+
+  it("bounds a very large active turn before building desktop DOM", () => {
+    const turn: TranscriptTurn = {
+      id: 9,
+      prompt: "long task",
+      assistantText: "",
+      statusLines: [],
+      blocks: Array.from({ length: 230 }, (_, index) => ({
+        kind: "status" as const,
+        id: `tool:${index}`,
+        state: "completed" as const,
+        text: `tool ${index}`,
+      })),
+    };
+
+    const html = renderToStaticMarkup(<DesktopTurnView turn={turn} active />);
+    expect(html).toContain("更早的 30 条任务输出");
+    expect(html).not.toContain(">tool 0<");
+    expect(html).toContain("tool 229");
   });
 });

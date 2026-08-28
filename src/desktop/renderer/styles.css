@@ -128,6 +128,7 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 
 .conversation-scroll { min-height: 0; overflow-y: auto; padding: 40px 32px 230px; scrollbar-width: thin; scrollbar-color: #d5dce4 transparent; }
 .conversation-column { width: min(780px, 100%); margin: 0 auto; }
+.transcript-window-notice { margin: 8px 0 14px; color: #7b8794; font-size: 12px; text-align: center; }
 .turn { margin: 0 0 46px; }
 .user-message { display: flex; justify-content: flex-end; margin-bottom: 24px; }
 .user-message span { max-width: min(82%, 660px); padding: 11px 15px; border: 1px solid #e2e7ec; border-radius: 17px 17px 4px 17px; background: #f7f8fa; font-size: 14px; line-height: 1.55; white-space: pre-wrap; }

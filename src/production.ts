@@ -365,9 +365,33 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     ? createTranscriptState()
     : restoreTranscriptState(recovered.timeline.state);
   const restoredTranscript = restoreTranscriptState(timelineState);
+  // Providers commonly emit text and thinking a few characters at a time. Applying
+  // every delta to the immutable timeline repeatedly copies the whole accumulated
+  // answer (both assistantText and its text block), which turns a long response into
+  // quadratic allocation pressure. Keep display streaming immediate, but coalesce
+  // adjacent timeline deltas until an ordering boundary or persistence snapshot.
+  const pendingTimelineStreams: Array<{ type: "text" | "thinking"; chunks: string[] }> = [];
+  const flushTimelineStreams = (): void => {
+    for (const pending of pendingTimelineStreams.splice(0)) {
+      timelineState = transcriptReducer(timelineState, {
+        type: "session",
+        event: { type: pending.type, text: pending.chunks.join("") },
+      });
+    }
+  };
+  const recordTimelineEvent = (event: SessionOutput): void => {
+    if (event.type === "text" || event.type === "thinking") {
+      const last = pendingTimelineStreams.at(-1);
+      if (last?.type === event.type) last.chunks.push(event.text);
+      else pendingTimelineStreams.push({ type: event.type, chunks: [event.text] });
+      return;
+    }
+    flushTimelineStreams();
+    timelineState = transcriptReducer(timelineState, { type: "session", event });
+  };
   let ideSessionId: string | undefined;
   const emitOutput = (event: SessionOutput): void => {
-    timelineState = transcriptReducer(timelineState, { type: "session", event });
+    recordTimelineEvent(event);
     options.output(event);
     if (ideSessionId !== undefined) ide.publishEvent(ideSessionId, event);
   };
@@ -774,22 +798,25 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     };
   }
   let persistTail: Promise<void> = Promise.resolve();
-  const sessionDocument = (): SessionDocument => ({
-    version: SESSION_VERSION, sessionId, createdAt, updatedAt: new Date().toISOString(), workspace: { path: workspace },
-    conversation: storedConversation(harness.main.context.snapshot()),
-    tasks: {
-      ...(taskPlan === undefined ? {} : { plan: taskPlan }),
-      ...(taskGraph === undefined ? {} : { graph: taskGraph }),
-      states: { ...taskStates },
-      results: { ...taskResults },
-    },
-    // Persist the resolved decision, not the harness snapshot: after logout the
-    // harness may still hold the old login model, and resuming from that stale
-    // value is what made the welcome card show a previous service.
-    models: { main: mainModel, subagent: childModel }, permissionMode: harness.permissionMode,
-    memory: memoryLifecycle,
-    timeline: { version: 1, state: timelineState },
-  });
+  const sessionDocument = (): SessionDocument => {
+    flushTimelineStreams();
+    return {
+      version: SESSION_VERSION, sessionId, createdAt, updatedAt: new Date().toISOString(), workspace: { path: workspace },
+      conversation: storedConversation(harness.main.context.snapshot()),
+      tasks: {
+        ...(taskPlan === undefined ? {} : { plan: taskPlan }),
+        ...(taskGraph === undefined ? {} : { graph: taskGraph }),
+        states: { ...taskStates },
+        results: { ...taskResults },
+      },
+      // Persist the resolved decision, not the harness snapshot: after logout the
+      // harness may still hold the old login model, and resuming from that stale
+      // value is what made the welcome card show a previous service.
+      models: { main: mainModel, subagent: childModel }, permissionMode: harness.permissionMode,
+      memory: memoryLifecycle,
+      timeline: { version: 1, state: timelineState },
+    };
+  };
   let persistFailed = false;
   const persist = (): Promise<void> => {
     persistTail = persistTail.catch(() => undefined).then(
