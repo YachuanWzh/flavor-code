@@ -88,7 +88,7 @@ describe("命令端到端（注入 spawn）", () => {
     const [command, argv, options] = host.spawn.mock.calls[0];
     expect(command).toBe(NODE_EXE);
     expect(argv.slice(0, 3)).toEqual([NPX_CLI, "--yes", "@flavor-code/plugin-manager"]);
-    expect(argv.slice(3)).toEqual(["add", "--all", "-y"]);
+    expect(argv.slice(3)).toEqual(["--all", "-y", "--force"]);
     expect(options.shell).toBeFalsy();
   });
 
@@ -101,7 +101,7 @@ describe("命令端到端（注入 spawn）", () => {
     const [command, argv] = host.spawn.mock.calls[0];
     expect(command).toMatch(/cmd\.exe$/i);
     expect(argv.slice(0, 3)).toEqual(["/d", "/s", "/c"]);
-    expect(argv[3]).toContain('"npx" "--yes" "@flavor-code/plugin-manager" "add" "--all" "-y"');
+    expect(argv[3]).toContain('"npx" "--yes" "@flavor-code/plugin-manager" "--all" "-y" "--force"');
   });
 
   it("macOS：直接 spawn npx，用户参数原样透传（不经过 shell 拼接）", async () => {
