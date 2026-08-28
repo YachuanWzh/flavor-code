@@ -1,13 +1,15 @@
 // superharness flavor-code plugin
 // Registers the superharness skill root so that go, brainstorm, tdd, etc.
-// are discovered under the /superharness namespace, and registers three
-// lifecycle hooks mirroring the Claude Code hooks:
+// are discovered by flavor-code, and registers eight lifecycle hooks:
 //   SessionStart     inject HARNESS.md (+ STACK.md when present) as additionalContext
 //   UserPromptSubmit auto-bootstrap ralph tracking on `/superharness:go <goal>`
 //   Stop             append a 'round' heartbeat to trace.jsonl while a go task runs
+//   SessionEnd       checkpoint without clearing the active resumable task
+//   Before/AfterPlan record plan boundaries
+//   SubagentStart/Stop record child lifecycle and real completion status
 // All hooks are best-effort and always return { decision: "allow" }.
 
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -37,9 +39,13 @@ function isoNow() {
 
 function atomicWrite(path, text) {
   mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, text, "utf8");
-  renameSync(tmp, path);
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    writeFileSync(tmp, text, "utf8");
+    renameSync(tmp, path);
+  } finally {
+    try { rmSync(tmp, { force: true }); } catch { /* ignore */ }
+  }
 }
 
 function readJson(path) {
@@ -67,8 +73,7 @@ function appendTrace(root, phase, traceEvent, detail) {
   const line = JSON.stringify({ ts: isoNow(), phase, event: traceEvent, detail: detail ?? "" });
   const path = join(ralphDir(root), "trace.jsonl");
   mkdirSync(dirname(path), { recursive: true });
-  const existing = readText(path) ?? "";
-  writeFileSync(path, `${existing}${line}\n`, "utf8");
+  appendFileSync(path, `${line}\n`, "utf8");
 }
 
 // Parse a go invocation at the start of the prompt. flavor-code invokes skills
@@ -115,6 +120,13 @@ function onSessionStart(event) {
   if (stack !== undefined) {
     context += `\n\n<EXTREMELY_IMPORTANT>\nThis project targets a specific tech stack. Follow this guidance.\n\n${stack}\n</EXTREMELY_IMPORTANT>`;
   }
+  // One-line onboarding nudge when the workspace has neither the generated
+  // doc nor an analysis cache. Never auto-analyze; the skill is manual-only.
+  if (typeof workspace === "string" && workspace.length > 0
+      && !existsSync(join(workspace, "ONBOARDING.md"))
+      && !existsSync(join(workspace, ".flavor", "superharness", "onboarding", "cache.json"))) {
+    context += `\n\n<superharness-onboarding-hint>\nNo onboarding guide for this workspace yet. Run /onboarding (superharness:onboarding) to analyze the codebase, map module business relationships, and generate ONBOARDING.md plus an interactive module mind map. The agent decides when to run it - nothing is analyzed automatically.\n</superharness-onboarding-hint>`;
+  }
   return { decision: "allow", additionalContext: context };
 }
 
@@ -152,8 +164,9 @@ function onStop(event) {
 }
 
 // Called when the session ends (host fires SessionEnd). Records a final
-// trace event and clears any remaining ralph state so the next session
-// starts with a clean slate.
+// trace checkpoint. It deliberately preserves .current-task: ending a host
+// session is not the same as completing the go task, and cold-start resume
+// relies on that pointer.
 function onSessionEnd(event) {
   const root = projectRoot(event);
   const current = getCurrentTask(root);
@@ -161,8 +174,6 @@ function onSessionEnd(event) {
   const tasks = readJson(join(ralphDir(root), "task.json"));
   const phase = typeof tasks?.phase === "string" && tasks.phase.length > 0 ? tasks.phase : "go";
   appendTrace(root, phase, "session:end", "session ended");
-  // Clear the active-task pointer so the Stop hook no longer records heartbeats.
-  try { rmSync(currentTaskPath(root), { force: true }); } catch { /* ignore */ }
   return ALLOW;
 }
 
@@ -208,8 +219,13 @@ function onSubagentStop(event) {
   if (current === undefined) return ALLOW;
   const tasks = readJson(join(ralphDir(root), "task.json"));
   const phase = typeof tasks?.phase === "string" && tasks.phase.length > 0 ? tasks.phase : "go";
-  const outcome = typeof event?.payload?.outcome === "string" ? event.payload.outcome : "completed";
-  appendTrace(root, phase, "subagent:stop", `subagent ${outcome}`);
+  const status = typeof event?.payload?.status === "string"
+    ? event.payload.status
+    : typeof event?.payload?.outcome === "string" ? event.payload.outcome : "completed";
+  const error = typeof event?.payload?.error === "string" && event.payload.error.length > 0
+    ? `: ${event.payload.error}`
+    : "";
+  appendTrace(root, phase, "subagent:stop", `subagent ${status}${error}`);
   return ALLOW;
 }
 

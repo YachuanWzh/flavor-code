@@ -19,7 +19,10 @@ const EVENTS_FILE = path.join(STATE_DIR, 'events');
 const EDITS_FILE = path.join(STATE_DIR, 'edits');
 const INFO_FILE = path.join(STATE_DIR, 'server-info');
 const STOPPED_FILE = path.join(STATE_DIR, 'server-stopped');
-const PORT = Number(process.env.SUPERHARNESS_PORT) || (49152 + Math.floor(Math.random() * 16383));
+// Let the OS allocate an available ephemeral port unless the caller explicitly
+// pins one. Randomly guessing a high port can still collide under parallel tests
+// or when several brainstorm sessions start together.
+const PORT = process.env.SUPERHARNESS_PORT ? Number(process.env.SUPERHARNESS_PORT) : 0;
 const HOST = process.env.SUPERHARNESS_HOST || '127.0.0.1';
 const IDLE_TIMEOUT_MS = Number(process.env.SUPERHARNESS_IDLE_TIMEOUT_MS) || 30 * 60 * 1000;
 const IDLE_CHECK_MS = Math.min(5000, IDLE_TIMEOUT_MS);
@@ -194,11 +197,13 @@ setInterval(() => {
 
 server.listen(PORT, HOST, () => {
   try { fs.unlinkSync(STOPPED_FILE); } catch {}
+  const address = server.address();
+  const actualPort = typeof address === 'object' && address !== null ? address.port : PORT;
   const urlHost = HOST === '127.0.0.1' ? 'localhost' : HOST;
   const info = {
     type: 'server-started',
-    port: PORT,
-    url: 'http://' + urlHost + ':' + PORT,
+    port: actualPort,
+    url: 'http://' + urlHost + ':' + actualPort,
     pid: process.pid,
     content_dir: CONTENT_DIR,
     state_dir: STATE_DIR,

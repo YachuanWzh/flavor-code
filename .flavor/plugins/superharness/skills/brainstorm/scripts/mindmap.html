@@ -19,6 +19,8 @@
   .node { cursor: pointer; }
   .node text { font-size: 13px; fill: var(--text); }
   .node.rejected text { fill: var(--muted); text-decoration: line-through; }
+  .node.stale { opacity: 0.45; }
+  .node.stale text { fill: var(--muted); font-style: italic; }
   .link { fill: none; stroke: #4a4e5e; stroke-width: 1.5; }
   #hint { position: fixed; bottom: 10px; right: 14px; color: var(--muted); font-size: 12px; z-index: 10; }
 </style>
@@ -48,6 +50,7 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 const KIND_COLORS = {
   topic: '#3d5afe', question: '#8e6cf0', option: '#2a9d8f', decision: '#e9933a',
   requirement: '#4fa3e3', risk: '#e35d6a', note: '#6c757d',
+  module: '#00b4d8', flow: '#90be6d', entity: '#b388eb',
 };
 const svg = document.getElementById('canvas');
 const viewport = document.getElementById('viewport');
