@@ -49,6 +49,11 @@ worktree creation fails, work in place — never block. Everything after this
   Every task follows the TDD step sequence: failing test → verify RED → minimal
   implementation → verify GREEN → commit.
 - Trivial goals (1–2 steps) may skip the plan file but NOT the TDD cycle.
+- **Analyze gate — the plan is not done without its Analysis Findings block.**
+  The `superharness:writing-plans` self-review must have produced the saved
+  **Analysis Findings** section (spec coverage matrix, contradictions,
+  ambiguities, verdict READY) at the end of the plan file. No Phase 2 work may
+  start while contradictions or unclosed coverage gaps remain open.
 - Create one TodoWrite/Task item per plan task and keep statuses current.
 - **Ralph tracking is already auto-started — you only enrich it.** The moment this
   `/superharness:go` prompt was submitted, the UserPromptSubmit hook bootstrapped the
@@ -130,8 +135,28 @@ no guess-and-patch fixes.
 
 - Dispatch a code-reviewer subagent over the change (base SHA → head SHA) using the
   template in `superharness:requesting-code-review`.
+- Process the findings under **`superharness:receiving-code-review`** discipline:
+  verify each finding against the codebase before implementing it, clarify anything
+  unclear before touching anything, push back with evidence where the reviewer is
+  wrong, and run a TDD cycle per fix.
 - Fix Critical and Important issues (each fix goes through the TDD cycle again).
   Note Minor issues in the final report.
+
+## Phase 4.5 — Converge
+
+**REQUIRED SUB-SKILL:** `superharness:converge`
+
+Tests green + review clean is not the finish line — the run must also match what
+was asked. Run the convergence audit: every spec/goal requirement classified
+`done`/`partial`/`missing`/`divergent` with file+test evidence.
+
+- **CONVERGED** → `Add-RalphTrace -Phase 'converge' -Event 'converge:pass' -Detail '<N> requirements, evidence cited'`,
+  then let converge sink the living spec to `.claude/superharness/specs/<plan-slug>.md`
+  (an existing brainstorm design doc is updated in place, not duplicated).
+- **NOT CONVERGED** → the leftovers are appended as new plan tasks and ralph
+  entries and you return to Phase 2 (strict TDD on each). Converge shares the
+  ralph retry cap of 5 (`Test-RalphRetryExhausted`) — when exhausted, stop and
+  report the open items honestly; never declare convergence without the audit.
 
 ## Phase 5 — Finish & Report
 
@@ -149,6 +174,7 @@ Deliver a final summary containing:
 - What was built/changed and where (file paths)
 - Evidence: test commands run and their actual results
 - Review outcome and what was fixed
+- Convergence verdict and the living-spec path written by Phase 4.5
 - Assumptions made and any noted Minor issues / follow-ups
 - How the work was finished (merge + worktree cleanup, or in-place)
 
