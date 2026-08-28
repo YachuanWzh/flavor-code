@@ -37,7 +37,7 @@ Flavor Code connects to OpenAI, Anthropic, or compatible services and works with
 | ⏪ | **Traceable, resumable results** | Full timeline, checkpoints, rewind, traces, diffs, and failure audits |
 | 🧱 | **Crash-consistent execution** | Fsync-backed event journal, durable steering queue, savepoints, and no automatic replay of non-idempotent tools |
 | 🧠 | **Local long-term context** | Memory, Skills, plugins, and project guides stored on your machine |
-| 🔎 | **Code graph navigation** | A local AST code-graph index (`.flavor/astgraph/`) powers `ast_search`/`ast_callers`/`ast_impact` queries for precise symbol lookup and reachability tracing |
+| 🔎 | **Code graph navigation** | A local AST code-graph index (`.flavor/astgraph/`) powers `ast_search`/`ast_callers`/`ast_impact` queries for precise symbol lookup and reachability tracing; `/explain` turns that graph plus git history into newcomer-oriented walkthroughs |
 | 🌿 | **Git-native workflows** | `/commit` drafts a Conventional-Commits message for staged changes and commits after confirmation; `/review` audits uncommitted changes; the read-only `GitHistory` tool explains when and why code changed |
 | 🎨 | **E2E requirement-to-delivery** | From a rough requirement or a design export to a delivered product: PRD, interactive prototype, visual implementation, API integration, autonomous acceptance, and scored delivery (Electron only) |
 | 🔁 | **Bounded self-improvement** | Repeated tool failures are captured, deduped, and proposed as suggestions; fixes ship as sandbox-verified plugins or as learned guardrail rules injected into future prompts, with run trends and rule management (`/evolve`) |
@@ -167,7 +167,7 @@ Common commands:
 
 You can submit steering or queue follow-ups while a run is in progress; once the current model response finishes, the task picks up new instructions at safe boundaries.
 
-`/commit` and `/review` use the cheap sub-agent model and degrade gracefully when it is unavailable. Session checkpoints are tagged with the current git state (`branch@sha`), so `/tree` shows what the workspace looked like at each node.
+`/commit` and `/review` use the cheap sub-agent model and degrade gracefully when it is unavailable. Session checkpoints are tagged with the current git state (`branch@sha`), so `/tree` shows what the workspace looked like at each node. `/explain <symbol>` runs on the same cheap model: it assembles call relations from the code graph, the symbol's real source slice, and recent commits touching the file, then generates a five-part newcomer walkthrough (what it does / key implementation points / call flow / why it is written this way / gotchas); an interactive picker disambiguates multiple matches, and a missing graph degrades to a `/ast init` hint instead of an error.
 
 #### CLI pals and cross-project work
 

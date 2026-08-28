@@ -37,7 +37,7 @@ Flavor Code 接入 OpenAI、Anthropic 或兼容服务，在受控工作区内使
 | ⏪ | **结果可追溯、可恢复** | 完整时间线、checkpoint、rewind、trace、Diff 和失败审计 |
 | 🧱 | **崩溃一致执行** | fsync 事件日志、持久 steering 队列、savepoint，非幂等工具不自动重放 |
 | 🧠 | **本地长期上下文** | 记忆、Skill、插件和项目指南均保存在本机 |
-| 🔎 | **代码图导航** | 本地 AST 代码图索引（`.flavor/astgraph/`），通过 `ast_search`/`ast_callers`/`ast_impact` 等查询精确定位符号、追踪可达性 |
+| 🔎 | **代码图导航** | 本地 AST 代码图索引（`.flavor/astgraph/`），通过 `ast_search`/`ast_callers`/`ast_impact` 等查询精确定位符号、追踪可达性；`/explain` 结合代码图与 Git 历史，向新人讲解一个符号 |
 | 🌿 | **Git 原生工作流** | `/commit` 为暂存改动生成 Conventional Commits 提交信息并确认提交；`/review` 审查未提交改动；只读 `GitHistory` 工具回答“这段代码为什么是这样” |
 | 🎨 | **E2E 需求到交付** | 从粗需求或设计稿到可交付产品：PRD、交互原型、视觉还原、接口联调、自主验收与评分交付（仅 Electron） |
 | 🔁 | **有界自进化** | 重复的工具失败被捕获、去重并形成建议；修复以沙箱验证过的插件形式落地，或沉淀为注入后续提示词的 guardrail 规则，并支持运行趋势与规则管理（`/evolve`） |
@@ -167,7 +167,7 @@ OAuth PKCE 的运行时行为与配置约定见 [PKCE 规范](./docs/specs/pkce-
 
 运行中可以提交 steering 或排队 follow-up；当前模型响应结束后，任务会在安全边界处接收新指令。
 
-`/commit` 与 `/review` 使用廉价子 Agent 模型，模型不可用时优雅降级。会话 checkpoint 会标记当前 git 状态（`branch@sha`），`/tree` 可以看到每个节点对应的工作区现场。
+`/commit` 与 `/review` 使用廉价子 Agent 模型，模型不可用时优雅降级。会话 checkpoint 会标记当前 git 状态（`branch@sha`），`/tree` 可以看到每个节点对应的工作区现场。`/explain <符号>` 同样走廉价模型：它把代码图中的调用关系、符号的真实源码切片和该文件的近期提交历史组装成证据，生成面向新人的五段式讲解（做什么 / 关键实现点 / 调用关系 / 为什么这样写 / 注意事项）；多个符号命中时弹出选择卡片，可方向键选择或直接输入更精确的名字；代码图未建立时提示 `/ast init`，不会抛错。
 
 #### CLI Pals 与跨项目协作
 
