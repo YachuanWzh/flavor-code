@@ -148,7 +148,7 @@ export const FlavorConfigSchema = z.object({
     .object({
       windowTokens: z.number().int().positive().default(200_000),
       reservedOutputTokens: z.number().int().nonnegative().default(20_000),
-      autoCompactBufferTokens: z.number().int().nonnegative().default(13_000),
+      autoCompactBufferTokens: z.number().int().nonnegative().default(27_000),
       warningBufferTokens: z.number().int().nonnegative().default(20_000),
       blockingBufferTokens: z.number().int().nonnegative().default(3_000),
       microcompactKeepRecentToolResults: z.number().int().nonnegative().default(5),

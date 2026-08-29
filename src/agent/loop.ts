@@ -2,6 +2,7 @@ import type { ContextManager } from "../context/manager.js";
 import type { HallucinationGuard } from "../hallucination/guard.js";
 import type { HookBus } from "../hooks/bus.js";
 import type { ModelRegistry } from "../models/registry.js";
+import { getHeapStatistics } from "node:v8";
 import { withStructuredOutput } from "../models/structured.js";
 import { normalizeProviderError, type ModelMessage, type ModelThinkingBlock, type ModelTool, type ProviderError } from "../models/types.js";
 import type { ToolRuntime } from "../tools/runtime.js";
@@ -27,6 +28,28 @@ function envMaxIterations(): number | undefined {
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed <= 0) return undefined;
   return parsed;
+}
+
+/**
+ * Stop a turn before the V8 heap reaches its hard limit. A retained-memory
+ * leak otherwise ends in a native OOM crash with no recovery; tripping this
+ * watermark saves the session and lets the launcher relaunch on a fresh heap.
+ * 0.8 keeps headroom for compaction payloads and the GC death spiral that
+ * starts near ~0.95.
+ */
+export const MEMORY_PRESSURE_HEAP_RATIO = 0.8;
+
+export function memoryPressureError(heapUsed: number, heapLimit: number): AgentError | undefined {
+  if (heapLimit <= 0 || heapUsed < heapLimit * MEMORY_PRESSURE_HEAP_RATIO) return undefined;
+  const mb = (bytes: number): number => Math.round(bytes / 1_048_576);
+  return {
+    code: "memory_pressure",
+    message: `Heap usage reached ${Math.round((heapUsed / heapLimit) * 100)}% of the V8 limit (${mb(heapUsed)}MB of ${mb(heapLimit)}MB); stopping to avoid a crash. The session is saved and will resume after restart.`,
+  };
+}
+
+function currentMemoryPressure(): AgentError | undefined {
+  return memoryPressureError(process.memoryUsage().heapUsed, getHeapStatistics().heap_size_limit);
 }
 
 export interface AgentLoopOptions {
@@ -128,6 +151,12 @@ export class AgentLoop {
     while (true) {
       if (request.signal?.aborted) {
         yield { type: "error", error: { code: "cancelled", message: abortMessage(request.signal) } };
+        return;
+      }
+
+      const pressure = currentMemoryPressure();
+      if (pressure !== undefined) {
+        yield { type: "error", error: pressure };
         return;
       }
 

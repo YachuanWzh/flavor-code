@@ -116,6 +116,14 @@ export class ContextManager {
   #visibilityLog: ContextVisibilityRecord[] = [];
   readonly #activeTransientSystem = new Map<string, ModelMessage>();
 
+  /**
+   * The visibility audit log persists every transient system admission and is
+   * serialized in full on every session save. Bound both dimensions or a long
+   * subagent-driven run grows it into hundreds of megabytes (heap OOM).
+   */
+  static readonly VISIBILITY_LOG_MAX_ENTRIES = 1_000;
+  static readonly VISIBILITY_RECORD_CONTENT_LIMIT = 2_048;
+
   constructor(options: ContextManagerOptions) {
     if (options.compactAtChars !== undefined && options.compactAtChars <= 0) throw new Error("compactAtChars must be positive");
     if (options.toolOutputChars <= 0) throw new Error("toolOutputChars must be positive");
@@ -217,9 +225,16 @@ export class ContextManager {
   beginTransientSystem(content: string): string {
     const id = randomUUID();
     const record: ContextVisibilityRecord = {
-      id, role: "system", content, admittedAt: new Date().toISOString(), scope: "run",
+      id,
+      role: "system",
+      content: limitVisibilityContent(content),
+      admittedAt: new Date().toISOString(),
+      scope: "run",
     };
     this.#visibilityLog.push(record);
+    if (this.#visibilityLog.length > ContextManager.VISIBILITY_LOG_MAX_ENTRIES) {
+      this.#visibilityLog = this.#visibilityLog.slice(-ContextManager.VISIBILITY_LOG_MAX_ENTRIES);
+    }
     this.#activeTransientSystem.set(id, { role: "system", content });
     return id;
   }
@@ -240,8 +255,10 @@ export class ContextManager {
     const currentStableHash = currentStable === undefined ? this.#epoch.stableSourceHash : hashMessages(currentStable);
     if (currentStable !== undefined && currentStableHash !== this.#epoch.stableSourceHash) {
       const value = currentStable.map((message) => message.content).join("\n\n");
+      const previous = this.#epoch.sources["system-baseline"]
+        ?? this.#epoch.stableMessages.map((message) => message.content).join("\n\n");
       if (this.#epoch.sources["system-baseline"] !== value) {
-        updates.push(contextUpdateMessage("system-baseline", value));
+        updates.push(contextUpdateMessage("system-baseline", deltaSourceValue(previous, value)));
         this.#epoch.sources["system-baseline"] = value;
       }
     } else if (currentStable !== undefined && this.#epoch.sources["system-baseline"] !== undefined) {
@@ -252,7 +269,7 @@ export class ContextManager {
     for (const key of DYNAMIC_SOURCE_ORDER) {
       const value = next[key];
       if (value === undefined || value === this.#epoch.sources[key]) continue;
-      updates.push(contextUpdateMessage(key, displaySourceValue(key, value)));
+      updates.push(contextUpdateMessage(key, deltaSourceValue(this.#epoch.sources[key], displaySourceValue(key, value))));
       this.#epoch.sources[key] = value;
     }
     for (const key of DYNAMIC_SOURCE_ORDER) {
@@ -285,7 +302,7 @@ export class ContextManager {
       ? (legacySummary === undefined ? undefined : { summary: legacySummary, compactedAt: new Date(0).toISOString() })
       : { ...snapshot.compact };
     if (snapshot.epoch !== undefined) this.#epoch = cloneEpoch(snapshot.epoch);
-    this.#visibilityLog = snapshot.visibilityLog?.map((item) => ({ ...item })) ?? [];
+    this.#visibilityLog = boundVisibilityLog(snapshot.visibilityLog);
     this.#activeTransientSystem.clear();
     this.#messages = messages.map((message) => message.role === "tool"
       ? { ...message, content: truncateToolOutput(message.content, this.#toolOutputChars) }
@@ -333,6 +350,13 @@ export class ContextManager {
   async prepareForModelCall(signal: AbortSignal = new AbortController().signal): Promise<boolean> {
     signal.throwIfAborted();
     this.refreshContextSources();
+    // Superseded "Context update" announcements duplicate state that the pinned
+    // source messages already expose. Dropping the stale ones relieves window
+    // pressure without paying for an LLM summarize round-trip.
+    if (this.#dropStaleContextUpdates()) {
+      this.#lastRecordedInputTokens = undefined;
+      this.#estimatedTokensAtLastRecordedUsage = undefined;
+    }
     if (!this.needsCompaction()) return false;
     const originalMessages = this.#messages;
     const originalRecordedUsage = this.#lastRecordedInputTokens;
@@ -443,6 +467,27 @@ export class ContextManager {
     this.#estimatedTokensAtLastRecordedUsage = undefined;
     this.#reportCompactProgress(100);
     return true;
+  }
+
+  #dropStaleContextUpdates(): boolean {
+    const latestBySource = new Map<string, number>();
+    for (let index = this.#messages.length - 1; index >= 0; index -= 1) {
+      const source = contextUpdateSource(this.#messages[index]!);
+      if (source === undefined || latestBySource.has(source)) continue;
+      latestBySource.set(source, index);
+    }
+    const next: ModelMessage[] = [];
+    let changed = false;
+    this.#messages.forEach((message, index) => {
+      const source = contextUpdateSource(message);
+      if (source !== undefined && latestBySource.get(source) !== index) {
+        changed = true;
+        return;
+      }
+      next.push(message);
+    });
+    if (changed) this.#messages = next;
+    return changed;
   }
 
   #reportCompactProgress(percentage: number): void {
@@ -557,6 +602,44 @@ function displaySourceValue(source: string, value: string): string {
 
 function contextUpdateMessage(source: string, content: string): ModelMessage {
   return { role: "system", content: `Context update [${source}]\n${content}` };
+}
+
+const CONTEXT_UPDATE_PREFIX = "Context update [";
+
+function contextUpdateSource(message: ModelMessage): string | undefined {
+  if (message.role !== "system" || typeof message.content !== "string") return undefined;
+  if (!message.content.startsWith(CONTEXT_UPDATE_PREFIX)) return undefined;
+  const end = message.content.indexOf("]\n", CONTEXT_UPDATE_PREFIX.length);
+  if (end < 0) return undefined;
+  return message.content.slice(CONTEXT_UPDATE_PREFIX.length, end);
+}
+
+/**
+ * When the new source value only appends to the previously admitted one, emit
+ * just the appended tail; the full state stays visible via the pinned source
+ * messages. Non-append rewrites fall back to the full value.
+ */
+function deltaSourceValue(previous: string | undefined, display: string): string {
+  if (previous === undefined || !display.startsWith(previous)) return display;
+  return display.slice(previous.length).replace(/^\s+/, "") || display;
+}
+
+function limitVisibilityContent(content: string): string {
+  const limit = ContextManager.VISIBILITY_RECORD_CONTENT_LIMIT;
+  if (content.length <= limit) return content;
+  return `${content.slice(0, limit)}\n...[truncated; original length: ${content.length} characters]...`;
+}
+
+function boundVisibilityLog(records: readonly ContextVisibilityRecord[] | undefined): ContextVisibilityRecord[] {
+  if (records === undefined) return [];
+  const limit = ContextManager.VISIBILITY_RECORD_CONTENT_LIMIT;
+  const bounded = records.map((item) => ({
+    ...item,
+    ...(item.content.length <= limit ? {} : { content: limitVisibilityContent(item.content) }),
+  }));
+  return bounded.length > ContextManager.VISIBILITY_LOG_MAX_ENTRIES
+    ? bounded.slice(-ContextManager.VISIBILITY_LOG_MAX_ENTRIES)
+    : bounded;
 }
 
 function cloneEpoch(epoch: ContextEpochSnapshot): ContextEpochSnapshot {

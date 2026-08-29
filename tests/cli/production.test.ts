@@ -1163,7 +1163,7 @@ describe("production runtime", () => {
       context: {
         windowTokens: 200_000,
         reservedOutputTokens: 20_000,
-        autoCompactBufferTokens: 13_000,
+        autoCompactBufferTokens: 27_000,
       },
     });
     await runtime.dispose();

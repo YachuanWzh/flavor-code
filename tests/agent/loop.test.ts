@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { describe, expect, it, vi } from "vitest";
+import { getHeapStatistics } from "node:v8";
 
-import { AgentLoop, type AgentLoopOptions } from "../../src/agent/loop.js";
+import { AgentLoop, MEMORY_PRESSURE_HEAP_RATIO, memoryPressureError, type AgentLoopOptions } from "../../src/agent/loop.js";
 import type { AgentEvent } from "../../src/agent/types.js";
 import { ContextManager } from "../../src/context/manager.js";
 import { HookBus } from "../../src/hooks/bus.js";
@@ -1028,6 +1029,52 @@ describe("AgentLoop", () => {
     const ends = events.filter((event): event is Extract<AgentEvent, { type: "tool-end" }> => event.type === "tool-end");
     expect(starts[0]!.hint).toBeUndefined();
     expect(ends[0]!.hint).toBeUndefined();
+  });
+
+  it("stops with memory_pressure before any model call when the heap watermark is crossed", async () => {
+    const requests: ModelRequest[] = [];
+    const fixture = createLoop({ adapter: fakeAdapter([], requests) });
+    const limit = getHeapStatistics().heap_size_limit;
+    const usage = vi.spyOn(process, "memoryUsage").mockReturnValue({
+      rss: 0, heapTotal: 0, heapUsed: Math.ceil(limit * (MEMORY_PRESSURE_HEAP_RATIO + 0.05)), external: 0, arrayBuffers: 0,
+    });
+    try {
+      const events = await collect(fixture.loop.run({ prompt: "do it" }));
+      expect(events).toHaveLength(1);
+      expect(events[0]!.type).toBe("error");
+      expect((events[0] as Extract<AgentEvent, { type: "error" }>).error.code).toBe("memory_pressure");
+      expect(requests).toHaveLength(0);
+    } finally {
+      usage.mockRestore();
+    }
+  });
+
+  it("runs normally when the heap stays under the watermark", async () => {
+    const fixture = createLoop({
+      adapter: fakeAdapter([[{ type: "text", text: "ok" }, { type: "done", usage: { inputTokens: 1, outputTokens: 1 } }]]),
+    });
+    const limit = getHeapStatistics().heap_size_limit;
+    const usage = vi.spyOn(process, "memoryUsage").mockReturnValue({
+      rss: 0, heapTotal: 0, heapUsed: Math.floor(limit * (MEMORY_PRESSURE_HEAP_RATIO - 0.2)), external: 0, arrayBuffers: 0,
+    });
+    try {
+      const events = await collect(fixture.loop.run({ prompt: "do it" }));
+      expect(events.some((event) => event.type === "done")).toBe(true);
+      expect(events.some((event) => event.type === "error")).toBe(false);
+    } finally {
+      usage.mockRestore();
+    }
+  });
+});
+
+describe("memoryPressureError", () => {
+  it("stays silent below the watermark and trips at or above it", () => {
+    const limit = 4_000_000_000;
+    expect(memoryPressureError(limit * 0.79, limit)).toBeUndefined();
+    const tripped = memoryPressureError(limit * 0.81, limit);
+    expect(tripped?.code).toBe("memory_pressure");
+    expect(tripped?.message).toContain("81%");
+    expect(memoryPressureError(1, 0)).toBeUndefined();
   });
 });
 

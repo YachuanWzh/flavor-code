@@ -15,12 +15,12 @@ import {
 import type { ModelMessage } from "../../src/models/types.js";
 
 describe("context pressure", () => {
-  it("matches Claude Code's effective-window auto-compact threshold", () => {
-    const below = calculateContextPressure(166_999, DEFAULT_COMPACTION_POLICY);
-    const at = calculateContextPressure(167_000, DEFAULT_COMPACTION_POLICY);
+  it("auto-compacts at 85% of the effective window", () => {
+    const below = calculateContextPressure(152_999, DEFAULT_COMPACTION_POLICY);
+    const at = calculateContextPressure(153_000, DEFAULT_COMPACTION_POLICY);
 
     expect(at.effectiveWindowTokens).toBe(180_000);
-    expect(at.autoCompactThresholdTokens).toBe(167_000);
+    expect(at.autoCompactThresholdTokens).toBe(153_000);
     expect(below.shouldAutoCompact).toBe(false);
     expect(at.shouldAutoCompact).toBe(true);
     expect(calculateContextPressure(177_000, DEFAULT_COMPACTION_POLICY).isAtBlockingLimit).toBe(true);

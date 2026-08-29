@@ -57,7 +57,7 @@ it("uses Claude-style token compaction defaults and accepts explicit overrides",
   expect(FlavorConfigSchema.parse({}).context).toMatchObject({
     windowTokens: 200_000,
     reservedOutputTokens: 20_000,
-    autoCompactBufferTokens: 13_000,
+    autoCompactBufferTokens: 27_000,
     warningBufferTokens: 20_000,
     blockingBufferTokens: 3_000,
     microcompactKeepRecentToolResults: 5,

@@ -15,7 +15,7 @@ export interface AgentRunRequest {
   getSteeringMessages?(): readonly string[];
 }
 
-export type AgentErrorCode = ProviderErrorCode | "iteration_limit" | "incomplete_stream" | "empty_response";
+export type AgentErrorCode = ProviderErrorCode | "iteration_limit" | "incomplete_stream" | "empty_response" | "memory_pressure";
 
 export interface AgentError {
   code: AgentErrorCode;

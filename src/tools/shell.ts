@@ -374,7 +374,8 @@ class BoundedOutput {
   readonly #headLimit: number;
   readonly #tailLimit: number;
   #head = Buffer.alloc(0);
-  #tail = Buffer.alloc(0);
+  #tailChunks: Buffer[] = [];
+  #tailBytes = 0;
   #complete = Buffer.alloc(0);
   #bytes = 0;
 
@@ -395,7 +396,19 @@ class BoundedOutput {
       const count = Math.min(this.#headLimit - this.#head.length, chunk.length);
       this.#head = Buffer.concat([this.#head, chunk.subarray(0, count)]);
     }
-    if (this.#tailLimit > 0) this.#tail = Buffer.concat([this.#tail, chunk]).subarray(-this.#tailLimit);
+    if (this.#tailLimit > 0) {
+      // Amortized-linear tail: queue raw chunks and only re-copy when the
+      // queue doubles past the window. The previous per-chunk concat made
+      // every streamed byte O(output-size), which showed up as GB-scale
+      // malloc churn and CPU burn on long shell outputs.
+      this.#tailChunks.push(chunk);
+      this.#tailBytes += chunk.length;
+      if (this.#tailBytes >= this.#tailLimit * 2) {
+        const merged = Buffer.concat(this.#tailChunks).subarray(-this.#tailLimit);
+        this.#tailChunks = [merged];
+        this.#tailBytes = merged.length;
+      }
+    }
   }
 
   metadata(): TruncationMetadata {
@@ -404,8 +417,9 @@ class BoundedOutput {
 
   text(): string {
     if (!this.truncated) return decodeOutput(this.#complete);
+    const tail = Buffer.concat(this.#tailChunks).subarray(-this.#tailLimit);
     const encoding = classifyUtf8(this.#complete) === "invalid" && process.platform === "win32" ? "gb18030" : "utf-8";
-    return `${decodePrefix(this.#head, encoding)}${ELLIPSIS}${decodeSuffix(this.#tail, encoding)}`;
+    return `${decodePrefix(this.#head, encoding)}${ELLIPSIS}${decodeSuffix(tail, encoding)}`;
   }
 }
 

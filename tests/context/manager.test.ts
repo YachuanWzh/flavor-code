@@ -541,6 +541,81 @@ describe("ContextManager", () => {
     expect(secondCalled).toBe(false);
     expect(context.messagesForModel()).toEqual(before);
   });
+
+  it("caps the visibility audit log and truncates oversized records", () => {
+    const context = createContext();
+    const big = "brief".repeat(1_000);
+    for (let index = 0; index < ContextManager.VISIBILITY_LOG_MAX_ENTRIES - 1; index += 1) {
+      const id = context.beginTransientSystem(`brief ${index}`);
+      context.endTransientSystem(id);
+    }
+    const bigId = context.beginTransientSystem(big);
+    context.endTransientSystem(bigId);
+
+    const log = context.snapshot().visibilityLog!;
+    expect(log).toHaveLength(ContextManager.VISIBILITY_LOG_MAX_ENTRIES);
+    expect(log.map((item) => item.content)).not.toContain(big);
+    expect(log.at(-1)?.content).toContain("...[truncated; original length: 5000 characters]...");
+  });
+
+  it("keeps the full transient content visible to the model even when the audit record is truncated", () => {
+    const context = createContext();
+    const big = "brief".repeat(1_000);
+    const id = context.beginTransientSystem(big);
+
+    expect(context.messagesForModel().map((message) => modelContentText(message.content))).toContain(big);
+    context.endTransientSystem(id);
+    expect(context.messagesForModel().map((message) => modelContentText(message.content))).not.toContain(big);
+  });
+
+  it("bounds an oversized restored visibility log instead of rehydrating it fully", () => {
+    const context = createContext();
+    const records = Array.from({ length: ContextManager.VISIBILITY_LOG_MAX_ENTRIES + 100 }, (_unused, index) => ({
+      id: `record-${index}`,
+      role: "system" as const,
+      content: "k".repeat(5_000),
+      admittedAt: new Date(0).toISOString(),
+      scope: "run" as const,
+    }));
+
+    context.restore({ messages: [], visibilityLog: records });
+
+    const log = context.snapshot().visibilityLog!;
+    expect(log).toHaveLength(ContextManager.VISIBILITY_LOG_MAX_ENTRIES);
+    expect(log[0]?.id).toBe("record-100");
+    expect(log.every((item) => item.content.length < 5_000)).toBe(true);
+  });
+
+  it("emits only the appended tail when a stable source extends its previous value", () => {
+    let preference = "Prefer concise answers.";
+    const context = createContext({ userMemory: () => preference });
+    preference = "Prefer concise answers.\nAlways cite files.";
+
+    expect(context.refreshContextSources()).toBe(true);
+
+    expect(context.snapshot().messages).toEqual([
+      { role: "system", content: "Context update [system-baseline]\nAlways cite files." },
+    ]);
+  });
+
+  it("drops stale context updates before compaction instead of summarizing them", async () => {
+    let sections: readonly string[] = ["baseline one"];
+    const context = createContext({ system: () => sections });
+    context.append({ role: "user", content: "turn one" });
+    sections = ["baseline two"];
+    context.refreshContextSources();
+    context.append({ role: "user", content: "turn two" });
+    sections = ["baseline three"];
+    context.refreshContextSources();
+
+    const compacted = await context.prepareForModelCall();
+
+    expect(compacted).toBe(false);
+    const updates = context.snapshot().messages.filter((message) => modelContentText(message.content).startsWith("Context update ["));
+    expect(updates).toEqual([
+      { role: "system", content: "Context update [system-baseline]\nbaseline three\n\nFLAVOR.md\nproject guidance" },
+    ]);
+  });
 });
 
 function createContext(overrides: Partial<ConstructorParameters<typeof ContextManager>[0]> = {}) {

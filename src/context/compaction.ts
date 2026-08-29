@@ -33,7 +33,9 @@ export interface MicrocompactResult {
 export const DEFAULT_COMPACTION_POLICY: CompactionPolicy = {
   windowTokens: 200_000,
   reservedOutputTokens: 20_000,
-  autoCompactBufferTokens: 13_000,
+  // 85% of the effective window (180_000 - 27_000 = 153_000): compaction used
+  // to trigger at ~92.8%, which let sessions ride the threshold into heap OOM.
+  autoCompactBufferTokens: 27_000,
   warningBufferTokens: 20_000,
   blockingBufferTokens: 3_000,
   microcompactKeepRecentToolResults: 5,

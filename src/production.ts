@@ -1,7 +1,8 @@
 ﻿import { readFile } from "node:fs/promises";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir, release as osRelease, tmpdir, version as osVersion } from "node:os";
-import { basename, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
 import {
   parseFinalSubagentMessage,
@@ -55,6 +56,13 @@ import { createSkillResourceTool, createSkillTool } from "./skills/tool.js";
 import { expandSkillArguments } from "./skills/arguments.js";
 import { SESSION_VERSION, SessionStore, type SessionDocument } from "./session/store.js";
 import { SessionHistory } from "./session/tree.js";
+import {
+  MEMORY_RESTART_EXIT_CODE,
+  memoryRestartMarkerPath,
+  nextMemoryRestartMarker,
+  parseMemoryRestartMarker,
+  type MemoryRestartMarker,
+} from "./utils/memory-restart.js";
 import { ProjectSleepOrganizer, ProjectSleepScheduler, localDateKey } from "./sleep/organizer.js";
 import {
   createApplyPatchTool,
@@ -1578,7 +1586,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         contextEpoch: harness.main.context.snapshot().epoch?.id ?? "legacy",
       });
       const turnId = harnessJournal.startTurn(turnConfig, { prompt, initialUserMessage: runOptions?.initialUserMessage });
-      return durableTurn(persistAndCheckpointAfter(runMain(
+      return monitorMemoryRestart(durableTurn(persistAndCheckpointAfter(runMain(
         harness, skills, prompt, signal, selectedModels.mainError,
         memoryStore === undefined || (!memoryHasRoutableEntries && userMemoryContext === undefined) ? undefined : {
           store: memoryStore, taskId: memoryLifecycle.taskId ?? sessionId,
@@ -1592,7 +1600,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         prompt,
         context: harness.main.context.snapshot(),
         label: `turn: ${prompt.slice(0, 80)}`,
-      })), harnessJournal, turnId, turnConfig);
+      })), harnessJournal, turnId, turnConfig), () => requestMemoryRestart(workspace, sessionId, emitOutput));
     },
     runSkill: (skill, prompt, signal) => persistAfter(
       runExplicitSkill(harness, skills, skill, prompt, signal, selectedModels.mainError), persist,
@@ -2378,6 +2386,48 @@ async function* durableTurn(
       journal.interruptTurn(turnId, failure ?? "turn consumer interrupted before completion");
     }
   }
+}
+
+/**
+ * Watch a turn's event stream for the heap watermark error. durableTurn has
+ * already recorded the interruption and persistAndCheckpointAfter has saved
+ * the session by the time the stream drains, so triggering the controlled
+ * restart afterwards cannot lose conversation state.
+ */
+async function* monitorMemoryRestart(
+  source: AsyncIterable<AgentEvent>,
+  onRestartNeeded: () => void,
+): AsyncIterable<AgentEvent> {
+  let pressure = false;
+  for await (const event of source) {
+    if (event.type === "error" && event.error.code === "memory_pressure") pressure = true;
+    yield event;
+  }
+  if (pressure) onRestartNeeded();
+}
+
+/**
+ * Ask the launcher to relaunch on a fresh heap: write the restart marker,
+ * set the agreed exit code, and request a graceful UI shutdown. All steps are
+ * best-effort — the turn is already persisted, so any failure here degrades
+ * to "user restarts manually" instead of losing work.
+ */
+function requestMemoryRestart(
+  workspace: string,
+  sessionId: string,
+  emitOutput: (event: SessionOutput) => void,
+): void {
+  try {
+    const markerPath = memoryRestartMarkerPath(workspace);
+    let previous: MemoryRestartMarker | undefined;
+    try { previous = parseMemoryRestartMarker(readFileSync(markerPath, "utf8")); }
+    catch { /* missing or unreadable marker simply restarts the budget */ }
+    mkdirSync(dirname(markerPath), { recursive: true });
+    writeFileSync(markerPath, `${JSON.stringify(nextMemoryRestartMarker(previous, sessionId, new Date()))}\n`, "utf8");
+  } catch { /* marker is an optimization, not a precondition */ }
+  process.exitCode = MEMORY_RESTART_EXIT_CODE;
+  emitOutput({ type: "notice", message: "Memory watermark reached; the session is saved and Flavor is restarting with a fresh heap." });
+  emitOutput({ type: "exit" });
 }
 
 interface GitCommandDeps {
