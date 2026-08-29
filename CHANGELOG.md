@@ -2,7 +2,34 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.3.16 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.3.17 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.3.17] - 2026-08-29
+
+### 修复
+- 根据两份 Node fatal report 更正 1.3.15 的崩溃判断：本次闪退确定为 JavaScript heap OOM（崩溃时约 4.28GB/4.50GB），并非 Maglev；移除无效且会降低运行时优化的自动 `--no-maglev`，后续防线以真实 provider token 压力、上下文收敛和堆水位保护为准
+- 修复长会话真实 token 压力被动态上下文刷新、过期公告清理或 microcompact 意外清空的问题：provider 返回的 usage 会保留到完整压缩成功，避免 162,047-token 请求退回约 97K 的本地低估值并持续绕过压缩；自动压缩触发缓冲区同时由 13,000 调整为 27,000 tokens（200K 窗口下约在有效窗口的 85% 处触发）
+- 修复上下文可见性审计日志潜在的无限增长：该日志随每次会话保存全量序列化，长时间子代理任务可能显著膨胀；现在限制最多保留 1,000 条记录且单条内容截断到 2,048 字符，恢复旧会话快照时同样施加边界
+- 修复上下文更新公告重复堆积占用窗口的问题：被新版取代的 "Context update" 公告在每次模型调用前自动清理；固定暴露完整状态的动态源只推送追加增量，`system-baseline` 则保留完整最新值，避免清理旧增量后丢失中间追加内容
+- 启动器为 CLI 进程统一追加 `--report-on-fatalerror`：V8 致命错误（堆 OOM、原生崩溃）会绕过 JavaScript 异常处理只留下不可用的原生栈，现在会在崩溃现场生成 Node 诊断报告文件便于事后定位
+- 新增堆水位受控重启防护：在迭代入口、上下文压缩后和模型请求物化后检查堆占用，达到 V8 堆上限的 80% 时以 `memory_pressure` 干净中断当前轮次并保存会话，进程以约定退出码结束，启动器随即自动以 `--resume` 在新堆中恢复同一会话（30 分钟内最多 3 次）；当前轮次不会自动重放，以免重复执行写文件或 Shell 等有副作用的工具
+- 启动器追加 `--heapsnapshot-near-heap-limit=1`：堆逼近上限时自动落一份 `.heapsnapshot` 堆快照，与诊断报告一起为下一次 OOM 留下可做 retainer 分析的现场（快照文件可能很大，请勿删除）
+- 修复 Shell 工具输出截断尾部每个数据块都全量拼接的 O(n²) 拷贝：改为分块队列、翻倍窗口时才合并，消除长输出命令下的巨额瞬时内存分配与 CPU 空转
+- 修复 UI timeline 永久保留所有已完成 turn、最终撞上 5MB session 上限后停止保存的问题：presentation history 现在同时限制为最近 200 个 turn 和约 200 万字符，运行时完成新 turn 及恢复旧 session 时都会立即收敛；模型上下文仍由独立的压缩摘要保持连续性
+- 取消普通 turn 完成后自动创建 rewind tree 和全工作区 checkpoint；会话分支改为仅在用户显式执行 `/checkpoint` 或点击桌面端“创建 checkpoint”时生成，`/tree`、`/rewind`、`/fork` 和 `/unrevert` 能力继续保留。手动历史仍限制为最近 100 个节点且 context payload 总计约 200 万字符，打开旧树时立即收敛并重写
+- 更新受影响的间接依赖，清除生产依赖安全审计中的 3 个高危和 2 个中危漏洞；发布门禁固定使用 npm 官方 registry 执行生产依赖零漏洞检查
+
+### 压力验证
+- 新增 `npm run stress:production-memory` 生产路径压测：启动构建后的 CLI 独立进程和本地 Anthropic-compatible HTTP/SSE 服务，覆盖 provider SDK、RPC、真实 `Task` 子代理状态变化、1MB `Read` 工具输出、上下文压缩、session 持久化、手动 checkpoint 以及受限 V8 堆；根因回归隔离复制原始崩溃会话和 rewind tree，验证“162,047 provider tokens → Task 动态状态变化 → 下一次主模型调用前完成压缩”的严格时序，真实请求由 851 条消息收敛为 14 条
+- 3,000 轮实跑完成 3,514 次主模型请求、100 次真实 `Task`/子代理、414 次大文件 `Read` 和 342 次完整压缩：384MB old-space 配置下实际 V8 heap limit 约 576MB，峰值 164.4MB（28.5%），强制 full GC 后 102.5MB（17.8%），前后段 P95 为 124.0/134.6MB；最终第 3,000 轮成功落盘，session 为 1.65MB/200 个 timeline turn，且普通路径全程没有生成 `tree.json` 或 `.flavor/checkpoints`
+- 在原始崩溃会话的 851-message 大上下文上连续显式创建 120 个 checkpoint：受限堆峰值 167.3MB（29.0%），历史按字符上限收敛为 4 个节点/约 170 万 context 字符，随后仍正常完成 Task 子代理和 851→14 消息压缩
+
+### 测试
+- 新增上下文管理器回归测试：覆盖可见性日志条目/内容双维度限界、快照恢复限界、过期 Context update 清理、provider usage 锚点在动态来源抖动与 microcompact 后仍然有效，以及连续 system-baseline 更新不丢内容；启动器测试覆盖强制重启用带诊断报告参数的链路
+- 新增 `npm run stress:context` 上下文内存压力测试：复现子代理可见性日志海量收录、历史臃肿会话快照恢复、逐轮动态来源抖动与 1MB 级上下文 fork 深拷贝等堆 OOM 场景，断言各项限界与增量推送修复持续生效
+- 新增 `npm run evidence:crash-fix` 崩溃指标回归：基于真实报告中的 162,047 输入 tokens、零压缩边界构造可重复的混合负载，验证新阈值与限界策略；真实外部 session 文件另以只读诊断回放验证，不伪装成仓库内测试 fixture
+- 新增堆水位防护测试：水位判定纯函数、越限轮次以 `memory_pressure` 中止且零模型调用、未越限正常运行；重启协议测试覆盖标记预算累计/窗口重置、会话 id 校验、`--resume` 参数重建与预算耗尽拒绝
+- 发布测试不再依赖本机 `.flavor/plugins` 私有目录，并为 Windows 全量并发测试设置稳定的超时与临时目录清理重试，保证干净环境下的默认 `npm test` 可作为发布门禁直接执行
 
 ## [1.3.16] - 2026-08-29
 
@@ -576,8 +603,9 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
-| 1.3.16 | 2026-08-29 | 上下文内存修复：压缩提前到有效窗口 85% 触发、可见性审计日志双重限界、Context update 过期清理与增量推送、启动器崩溃诊断报告 |
-| 1.3.15 | 2026-08-29 | 严重稳定性修复：Windows 11 build 26200 + Node 24 及以上版本自动禁用 Maglev，轻量启动器在业务代码加载前规避 V8 原生闪退，并由真实 npm 命令链路回归验证；superharness 升级 1.1.0 新增 onboarding/converge/receiving-code-review 技能 |
+| 1.3.17 | 2026-08-29 | 堆 OOM 根因修正：保留真实 provider token 压力直到完整压缩、清理上下文不再绕过阈值或丢 baseline、移除无效 no-maglev、增加多阶段堆水位保护 |
+| 1.3.16 | 2026-08-29 | 上下文内存与诊断初步修复：压缩阈值提前、可见性日志限界、Context update 清理、堆水位重启与 fatal report/heapsnapshot |
+| 1.3.15 | 2026-08-29 | 首轮稳定性处理：曾按 Maglev 方向加入 no-maglev 启动器（后由 1.3.17 的 fatal report 证据纠正为 JavaScript heap OOM）；superharness 升级 1.1.0 |
 | 1.3.14 | 2026-08-28 | 长程任务稳定性修复：流式转录批量合并、CLI/桌面实时渲染窗口、连续退格同步输入草稿、桌面 mention 标签编辑修复；/explain 流式输出、superharness 生命周期钩子增强 |
 | 1.3.13 | 2026-08-28 | 新人上手命令 /explain：代码图 + 真实源码 + Git 历史生成五段式讲解，歧义时选择卡片选符号，无索引/非 git/模型失败均优雅降级 |
 | 1.3.12 | 2026-08-27 | 扩展思考流式展示：Anthropic 默认 8192 思考预算与 OpenAI reasoning effort 配置、CLI 打字机思考行、签名思考块回显、不支持端点自动降级 |

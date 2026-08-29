@@ -73,6 +73,14 @@ export interface TranscriptState {
   taskSnapshot?: TaskSnapshot;
 }
 
+/**
+ * The transcript is presentation history, not model context. Keeping it
+ * forever duplicated already-compacted conversation data until session saves
+ * crossed the 5 MB safety limit and later turns stopped being recoverable.
+ */
+export const MAX_TRANSCRIPT_TURNS = 200;
+export const MAX_TRANSCRIPT_CHARS = 2_000_000;
+
 export type TranscriptAction =
   | { type: "hydrate"; messages: readonly TranscriptHistoryMessage[]; compact?: TranscriptCompactBoundary }
   | { type: "restore"; state: TranscriptState }
@@ -412,7 +420,7 @@ function hydrateHistory(
     }
   }
   if (turn !== undefined) completed.push(turn);
-  return { completed, nextId: completed.length + 1 };
+  return { completed: boundedCompleted(completed), nextId: completed.length + 1 };
 }
 
 export function transcriptFromLegacyConversation(
@@ -535,10 +543,10 @@ function finishActive(state: TranscriptState): TranscriptState {
   if (state.active === undefined) return state;
   const active = withoutModelActivity(state.active);
   return {
-    completed: [...state.completed, {
+    completed: boundedCompleted([...state.completed, {
       ...active,
       completedAt: active.completedAt ?? new Date().toISOString(),
-    }],
+    }]),
     nextId: state.nextId,
     ...(state.taskSnapshot === undefined ? {} : { taskSnapshot: state.taskSnapshot }),
   };
@@ -579,11 +587,26 @@ function withoutModelActivity(turn: TranscriptTurn, id?: string): TranscriptTurn
 export function restoreTranscriptState(state: TranscriptState): TranscriptState {
   const completed = state.completed.map(cloneTurn);
   if (state.active !== undefined) completed.push(normalizeInterruptedTurn(cloneTurn(state.active)));
+  const nextId = Math.max(state.nextId, ...completed.map((turn) => turn.id + 1), 1);
   return {
-    completed,
-    nextId: Math.max(state.nextId, ...completed.map((turn) => turn.id + 1), 1),
+    completed: boundedCompleted(completed),
+    nextId,
     ...(state.taskSnapshot === undefined ? {} : { taskSnapshot: state.taskSnapshot }),
   };
+}
+
+function boundedCompleted(input: readonly TranscriptTurn[]): TranscriptTurn[] {
+  const recent = input.slice(-MAX_TRANSCRIPT_TURNS);
+  let chars = 0;
+  let start = recent.length;
+  for (let index = recent.length - 1; index >= 0; index -= 1) {
+    const turn = recent[index]!;
+    const size = JSON.stringify(turn).length;
+    if (start < recent.length && chars + size > MAX_TRANSCRIPT_CHARS) break;
+    chars += size;
+    start = index;
+  }
+  return recent.slice(start);
 }
 
 function compactionTurn(compact: TranscriptCompactBoundary): TranscriptTurn {

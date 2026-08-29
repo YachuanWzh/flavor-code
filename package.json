@@ -1,6 +1,6 @@
 {
   "name": "flavor-code",
-  "version": "1.3.16",
+  "version": "1.3.17",
   "author": "YachuanWzh",
   "type": "module",
   "publishConfig": {
@@ -52,6 +52,7 @@
     "smoke:install": "node scripts/smoke-install.mjs",
     "smoke:d2c-worker": "npm run build:desktop:main && node scripts/smoke-d2c-worker.mjs",
     "stress:context": "vitest run scripts/stress-context-memory.test.ts --reporter=verbose",
+    "stress:production-memory": "npm run build:cli && node scripts/stress-production-memory.mjs",
     "evidence:crash-fix": "vitest run scripts/evidence-crash-replay.test.ts --reporter=verbose",
     "prepack": "npm run build"
   },

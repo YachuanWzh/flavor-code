@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createTranscriptState,
+  MAX_TRANSCRIPT_TURNS,
   restoreTranscriptState,
   transcriptReducer,
   type TranscriptBlock,
@@ -10,6 +11,32 @@ import {
 afterEach(() => vi.useRealTimers());
 
 describe("transcriptReducer", () => {
+  it("bounds completed presentation history without reusing turn ids", () => {
+    let state = createTranscriptState();
+    for (let index = 0; index < MAX_TRANSCRIPT_TURNS + 5; index += 1) {
+      state = transcriptReducer(state, { type: "submit", prompt: `turn-${index}` });
+      state = transcriptReducer(state, { type: "session", event: {
+        type: "done", usage: { inputTokens: 1, outputTokens: 1 },
+      } });
+    }
+
+    expect(state.completed).toHaveLength(MAX_TRANSCRIPT_TURNS);
+    expect(state.completed[0]?.prompt).toBe("turn-5");
+    expect(state.completed.at(-1)?.prompt).toBe(`turn-${MAX_TRANSCRIPT_TURNS + 4}`);
+    expect(state.nextId).toBe(MAX_TRANSCRIPT_TURNS + 6);
+  });
+
+  it("bounds oversized restored history while preserving the next id", () => {
+    const completed = Array.from({ length: MAX_TRANSCRIPT_TURNS + 10 }, (_, index) => ({
+      id: index + 1, prompt: `restored-${index}`, assistantText: "ok", statusLines: [], blocks: [],
+    }));
+    const state = restoreTranscriptState({ completed, nextId: completed.length + 1 });
+
+    expect(state.completed).toHaveLength(MAX_TRANSCRIPT_TURNS);
+    expect(state.completed[0]?.prompt).toBe("restored-10");
+    expect(state.nextId).toBe(MAX_TRANSCRIPT_TURNS + 11);
+  });
+
   it("opens an attributed pal turn for an idle task so model output has a destination", () => {
     let state = transcriptReducer(createTranscriptState(), { type: "session", event: {
       type: "pal-task", status: "received",

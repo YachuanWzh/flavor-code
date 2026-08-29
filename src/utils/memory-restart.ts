@@ -6,8 +6,9 @@ import { join } from "node:path";
  * The agent loop stops a turn with `memory_pressure` before the V8 heap
  * reaches its hard limit; production then saves the session, writes a marker
  * and exits with MEMORY_RESTART_EXIT_CODE. The launcher reads the marker and
- * relaunches the CLI with `--resume <sessionId>`, so a retained-memory leak
- * degrades to a brief pause instead of a fatal V8 OOM crash.
+ * relaunches the CLI with `--resume <sessionId>`, so memory pressure restores
+ * the saved session instead of ending in a fatal V8 OOM crash. The interrupted
+ * turn is intentionally not replayed because it may contain non-idempotent tools.
  */
 export const MEMORY_RESTART_EXIT_CODE = 75;
 export const MEMORY_RESTART_MARKER_FILE = "memory-restart.json";

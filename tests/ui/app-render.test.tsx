@@ -291,6 +291,49 @@ describe("TerminalLayout", () => {
     expect(Math.max(...output.split("\n").map((line) => [...line].length))).toBeLessThanOrEqual(48);
   });
 
+  it("shows a yellow update hint in the welcome card when a newer npm version exists", () => {
+    const wide = stripAnsi(renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[]}
+      input=""
+      promptCursor={0}
+      columns={96}
+      rows={30}
+      activeSession={false}
+      updateTo="9.9.9"
+    />, { columns: 96 }));
+    const compact = stripAnsi(renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[]}
+      input=""
+      promptCursor={0}
+      columns={48}
+      rows={20}
+      activeSession={false}
+      updateTo="9.9.9"
+    />, { columns: 48 }));
+    const quiet = stripAnsi(renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[]}
+      input=""
+      promptCursor={0}
+      columns={96}
+      rows={30}
+      activeSession={false}
+    />, { columns: 96 }));
+
+    expect(wide).toContain("Update available");
+    expect(wide).toContain(`v${packageVersion()}`);
+    expect(wide).toContain("9.9.9");
+    expect(wide).toContain("npm i -g flavor-code");
+    expect(compact).toContain("Update available");
+    expect(Math.max(...compact.split("\n").map((line) => [...line].length))).toBeLessThanOrEqual(48);
+    expect(quiet).not.toContain("Update available");
+  });
+
   it("collapses pasted draft text but keeps submitted content fully visible with a spaced chevron", () => {
     const pasted = "first pasted line\nsecond pasted line\nthird pasted line";
     const output = renderToString(<TerminalLayout

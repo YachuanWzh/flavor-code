@@ -1065,6 +1065,31 @@ describe("AgentLoop", () => {
       usage.mockRestore();
     }
   });
+
+  it("stops before the provider call when preparing the request crosses the watermark", async () => {
+    const requests: ModelRequest[] = [];
+    const fixture = createLoop({ adapter: fakeAdapter([], requests) });
+    const limit = getHeapStatistics().heap_size_limit;
+    const low = {
+      rss: 0, heapTotal: 0, heapUsed: Math.floor(limit * 0.5), external: 0, arrayBuffers: 0,
+    };
+    const high = {
+      rss: 0, heapTotal: 0, heapUsed: Math.ceil(limit * 0.85), external: 0, arrayBuffers: 0,
+    };
+    const usage = vi.spyOn(process, "memoryUsage")
+      .mockReturnValueOnce(low)
+      .mockReturnValueOnce(low)
+      .mockReturnValueOnce(high)
+      .mockReturnValue(high);
+    try {
+      const events = await collect(fixture.loop.run({ prompt: "do it" }));
+      expect(events.at(-1)?.type).toBe("error");
+      expect((events.at(-1) as Extract<AgentEvent, { type: "error" }>).error.code).toBe("memory_pressure");
+      expect(requests).toHaveLength(0);
+    } finally {
+      usage.mockRestore();
+    }
+  });
 });
 
 describe("memoryPressureError", () => {

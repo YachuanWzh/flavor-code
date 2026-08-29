@@ -141,26 +141,27 @@ describe("context memory stress", () => {
     expect(modelContentText(pinned?.content ?? "")).toContain(`step ${turns}`);
   }, 120_000);
 
-  it("scenario B2: prefix-appending memory source emits only the appended tail", () => {
-    let preference = "Prefer concise answers.";
-    const context = createContext({ userMemory: () => preference });
+  it("scenario B2: prefix-appending dynamic task state emits only the appended tail", () => {
+    let taskState = "plan: initialized";
+    const context = createContext({ taskState });
 
     const totalInjected: string[] = [];
     for (let record = 1; record <= 50; record += 1) {
-      preference += `\nmemory record ${record}: ${"detail ".repeat(20)}`;
+      taskState += `\nstate record ${record}: ${"detail ".repeat(20)}`;
+      context.updateTaskState(taskState);
       context.refreshContextSources();
       const update = context.snapshot().messages.at(-1);
       totalInjected.push(modelContentText(update?.content ?? ""));
     }
 
     const injectedChars = totalInjected.reduce((sum, item) => sum + item.length, 0);
-    console.log(`  [B2] appendedRecords=50 fullTextSize=${mb(preference.length)} injectedTotal=${mb(injectedChars)} avgPerUpdate=${(injectedChars / 50).toFixed(0)} chars`);
+    console.log(`  [B2] appendedRecords=50 fullTextSize=${mb(taskState.length)} injectedTotal=${mb(injectedChars)} avgPerUpdate=${(injectedChars / 50).toFixed(0)} chars`);
 
     // Pre-fix each refresh re-emitted the entire growing baseline (avg ~4KB and
     // rising); with delta injection each update carries only the appended tail.
-    expect(injectedChars).toBeLessThan(preference.length * 2);
+    expect(injectedChars).toBeLessThan(taskState.length * 2);
     expect(injectedChars / 50).toBeLessThan(500);
-    expect(totalInjected.every((item) => item.includes("Context update [system-baseline]"))).toBe(true);
+    expect(totalInjected.every((item) => item.includes("Context update [task-state]"))).toBe(true);
   }, 120_000);
 
   it("scenario C: fork of a ~1MB context stays cheap (regression guard)", () => {

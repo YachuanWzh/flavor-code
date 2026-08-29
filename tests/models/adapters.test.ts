@@ -23,9 +23,10 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  await Promise.all(imageRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  const cleanup = { recursive: true, force: true, maxRetries: 5, retryDelay: 20 } as const;
+  await Promise.all(imageRoots.splice(0).map((root) => rm(root, cleanup)));
   if (usageRoot !== undefined) {
-    await rm(usageRoot, { recursive: true, force: true });
+    await rm(usageRoot, cleanup);
   }
   if (previousUsageFile === undefined) {
     delete process.env.FLAVOR_USAGE_FILE;

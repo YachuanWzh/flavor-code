@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { join } from "node:path";
 
-import { activate, resolveInvocation } from "../../../.flavor/plugins/update-plugin-0.1.0/index.js";
+import { activate, resolveInvocation } from "./fixture/index.mjs";
 
 function makeFakeChild() {
   const child = new EventEmitter();

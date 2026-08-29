@@ -60,6 +60,8 @@ import {
   type MentionCompletion,
 } from "./mention-completion.js";
 import { WelcomeCard } from "./welcome.js";
+import { checkForUpdate } from "../update/check.js";
+import { packageVersion } from "../utils/version.js";
 import {
   DEFAULT_MAX_IMAGES,
   DEFAULT_MAX_TOTAL_IMAGE_BYTES,
@@ -301,6 +303,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
   const [customQuestionActive, setCustomQuestionActive] = useState(false);
   const [columns, setColumns] = useState(stdout?.columns ?? 80);
   const [rows, setRows] = useState(stdout?.rows ?? 24);
+  const [updateTo, setUpdateTo] = useState<string>();
   const [transcript, dispatch] = useReducer(transcriptReducer, undefined, createTranscriptState);
   const scrollRef = useRef<ScrollBoxHandle>(null);
   const taskScrollRef = useRef<ScrollBoxHandle>(null);
@@ -478,6 +481,15 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
   }, [runtime, revision]);
 
   useEffect(() => installSigintHandler(process, interrupt), [interrupt]);
+
+  // One-shot npm registry lookup on startup; silently ignored when offline.
+  useEffect(() => {
+    let disposed = false;
+    void checkForUpdate(packageVersion()).then((version) => {
+      if (version !== undefined && !disposed) setUpdateTo(version);
+    });
+    return () => { disposed = true; };
+  }, []);
 
   useEffect(() => {
     if (runtime?.services.ideContext === undefined) {
@@ -862,6 +874,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
     workspaceName={basename(workspace)}
     completed={transcript.completed}
     {...(transcript.active === undefined ? {} : { active: transcript.active })}
+    {...(updateTo === undefined ? {} : { updateTo })}
     columns={columns}
     rows={rows}
   />;
@@ -872,6 +885,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
     workspaceName={basename(workspace)}
     completed={transcript.completed}
     {...(transcript.active === undefined ? {} : { active: transcript.active })}
+    {...(updateTo === undefined ? {} : { updateTo })}
     input={input}
     pastedBlocks={pastedBlocks}
     imageAttachments={imageAttachments}
@@ -900,13 +914,14 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
 }
 
 function StartingLayout({
-  workspaceName, completed, active, columns, rows,
-}: Pick<TerminalLayoutProps, "workspaceName" | "completed" | "active" | "columns"> & { rows: number }): React.JSX.Element {
+  workspaceName, completed, active, updateTo, columns, rows,
+}: Pick<TerminalLayoutProps, "workspaceName" | "completed" | "active" | "updateTo" | "columns"> & { rows: number }): React.JSX.Element {
   return <TerminalLayout
     model="starting"
     workspaceName={workspaceName}
     completed={completed}
     {...(active === undefined ? {} : { active })}
+    {...(updateTo === undefined ? {} : { updateTo })}
     input=""
     promptCursor={0}
     columns={columns}
@@ -919,6 +934,8 @@ export interface TerminalLayoutProps {
   model: string;
   serviceName?: string;
   workspaceName: string;
+  /** Newer npm version to advertise in the welcome card; absent when up to date. */
+  updateTo?: string;
   completed: TranscriptTurn[];
   active?: TranscriptTurn;
   input: string;
@@ -1034,7 +1051,7 @@ export function cliTranscriptWindow(
 }
 
 export function TerminalLayout({
-  model, serviceName, workspaceName, completed, active, input, pastedBlocks = [], imageAttachments = [], clipboardNotice,
+  model, serviceName, workspaceName, updateTo, completed, active, input, pastedBlocks = [], imageAttachments = [], clipboardNotice,
   promptCursor, columns, rows = 24, activeSession, pendingPrompt, approval,
   questions, memoryReviews = [], memoryAutoDismissSeconds = 0, questionIndex = 0, questionAnswers = {}, customQuestionActive = false,
   completion, mentionCompletion, onMentionSelect, completedSlashTokenLength: tokenLength = 0, scrollRef,
@@ -1074,7 +1091,7 @@ export function TerminalLayout({
   return <Box height={rows} width="100%" flexDirection="column" overflow="hidden">
     <ScrollBox {...(scrollRef === undefined ? {} : { ref: scrollRef })} flexGrow={1} flexDirection="column" stickyScroll>
       {showWelcome
-        ? <WelcomeCard model={model} {...(serviceName === undefined ? {} : { serviceName })} workspaceName={workspaceName} columns={columns} />
+        ? <WelcomeCard model={model} {...(serviceName === undefined ? {} : { serviceName })} workspaceName={workspaceName} {...(updateTo === undefined ? {} : { updateTo })} columns={columns} />
         : <Text dimColor>{"flavor · "}{model}{" · "}{workspaceName}</Text>}
       <Box height={1} />
       {completedWindow.hiddenTurns > 0 || completedWindow.hiddenBlocks > 0

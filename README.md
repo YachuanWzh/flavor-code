@@ -271,7 +271,7 @@ Project runtime data lives under `.flavor/`:
 ├── sessions/         # Session timelines
 │   └── *.events.jsonl # Crash-consistent execution journals
 ├── session-assets/   # Image attachments
-├── session-trees/    # Session branches
+├── session-trees/    # Explicit /checkpoint session branches
 ├── checkpoints/      # Workspace snapshots
 ├── memory/           # Long-term memory
 ├── traces/           # Optional execution traces

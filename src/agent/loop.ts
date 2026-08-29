@@ -44,7 +44,7 @@ export function memoryPressureError(heapUsed: number, heapLimit: number): AgentE
   const mb = (bytes: number): number => Math.round(bytes / 1_048_576);
   return {
     code: "memory_pressure",
-    message: `Heap usage reached ${Math.round((heapUsed / heapLimit) * 100)}% of the V8 limit (${mb(heapUsed)}MB of ${mb(heapLimit)}MB); stopping to avoid a crash. The session is saved and will resume after restart.`,
+    message: `Heap usage reached ${Math.round((heapUsed / heapLimit) * 100)}% of the V8 limit (${mb(heapUsed)}MB of ${mb(heapLimit)}MB); stopping the current turn to avoid a crash. The saved session will reopen after restart.`,
   };
 }
 
@@ -208,6 +208,11 @@ export class AgentLoop {
         yield { type: "error", error: normalizeProviderError(error) };
         return;
       }
+      const preparedPressure = currentMemoryPressure();
+      if (preparedPressure !== undefined) {
+        yield { type: "error", error: preparedPressure };
+        return;
+      }
 
       let assistantText = "";
       const collectedToolCalls: CollectedToolCall[] = [];
@@ -235,6 +240,11 @@ export class AgentLoop {
           tools: [...this.#options.tools],
           ...(request.signal === undefined ? {} : { signal: request.signal }),
         };
+        const requestPressure = currentMemoryPressure();
+        if (requestPressure !== undefined) {
+          yield { type: "error", error: requestPressure };
+          return;
+        }
         let before;
         try {
           before = await this.#options.hooks.emit({

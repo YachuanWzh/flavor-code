@@ -1,10 +1,11 @@
-// P0 heap-OOM crash-fix evidence harness.
+// P0 heap-OOM crash-fix regression harness.
 //
 // The crashed production session (session-20260828155654859-1591978c) died at
 // 162,047 reported input tokens with zero compaction events over 775 messages.
-// This file replays that exact trajectory through the REAL production code
-// paths (beginTransientSystem / refreshContextSources / prepareForModelCall /
-// recordModelUsage) and asserts the fix holds end to end:
+// This file uses those observed boundaries to construct a repeatable mixed-load
+// trajectory through the production ContextManager paths. It is intentionally
+// self-contained; the real external session file is validated separately during
+// incident investigation and is not claimed as a fixture here.
 //
 //   E1 the precise crash token count now triggers auto-compaction (and did not
 //      under the old 92.8% threshold)
@@ -44,7 +45,7 @@ function createContext(overrides: Partial<ConstructorParameters<typeof ContextMa
   });
 }
 
-describe("P0 crash-fix evidence", () => {
+describe("P0 crash-fix regression evidence", () => {
   it("E1: the exact crash-session token count triggers compaction now, and never did before", () => {
     const oldPolicy = { ...DEFAULT_COMPACTION_POLICY, autoCompactBufferTokens: OLD_AUTO_COMPACT_BUFFER };
     const crashNow = calculateContextPressure(CRASH_LAST_INPUT_TOKENS, DEFAULT_COMPACTION_POLICY);
@@ -62,7 +63,7 @@ describe("P0 crash-fix evidence", () => {
     expect(crashNow.shouldAutoCompact).toBe(true);
   });
 
-  it("E2: full crash-trajectory soak stays bounded and auto-compacts mid-flight", async () => {
+  it("E2: crash-shaped synthetic soak stays bounded and auto-compacts mid-flight", async () => {
     let summarizeCalls = 0;
     let firstCompactAtTokens: number | undefined;
     const context = createContext({

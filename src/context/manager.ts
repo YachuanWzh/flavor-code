@@ -255,10 +255,12 @@ export class ContextManager {
     const currentStableHash = currentStable === undefined ? this.#epoch.stableSourceHash : hashMessages(currentStable);
     if (currentStable !== undefined && currentStableHash !== this.#epoch.stableSourceHash) {
       const value = currentStable.map((message) => message.content).join("\n\n");
-      const previous = this.#epoch.sources["system-baseline"]
-        ?? this.#epoch.stableMessages.map((message) => message.content).join("\n\n");
       if (this.#epoch.sources["system-baseline"] !== value) {
-        updates.push(contextUpdateMessage("system-baseline", deltaSourceValue(previous, value)));
+        // Keep the complete replacement here. Unlike the dynamic sources below,
+        // system-baseline is not exposed by #pinnedMessages(), so retaining only
+        // an appended tail would lose earlier tails when stale updates are
+        // collapsed to the latest record.
+        updates.push(contextUpdateMessage("system-baseline", value));
         this.#epoch.sources["system-baseline"] = value;
       }
     } else if (currentStable !== undefined && this.#epoch.sources["system-baseline"] !== undefined) {
@@ -279,8 +281,6 @@ export class ContextManager {
     }
     if (updates.length === 0) return false;
     this.#messages.push(...updates);
-    this.#lastRecordedInputTokens = undefined;
-    this.#estimatedTokensAtLastRecordedUsage = undefined;
     return true;
   }
 
@@ -353,10 +353,12 @@ export class ContextManager {
     // Superseded "Context update" announcements duplicate state that the pinned
     // source messages already expose. Dropping the stale ones relieves window
     // pressure without paying for an LLM summarize round-trip.
-    if (this.#dropStaleContextUpdates()) {
-      this.#lastRecordedInputTokens = undefined;
-      this.#estimatedTokensAtLastRecordedUsage = undefined;
-    }
+    // Keep the provider usage anchor when sources change or stale announcements
+    // are removed. #currentTokenUsage already accounts for newly appended local
+    // content, while retaining the provider value is deliberately conservative
+    // when cleanup removes content. Clearing it here made a 162K-token provider
+    // request fall back to a ~97K local estimate and bypass auto-compaction.
+    this.#dropStaleContextUpdates();
     if (!this.needsCompaction()) return false;
     const originalMessages = this.#messages;
     const originalRecordedUsage = this.#lastRecordedInputTokens;
@@ -369,8 +371,10 @@ export class ContextManager {
     const microcompact = microcompactMessages(this.#messages, this.#compaction.microcompactKeepRecentToolResults);
     if (microcompact.changed) {
       this.#messages = microcompact.messages;
-      this.#lastRecordedInputTokens = undefined;
-      this.#estimatedTokensAtLastRecordedUsage = undefined;
+      // Preserve any provider-reported usage until a full compaction succeeds.
+      // Local estimation can substantially undercount provider tokens, so
+      // clearing the anchor here allowed a small tool-output reduction to make
+      // a 162K-token request look like ~96K and skip the required summary.
     }
     if (!this.needsCompaction()) {
       if (microcompact.changed) {

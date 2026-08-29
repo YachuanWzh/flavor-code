@@ -2,11 +2,13 @@ import React from "react";
 
 import { Box, Text } from "../claude-ink/index.js";
 import { packageVersion } from "../utils/version.js";
+import { NPM_PACKAGE_NAME } from "../update/check.js";
 
 export interface WelcomeCardProps {
   model: string;
   serviceName?: string;
   workspaceName: string;
+  updateTo?: string;
   columns: number;
 }
 
@@ -18,8 +20,16 @@ const FLAVOR_WORDMARK = [
   "└  ┴─┘┴ ┴ └┘ └─┘┴└─",
 ].join("\n");
 
-export function WelcomeCard({ model, serviceName, workspaceName, columns }: WelcomeCardProps): React.JSX.Element {
+export function WelcomeCard({
+  model, serviceName, workspaceName, updateTo, columns,
+}: WelcomeCardProps): React.JSX.Element {
   const wide = Math.max(1, Math.floor(columns)) >= WIDE_WELCOME_COLUMNS;
+  const updateHint = updateTo === undefined ? null : (
+    <Text color="yellow" wrap="truncate-end">
+      {"▲ "}Update available: v{packageVersion()} {"\u2192"} v{updateTo}
+      {" \u00b7 npm i -g "}{NPM_PACKAGE_NAME}
+    </Text>
+  );
 
   return <Box width="100%" borderStyle="round" borderColor="yellow" paddingX={1}>
     {wide ? <Box width="100%" flexDirection="row">
@@ -52,12 +62,14 @@ export function WelcomeCard({ model, serviceName, workspaceName, columns }: Welc
           <Text color="cyan">/config</Text>{" · "}
           <Text color="cyan">/tasks</Text>
         </Text>
+        {updateHint}
       </Box>
     </Box> : <Box width="100%" flexDirection="column">
       <Text bold color={FLAVOR_ACCENT}>◆ Flavor Code</Text>
       <Text>Welcome back!</Text>
       <Text dimColor wrap="truncate-end">{model}{" · "}{workspaceName}{" · v"}{packageVersion()}</Text>
       <Text><Text color="cyan">/init</Text>{" setup · "}<Text color="cyan">/help</Text>{" commands"}</Text>
+      {updateHint}
     </Box>}
   </Box>;
 }

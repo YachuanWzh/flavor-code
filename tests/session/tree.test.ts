@@ -4,13 +4,44 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { ContextSnapshot } from "../../src/context/manager.js";
-import { SessionHistory } from "../../src/session/tree.js";
+import {
+  MAX_SESSION_HISTORY_CONTEXT_CHARS,
+  MAX_SESSION_HISTORY_NODES,
+  SessionHistory,
+} from "../../src/session/tree.js";
 
 const context = (content: string): ContextSnapshot => ({
   messages: [{ role: "user", content }],
 });
 
 describe("SessionHistory", () => {
+  it("bounds automatic rewind nodes and reparents the retained root", async () => {
+    const root = await mkdtemp(join(tmpdir(), "flavor-tree-bounded-"));
+    const history = await SessionHistory.open({ workspace: root, sessionId: "session-test" });
+    for (let index = 0; index < MAX_SESSION_HISTORY_NODES + 5; index += 1) {
+      await history.append({ prompt: `turn-${index}`, context: context(`context-${index}`) });
+    }
+
+    expect(history.tree()).toHaveLength(MAX_SESSION_HISTORY_NODES);
+    expect(history.tree()[0]?.prompt).toBe("turn-5");
+    expect(history.tree()[0]?.parentId).toBeNull();
+    const reopened = await SessionHistory.open({ workspace: root, sessionId: "session-test" });
+    expect(reopened.tree()).toHaveLength(MAX_SESSION_HISTORY_NODES);
+  });
+
+  it("bounds the total retained context payload even with few large nodes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "flavor-tree-context-bounded-"));
+    const history = await SessionHistory.open({ workspace: root, sessionId: "session-test" });
+    const large = "x".repeat(Math.floor(MAX_SESSION_HISTORY_CONTEXT_CHARS / 2));
+    for (let index = 0; index < 4; index += 1) {
+      await history.append({ prompt: `large-${index}`, context: context(`${index}-${large}`) });
+    }
+
+    expect(history.tree().length).toBeLessThanOrEqual(2);
+    expect(history.tree().at(-1)?.prompt).toBe("large-3");
+    expect(history.tree()[0]?.parentId).toBeNull();
+  });
+
   it("preserves branches when appending after moving the leaf", async () => {
     const root = await mkdtemp(join(tmpdir(), "flavor-tree-"));
     const history = await SessionHistory.open({ workspace: root, sessionId: "session-test" });

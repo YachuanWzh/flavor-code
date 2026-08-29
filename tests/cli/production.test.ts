@@ -1100,6 +1100,11 @@ describe("production runtime", () => {
     await first.session.start();
     await first.services.setPermissionMode("acceptEdits");
     await first.session.submit("persist me");
+    const treePath = join(workspace, ".flavor", "session-trees", first.sessionId, "tree.json");
+    await expect(readFile(treePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    const checkpoint = await first.services.checkpoint?.("before manual refactor");
+    expect(checkpoint).toMatchObject({ prompt: expect.stringContaining("before manual refactor") });
+    expect(JSON.parse(await readFile(treePath, "utf8")).nodes).toHaveLength(1);
     await first.session.close(); await first.dispose();
     const saved = await new SessionStore({ workspace }).load();
     expect(saved.conversation.messages.some((message) => message.role === "user" && message.content === "persist me")).toBe(true);

@@ -21,6 +21,10 @@ interface TreeDocument {
   nodes: SessionTreeNode[];
 }
 
+/** Rewind history duplicates full context snapshots, so it must stay bounded. */
+export const MAX_SESSION_HISTORY_NODES = 100;
+export const MAX_SESSION_HISTORY_CONTEXT_CHARS = 2_000_000;
+
 export interface SessionHistoryOptions {
   workspace: string;
   sessionId: string;
@@ -39,8 +43,10 @@ export class SessionHistory {
     this.#path = join(resolve(options.workspace), ".flavor", "session-trees", options.sessionId, "tree.json");
     this.#checkpoints = new WorkspaceCheckpointStore({ workspace: options.workspace });
     this.#restoreContext = options.restoreContext;
-    this.#nodes = document.nodes;
-    this.#leafId = document.leafId;
+    this.#nodes = boundedNodes(document.nodes);
+    this.#leafId = document.leafId !== null && this.#nodes.some((node) => node.id === document.leafId)
+      ? document.leafId
+      : (this.#nodes.at(-1)?.id ?? null);
   }
 
   static async open(options: SessionHistoryOptions): Promise<SessionHistory> {
@@ -53,7 +59,9 @@ export class SessionHistory {
     } catch (error) {
       if (!isCode(error, "ENOENT")) throw error;
     }
-    return new SessionHistory(options, document);
+    const history = new SessionHistory(options, document);
+    if (history.#nodes.length !== document.nodes.length) await history.#persist();
+    return history;
   }
 
   get leafId(): string | null { return this.#leafId; }
@@ -71,6 +79,7 @@ export class SessionHistory {
     };
     this.#nodes.push(node);
     this.#leafId = node.id;
+    this.#boundNodes();
     await this.#persist();
     return structuredClone(node);
   }
@@ -119,6 +128,14 @@ export class SessionHistory {
     return node;
   }
 
+  #boundNodes(): void {
+    const bounded = boundedNodes(this.#nodes);
+    this.#nodes.splice(0, this.#nodes.length, ...bounded);
+    if (this.#leafId !== null && !this.#nodes.some((node) => node.id === this.#leafId)) {
+      this.#leafId = this.#nodes.at(-1)?.id ?? null;
+    }
+  }
+
   async #persist(): Promise<void> {
     const document: TreeDocument = {
       version: 1,
@@ -131,6 +148,25 @@ export class SessionHistory {
     await writeFile(temporary, `${JSON.stringify(document)}\n`, { encoding: "utf8", mode: 0o600 });
     await rename(temporary, this.#path);
   }
+}
+
+function boundedNodes(input: readonly SessionTreeNode[]): SessionTreeNode[] {
+  const recent = input.slice(-MAX_SESSION_HISTORY_NODES);
+  let contextChars = 0;
+  let start = recent.length;
+  for (let index = recent.length - 1; index >= 0; index -= 1) {
+    const node = recent[index]!;
+    const size = JSON.stringify(node.context).length;
+    if (start < recent.length && contextChars + size > MAX_SESSION_HISTORY_CONTEXT_CHARS) break;
+    contextChars += size;
+    start = index;
+  }
+  const retained = recent.slice(start).map((node) => structuredClone(node));
+  const ids = new Set(retained.map((node) => node.id));
+  for (const node of retained) {
+    if (node.parentId !== null && !ids.has(node.parentId)) node.parentId = null;
+  }
+  return retained;
 }
 
 function validate(value: TreeDocument, sessionId: string): void {

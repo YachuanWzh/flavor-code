@@ -586,16 +586,60 @@ describe("ContextManager", () => {
     expect(log.every((item) => item.content.length < 5_000)).toBe(true);
   });
 
-  it("emits only the appended tail when a stable source extends its previous value", () => {
-    let preference = "Prefer concise answers.";
-    const context = createContext({ userMemory: () => preference });
-    preference = "Prefer concise answers.\nAlways cite files.";
+  it("keeps the complete latest stable baseline when stale updates are collapsed", async () => {
+    let sections: readonly string[] = ["A"];
+    const context = createContext({ system: () => sections });
 
-    expect(context.refreshContextSources()).toBe(true);
+    sections = ["A", "B"];
+    await context.prepareForModelCall();
+    sections = ["A", "B", "C"];
+    await context.prepareForModelCall();
 
-    expect(context.snapshot().messages).toEqual([
-      { role: "system", content: "Context update [system-baseline]\nAlways cite files." },
+    const updates = context.snapshot().messages.filter((message) =>
+      modelContentText(message.content).startsWith("Context update [system-baseline]"));
+    expect(updates).toEqual([
+      { role: "system", content: "Context update [system-baseline]\nA\n\nB\n\nC\n\nFLAVOR.md\nproject guidance" },
     ]);
+  });
+
+  it("preserves provider token pressure while dynamic sources churn", async () => {
+    let summarizeCalls = 0;
+    const context = createContext({
+      taskState: "initial",
+      summarize: async () => { summarizeCalls += 1; return "summary"; },
+    });
+    for (let index = 0; index < 30; index += 1) {
+      context.append({ role: index % 2 === 0 ? "user" : "assistant", content: `message ${index}` });
+    }
+    context.recordModelUsage(162_047);
+    context.updateTaskState("changed after the provider response");
+
+    const compacted = await context.prepareForModelCall();
+
+    expect(compacted).toBe(true);
+    expect(summarizeCalls).toBe(1);
+  });
+
+  it("does not let microcompaction erase provider token pressure", async () => {
+    let summarizeCalls = 0;
+    const context = createContext({
+      summarize: async () => { summarizeCalls += 1; return "summary"; },
+    });
+    for (let index = 0; index < 40; index += 1) {
+      context.append({ role: "user", content: `historical request ${index} ${"x".repeat(1_000)}` });
+      context.append({ role: "assistant", content: `historical response ${index} ${"y".repeat(1_000)}` });
+    }
+    for (let index = 0; index < 8; index += 1) {
+      context.append({ role: "assistant", content: "working", toolCalls: [{ id: `call-${index}`, name: "Read", input: {} }] });
+      context.append({ role: "tool", toolCallId: `call-${index}`, content: "large old tool output ".repeat(100) });
+    }
+    context.append({ role: "user", content: "continue" });
+    context.recordModelUsage(162_047);
+
+    const compacted = await context.prepareForModelCall();
+
+    expect(compacted).toBe(true);
+    expect(summarizeCalls).toBe(1);
   });
 
   it("drops stale context updates before compaction instead of summarizing them", async () => {

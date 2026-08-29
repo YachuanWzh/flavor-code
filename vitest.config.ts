@@ -15,6 +15,10 @@ export default defineConfig({
   test: {
     environment: "node",
     restoreMocks: true,
+    // Windows process creation, Git worktrees and Electron-adjacent fixtures
+    // routinely exceed Vitest's 5s default when the full suite runs in parallel.
+    testTimeout: 15_000,
+    hookTimeout: 15_000,
     exclude: [...configDefaults.exclude, "**/.worktrees/**"],
   },
 });

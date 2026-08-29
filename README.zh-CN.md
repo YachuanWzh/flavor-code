@@ -271,7 +271,7 @@ Skill 是带有 YAML 头信息的 `SKILL.md`，放在 `.flavor/skills/<name>/` �
 ├── sessions/         # 会话时间线
 │   └── *.events.jsonl # 崩溃一致执行事件日志
 ├── session-assets/   # 图片附件
-├── session-trees/    # 会话分支
+├── session-trees/    # 手动 /checkpoint 创建的会话分支
 ├── checkpoints/      # 工作区快照
 ├── memory/           # 长期记忆
 ├── traces/           # 可选执行 trace

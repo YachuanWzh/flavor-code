@@ -1586,7 +1586,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         contextEpoch: harness.main.context.snapshot().epoch?.id ?? "legacy",
       });
       const turnId = harnessJournal.startTurn(turnConfig, { prompt, initialUserMessage: runOptions?.initialUserMessage });
-      return monitorMemoryRestart(durableTurn(persistAndCheckpointAfter(runMain(
+      return monitorMemoryRestart(durableTurn(persistAfter(runMain(
         harness, skills, prompt, signal, selectedModels.mainError,
         memoryStore === undefined || (!memoryHasRoutableEntries && userMemoryContext === undefined) ? undefined : {
           store: memoryStore, taskId: memoryLifecycle.taskId ?? sessionId,
@@ -1596,11 +1596,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         runOptions?.initialUserMessage,
         runOptions?.additionalContext,
         ide,
-      ), persist, () => sessionHistory.append({
-        prompt,
-        context: harness.main.context.snapshot(),
-        label: `turn: ${prompt.slice(0, 80)}`,
-      })), harnessJournal, turnId, turnConfig), () => requestMemoryRestart(workspace, sessionId, emitOutput));
+      ), persist), harnessJournal, turnId, turnConfig), () => requestMemoryRestart(workspace, sessionId, emitOutput));
     },
     runSkill: (skill, prompt, signal) => persistAfter(
       runExplicitSkill(harness, skills, skill, prompt, signal, selectedModels.mainError), persist,
@@ -1793,6 +1789,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     ide: () => ide.status(),
     ideContext: () => ide.editorContext(),
     checkpoint: async (label) => {
+      // Rewind history is opt-in. Ordinary turns persist the resumable session
+      // but do not clone full contexts or checkpoint the workspace.
       // Tag checkpoints with the git state so /tree shows what the workspace
       // looked like at each node.
       const marker = await gitMarker(workspace);
@@ -2337,19 +2335,6 @@ async function* persistAfter<T>(source: AsyncIterable<T>, persist: () => Promise
   finally { await persist(); }
 }
 
-async function* persistAndCheckpointAfter<T>(
-  source: AsyncIterable<T>,
-  persist: () => Promise<void>,
-  checkpoint: () => Promise<unknown>,
-): AsyncIterable<T> {
-  try {
-    for await (const item of source) yield item;
-    await checkpoint();
-  } finally {
-    await persist();
-  }
-}
-
 async function* persistEach<T>(source: AsyncIterable<T>, persist: () => Promise<void>): AsyncIterable<T> {
   try {
     for await (const item of source) {
@@ -2390,7 +2375,7 @@ async function* durableTurn(
 
 /**
  * Watch a turn's event stream for the heap watermark error. durableTurn has
- * already recorded the interruption and persistAndCheckpointAfter has saved
+ * already recorded the interruption and persistAfter has saved
  * the session by the time the stream drains, so triggering the controlled
  * restart afterwards cannot lose conversation state.
  */
