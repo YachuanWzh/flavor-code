@@ -125,7 +125,7 @@ function onSessionStart(event) {
   if (typeof workspace === "string" && workspace.length > 0
       && !existsSync(join(workspace, "ONBOARDING.md"))
       && !existsSync(join(workspace, ".flavor", "superharness", "onboarding", "cache.json"))) {
-    context += `\n\n<superharness-onboarding-hint>\nNo onboarding guide for this workspace yet. Run /onboarding (superharness:onboarding) to analyze the codebase, map module business relationships, and generate ONBOARDING.md plus an interactive module mind map. The agent decides when to run it - nothing is analyzed automatically.\n</superharness-onboarding-hint>`;
+    context += `\n\n<superharness-onboarding-hint>\nNo onboarding guide for this workspace yet. Run /onboarding (superharness:onboarding) to analyze the codebase, map module business relationships, and generate ONBOARDING.md plus an interactive module mind map. Only run it when the user explicitly invokes the command - never self-invoke; nothing is analyzed automatically.\n</superharness-onboarding-hint>`;
   }
   return { decision: "allow", additionalContext: context };
 }

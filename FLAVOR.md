@@ -63,7 +63,7 @@ Key capabilities:
 - **go** -- Drive a task end-to-end under strict TDD + verification + code review discipline.
 - **light** -- Lightweight mode for small focused tasks: TDD with exemptions, real-output verification, no worktree/plan-file/ralph overhead.
 - **brainstorm** -- Explore requirements with a live browser mind map (manual trigger only).
-- **onboarding** -- Deep-analyze the workspace's business logic for newcomers: ONBOARDING.md + interactive module mind map, astgraph-powered with fallback, incremental via cache.
+- **onboarding** -- Deep-analyze the workspace's business logic for newcomers (manual trigger only): ONBOARDING.md + interactive module mind map, astgraph-powered with fallback, incremental via cache.
 - **test-driven-development** -- RED-GREEN-REFACTOR cycle. No production code without a failing test first.
 - **systematic-debugging** -- Root-cause tracing, defense-in-depth, no guess-and-patch.
 - **verification-before-completion** -- Run the full test suite and show real output before claiming done.
@@ -76,12 +76,7 @@ Key capabilities:
 
 Usage in flavor-code: `/<skill-name> <args>`, e.g. `/go refactor login module` or `/brainstorm payment plan`.
 
-### Latest update (v1.1.0)
+### Latest update (v1.1.1)
 
-- Added an npm-distributed, cross-platform `superharness` command for Windows and macOS/Linux.
-- Installing through `@flavor-code/plugin-manager` now initializes `FLAVOR.md`, `CLAUDE.md`, or both and can expose the CLI globally.
-- Added `receiving-code-review`: verify review findings before implementation instead of applying feedback blindly.
-- Added `converge`: audit the implementation against the specification and plan before finishing.
-- Added living specifications so verified behavior survives across sessions as durable project context.
-- Strengthened stack guidance for command verification, test boundaries, contract-first full-stack changes, and end-to-end testing.
+- `onboarding` is now manual-trigger only: it runs when you explicitly invoke `/onboarding` (or `/superharness:onboarding`) and never starts on its own when you ask to explore or understand a project.
 <!-- SUPERHARNESS:FLAVOR-END -->
