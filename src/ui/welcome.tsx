@@ -2,7 +2,6 @@ import React from "react";
 
 import { Box, Text } from "../claude-ink/index.js";
 import { packageVersion } from "../utils/version.js";
-import { NPM_PACKAGE_NAME } from "../update/check.js";
 
 export interface WelcomeCardProps {
   model: string;
@@ -25,9 +24,9 @@ export function WelcomeCard({
 }: WelcomeCardProps): React.JSX.Element {
   const wide = Math.max(1, Math.floor(columns)) >= WIDE_WELCOME_COLUMNS;
   const updateHint = updateTo === undefined ? null : (
-    <Text color="yellow" wrap="truncate-end">
+    <Text color="yellowBright" wrap="truncate-end">
       {"▲ "}Update available: v{packageVersion()} {"\u2192"} v{updateTo}
-      {" \u00b7 npm i -g "}{NPM_PACKAGE_NAME}
+      {" \u00b7 run: flavor update"}
     </Text>
   );
 

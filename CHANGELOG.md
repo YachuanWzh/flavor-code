@@ -2,7 +2,33 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.3.17 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.3.19 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.3.19] - 2026-08-30
+
+### 新增
+- 新增 `flavor update` 命令：查询 npm registry 上 `flavor-code` 的最新版本，若高于当前安装版本则自动执行全局安装（Windows 下使用 `npm.cmd` 避免 spawn 失败），升级后提示重启 flavor 生效；已是最新、registry 不可达、安装失败三种情况分别给出明确输出，后两者以非零退出码结束，安装失败时附带 `npm i -g flavor-code` 手动兜底命令
+
+### 改进
+- 欢迎卡片的版本更新公告不再要求用户手动执行 `npm i -g`，改为提示直接运行 `flavor update`；公告颜色由 yellow 提亮为 yellowBright，在深色终端下更醒目
+
+### 测试
+- 新增 update 执行逻辑单元测试：平台 npm 可执行文件选择、无新版本时不安装、有新版本时全局安装指定版本、registry 不可达返回 check-failed、npm 非零退出或无法启动返回 install-failed
+- 新增 `flavor update` 命令回归测试：覆盖升级成功、已最新、registry 不可达、安装失败四种输出与退出码，以及失败时的手动安装提示
+- 新增欢迎卡片渲染回归测试：验证更新公告展示新版本号与 `run: flavor update` 提示
+
+## [1.3.18] - 2026-08-30
+
+### 新增
+- Stop 钩子支持否决结束回合：会话在每轮结束时发射 `Stop` 钩子，钩子返回 `{ decision: "deny", reason }` 即可阻止回合收尾，否决理由会以 `[stop-guard]` 后续提示的形式自动注入回模型，要求先完成所需验证或修复再结束，让 verify-gate 这类守护插件真正实现"不证明可用就不许停"
+- 否决续延具备防死循环预算：每条用户提交链最多续延 2 次（`MAX_STOP_DENIALS`），超出后提示并正常结束回合；每个新用户提交重置计数，取消或已被否决的回合不触发续延，续延入队失败也不会卡死清理流程
+
+### 改进
+- superharness 插件升级至 1.1.1：`onboarding` 改为仅手动触发，只有显式调用 `/onboarding`（或 `/superharness:onboarding`）时才会运行，不再在探索项目时自行启动；FLAVOR.md 与注入提示同步更新
+
+### 测试
+- 新增 Stop 钩子否决与续延的会话单元测试：覆盖否决注入、续延计数上限、预算耗尽后强制收尾与新提交重置计数
+- 新增内置守护插件回归测试：`verify-gate`（源码改动未验证则否决 Stop、成功测试/构建后清零、忽略文档与生成文件、不否决已取消回合）、`secret-guard`（AWS 密钥/私钥/JWT/GitHub token/.env 写入触发询问且不回显机密）、`edit-doctor`（未闭合括号/字符串与非法 JSON 触发询问、损坏标记修复后自动清除、暂存提示一次性注入），以及三个新插件零诊断加载的完整性测试
 
 ## [1.3.17] - 2026-08-29
 
@@ -603,6 +629,8 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.3.19 | 2026-08-30 | 新增 `flavor update` 一键自升级（查询 registry、全局安装、失败兜底提示）；欢迎卡片更新公告改为提示运行 `flavor update` 并提亮颜色 |
+| 1.3.18 | 2026-08-30 | Stop 钩子可否决结束回合并以 `[stop-guard]` 提示注入理由（每条提交链最多续延 2 次）；superharness 升级 1.1.1，onboarding 改为仅手动触发；新增 verify-gate/secret-guard/edit-doctor 守护插件回归测试 |
 | 1.3.17 | 2026-08-29 | 堆 OOM 根因修正：保留真实 provider token 压力直到完整压缩、清理上下文不再绕过阈值或丢 baseline、移除无效 no-maglev、增加多阶段堆水位保护 |
 | 1.3.16 | 2026-08-29 | 上下文内存与诊断初步修复：压缩阈值提前、可见性日志限界、Context update 清理、堆水位重启与 fatal report/heapsnapshot |
 | 1.3.15 | 2026-08-29 | 首轮稳定性处理：曾按 Maglev 方向加入 no-maglev 启动器（后由 1.3.17 的 fatal report 证据纠正为 JavaScript heap OOM）；superharness 升级 1.1.0 |

@@ -7,6 +7,8 @@ import { Command, Option } from "commander";
 
 import { createProductionRuntime, type ProductionRuntime } from "./production.js";
 import { initializeFlavor } from "./init/project.js";
+import { runUpdate, type UpdateOutcome } from "./update/apply.js";
+import { NPM_PACKAGE_NAME } from "./update/check.js";
 import { installCrashGuard } from "./utils/crash-guard.js";
 import { message } from "./utils/error.js";
 import { redactErrorText } from "./utils/redact.js";
@@ -35,6 +37,7 @@ export interface CliDependencies {
   randomUUID?(): string;
   runBroker?: typeof runPalBroker;
   runInteractive?(props: InteractiveCliProps): Promise<void>;
+  runUpdate?(options?: Parameters<typeof runUpdate>[0]): Promise<UpdateOutcome>;
 }
 
 export function createProgram(dependencies: CliDependencies = {}): Command {
@@ -62,6 +65,34 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
         process.stdout.write(`${result.created ? "Created" : "Updated"} ${result.path}\n`);
       } catch (error) {
         process.stderr.write(`init: ${safeError(error)}\n`);
+        process.exitCode = 1;
+      }
+    });
+
+  program
+    .command("update")
+    .description(`Update the globally installed ${NPM_PACKAGE_NAME} to the latest npm release`)
+    .action(async () => {
+      try {
+        const outcome = await (dependencies.runUpdate ?? runUpdate)();
+        switch (outcome.status) {
+          case "up-to-date":
+            process.stdout.write(`${NPM_PACKAGE_NAME} is already up to date (v${outcome.current}).\n`);
+            break;
+          case "updated":
+            process.stdout.write(`Updated ${NPM_PACKAGE_NAME} v${outcome.current} \u2192 v${outcome.latest}. Restart flavor to use it.\n`);
+            break;
+          case "check-failed":
+            process.stderr.write("update: could not reach the npm registry to determine the latest version.\n");
+            process.exitCode = 1;
+            break;
+          case "install-failed":
+            process.stderr.write(`update: npm install failed${outcome.exitCode === null ? " (npm could not be started)" : ` with exit code ${outcome.exitCode}`}. Install manually with: npm i -g ${NPM_PACKAGE_NAME}\n`);
+            process.exitCode = 1;
+            break;
+        }
+      } catch (error) {
+        process.stderr.write(`update: ${safeError(error)}\n`);
         process.exitCode = 1;
       }
     });

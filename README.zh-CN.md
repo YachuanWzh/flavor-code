@@ -75,6 +75,14 @@ flavor --resume -p "继续完成剩余工作"
 
 非交互模式会拒绝需要人工审批的操作，不会悬挂等待输入。
 
+**4. 保持更新**
+
+```bash
+flavor update
+```
+
+Flavor 启动时会检查 npm registry，有新版本时在欢迎卡片中提示；运行 `flavor update` 即可一键升级到最新发行版，升级后重启 Flavor 生效。
+
 ## 配置模型
 
 最快的方式是设置环境变量：

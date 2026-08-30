@@ -328,10 +328,25 @@ describe("TerminalLayout", () => {
     expect(wide).toContain("Update available");
     expect(wide).toContain(`v${packageVersion()}`);
     expect(wide).toContain("9.9.9");
-    expect(wide).toContain("npm i -g flavor-code");
+    expect(wide).toContain("flavor update");
     expect(compact).toContain("Update available");
     expect(Math.max(...compact.split("\n").map((line) => [...line].length))).toBeLessThanOrEqual(48);
     expect(quiet).not.toContain("Update available");
+  });
+
+  it("renders the update hint plain bright yellow without bold in both welcome layouts", () => {
+    const hint = (layout: React.ReactElement<{ children?: React.ReactNode }>, index: number) =>
+      React.Children.toArray(layout.props.children)[index] as React.ReactElement<{ bold?: boolean; color?: string }>;
+    const card = WelcomeCard({ model: "model", workspaceName: "workspace", columns: 96, updateTo: "9.9.9" });
+    const wideLayout = card.props.children as React.ReactElement<{ children?: React.ReactNode }>;
+    const wideRight = React.Children.toArray(wideLayout.props.children)[1] as React.ReactElement<{ children?: React.ReactNode }>;
+    const compactCard = WelcomeCard({ model: "model", workspaceName: "workspace", columns: 48, updateTo: "9.9.9" });
+    const compactLayout = compactCard.props.children as React.ReactElement<{ children?: React.ReactNode }>;
+
+    expect(hint(wideRight, 6).props.bold).toBeUndefined();
+    expect(hint(wideRight, 6).props.color).toBe("yellowBright");
+    expect(hint(compactLayout, 4).props.bold).toBeUndefined();
+    expect(hint(compactLayout, 4).props.color).toBe("yellowBright");
   });
 
   it("collapses pasted draft text but keeps submitted content fully visible with a spaced chevron", () => {

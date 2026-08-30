@@ -75,6 +75,14 @@ flavor --resume -p "Continue the remaining work"
 
 Non-interactive mode refuses actions that require human approval and never hangs waiting for input.
 
+**4. Staying up to date**
+
+```bash
+flavor update
+```
+
+Flavor checks the npm registry at startup and shows an update hint on the welcome card. Run `flavor update` to upgrade the global install to the latest release, then restart Flavor.
+
 ## Configuring Models
 
 The fastest way is to set environment variables:
