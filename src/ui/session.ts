@@ -191,6 +191,12 @@ const HELP = [
   "/co-work <pal> <goal> | status [id] | cancel <id> [reason]",
 ].join("\n");
 
+// A Stop hook may veto ending a turn by returning { decision: "deny",
+// reason }. The reason is injected back as a bounded number of follow-up
+// prompts per user-initiated chain, so guards like verify-gate can enforce
+// "prove it works before you stop" without risking an infinite loop.
+const MAX_STOP_DENIALS = 2;
+
 export class FlavorSession {
   readonly #services: SessionServices;
   #active: AbortController | undefined;
@@ -201,6 +207,7 @@ export class FlavorSession {
   #submissionTail: Promise<void> = Promise.resolve();
   #coWorkEventTail: Promise<void> = Promise.resolve();
   #pendingSubmissions = 0;
+  #stopDenials = 0;
   #closePromise: Promise<void> | undefined;
   readonly #queue = new AgentMessageQueue();
   readonly #queuedSubmissions: Record<"steer" | "followUp", NormalizedSubmission[]> = { steer: [], followUp: [] };
@@ -404,6 +411,7 @@ export class FlavorSession {
   }
 
   async #runSubmissionChain(initialSubmission: NormalizedSubmission): Promise<void> {
+    this.#stopDenials = 0;
     const pending = [initialSubmission];
     let initial = true;
     while (pending.length > 0) {
@@ -489,8 +497,9 @@ export class FlavorSession {
         this.#active = undefined;
         this.#activeSubmission = undefined;
         if (submission.coWorkPlanningKey !== undefined) this.#finishActivePlanning(submission.coWorkPlanningKey);
+        let stopDecision: Awaited<ReturnType<HookBus["emit"]>> | undefined;
         try {
-          await this.#services.hooks.emit({
+          stopDecision = await this.#services.hooks.emit({
             version: 1,
             type: "Stop",
             payload: {
@@ -506,6 +515,24 @@ export class FlavorSession {
           try { this.#services.output({ type: "error", error: { code: "unknown", message: message(error) } }); }
           catch { /* Never let cleanup failures escape. */ }
         }
+        try {
+          if (
+            stopDecision?.decision === "deny" && typeof stopDecision.reason === "string" && stopDecision.reason.length > 0
+            && !this.#closed && outcome !== "cancelled" && outcome !== "denied"
+          ) {
+            if (this.#stopDenials < MAX_STOP_DENIALS) {
+              this.#stopDenials += 1;
+              const text =
+                `[stop-guard] A Stop hook vetoed ending this turn (continuation ${this.#stopDenials}/${MAX_STOP_DENIALS}). It reported:\n` +
+                `${stopDecision.reason}\n` +
+                "Address this now (for example run the required verification or fix), then finish.";
+              this.#enqueueMessage("followUp", { text, displayText: text });
+              this.#notice(`Stop hook requested continuation (${this.#stopDenials}/${MAX_STOP_DENIALS}).`);
+            } else {
+              this.#notice("Stop hook kept vetoing after the continuation budget; ending the turn anyway.");
+            }
+          }
+        } catch { /* A broken continuation enqueue must not wedge teardown. */ }
         this.#ackDurable(submission);
         this.#ackActiveSteering();
       }

@@ -1093,4 +1093,71 @@ describe("FlavorSession", () => {
     expect(fork).toHaveBeenCalledWith("turn-1");
     expect(outputs.join("\n")).toContain("checkpoint-1");
   });
+
+  it("continues the turn when a Stop hook denies, carrying the reason as a follow-up prompt", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const prompts: string[] = [];
+    base.run = async function* (prompt) {
+      prompts.push(prompt);
+      yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
+    };
+    let stopCount = 0;
+    base.hooks.on("Stop", () => {
+      stopCount += 1;
+      return stopCount === 1 ? { decision: "deny", reason: "src/a.ts changed without a test run" } : { decision: "allow" };
+    });
+    const session = new FlavorSession(base);
+
+    await session.submit("implement the thing");
+    await session.whenIdle();
+
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).toBe("implement the thing");
+    expect(prompts[1]).toContain("src/a.ts changed without a test run");
+    expect(outputs.join("\n")).toContain("Stop hook requested continuation");
+  });
+
+  it("caps consecutive Stop-hook continuations so a persistent deny cannot loop forever", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const prompts: string[] = [];
+    base.run = async function* (prompt) {
+      prompts.push(prompt);
+      yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
+    };
+    base.hooks.on("Stop", () => ({ decision: "deny", reason: "verify first" }));
+    const session = new FlavorSession(base);
+
+    await session.submit("implement the thing");
+    await session.whenIdle();
+
+    // One original prompt plus at most 2 hook-driven continuations.
+    expect(prompts).toHaveLength(3);
+    expect(prompts.filter((prompt) => prompt.includes("verify first"))).toHaveLength(2);
+  });
+
+  it("resets the Stop-hook continuation budget on a fresh user submission", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const prompts: string[] = [];
+    base.run = async function* (prompt) {
+      prompts.push(prompt);
+      yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
+    };
+    // Persistent denial: every turn gets exactly MAX_STOP_DENIALS (2)
+    // continuations, and a fresh user submission restores the budget.
+    base.hooks.on("Stop", () => ({ decision: "deny", reason: "run tests" }));
+    const session = new FlavorSession(base);
+
+    await session.submit("first task");
+    await session.whenIdle();
+    expect(prompts).toHaveLength(3); // original + 2 continuations
+    expect(prompts.filter((prompt) => prompt.includes("run tests"))).toHaveLength(2);
+
+    await session.submit("second task");
+    await session.whenIdle();
+    expect(prompts).toHaveLength(6); // budget reset for the new chain
+    expect(prompts.filter((prompt) => prompt.includes("run tests"))).toHaveLength(4);
+  });
 });
