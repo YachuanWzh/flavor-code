@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 
+import { prepareSpawnInvocation } from "../utils/spawn-executable.js";
 import { gt, isValidVersion } from "../utils/semver.js";
 import { packageVersion } from "../utils/version.js";
 import { fetchLatestVersion, NPM_PACKAGE_NAME, type UpdateCheckOptions } from "./check.js";
@@ -27,7 +28,11 @@ export function npmExecutable(platform: NodeJS.Platform = process.platform): str
 }
 
 export const defaultInstall: InstallRunner = (command, args) => new Promise((resolve, reject) => {
-  const child = spawn(command, args, { stdio: "inherit" });
+  const invocation = prepareSpawnInvocation(command, args);
+  const child = spawn(invocation.command, invocation.args, {
+    stdio: "inherit",
+    ...(invocation.windowsVerbatimArguments === undefined ? {} : { windowsVerbatimArguments: invocation.windowsVerbatimArguments }),
+  });
   child.on("error", reject);
   child.on("close", (code) => resolve(code));
 });

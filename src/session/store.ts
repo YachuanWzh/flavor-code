@@ -150,6 +150,13 @@ export interface SessionEntry {
 
 export interface SessionStoreOptions { workspace: string; maxBytes?: number; maxSessions?: number }
 
+export interface SessionLease {
+  readonly sessionId: string;
+  release(): Promise<void>;
+}
+
+const INVALID_SESSION_LOCK_STALE_MS = 30_000;
+
 export class SessionStore {
   readonly #workspace: string;
   readonly #sessions: string;
@@ -203,6 +210,49 @@ export class SessionStore {
       await rm(temporary, { force: true }).catch(() => undefined);
     }
     await this.#prune().catch(() => undefined);
+  }
+
+  /** Hold this lease for the full lifetime of a writable session runtime. */
+  async acquireLease(sessionId: string): Promise<SessionLease> {
+    SessionIdSchema.parse(sessionId);
+    await this.#prepareDirectory();
+    const path = join(this.#sessions, `.${sessionId}.lock`);
+    const token = JSON.stringify({ pid: process.pid, nonce: randomUUID(), createdAt: new Date().toISOString() });
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      let handle;
+      let created = false;
+      try {
+        handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+        created = true;
+        await handle.writeFile(token, "utf8");
+        await handle.sync();
+        await handle.close();
+        handle = undefined;
+        let released = false;
+        return {
+          sessionId,
+          release: async () => {
+            if (released) return;
+            try {
+              if (await readFile(path, "utf8") === token) await rm(path, { force: true });
+            } catch (error) {
+              if (!isCode(error, "ENOENT")) throw error;
+            }
+            released = true;
+          },
+        };
+      } catch (error) {
+        await handle?.close().catch(() => undefined);
+        if (created) await rm(path, { force: true }).catch(() => undefined);
+        if (!isCode(error, "EEXIST")) throw error;
+        const owner = await reclaimStaleSessionLock(path);
+        if (owner !== undefined) {
+          throw new Error(`Session "${sessionId}" is already active in process ${owner}. Close that session before resuming it here.`);
+        }
+      }
+    }
+    throw new Error(`Session "${sessionId}" could not acquire its writer lease because the lock kept changing`);
   }
 
   async load(sessionId?: string): Promise<SessionDocument> {
@@ -301,6 +351,8 @@ export class SessionStore {
     SessionIdSchema.parse(sessionId);
     try { await this.#assertSafeExistingDirectory(); }
     catch (error) { if (isCode(error, "ENOENT")) return; throw error; }
+    const owner = await reclaimStaleSessionLock(join(this.#sessions, `.${sessionId}.lock`));
+    if (owner !== undefined) throw new Error(`Session "${sessionId}" is active in process ${owner} and cannot be deleted`);
     const path = this.#path(sessionId);
     try {
       const metadata = await lstat(path);
@@ -322,8 +374,11 @@ export class SessionStore {
   async #prune(): Promise<void> {
     const entries = await this.list();
     if (entries.length <= this.#maxSessions) return;
-    const excess = entries.slice(this.#maxSessions);
-    for (const entry of excess) {
+    let retained = 0;
+    for (const entry of entries) {
+      const owner = await reclaimStaleSessionLock(join(this.#sessions, `.${entry.sessionId}.lock`));
+      if (owner !== undefined) continue;
+      if (retained < this.#maxSessions) { retained += 1; continue; }
       await rm(this.#path(entry.sessionId), { force: true }).catch(() => undefined);
       await rm(join(this.#sessions, `${entry.sessionId}.events.jsonl`), { force: true }).catch(() => undefined);
     }
@@ -376,6 +431,48 @@ function storedSessionVersion(raw: string): number {
   const first = JSON.parse(trimmed.split("\n", 1)[0] ?? "{}") as Record<string, unknown>;
   const candidate = first.__meta === true ? first.version : (JSON.parse(trimmed) as Record<string, unknown>).version;
   return typeof candidate === "number" && Number.isInteger(candidate) ? candidate : 0;
+}
+
+async function reclaimStaleSessionLock(path: string): Promise<number | undefined> {
+  try {
+    const token = await readFile(path, "utf8");
+    const metadata = await stat(path);
+    const owner = parseSessionLockOwner(token);
+    if (owner !== undefined && isProcessAlive(owner)) return owner;
+    if (owner === undefined && Date.now() - metadata.mtimeMs <= INVALID_SESSION_LOCK_STALE_MS) {
+      throw new Error(`Session writer lock ${path} is incomplete or invalid; retry after the owning process exits`);
+    }
+    if (await readFile(path, "utf8") !== token) return undefined;
+    const stale = `${path}.stale-${process.pid}-${randomUUID()}`;
+    try {
+      await rename(path, stale);
+      await rm(stale, { force: true });
+    } catch (error) {
+      if (!isCode(error, "ENOENT")) throw error;
+    }
+    return undefined;
+  } catch (error) {
+    if (isCode(error, "ENOENT")) return undefined;
+    throw error;
+  }
+}
+
+function parseSessionLockOwner(token: string): number | undefined {
+  try {
+    const value: unknown = JSON.parse(token);
+    if (typeof value !== "object" || value === null || !("pid" in value)) return undefined;
+    const pid = (value as { pid?: unknown }).pid;
+    return typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
+  } catch { return undefined; }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return isCode(error, "EPERM");
+  }
 }
 
 async function boundedRead(path: string, maxBytes: number): Promise<string> {

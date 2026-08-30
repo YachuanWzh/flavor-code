@@ -14,6 +14,7 @@ import {
   type ShellHookHandler,
 } from "./types.js";
 import { message as errorMessage } from "../utils/error.js";
+import { prepareSpawnInvocation } from "../utils/spawn-executable.js";
 
 interface RegisteredHandler {
   handler: HookHandler | ShellHookHandler;
@@ -157,12 +158,15 @@ function decoratePayload(
 
 function runShellHandler(descriptor: ShellHookHandler, event: HookEvent, signal: AbortSignal): Promise<HookDecision> {
   return new Promise((resolve, reject) => {
-    const child = spawn(descriptor.command, [...(descriptor.args ?? [])], {
-      env: { ...process.env, ...descriptor.env },
+    const env = { ...process.env, ...descriptor.env };
+    const invocation = prepareSpawnInvocation(descriptor.command, descriptor.args ?? [], { env });
+    const child = spawn(invocation.command, invocation.args, {
+      env,
       shell: false,
       detached: process.platform !== "win32",
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
+      ...(invocation.windowsVerbatimArguments === undefined ? {} : { windowsVerbatimArguments: invocation.windowsVerbatimArguments }),
     });
     const maxOutputBytes = descriptor.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
     let stdout = "";

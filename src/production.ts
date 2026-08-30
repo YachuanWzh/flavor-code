@@ -54,7 +54,7 @@ import type { PluginCommandHandler } from "./plugins/types.js";
 import { SkillRegistry } from "./skills/registry.js";
 import { createSkillResourceTool, createSkillTool } from "./skills/tool.js";
 import { expandSkillArguments } from "./skills/arguments.js";
-import { SESSION_VERSION, SessionStore, type SessionDocument } from "./session/store.js";
+import { SESSION_VERSION, SessionStore, type SessionDocument, type SessionLease } from "./session/store.js";
 import { SessionHistory } from "./session/tree.js";
 import {
   MEMORY_RESTART_EXIT_CODE,
@@ -101,6 +101,7 @@ import { MVP_COMMANDS } from "./ui/commands.js";
 import { resolveLanguage, languageInstruction } from "./utils/intl.js";
 import { awaitWithSignal, withTimeout } from "./utils/async.js";
 import { message } from "./utils/error.js";
+import { registerCrashCleanup } from "./utils/crash-guard.js";
 import { execFileNoThrow } from "./utils/execFileNoThrow.js";
 import { redactSecrets } from "./utils/redact.js";
 import { HallucinationGuard } from "./hallucination/guard.js";
@@ -614,6 +615,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   let collaborationEventPump: Promise<void> | undefined;
   let collaborationEventsOpen = true;
   let islandControlServer: IslandControlServer | undefined;
+  let sessionLease: SessionLease | undefined;
   const pumpCollaborationEvents = (): void => {
     if (collaborationEventPump !== undefined || collaborationSession === undefined || deliverCollaborationEvent === undefined) return;
     collaborationEventPump = (async () => {
@@ -775,6 +777,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const subagentStartedAt: Record<string, number> = {};
   const subagentElapsedMs: Record<string, number> = {};
   let sessionId = recovered?.sessionId ?? `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
+  sessionLease = await sessionStore.acquireLease(sessionId);
   hookSessionId = sessionId;
   let harnessJournal = new HarnessJournal({ workspace, sessionId });
   const harnessRecovery = harnessJournal.recover();
@@ -1098,7 +1101,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       maxEntryChars: config.memory.maxEntryChars,
       scoreThreshold: config.memory.scoreThreshold,
       autoStoreThreshold: config.memory.autoStoreThreshold,
-      maxCandidates: Math.min(config.memory.maxCandidatesPerTask, 1),
+      maxCandidates: config.memory.maxCandidatesPerTask,
       ...(config.language === undefined ? {} : { language: config.language }),
       generate: (prompt, signal) => generateMemoryExtraction(registry, childModel, prompt, signal),
     })
@@ -1768,7 +1771,12 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       for (const key of Object.keys(subagentStartedAt)) delete subagentStartedAt[key];
       for (const key of Object.keys(subagentElapsedMs)) delete subagentElapsedMs[key];
       const previousIdeSessionId = ideSessionId;
-      sessionId = `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
+      const nextSessionId = `session-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`;
+      const nextLease = await sessionStore.acquireLease(nextSessionId);
+      const previousLease = sessionLease;
+      sessionLease = nextLease;
+      sessionId = nextSessionId;
+      await previousLease?.release();
       hookSessionId = sessionId;
       harnessJournal = new HarnessJournal({ workspace, sessionId });
       setUsageSession(sessionId);
@@ -2049,15 +2057,13 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     setPermissionProfile: (profile: PermissionProfile) => harness.setPermissionProfile(profile),
   };
   let disposed = false;
-  return {
-    session, services, authorization, approvals, memoryReviews, restoredTranscript,
-    jobs: { list: () => jobs.list(), read: (id, owner, cursor) => jobs.read(id, owner, cursor), subscribe: (listener) => jobs.subscribe(listener) },
-    get sessionId() { return sessionId; },
-    get diagnostics() { return diagnostics.map((item) => redactSecrets(item, secrets)); },
-    async dispose() {
-      if (disposed) return;
-      disposed = true;
-      const stepTimeoutMs = options.shutdownStepTimeoutMs ?? DEFAULT_SHUTDOWN_STEP_TIMEOUT_MS;
+  let unregisterCrashCleanup = (): void => undefined;
+  const disposeRuntime = async (): Promise<void> => {
+    if (disposed) return;
+    disposed = true;
+    unregisterCrashCleanup();
+    const stepTimeoutMs = options.shutdownStepTimeoutMs ?? DEFAULT_SHUTDOWN_STEP_TIMEOUT_MS;
+    try {
       collaborationEventsOpen = false;
       unsubscribeCollaboration?.();
       if (collaborationEventPump !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "collaboration-event-pump", collaborationEventPump);
@@ -2076,7 +2082,19 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       memoryReviews.dispose();
       if (collaborationClient !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "collaboration-close", collaborationClient.close());
       await cleanupProduction(approvals, questions, pluginHost, mcpManager, harness, { stepTimeoutMs });
-    },
+    } finally {
+      const lease = sessionLease;
+      sessionLease = undefined;
+      await lease?.release();
+    }
+  };
+  unregisterCrashCleanup = registerCrashCleanup(disposeRuntime);
+  return {
+    session, services, authorization, approvals, memoryReviews, restoredTranscript,
+    jobs: { list: () => jobs.list(), read: (id, owner, cursor) => jobs.read(id, owner, cursor), subscribe: (listener) => jobs.subscribe(listener) },
+    get sessionId() { return sessionId; },
+    get diagnostics() { return diagnostics.map((item) => redactSecrets(item, secrets)); },
+    dispose: disposeRuntime,
   };
   } catch (primaryError) {
     collaborationEventsOpen = false;
@@ -2097,6 +2115,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       await cleanupProduction(approvals, questions, pluginHost, mcpManager, harnessCreated ? harness : undefined, { stepTimeoutMs });
     }
     catch (cleanupError) { attachCleanupError(primaryError, cleanupError); }
+    try { await sessionLease?.release(); }
+    catch (leaseError) { attachCleanupError(primaryError, leaseError); }
+    sessionLease = undefined;
     throw primaryError;
   }
 }

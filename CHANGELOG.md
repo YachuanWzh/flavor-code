@@ -2,7 +2,29 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.3.19 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.3.20 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.3.20] - 2026-08-30
+
+### 新增
+- 新增会话写租约（writer lease）：每个会话在打开为可写运行时以独占锁文件登记归属进程，同一会话同时只允许一个运行时持有写权；第二个实例尝试打开或 `--resume` 同一会话时会立即收到明确报错（含占用方进程号），从源头杜绝两个 flavor 进程并发写同一 session 文件导致的互相覆盖与数据损坏
+- 租约具备完整的失效与回收路径：持有租约的进程退出（正常 dispose、启动失败回滚、崩溃）后锁被释放；锁文件遗留自已死亡进程时按进程存活探测自动回收，损坏或不完整的锁在 30 秒宽限期后同样可被回收；删除会话和会话数超限清理（prune）都会跳过仍有活跃写进程的子会话，避免正在使用的历史被误删
+- 崩溃守护新增清理回调注册（`registerCrashCleanup`）：运行时把释放会话租约等收尾动作挂入 `unhandledRejection` / `uncaughtException` 崩溃路径，进程退出前限时运行全部清理（默认 1 秒预算外加看门狗兜底），异常崩溃也不会把写锁永久悬置在磁盘上
+
+### 修复
+- 修复 Windows 下三类子进程启动失败或参数被破坏的问题：钩子 shell 命令、LSP 服务器进程与 `flavor update` 的 npm 安装统一改用新的 `prepareSpawnInvocation` 结构化解析——按 `PATH`/`PATHEXT` 定位真实可执行文件，原生 `.exe`/`.com` 保留原始 argv 边界直接启动，仅 `.cmd`/`.bat` 批处理（如 npm/npx 的 `.bin` shim）经由 `cmd.exe /d /s /c` 桥接并对元字符做转义，其他平台行为完全不变
+- 修复桌面端主进程多处裸 `void savePersistedProjects()` 调用：持久化写入失败时会产生无人处理的 rejection（在崩溃守护下可能被误判为致命错误），改为统一的后台保存入口并记录失败日志
+
+### 改进
+- 记忆配置 `maxCandidatesPerTask` 从 1–10 可调范围收敛为固定值 1（schema 改为 literal 并保留注释说明）：每任务单候选是刻意的记忆质量边界而非可调参数，配置任何大于 1 的值现在会直接被校验拒绝
+- 会话内切换新会话（如 `/new`）时先取得新会话租约、提交成功后再释放旧会话租约，切换过程中不存在无写权保护的窗口
+- 桌面端任务状态变化与活动通知触发的工程列表持久化不再阻塞主流程事件循环
+
+### 测试
+- 新增会话租约单元测试：同会话二次获取被拒并提示占用方、释放后可重新获取、租约存续期间禁止删除会话、prune 跳过活跃会话、死亡进程遗留的失效锁可回收
+- 新增崩溃清理注册表测试：回调注册与注销的执行语义、永不 settle 的清理在超时预算内被强制截断
+- 新增 `prepareSpawnInvocation` 回归测试：非 Windows 平台保持结构化命令原样；Windows 下真实启动 `.cmd` shim 并验证含空格与 `&` 元字符的参数逐字透传；`flavor update` 安装路径在 Windows 上真实拉起 npm 的 cmd shim 并成功退出
+- 新增配置校验用例：`maxCandidatesPerTask: 2` 被 schema 拒绝
 
 ## [1.3.19] - 2026-08-30
 

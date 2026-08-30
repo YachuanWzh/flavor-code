@@ -396,6 +396,10 @@ async function savePersistedProjects(): Promise<void> {
   await writeFile(statePath(), `${JSON.stringify({ workspace: activeWorkspace, projects: projectOrder, ...workbench })}\n`, { encoding: "utf8", mode: 0o600 });
 }
 
+function savePersistedProjectsInBackground(): void {
+  void savePersistedProjects().catch((error) => logStartup("persist-projects-failed", String(error)));
+}
+
 function validRecord(value: unknown): Record<string, never> {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, never> : {};
 }
@@ -453,7 +457,7 @@ function trackTaskTransition(workspace: string, task: ManagedDesktopTask | undef
   const needsAttention = next.approval !== undefined || (next.questions?.length ?? 0) > 0;
   const hadAttention = previous?.approval !== undefined || (previous?.questions?.length ?? 0) > 0;
   if (needsAttention && !hadAttention) addActivity(workspace, sessionId, "attention", "任务等待你的确认");
-  void savePersistedProjects();
+  savePersistedProjectsInBackground();
 }
 
 function addActivity(workspace: string, sessionId: string | undefined, kind: DesktopActivityItem["kind"], title: string, detail?: string): void {
@@ -464,7 +468,7 @@ function addActivity(workspace: string, sessionId: string | undefined, kind: Des
     notification.on("click", () => { void activateManagedSession(workspace, sessionId); });
     notification.show();
   }
-  void savePersistedProjects();
+  savePersistedProjectsInBackground();
 }
 
 async function startManagedSession(resumeSession?: string, environment: "local" | "worktree" = "local"): Promise<SessionStartedPayload> {

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { npmExecutable, runUpdate, type InstallRunner } from "../../src/update/apply.js";
+import { defaultInstall, npmExecutable, runUpdate, type InstallRunner } from "../../src/update/apply.js";
 import type { RegistryFetch } from "../../src/update/check.js";
 
 function respondWith(ok: boolean, body: unknown): RegistryFetch {
@@ -12,6 +12,10 @@ describe("npmExecutable", () => {
     expect(npmExecutable("win32")).toBe("npm.cmd");
     expect(npmExecutable("linux")).toBe("npm");
     expect(npmExecutable("darwin")).toBe("npm");
+  });
+
+  it.runIf(process.platform === "win32")("actually launches the npm cmd shim on Windows", async () => {
+    await expect(defaultInstall(npmExecutable("win32"), ["--version"])).resolves.toBe(0);
   });
 });
 

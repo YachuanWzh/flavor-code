@@ -104,7 +104,8 @@ export const FlavorConfigSchema = z.object({
       autoStoreThreshold: z.number().int().min(0).max(12).default(11),
       ignoreStreakLimit: z.number().int().min(2).max(100).default(5),
       reviewAutoDismissSeconds: z.number().int().min(0).max(300).default(5),
-      maxCandidatesPerTask: z.number().int().min(1).max(10).default(1),
+      // One candidate per task is a deliberate memory-quality boundary, not a tunable range.
+      maxCandidatesPerTask: z.literal(1).default(1),
       retrievalTopK: z.number().int().min(1).max(20).default(5),
       maxEntries: z.number().int().min(1).max(10_000).default(200),
       maxEntryChars: z.number().int().min(32).max(20_000).default(1_000),

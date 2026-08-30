@@ -14,9 +14,33 @@ import { redactErrorText } from "./redact.js";
 export interface CrashGuardOptions {
   /** Directory provider for crash logs; defaults to the current working directory. */
   workspace?(): string;
+  /** Maximum time granted to registered cleanup callbacks before forced exit. */
+  cleanupTimeoutMs?: number;
 }
 
 let installed = false;
+let crashing = false;
+const crashCleanups = new Set<() => void | Promise<void>>();
+
+export function registerCrashCleanup(cleanup: () => void | Promise<void>): () => void {
+  crashCleanups.add(cleanup);
+  return () => { crashCleanups.delete(cleanup); };
+}
+
+export async function runCrashCleanups(timeoutMs: number): Promise<void> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) throw new Error("Crash cleanup timeout must be non-negative");
+  const cleanup = Promise.allSettled([...crashCleanups].map(async (callback) => callback()));
+  if (timeoutMs === 0) return;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      cleanup,
+      new Promise<void>((resolvePromise) => { timer = setTimeout(resolvePromise, timeoutMs); }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 export function installCrashGuard(options: CrashGuardOptions = {}): void {
   if (installed) return;
@@ -59,7 +83,12 @@ export function installCrashGuard(options: CrashGuardOptions = {}): void {
     return String(reason);
   };
 
-  const crash = (kind: string, reason: unknown): never => {
+  const crash = (kind: string, reason: unknown): void => {
+    if (crashing) {
+      process.exit(1);
+      return;
+    }
+    crashing = true;
     const detail = describe(reason);
     const logPath = writeCrashLog(kind, detail);
     restoreTerminal();
@@ -68,7 +97,12 @@ export function installCrashGuard(options: CrashGuardOptions = {}): void {
       process.stderr.write(`flavor crashed (${kind}): ${safe}\n`);
       if (logPath !== undefined) process.stderr.write(`crash log: ${logPath}\n`);
     } catch { /* stderr may be gone already; the log file is the fallback. */ }
-    process.exit(1);
+    const cleanupTimeoutMs = options.cleanupTimeoutMs ?? 1_000;
+    const watchdog = setTimeout(() => process.exit(1), cleanupTimeoutMs + 50);
+    void runCrashCleanups(cleanupTimeoutMs).finally(() => {
+      clearTimeout(watchdog);
+      process.exit(1);
+    });
   };
 
   process.on("unhandledRejection", (reason) => crash("unhandledRejection", reason));

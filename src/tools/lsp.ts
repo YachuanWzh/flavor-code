@@ -5,6 +5,7 @@ import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { z } from "zod";
 
+import { prepareSpawnInvocation } from "../utils/spawn-executable.js";
 import type { ToolDefinition } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -84,10 +85,12 @@ class LspConnection {
   #initError: Error | undefined;
 
   constructor(command: string, args: string[], cwd: string) {
-    this.#process = spawn(command, args, {
+    const invocation = prepareSpawnInvocation(command, args, { cwd });
+    this.#process = spawn(invocation.command, invocation.args, {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
+      ...(invocation.windowsVerbatimArguments === undefined ? {} : { windowsVerbatimArguments: invocation.windowsVerbatimArguments }),
     });
 
     this.#process.on("error", (err) => {

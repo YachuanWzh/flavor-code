@@ -46,6 +46,57 @@ function document(root: string): SessionDocument {
 }
 
 describe("SessionStore", () => {
+  it("allows only one writable runtime lease per session", async () => {
+    const root = await workspace();
+    const first = new SessionStore({ workspace: root });
+    const second = new SessionStore({ workspace: root });
+    const lease = await first.acquireLease("shared-session");
+
+    await expect(second.acquireLease("shared-session")).rejects.toThrow(/already active/i);
+    await lease.release();
+    const replacement = await second.acquireLease("shared-session");
+    await replacement.release();
+  });
+
+  it("does not delete a session while another runtime holds its writer lease", async () => {
+    const root = await workspace();
+    const store = new SessionStore({ workspace: root });
+    await store.save({ ...document(root), sessionId: "active-session" });
+    const lease = await store.acquireLease("active-session");
+
+    await expect(new SessionStore({ workspace: root }).delete("active-session")).rejects.toThrow(/active/i);
+    await lease.release();
+    await expect(new SessionStore({ workspace: root }).delete("active-session")).resolves.toBeUndefined();
+  });
+
+  it("does not prune an older session while it has an active writer", async () => {
+    const root = await workspace();
+    const store = new SessionStore({ workspace: root, maxSessions: 1 });
+    await store.save({ ...document(root), sessionId: "active-session", updatedAt: "2026-07-12T01:00:00.000Z" });
+    const lease = await store.acquireLease("active-session");
+
+    await store.save({ ...document(root), sessionId: "newer-session", updatedAt: "2026-07-12T03:00:00.000Z" });
+
+    await expect(store.load("active-session")).resolves.toMatchObject({ sessionId: "active-session" });
+    await expect(store.load("newer-session")).resolves.toMatchObject({ sessionId: "newer-session" });
+    await lease.release();
+  });
+
+  it("reclaims a session lease left by a dead process", async () => {
+    const root = await workspace();
+    const sessions = join(root, ".flavor", "sessions");
+    await mkdir(sessions, { recursive: true });
+    await writeFile(join(sessions, ".stale-session.lock"), JSON.stringify({
+      pid: 2_147_483_647,
+      nonce: "stale",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    }));
+
+    const lease = await new SessionStore({ workspace: root }).acquireLease("stale-session");
+    await lease.release();
+    await expect(readdir(sessions)).resolves.not.toContain(".stale-session.lock");
+  });
+
   it("round-trips task-memory lifecycle metadata", async () => {
     const root = await workspace();
     const store = new SessionStore({ workspace: root });

@@ -51,6 +51,7 @@ it("uses bounded long-term-memory defaults and validates overrides", () => {
   expect(() => FlavorConfigSchema.parse({ memory: { scoreThreshold: 13 } })).toThrow();
   expect(() => FlavorConfigSchema.parse({ memory: { autoStoreThreshold: 13 } })).toThrow();
   expect(() => FlavorConfigSchema.parse({ memory: { ignoreStreakLimit: 1 } })).toThrow();
+  expect(() => FlavorConfigSchema.parse({ memory: { maxCandidatesPerTask: 2 } })).toThrow();
 });
 
 it("uses Claude-style token compaction defaults and accepts explicit overrides", () => {

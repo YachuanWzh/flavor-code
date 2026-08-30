@@ -1,0 +1,48 @@
+import { spawn } from "node:child_process";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+
+import { prepareSpawnInvocation } from "../../src/utils/spawn-executable.js";
+
+const roots: string[] = [];
+afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
+
+describe("prepareSpawnInvocation", () => {
+  it("preserves structured commands outside Windows", () => {
+    expect(prepareSpawnInvocation("npm", ["run", "check value"], { platform: "linux" }))
+      .toEqual({ command: "npm", args: ["run", "check value"] });
+  });
+
+  it.runIf(process.platform === "win32")("bridges cmd shims through ComSpec on Windows", async () => {
+    const root = await mkdtemp(join(tmpdir(), "flavor-spawn-")); roots.push(root);
+    const shim = join(root, "example.cmd");
+    await writeFile(shim, "@echo off\r\nnode -e \"process.stdout.write(JSON.stringify(process.argv.slice(1)))\" %*\r\n", "utf8");
+    await chmod(shim, 0o755);
+
+    const invocation = prepareSpawnInvocation("example", ["value with spaces", "a&b"], {
+      platform: "win32",
+      env: { PATH: `${root}${delimiter}${process.env.PATH ?? ""}`, PATHEXT: ".EXE;.CMD", ComSpec: process.env.ComSpec },
+    });
+
+    expect(invocation.command.toLocaleLowerCase()).toContain("cmd.exe");
+    expect(invocation.args.slice(0, 3)).toEqual(["/d", "/s", "/c"]);
+    expect(invocation.args[3]?.toLocaleLowerCase()).toContain("example.cmd");
+    expect(invocation.windowsVerbatimArguments).toBe(true);
+
+    const output = await new Promise<string>((resolvePromise, reject) => {
+      const child = spawn(invocation.command, invocation.args, {
+        windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+      child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+      child.once("error", reject);
+      child.once("close", (code) => code === 0 ? resolvePromise(stdout) : reject(new Error(stderr || `exit ${code}`)));
+    });
+    expect(JSON.parse(output)).toEqual(["value with spaces", "a&b"]);
+  });
+});
