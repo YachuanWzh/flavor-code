@@ -19,30 +19,58 @@ try {
 }
 `.trim();
 
+// JXA bridges ObjC nil inconsistently across macOS versions: some return
+// JavaScript null (falsy), others an $.nil proxy that is truthy yet resolves
+// every method lookup to undefined. Guard every bridge object by probing the
+// method we are about to call, and fail soft to exit(3) ("no image") so the
+// caller falls back to a plain text paste instead of surfacing a TypeError.
 const READ_MAC_CLIPBOARD_IMAGE = String.raw`
 ObjC.import("AppKit");
 ObjC.import("Foundation");
 ObjC.import("stdlib");
 
-const pasteboard = $.NSPasteboard.generalPasteboard;
-let data = pasteboard.dataForType($.NSPasteboardTypePNG);
-if (!data) {
-  const tiff = pasteboard.dataForType($.NSPasteboardTypeTIFF);
-  if (tiff) {
-    const representation = $.NSBitmapImageRep.imageRepWithData(tiff);
-    if (representation) {
-      data = representation.representationUsingTypeProperties(
-        $.NSBitmapImageFileTypePNG,
-        $({})
-      );
+function isBridgeMethod(value, method) {
+  return value !== null && value !== undefined
+    && typeof value[method] === "function";
+}
+
+try {
+  const pasteboard = $.NSPasteboard.generalPasteboard;
+  let data = null;
+  if (isBridgeMethod(pasteboard, "dataForType")) {
+    const png = pasteboard.dataForType($.NSPasteboardTypePNG);
+    if (isBridgeMethod(png, "base64EncodedStringWithOptions")) {
+      data = png;
+    } else {
+      const tiff = pasteboard.dataForType($.NSPasteboardTypeTIFF);
+      // NSData.length is exposed by JXA as a property value, not a
+      // callable bridge method. Probe a real NSData method so a valid
+      // TIFF-only pasteboard item is not mistaken for ObjC nil.
+      if (isBridgeMethod(tiff, "base64EncodedStringWithOptions")) {
+        const representation = $.NSBitmapImageRep.imageRepWithData(tiff);
+        if (isBridgeMethod(representation, "representationUsingTypeProperties")) {
+          const converted = representation.representationUsingTypeProperties(
+            $.NSBitmapImageFileTypePNG,
+            $({})
+          );
+          if (isBridgeMethod(converted, "base64EncodedStringWithOptions")) {
+            data = converted;
+          }
+        }
+      }
     }
   }
-}
-if (!data) {
+  if (!data) {
+    $.exit(3);
+  }
+  const encoded = data.base64EncodedStringWithOptions(0);
+  if (!encoded) {
+    $.exit(3);
+  }
+  console.log(ObjC.unwrap(encoded));
+} catch (error) {
   $.exit(3);
 }
-const encoded = data.base64EncodedStringWithOptions(0);
-console.log(ObjC.unwrap(encoded));
 `.trim();
 
 type ClipboardRunner = typeof execFileNoThrow;

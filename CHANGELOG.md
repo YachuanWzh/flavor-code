@@ -2,7 +2,18 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.3.20 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.3.21 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.3.21] - 2026-09-02
+
+### 修复
+- 修复 macOS 上粘贴图片在部分系统版本报硬错误（`Could not read the clipboard image: execution error: TypeError: data.base64EncodedStringWithOptions is not a function`）的问题：JXA 剪贴板读取脚本原先用 `if (!data)` 判断"无图片"，但某些 macOS 版本会把 ObjC 的 nil 桥接成 truthy 的 `$.nil` 代理对象——对它做方法查找全部得到 undefined，判空防线失效，TypeError 被原样抛给用户。现在取 PNG、TIFF→PNG 转换、base64 编码三个环节都先探测实际桥方法再调用，并将整段读取包进 `try/catch` fail-soft 兜底；同时按 NSData 的真实 JXA 形态处理 `length` 数值属性，保留 TIFF-only 剪贴板转换能力
+- 修复 CLI Markdown 围栏代码块在列表缩进、终端缩放和 ScrollBox 增量滚动后出现边框折行、单行正文消失的问题：代码块边框及正文宽度改由 Yoga 按父容器实际宽度计算，不再用全局 `stdout.columns` 手工拼接；超长代码行按实际布局单行截断
+- 修复终端仅改变列数且界面全部使用百分比宽度时，React 无宿主节点变更而跳过布局提交、Yoga 根节点继续保留旧宽度的问题；resize 现在会检测并同步补做布局与绘制
+
+### 测试
+- macOS 剪贴板测试现在会在 Windows/Linux CI 内以模拟 ObjC 桥对象实际执行 JXA 脚本，覆盖 PNG、truthy nil 代理、TIFF-only、数值 `length` 属性及桥接异常 fail-soft 路径
+- 新增 20/32/80/120 列列表嵌套代码块、超长单行截断、自研原生屏幕缓冲区连续 resize，以及 ScrollBox 多次上下滚动回归测试
 
 ## [1.3.20] - 2026-08-30
 
@@ -651,6 +662,8 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.3.21 | 2026-09-02 | 修复 macOS 剪贴板 ObjC nil/TIFF 桥接异常，以及列表代码块在终端 resize/滚动后折行或正文消失的问题；补充可执行 JXA 模拟与原生屏幕缓冲区回归测试 |
+| 1.3.20 | 2026-08-30 | 会话写租约（writer lease）杜绝双进程并发写同一 session；Windows 子进程启动统一走 `prepareSpawnInvocation` 结构化解析；崩溃守护清理回调注册 |
 | 1.3.19 | 2026-08-30 | 新增 `flavor update` 一键自升级（查询 registry、全局安装、失败兜底提示）；欢迎卡片更新公告改为提示运行 `flavor update` 并提亮颜色 |
 | 1.3.18 | 2026-08-30 | Stop 钩子可否决结束回合并以 `[stop-guard]` 提示注入理由（每条提交链最多续延 2 次）；superharness 升级 1.1.1，onboarding 改为仅手动触发；新增 verify-gate/secret-guard/edit-doctor 守护插件回归测试 |
 | 1.3.17 | 2026-08-29 | 堆 OOM 根因修正：保留真实 provider token 压力直到完整压缩、清理上下文不再绕过阈值或丢 baseline、移除无效 no-maglev、增加多阶段堆水位保护 |

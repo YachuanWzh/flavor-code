@@ -343,6 +343,16 @@ export default class Ink {
     // layout is updated, causing a mismatch between viewport and content dimensions.
     if (this.currentNode !== null) {
       this.render(this.currentNode);
+      // A columns-only resize can produce no host mutations when the tree is
+      // entirely percentage-width. React then skips resetAfterCommit, so the
+      // Yoga root keeps its old width even though terminalColumns changed.
+      // Detect that no-op commit and perform the same layout + paint fallback
+      // synchronously; otherwise memoized transcript rows retain stale widths
+      // until some unrelated state update happens.
+      if (this.rootNode.yogaNode?.getComputedWidth() !== this.terminalColumns) {
+        this.rootNode.onComputeLayout?.();
+        this.onRender();
+      }
     }
   };
   resolveExitPromise: () => void = () => {};

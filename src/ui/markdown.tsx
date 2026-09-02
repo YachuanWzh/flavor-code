@@ -5,7 +5,17 @@ import { marked } from "marked";
 import type { Token, Tokens } from "marked";
 
 import { highlightCode } from "./highlight.js";
-import { charWidth } from "./char-width.js";
+
+const CODE_BLOCK_BORDER = {
+  top: "─",
+  bottom: "─",
+  left: " ",
+  right: " ",
+  topLeft: "╭",
+  topRight: "╮",
+  bottomLeft: "╰",
+  bottomRight: "╯",
+} as const;
 
 /* ------------------------------------------------------------------ */
 /*  Public component                                                   */
@@ -122,28 +132,30 @@ function HeadingView({ token }: { token: Tokens.Heading }): React.JSX.Element {
 }
 
 function CodeBlock({ token }: { token: Tokens.Code }): React.JSX.Element {
-  const { stdout } = useStdout();
-  const columns = stdout?.columns ?? 80;
-  const innerWidth = Math.max(20, columns - 6); // 2 indent each side + 2 border
   const styledSource = useMemo(() => highlightCode(token.text, token.lang), [token.text, token.lang]);
   const lines = useMemo(() => styledSource.split("\n"), [styledSource]);
-  const truncated = useMemo(() => lines.map((line) => truncateToWidth(line, innerWidth - 2)), [lines, innerWidth]);
   const langLabel = token.lang?.trim();
   const label = langLabel && langLabel.length > 0 ? langLabel : "code";
-  const topBarWidth = Math.max(0, columns - 4 - label.length - 4);
   return (
-    // Code blocks are self-contained painted regions. Marking the region
-    // opaque prevents ScrollBox's incremental renderer from blitting cached
-    // blank cells over clean, single-line code bodies during transcript
-    // scrolls/redraws.
-    <Box flexDirection="column" paddingX={1} opaque>
-      <Text color="gray">{"╭─ "}<Text color="cyan">{label}</Text>{" "}{"─".repeat(topBarWidth)}{"╮"}</Text>
+    // Let Yoga derive the border and text width from the actual parent box.
+    // A fenced block may be nested under list indentation, and terminal
+    // resizes can change that width without changing this memoized token.
+    // Building a line from process.stdout.columns overflows those narrower
+    // parents and desynchronizes the terminal's physical auto-wrap cursor.
+    <Box
+      flexDirection="column"
+      width="100%"
+      paddingX={1}
+      borderStyle={CODE_BLOCK_BORDER}
+      borderColor="gray"
+      borderText={{ content: ` ${label} `, position: "top", align: "start", offset: 1 }}
+      opaque
+    >
       <Box flexDirection="column" paddingX={1}>
-        {truncated.map((line, i) => (
-          <Text key={i} color="gray">{line}</Text>
+        {lines.map((line, i) => (
+          <Text key={i} color="gray" wrap="truncate-end">{line.length > 0 ? line : " "}</Text>
         ))}
       </Box>
-      <Text color="gray">{"╰"}{"─".repeat(Math.max(0, columns - 6))}{"╯"}</Text>
     </Box>
   );
 }
@@ -352,33 +364,6 @@ function stripAnsi(value: string): string {
   return value.replace(ANSI_RE, "");
 }
 
-function visibleWidth(value: string): number {
-  // Strip ANSI then sum the display width of each code point so CJK and
-  // emoji (2 columns) are counted correctly.
-  let width = 0;
-  for (const ch of stripAnsi(value)) {
-    width += charWidth(ch.codePointAt(0) ?? 0);
-  }
-  return width;
-}
-
-function truncateToWidth(value: string, width: number): string {
-  if (width <= 0) return "";
-  const stripped = stripAnsi(value);
-  if (visibleWidth(stripped) <= width) return value;
-  const prefix = (value.match(/^\x1B\[[0-?]*[ -/]*[@-~]*/)?.[0]) ?? "";
-  const suffix = "\x1B[0m";
-  let out = "";
-  let visual = 0;
-  for (const ch of stripped) {
-    const cw = charWidth(ch.codePointAt(0) ?? 0);
-    if (visual + cw > width - 1) break; // reserve 1 col for "…"
-    out += ch;
-    visual += cw;
-  }
-  return prefix + out + "…" + suffix;
-}
-
 function renderInlineText(tokens: readonly Token[]): string {
   let out = "";
   for (const tok of tokens) {
@@ -413,5 +398,3 @@ function inlineTokenToString(token: Token): string {
       return "";
   }
 }
-
-// visibleWidth now used by truncateToWidth above.
