@@ -83,6 +83,7 @@ import { DesktopRuntimeController } from "./runtime-controller.js";
 import { isSafeExternalUrl, isTrustedNavigation, normalizePersistedDesktopProjects } from "./security.js";
 import { desktopWindowChrome } from "./window-options.js";
 import { installCrashGuard } from "../utils/crash-guard.js";
+import { loginShellEnvironment } from "../utils/login-shell-environment.js";
 import { desktopGitCommit, desktopGitDiff, desktopGitDiscard, desktopGitHistory, desktopGitReviewDiff, desktopGitStage, desktopGitStatus, desktopGitUnstage, desktopLastTurnDiff } from "./git-manager.js";
 import { DesktopWorktreeManager } from "./worktree-manager.js";
 import { DesktopWorkbenchService } from "./workbench-service.js";
@@ -956,6 +957,8 @@ async function createWindow(): Promise<void> {
 }
 
 app.whenReady().then(async () => {
+  const desktopEnvironment = await loginShellEnvironment(process.env);
+  if (desktopEnvironment.PATH !== undefined) process.env.PATH = desktopEnvironment.PATH;
   installIpcHandlers();
   appMenu = applicationMenu();
   Menu.setApplicationMenu(appMenu);

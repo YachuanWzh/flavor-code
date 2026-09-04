@@ -73,7 +73,7 @@ import {
   type FileWriteProposal,
 } from "./tools/files.js";
 import { createGlobTool, createGrepTool } from "./tools/search.js";
-import { createShellTool } from "./tools/shell.js";
+import { createShellTool, resolveRuntimeShell } from "./tools/shell.js";
 import { createWebFetchTool, createWebSearchTool } from "./tools/web.js";
 import { createLspTools } from "./tools/lsp.js";
 import {
@@ -98,6 +98,7 @@ import type { ToolDefinition } from "./tools/types.js";
 import { FlavorSession, type SessionOutput, type SessionServices } from "./ui/session.js";
 import { createTranscriptState, restoreTranscriptState, transcriptReducer, type TranscriptState } from "./ui/transcript.js";
 import { MVP_COMMANDS } from "./ui/commands.js";
+import { formatDoctorReport, runDoctor } from "./doctor.js";
 import { resolveLanguage, languageInstruction } from "./utils/intl.js";
 import { awaitWithSignal, withTimeout } from "./utils/async.js";
 import { message } from "./utils/error.js";
@@ -244,7 +245,7 @@ export function createPromptEnvironment(input: PromptEnvironmentInput = {}): Pro
     date: Number.isNaN(now.getTime()) ? "unknown" : localDateKey(now),
     platform: promptEnvironmentValue(input.platform ?? process.platform),
     osVersion: promptEnvironmentValue(input.osVersion ?? `${osVersion()} ${osRelease()}`),
-    shell: promptEnvironmentValue(input.shell ?? process.env.ComSpec ?? process.env.SHELL),
+    shell: promptEnvironmentValue(input.shell ?? resolveRuntimeShell()?.command),
     isGitRepository: input.isGitRepository ?? "unknown",
   };
 }
@@ -502,6 +503,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     createApplyPatchTool(workspace, fileMutationOptions),
     createGlobTool(workspace), createGrepTool(workspace), createGitHistoryTool(workspace), createShellTool(workspace, {
       jobs,
+      environment,
       ...(executionEnvironment === undefined ? {} : { executionEnvironment }),
     }),
     createWebFetchTool(), createWebSearchTool(), ...createJobTools(jobs), ...createTerminalTools(terminals, workspace),
@@ -937,7 +939,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     now: new Date(),
     platform: process.platform,
     osVersion: `${osVersion()} ${osRelease()}`,
-    shell: environment.ComSpec ?? environment.SHELL ?? "unknown",
+    shell: resolveRuntimeShell(process.platform, environment)?.command ?? "unknown",
     isGitRepository: await gitRepository,
   });
   const createContext = (
@@ -1338,6 +1340,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       createApplyPatchTool(input.workspace, loopMutationOptions), createGlobTool(input.workspace), createGrepTool(input.workspace),
       createShellTool(input.workspace, {
         jobs,
+        environment,
         ...(loopExecutionEnvironment === undefined ? {} : { executionEnvironment: loopExecutionEnvironment }),
       }),
       createWebFetchTool(), createWebSearchTool(), ...createJobTools(jobs),
@@ -1352,7 +1355,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     const loopInstructionBaseline = await loopInstructions.baseline();
     const loopEnvironment = createPromptEnvironment({
       now: new Date(), platform: process.platform, osVersion: `${osVersion()} ${osRelease()}`,
-      shell: environment.ComSpec ?? environment.SHELL ?? "unknown",
+      shell: resolveRuntimeShell(process.platform, environment)?.command ?? "unknown",
       isGitRepository: await detectGitRepository(input.workspace),
     });
     let compactionInputTokens = 0;
@@ -1741,6 +1744,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         return `Failed to read audit log: ${message(error)}`;
       }
     },
+    doctor: async () => formatDoctorReport(await runDoctor({ workspace, home, environment })),
     usage: async () => {
       try {
         const raw = await readFile(usageLogPath(), "utf8");

@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Command, Option } from "commander";
 
 import { createProductionRuntime, type ProductionRuntime } from "./production.js";
+import { formatDoctorReport, runDoctor, type DoctorReport } from "./doctor.js";
 import { initializeFlavor } from "./init/project.js";
 import { runUpdate, type UpdateOutcome } from "./update/apply.js";
 import { NPM_PACKAGE_NAME } from "./update/check.js";
@@ -38,6 +39,7 @@ export interface CliDependencies {
   runBroker?: typeof runPalBroker;
   runInteractive?(props: InteractiveCliProps): Promise<void>;
   runUpdate?(options?: Parameters<typeof runUpdate>[0]): Promise<UpdateOutcome>;
+  runDoctor?(options?: Parameters<typeof runDoctor>[0]): Promise<DoctorReport>;
 }
 
 export function createProgram(dependencies: CliDependencies = {}): Command {
@@ -93,6 +95,24 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
         }
       } catch (error) {
         process.stderr.write(`update: ${safeError(error)}\n`);
+        process.exitCode = 1;
+      }
+    });
+
+  program
+    .command("doctor [directory]")
+    .description("Diagnose the local Flavor runtime, configuration, tools, plugins, and npm access")
+    .option("--json", "print the report as JSON")
+    .action(async (directory: string | undefined, command: { json?: boolean }) => {
+      try {
+        const report = await (dependencies.runDoctor ?? runDoctor)({
+          workspace: resolve(directory ?? process.cwd()),
+          home: homedir(),
+        });
+        process.stdout.write(command.json ? `${JSON.stringify(report, null, 2)}\n` : formatDoctorReport(report));
+        if (!report.ok) process.exitCode = 1;
+      } catch (error) {
+        process.stderr.write(`doctor: ${safeError(error)}\n`);
         process.exitCode = 1;
       }
     });

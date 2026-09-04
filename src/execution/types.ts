@@ -3,7 +3,10 @@ export interface ExecutionRequest {
   args: readonly string[];
   cwd: string;
   timeoutMs?: number;
+  maxOutputBytes?: number;
 }
+
+export interface ExecutionTruncationMetadata { truncated: boolean; originalBytes: number; limitBytes: number }
 
 export interface ExecutionResult {
   exitCode: number | null;
@@ -11,6 +14,8 @@ export interface ExecutionResult {
   stdout: string;
   stderr: string;
   terminationReason: "timeout" | "cancelled" | null;
+  truncated?: boolean;
+  truncation?: { stdout: ExecutionTruncationMetadata; stderr: ExecutionTruncationMetadata };
 }
 
 export interface ExecutionEnvironment {

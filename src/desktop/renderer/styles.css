@@ -178,6 +178,12 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .activity-title code { max-width: 100%; overflow: hidden; color: #98a2ad; font: 10px/1.4 "Cascadia Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .activity-card[data-activity="model"] .activity-title > span { color: #327ca1; font-weight: 650; }
 .reasoning-preview { max-width: 100%; margin-top: 5px; overflow: hidden; color: #84939e; font: 11px/1.55 "Cascadia Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.tool-presentation { display: grid; margin-top: 7px; gap: 4px; }
+.tool-presentation > strong { color: #536370; font-size: 11px; font-weight: 650; }
+.terminal-presentation > small { margin-top: 3px; color: #8a97a2; font: 700 8px "Cascadia Code", Consolas, monospace; letter-spacing: .06em; }
+.terminal-presentation > pre { max-height: 180px; overflow: auto; margin: 0; padding: 7px 9px; border-radius: 6px; background: #f4f7f9; color: #44515c; font: 10px/1.5 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.terminal-presentation > pre[data-stream="stderr"] { background: #fff6f5; color: #994a46; }
+.terminal-diagnostic { color: #9b5a31; font-size: 10px; line-height: 1.45; }
 .tool-details, .timeline-details { margin-top: 8px; border: 1px solid #e3e9ee; border-radius: 8px; background: #fafcfd; }
 .tool-details > summary, .timeline-details > summary { padding: 6px 9px; cursor: pointer; color: #71808d; font-size: 10px; font-weight: 600; }
 .tool-details label { display: block; padding: 3px 9px 0; color: #87939e; font-size: 9px; font-weight: 700; text-transform: uppercase; }

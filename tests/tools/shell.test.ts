@@ -1,9 +1,9 @@
-import { mkdtempSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
-import { buildWindowsCommandLine, createShellTool, normalizeShellCommand } from "../../src/tools/shell.js";
+import { createShellTool, normalizeShellCommand } from "../../src/tools/shell.js";
 import { JobRegistry } from "../../src/jobs/registry.js";
 
 const node = process.execPath;
@@ -27,6 +27,9 @@ describe("normalizeShellCommand", () => {
     expect(normalizeShellCommand({ command: 'node -e "process.stdout.write(\'hi\')"', args: [] })).toEqual({
       command: "node", args: ["-e", "process.stdout.write('hi')"],
     });
+    expect(normalizeShellCommand({ command: "node -e 'process.stdout.write(\"hello world\")'", args: [] })).toEqual({
+      command: "node", args: ["-e", 'process.stdout.write("hello world")'],
+    });
   });
 
   it("leaves explicit program paths with spaces untouched", () => {
@@ -48,31 +51,31 @@ describe("normalizeShellCommand", () => {
 
   it("does not split a single token even when quoted", () => {
     expect(normalizeShellCommand({ command: '"C:\\Program Files\\node.exe"', args: [] })).toEqual({
-      command: '"C:\\Program Files\\node.exe"', args: [],
+      command: "C:\\Program Files\\node.exe", args: [],
     });
   });
-});
 
-describe("buildWindowsCommandLine", () => {
-  it("keeps the cmd.exe fallback with the UTF-8 code page prefix", () => {
-    expect(buildWindowsCommandLine("cmd", "node --version", "node", [])).toBe("chcp 65001>nul & node --version");
+  it("repairs quoted cmd payloads without discarding switches", () => {
+    expect(normalizeShellCommand({ command: "cmd", args: ["/c", '"dir"', "/b", "src"] })).toEqual({
+      command: "cmd", args: ["/c", "dir", "/b", "src"],
+    });
   });
 
-  it("prefers pwsh and carries arguments through -EncodedCommand untouched", () => {
-    const line = buildWindowsCommandLine("pwsh", "node --version", "node", ["-e", "console.log('a b')"]);
-    expect(line).toMatch(/^chcp 65001>nul & pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand [A-Za-z0-9+/=]+$/);
-    const encoded = line.split(" ").pop()!;
-    const script = Buffer.from(encoded, "base64").toString("utf16le");
-    expect(script).toBe("& 'node' '-e' 'console.log(''a b'')'; exit $LASTEXITCODE");
-  });
-
-  it("falls back to legacy Windows PowerShell when pwsh is absent", () => {
-    const line = buildWindowsCommandLine("powershell", "node --version", "node", []);
-    expect(line).toMatch(/^chcp 65001>nul & powershell .*-EncodedCommand /);
+  it("keeps shell expansions and unmatched quotes out of argv normalization", () => {
+    expect(normalizeShellCommand({ command: "echo $HOME", args: [] })).toEqual({ command: "echo $HOME", args: [] });
+    expect(normalizeShellCommand({ command: "echo *.ts", args: [] })).toEqual({ command: "echo *.ts", args: [] });
+    expect(normalizeShellCommand({ command: 'echo "unterminated', args: [] })).toEqual({ command: 'echo "unterminated', args: [] });
   });
 });
 
 describe("Shell", () => {
+  it("rejects empty commands and null bytes at the tool boundary", () => {
+    const schema = createShellTool(process.cwd()).inputSchema;
+    expect(() => schema.parse({ command: "   ", args: [] })).toThrow();
+    expect(() => schema.parse({ command: "node\0bad", args: [] })).toThrow();
+    expect(() => schema.parse({ command: "node", args: ["bad\0arg"] })).toThrow();
+  });
+
   it.skipIf(process.platform !== "win32")("runs PowerShell syntax via the detected shell instead of cmd.exe", async () => {
     const result = await createShellTool(process.cwd()).execute({
       // cmd.exe has no Write-Output; a PowerShell-family shell prints the argument.
@@ -96,6 +99,19 @@ describe("Shell", () => {
     })).toMatchObject({ kind: "job", action: "start", id: result.jobId, state: "running" });
     await jobs.wait(result.jobId, "main");
     expect(jobs.read(result.jobId, "main").output).toContain("ready");
+  });
+  it("preserves structured failure diagnostics on background jobs", async () => {
+    const jobs = new JobRegistry();
+    const tool = createShellTool(process.cwd(), { jobs });
+    const result = await tool.execute({
+      command: node, args: ["-e", "process.stderr.write('raw failure');process.exit(9)"], background: true,
+    }, signal, { agent: "main" });
+    if (!("jobId" in result)) throw new Error("expected background result");
+    await jobs.wait(result.jobId, "main");
+    expect(jobs.read(result.jobId, "main")).toMatchObject({
+      state: "failed", exitCode: 9, error: "Command exited with code 9.",
+      output: "[stderr] raw failure",
+    });
   });
   it("accepts string-form booleans for background (weak-typed models emit \"true\")", async () => {
     const jobs = new JobRegistry();
@@ -125,6 +141,81 @@ describe("Shell", () => {
     expect(result.signal).toBeNull();
   });
 
+  it("preserves metacharacters and whitespace as exact argv values", async () => {
+    const result = await createShellTool(process.cwd()).execute({
+      command: node,
+      args: ["-e", "process.stdout.write(process.argv.slice(1).join('\\n'))", "a&b", "two words", "quoted\"value"],
+    }, signal);
+
+    expect(result).toMatchObject({ exitCode: 0, stdout: "a&b\ntwo words\nquoted\"value" });
+  });
+
+  it("makes project-local node_modules binaries available without npx", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-local-bin-"));
+    const bin = join(workspace, "node_modules", ".bin");
+    mkdirSync(bin, { recursive: true });
+    if (process.platform === "win32") {
+      writeFileSync(join(bin, "local-fixture-tool.cmd"), "@echo off\r\necho local-bin-ok\r\n", "utf8");
+    } else {
+      const executable = join(bin, "local-fixture-tool");
+      writeFileSync(executable, "#!/bin/sh\nprintf local-bin-ok\n", "utf8");
+      chmodSync(executable, 0o755);
+    }
+
+    const result = await createShellTool(workspace).execute({ command: "local-fixture-tool", args: [] }, signal);
+    expect(result).toMatchObject({ exitCode: 0 });
+    expect(result.stdout.trim()).toBe("local-bin-ok");
+  });
+
+  it.skipIf(process.platform !== "win32")("repairs and runs the cmd invocation shown by shell failure reports", async () => {
+    const result = await createShellTool(process.cwd()).execute({
+      command: "cmd", args: ["/c", '"dir"', "/b", "src"],
+    }, signal);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("tools");
+    expect(result.stderr).toBe("");
+    expect(result.diagnostic).toBeUndefined();
+  });
+
+  it("uses the selected runtime shell only for explicit shell syntax", async () => {
+    const command = process.platform === "win32"
+      ? "Write-Output left,right | Select-Object -Last 1"
+      : "printf 'left\\nright\\n' | tail -n 1";
+    const result = await createShellTool(process.cwd()).execute({ command, args: [] }, signal);
+
+    expect(result).toMatchObject({ exitCode: 0 });
+    expect(result.stdout.trim()).toBe("right");
+  });
+
+  it("does not silently drop args supplied with a shell expression", async () => {
+    const command = process.platform === "win32"
+      ? "Write-Output base; Write-Output"
+      : "printf base; printf";
+    const result = await createShellTool(process.cwd()).execute({ command, args: ["-suffix"] }, signal);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.replace(/\r?\n/gu, "")).toBe("base-suffix");
+  });
+
+  it("expands runtime-shell environment variables in explicit shell expressions", async () => {
+    const environment = { ...process.env, FLAVOR_SHELL_EXPANSION: "expanded-value" };
+    const command = process.platform === "win32"
+      ? "Write-Output $env:FLAVOR_SHELL_EXPANSION"
+      : "printf \"$FLAVOR_SHELL_EXPANSION\"";
+    const result = await createShellTool(process.cwd(), { environment }).execute({ command, args: [] }, signal);
+
+    expect(result).toMatchObject({ exitCode: 0 });
+    expect(result.stdout.trim()).toBe("expanded-value");
+  });
+
+  it("reports unmatched shell quotes instead of executing them as literal argv", async () => {
+    const result = await createShellTool(process.cwd()).execute({ command: 'echo "unterminated', args: [] }, signal);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.diagnostic).toMatchObject({ kind: "shell-syntax" });
+  });
+
   it("runs a whole command line stuffed into command (Windows-friendly)", async () => {
     const result = await createShellTool(process.cwd()).execute({
       command: `node -e "process.stdout.write('compat-ok')"`, args: [],
@@ -144,7 +235,28 @@ describe("Shell", () => {
       command: node, args: ["-e", "process.stderr.write('bad'); process.exit(7)"],
     }, signal);
 
-    expect(result).toMatchObject({ exitCode: 7, signal: null, stderr: "bad", truncated: false });
+    expect(result).toMatchObject({
+      exitCode: 7, signal: null, stderr: "bad", truncated: false,
+      diagnostic: { kind: "non-zero-exit", message: "Command exited with code 7." },
+    });
+  });
+
+  it("returns an accurate missing-path diagnostic instead of throwing", async () => {
+    const missing = join(process.cwd(), "definitely-missing-flavor-command");
+    const result = await createShellTool(process.cwd()).execute({ command: missing, args: [] }, signal);
+
+    expect(result.exitCode).toBe(127);
+    expect(result.stdout).toBe("");
+    expect(result.diagnostic).toMatchObject({ kind: "path-not-found" });
+  });
+
+  it("classifies a missing bare executable reported by the runtime shell", async () => {
+    const result = await createShellTool(process.cwd()).execute({
+      command: "definitely-missing-flavor-command", args: [],
+    }, signal);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.diagnostic).toMatchObject({ kind: "command-not-found" });
   });
 
   // Runs three subprocesses (cmd UTF-8, node GBK, and a real npm call that
@@ -180,6 +292,18 @@ describe("Shell", () => {
     const output = jobs.read(result.jobId, "main").output;
     expect(output).toContain("中文错误");
     expect(output).not.toContain("�");
+  });
+
+  it("decodes UTF-16LE output with and without a byte-order mark", async () => {
+    const withBom = await createShellTool(process.cwd()).execute({
+      command: node, args: ["-e", "process.stdout.write(Buffer.concat([Buffer.from([0xff,0xfe]),Buffer.from('hello 世界','utf16le')]))"],
+    }, signal);
+    expect(withBom.stdout).toBe("hello 世界");
+
+    const withoutBom = await createShellTool(process.cwd()).execute({
+      command: node, args: ["-e", "process.stdout.write(Buffer.from('plain text','utf16le'))"],
+    }, signal);
+    expect(withoutBom.stdout).toBe("plain text");
   });
 
   it("terminates commands on timeout", async () => {

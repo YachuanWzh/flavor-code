@@ -30,6 +30,7 @@ function services(events: string[], outputs: string[]): SessionServices {
     setModel: () => {}, setPermissionMode: () => {}, compact: async () => false,
     initialize: async () => ({ path: "/work/FLAVOR.md", created: true }),
     config: () => ({ providers: { openai: { apiKey: "top-secret", token: "also-secret" } } }),
+    doctor: async () => "Flavor Doctor: healthy",
     skills: async () => [], plugins: () => [], hooksStatus: () => [], tasks: () => [], audit: async () => "", evolve: async () => "", usage: async () => "", cancelActiveTask: async () => {},
     clearContext: async () => {},
     memory: async () => "memory contents",
@@ -47,6 +48,18 @@ function services(events: string[], outputs: string[]): SessionServices {
 }
 
 describe("FlavorSession", () => {
+  it("runs /doctor locally without sending a model prompt", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    base.doctor = vi.fn(async () => "Flavor Doctor\n[ok] runtime");
+    base.run = async function* () { throw new Error("model should not run"); };
+
+    await new FlavorSession(base).submit("/doctor");
+
+    expect(base.doctor).toHaveBeenCalledOnce();
+    expect(outputs.join("\n")).toContain("[ok] runtime");
+  });
+
   it("dispatches both registered-tool slash forms without sending a model prompt", async () => {
     const events: string[] = []; const outputs: string[] = [];
     const base = services(events, outputs);

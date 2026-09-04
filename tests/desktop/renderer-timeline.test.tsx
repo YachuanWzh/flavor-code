@@ -129,6 +129,32 @@ describe("desktop restored timeline rendering", () => {
     expect(html).toContain("restored contents");
   });
 
+  it("renders terminal stdout, stderr, and diagnostics as distinct desktop output", () => {
+    const turn: TranscriptTurn = {
+      id: 1,
+      prompt: "run",
+      assistantText: "",
+      statusLines: [],
+      blocks: [{
+        kind: "status", id: "tool:shell", state: "failed", text: "Shell failed",
+        presentation: {
+          kind: "terminal", title: "check", command: "check",
+          stdout: "partial output", stderr: "real stderr", exitCode: 2, state: "failed",
+          diagnostic: "Command exited with code 2.",
+        },
+      }],
+    };
+
+    const html = renderToStaticMarkup(<DesktopTurnView turn={turn} />);
+    expect(html).toContain("OUTPUT");
+    expect(html).toContain('data-stream="stdout"');
+    expect(html).toContain("partial output");
+    expect(html).toContain("ERROR");
+    expect(html).toContain('data-stream="stderr"');
+    expect(html).toContain("real stderr");
+    expect(html).toContain("Command exited with code 2.");
+  });
+
   it("renders compacted legacy history as a distinct boundary card", () => {
     const turn: TranscriptTurn = {
       id: 1,

@@ -30,6 +30,15 @@ function executeMacClipboardScript(
   const dollar = Object.assign(
     (_value: unknown) => ({}),
     {
+      NSDictionary: { dictionary: {} },
+      NSFileHandle: {
+        fileHandleWithStandardOutput: {
+          writeData(value: unknown) {
+            stdout.push(String(value));
+          },
+        },
+      },
+      NSUTF8StringEncoding: "utf8",
       NSPasteboard: { generalPasteboard: pasteboard },
       NSPasteboardTypePNG: "public.png",
       NSPasteboardTypeTIFF: "public.tiff",
@@ -50,17 +59,27 @@ function executeMacClipboardScript(
   );
   const ObjC = {
     import(_framework: string) {},
-    unwrap(value: unknown) { return value; },
   };
-  const console = { log(value: unknown) { stdout.push(String(value)); } };
 
   try {
-    Function("ObjC", "$", "console", script)(ObjC, dollar, console);
+    Function("ObjC", "$", script)(ObjC, dollar);
     return { exitCode: 0, stdout };
   } catch (error) {
     if (error instanceof JxaExit) return { exitCode: error.code, stdout };
     throw error;
   }
+}
+
+function jxaString(value: string) {
+  return {
+    stringByAppendingString(suffix: string) {
+      return {
+        dataUsingEncoding(_encoding: unknown) {
+          return `${value}${suffix}`;
+        },
+      };
+    },
+  };
 }
 
 async function captureMacClipboardScript(): Promise<string> {
@@ -133,6 +152,9 @@ describe("CLI clipboard image detection", () => {
     expect(script).toContain("$.NSPasteboard.generalPasteboard");
     expect(script).toContain("$.NSPasteboardTypePNG");
     expect(script).toContain("$.NSPasteboardTypeTIFF");
+    expect(script).toContain("$.NSDictionary.dictionary");
+    expect(script).toContain("$.NSFileHandle.fileHandleWithStandardOutput.writeData(output)");
+    expect(script).not.toContain("console.log");
     // Regression: JXA bridges ObjC nil as a truthy proxy on some macOS
     // versions, so the script must probe bridge methods before calling them
     // and fail soft to exit(3) instead of leaking a TypeError.
@@ -144,11 +166,11 @@ describe("CLI clipboard image detection", () => {
 
   it("executes the macOS JXA PNG path and tolerates a truthy ObjC nil proxy", async () => {
     const script = await captureMacClipboardScript();
-    const png = { base64EncodedStringWithOptions: () => pngBase64 };
+    const png = { base64EncodedStringWithOptions: () => jxaString(pngBase64) };
 
     expect(executeMacClipboardScript(script, { png })).toEqual({
       exitCode: 0,
-      stdout: [pngBase64],
+      stdout: [`${pngBase64}\n`],
     });
     expect(executeMacClipboardScript(script, { png: {}, tiff: {} })).toEqual({
       exitCode: 3,
@@ -162,11 +184,11 @@ describe("CLI clipboard image detection", () => {
       length: 128,
       base64EncodedStringWithOptions: () => "unused-tiff-base64",
     };
-    const converted = { base64EncodedStringWithOptions: () => pngBase64 };
+    const converted = { base64EncodedStringWithOptions: () => jxaString(pngBase64) };
 
     expect(executeMacClipboardScript(script, { png: {}, tiff, converted })).toEqual({
       exitCode: 0,
-      stdout: [pngBase64],
+      stdout: [`${pngBase64}\n`],
     });
   });
 

@@ -51,7 +51,7 @@ try {
         if (isBridgeMethod(representation, "representationUsingTypeProperties")) {
           const converted = representation.representationUsingTypeProperties(
             $.NSBitmapImageFileTypePNG,
-            $({})
+            $.NSDictionary.dictionary
           );
           if (isBridgeMethod(converted, "base64EncodedStringWithOptions")) {
             data = converted;
@@ -67,7 +67,9 @@ try {
   if (!encoded) {
     $.exit(3);
   }
-  console.log(ObjC.unwrap(encoded));
+  const output = encoded.stringByAppendingString("\n")
+    .dataUsingEncoding($.NSUTF8StringEncoding);
+  $.NSFileHandle.fileHandleWithStandardOutput.writeData(output);
 } catch (error) {
   $.exit(3);
 }

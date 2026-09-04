@@ -110,6 +110,7 @@ export interface SessionServices {
   hooksStatus(): readonly unknown[];
   tasks(): unknown;
   audit(toolFilter?: string): string | Promise<string>;
+  doctor?(): string | Promise<string>;
   evolve(args: readonly string[]): string | Promise<string>;
   gitCommit?(hint: string | undefined, signal: AbortSignal): Promise<string>;
   gitReview?(focus: string | undefined, signal: AbortSignal): Promise<string>;
@@ -174,7 +175,7 @@ const HELP = [
   "/permissions <default|acceptEdits|plan|bypassPermissions|auto|bubble>",
   "/login                                  authenticate via OAuth PKCE",
   "/logout                                 clear stored OAuth credentials",
-  "/init  /config  /skills  /plugins  /hooks  /tasks",
+  "/init  /config  /skills  /plugins  /hooks  /tasks  /doctor",
   "/memory  /remember [type] <text>  /forget <text-or-id>  /forget-cold  /finish",
   "/checkpoint [label]  /tree  /rewind <node>  /unrevert  /fork <node>",
   "/compact  /clear  /help  /exit",
@@ -660,6 +661,7 @@ export class FlavorSession {
     else if (command.name === "hooks") this.#notice(format(this.#services.hooksStatus()));
     else if (command.name === "tasks") this.#notice(format(this.#services.tasks()));
     else if (command.name === "audit") this.#notice(await this.#services.audit(command.toolFilter));
+    else if (command.name === "doctor") this.#notice(await required(this.#services.doctor, "doctor")());
     else if (command.name === "evolve") this.#notice(await this.#services.evolve(command.args));
     else if (command.name === "usage") this.#notice(await this.#services.usage());
     else if (command.name === "clear") {

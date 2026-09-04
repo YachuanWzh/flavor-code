@@ -45,6 +45,7 @@ export interface TerminalToolPresentation {
   command?: string;
   stdout?: string;
   stderr?: string;
+  diagnostic?: string;
   exitCode?: number | null;
   state?: "running" | "completed" | "failed" | "cancelled";
   truncated?: boolean;

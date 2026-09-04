@@ -83,6 +83,8 @@ flavor update
 
 Flavor checks the npm registry at startup and shows an update hint on the welcome card. Run `flavor update` to upgrade the global install to the latest release, then restart Flavor.
 
+If Flavor cannot start or local tools behave unexpectedly, run `flavor doctor` from a terminal. In the interactive CLI and desktop app, run `/doctor`. Both entry points check Node.js, configuration, providers, the command shell, ripgrep, plugin directories, and npm registry access. Use `flavor doctor --json` for a machine-readable issue report; API keys are never printed.
+
 ## Configuring Models
 
 The fastest way is to set environment variables:
@@ -156,6 +158,7 @@ Common commands:
 | Command | Purpose |
 | --- | --- |
 | `/init` | Generate or update `FLAVOR.md` |
+| `/doctor` | Diagnose the local runtime, configuration, tools, plugins, and npm access |
 | `/model` | View or switch main/sub-agent models |
 | `/permissions` | Switch permission modes |
 | `/tasks` | View task plans and sub-agent status |

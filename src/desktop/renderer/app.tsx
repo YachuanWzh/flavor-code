@@ -1010,7 +1010,7 @@ function BlockView({ block }: { block: TranscriptBlock }): React.JSX.Element {
       {block.progress !== undefined && <div className="progress-track"><i style={{ width: `${block.progress}%` }} /></div>}
       {block.presentation?.kind === "file-change" && <DiffPreview presentation={block.presentation} />}
       {block.presentation?.kind === "generic" && <div className="tool-presentation"><strong>{block.presentation.title}</strong>{block.presentation.summary && <span>{block.presentation.summary}</span>}</div>}
-      {block.presentation?.kind === "terminal" && <div className="tool-presentation"><strong>{block.presentation.title}</strong>{block.presentation.stdout && <pre>{boundedDesktopText(block.presentation.stdout)}</pre>}</div>}
+      {block.presentation?.kind === "terminal" && <div className="tool-presentation terminal-presentation"><strong>{block.presentation.title}</strong>{block.presentation.stdout && <><small>OUTPUT</small><pre data-stream="stdout">{boundedDesktopText(block.presentation.stdout)}</pre></>}{block.presentation.stderr && <><small>ERROR</small><pre data-stream="stderr">{boundedDesktopText(block.presentation.stderr)}</pre></>}{block.presentation.diagnostic && <span className="terminal-diagnostic">{block.presentation.diagnostic}</span>}</div>}
       {block.presentation?.kind === "web" && <div className="tool-presentation"><strong>{block.presentation.title}</strong>{block.presentation.summary && <span>{block.presentation.summary}</span>}</div>}
       {block.tool && <details className="tool-details"><summary>调用详情</summary>
         <label>Input</label><pre>{boundedJson(block.tool.input)}</pre>

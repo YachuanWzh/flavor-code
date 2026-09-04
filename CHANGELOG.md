@@ -2,7 +2,29 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.3.21 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.0-beta.1 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.0-beta.1] - 2026-09-04
+
+### 新增
+- 新增本地诊断能力：非交互终端使用 `flavor doctor [directory]`，CLI 交互界面与桌面端使用 `/doctor`；统一检查 Node.js 版本、工作区与状态目录权限、配置有效性、Provider 凭据存在性、内置 ripgrep、命令 Shell、项目/全局插件 manifest 与入口文件，以及 npm registry 连通性；失败项令 CLI 以非零状态退出，离线 registry 和未配置 Provider 作为警告；`flavor doctor --json` 可输出不含 API Key 的机器可读报告；诊断走只读配置加载路径（新增 `seedGlobalEnv: false`），排查问题时不会向全局 `.env` 写入任何环境变量
+- Docker 执行环境新增输出限幅与升级式终止：`ExecutionRequest` 支持 `maxOutputBytes`（默认 1MB），stdout/stderr 超限后按“头部 + 省略号 + 尾部”截断且不拆断跨边界的 UTF-8 多字节字符，结果携带各自的截断元数据（原始字节数/上限/是否截断）；取消与超时先 SIGTERM、250ms 宽限期后 SIGKILL，进程仍不退出则在 5 秒后强制结算，不再无限挂起
+- macOS 桌面端启动时继承用户登录 shell 的 PATH：在 2 秒预算内以登录 shell 查询并合并 Homebrew 与用户工具目录，保留 Electron 已提供的路径并去重，查询失败静默回退不影响启动，解决 GUI 方式启动的 flavor 找不到 brew 安装命令行工具的问题
+
+### 修复
+- 修复 macOS CLI 无法可靠粘贴剪贴板图片的问题：JXA 的 TIFF→PNG 转换参数改用原生 `$.NSDictionary.dictionary`，避免普通 JavaScript 对象 `$({})` 在 Objective-C bridge 中转换失败；base64 图片数据改由 `NSFileHandle.fileHandleWithStandardOutput` 明确写入 stdout，避免 `console.log` 被 `osascript` 当作诊断输出写入 stderr、导致 Node.js 调用方读取不到图片内容
+- 重构 Shell 工具的跨平台执行链：普通可执行程序直接按结构化 argv 启动，不再经过 `shell: true` 和多层命令行重解析；仅内建命令、管道、重定向及操作符进入 doctor、系统提示与执行器共同解析出的运行时 Shell。Windows `.cmd`/`.bat` 仍通过受控 `cmd.exe` 桥接，并修复 `cmd /c` 参数中可执行名被多余引号包裹后误报“不是内部或外部命令”的问题；macOS/Linux 使用实际可用的用户 Shell（不可用时回退 `/bin/sh`）
+- 修复可执行文件名解析不一致的问题：Windows 下现优先在 PATH 之前查找当前目录同名文件，与 Shell 执行器的视角一致；macOS/Linux 新增 `resolveExecutablePath`，同时校验常规文件与 `X_OK` 可执行位，避免误选中不可执行文件
+
+### 改进
+- Shell 失败结果新增结构化诊断类型与可操作提示，区分命令不存在、路径不存在、权限不足、Shell 语法、超时、取消和普通非零退出，同时保持程序原始 stdout/stderr 不被改写；CLI 与桌面端均展示真实 stderr 和独立诊断，模型工具说明明确要求 `command` 与 `args` 的 argv 边界，减少模型自行添加 Shell 引号造成的假失败
+- evolve 自改进信号优先采用结构化 Shell 诊断的 message 与类型，错误码按 `shell_<诊断类型>` 记录（如 `shell_command-not-found`），原始流为空时也能聚类同类失败
+- 系统提示环境信息中的 Shell 值由直接猜测 `ComSpec`/`SHELL` 改为 `resolveRuntimeShell` 解析出的实际可用命令，与 doctor 和 Shell 执行器保持一致；后台作业完成回调 `JobHandle.complete` 支持携带错误信息
+
+### 测试
+- 更新 macOS JXA 剪贴板执行模拟，覆盖原生空字典、NSString→UTF-8 NSData 转换及标准输出写入路径，并确保脚本不再使用 `console.log`
+- 移除依赖本机 gitignored `.flavor/plugins` 私有目录、无法在干净 checkout 中复现的插件加载测试；新增 doctor 健康/失败/脱敏报告、CLI JSON/退出码及 `/doctor` 本地分发（不触发模型调用）测试；新增结构化 argv、Shell 操作符、非零退出诊断及截图所示 `cmd /c` 引号错误的跨平台回归测试
+- 新增 Docker 有界输出 UTF-8 安全截断、截断元数据与 SIGTERM→SIGKILL 升级终止测试；新增 Windows 当前目录优先解析与 POSIX 可执行位检查测试；新增桌面端 terminal 卡片 stdout/stderr/诊断分区渲染、evolve 优先取结构化诊断，以及 macOS 桌面登录 shell PATH 合并的回归测试
 
 ## [1.3.21] - 2026-09-02
 
@@ -662,6 +684,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.4.0-beta.1 | 2026-09-04 | 新增 `flavor doctor`/`/doctor` 本地诊断；Docker 执行有界输出与升级式终止；macOS 桌面端继承登录 shell PATH；Shell 结构化 argv 直启、统一运行时解析和分类诊断，修复 Windows `cmd /c` 引号、可执行名解析及桌面 stderr 展示；修复 macOS CLI 剪贴板图片输出 |
 | 1.3.21 | 2026-09-02 | 修复 macOS 剪贴板 ObjC nil/TIFF 桥接异常，以及列表代码块在终端 resize/滚动后折行或正文消失的问题；补充可执行 JXA 模拟与原生屏幕缓冲区回归测试 |
 | 1.3.20 | 2026-08-30 | 会话写租约（writer lease）杜绝双进程并发写同一 session；Windows 子进程启动统一走 `prepareSpawnInvocation` 结构化解析；崩溃守护清理回调注册 |
 | 1.3.19 | 2026-08-30 | 新增 `flavor update` 一键自升级（查询 registry、全局安装、失败兜底提示）；欢迎卡片更新公告改为提示运行 `flavor update` 并提亮颜色 |

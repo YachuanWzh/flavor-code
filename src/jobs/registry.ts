@@ -31,7 +31,7 @@ interface JobRecord extends JobSnapshot {
 export interface JobHandle {
   readonly id: string;
   append(text: string): void;
-  complete(result?: { exitCode?: number | null }): void;
+  complete(result?: { exitCode?: number | null; error?: string }): void;
   fail(error: unknown): void;
   cancel(): void;
 }

@@ -273,10 +273,19 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
         try {
           const stderr = typeof shell.stderr === "string" ? shell.stderr : "";
           const stdout = typeof shell.stdout === "string" ? shell.stdout : "";
-          const message = stderr.trim().slice(0, 300)
+          const diagnostic = shell.diagnostic !== null && typeof shell.diagnostic === "object"
+            ? shell.diagnostic as Record<string, unknown>
+            : undefined;
+          const diagnosticMessage = typeof diagnostic?.message === "string" ? diagnostic.message : "";
+          const diagnosticKind = typeof diagnostic?.kind === "string" ? diagnostic.kind : undefined;
+          const message = diagnosticMessage.trim().slice(0, 300)
+            || stderr.trim().slice(0, 300)
             || stdout.trim().slice(0, 300)
             || (exitCode === undefined ? "shell timed out" : `exit code ${exitCode}`);
-          await captureFailure(tool, exitCode === undefined ? "shell_exit_timeout" : `shell_exit_${exitCode}`, message, payload.input);
+          const errorCode = diagnosticKind === undefined
+            ? (exitCode === undefined ? "shell_exit_timeout" : `shell_exit_${exitCode}`)
+            : `shell_${diagnosticKind}`;
+          await captureFailure(tool, errorCode, message, payload.input);
         } catch (error) {
           logger.warn(`shell capture failed — ${error instanceof Error ? error.message : String(error)}`);
         }

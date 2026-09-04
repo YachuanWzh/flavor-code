@@ -1,4 +1,4 @@
-import { existsSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { delimiter, extname, isAbsolute, resolve } from "node:path";
 
 export interface PreparedSpawnInvocation {
@@ -13,7 +13,7 @@ export interface PrepareSpawnOptions {
   platform?: NodeJS.Platform;
 }
 
-const WINDOWS_EXECUTABLE = /\.(?:com|exe)$/iu;
+const WINDOWS_BATCH = /\.(?:bat|cmd)$/iu;
 const WINDOWS_CMD_SHIM = /node_modules[\\/].bin[\\/][^\\/]+\.cmd$/iu;
 const CMD_META = /([()\][%!^"`<>&|;, *?])/gu;
 
@@ -30,8 +30,8 @@ export function prepareSpawnInvocation(
   if ((options.platform ?? process.platform) !== "win32") return { command, args: [...args] };
 
   const env = options.env ?? process.env;
-  const commandFile = resolveWindowsCommand(command, options.cwd, env);
-  if (commandFile === undefined || WINDOWS_EXECUTABLE.test(commandFile)) {
+  const commandFile = resolveExecutablePath(command, options);
+  if (commandFile === undefined || !WINDOWS_BATCH.test(commandFile)) {
     return { command: commandFile ?? command, args: [...args] };
   }
 
@@ -44,6 +44,19 @@ export function prepareSpawnInvocation(
   };
 }
 
+/** Resolve an executable exactly as the structured Shell runner will see it. */
+export function resolveExecutablePath(command: string, options: PrepareSpawnOptions = {}): string | undefined {
+  const platform = options.platform ?? process.platform;
+  const env = options.env ?? process.env;
+  if (platform === "win32") return resolveWindowsCommand(command, options.cwd, env);
+
+  const hasPath = isAbsolute(command) || command.includes("/");
+  const bases = hasPath
+    ? [isAbsolute(command) ? command : resolve(options.cwd ?? process.cwd(), command)]
+    : (env.PATH ?? "").split(delimiter).filter(Boolean).map((entry) => resolve(entry, command));
+  return bases.find(isExecutableFile);
+}
+
 function resolveWindowsCommand(command: string, cwd: string | undefined, env: NodeJS.ProcessEnv): string | undefined {
   const pathValue = environmentValue(env, "PATH") ?? "";
   const pathExt = (environmentValue(env, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD")
@@ -52,7 +65,10 @@ function resolveWindowsCommand(command: string, cwd: string | undefined, env: No
   const hasPath = isAbsolute(command) || /[\\/]/u.test(command);
   const bases = hasPath
     ? [isAbsolute(command) ? command : resolve(cwd ?? process.cwd(), command)]
-    : pathValue.split(";").filter(Boolean).map((entry) => resolve(unquote(entry), command));
+    : [
+      resolve(cwd ?? process.cwd(), command),
+      ...pathValue.split(";").filter(Boolean).map((entry) => resolve(unquote(entry), command)),
+    ];
 
   for (const base of bases) {
     const candidates = extname(base).length > 0 ? [base] : [base, ...pathExt.map((extension) => `${base}${extension}`)];
@@ -76,6 +92,14 @@ function unquote(value: string): string {
 function isRegularFile(path: string): boolean {
   try { return existsSync(path) && statSync(path).isFile(); }
   catch { return false; }
+}
+
+function isExecutableFile(path: string): boolean {
+  try {
+    if (!existsSync(path) || !statSync(path).isFile()) return false;
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch { return false; }
 }
 
 function escapeCmdCommand(value: string): string {

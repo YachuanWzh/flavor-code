@@ -18,6 +18,8 @@ export interface LoadConfigOptions {
   home: string;
   cli?: ConfigObject;
   environment?: Record<string, string | undefined>;
+  /** Disable environment persistence for read-only diagnostics. */
+  seedGlobalEnv?: boolean;
 }
 
 export interface LoadedConfig {
@@ -189,7 +191,7 @@ export async function loadConfig(options: LoadConfigOptions): Promise<LoadedConf
 
   // Seed global .env on first use — copy any flavor-relevant env vars from
   // the current environment so they are available from any project directory.
-  await seedGlobalEnv(globalEnvPath);
+  if (options.seedGlobalEnv !== false) await seedGlobalEnv(globalEnvPath);
 
   const projectRead = await readJsonIfPresent(projectPath);
   const projectConfig = projectRead?.value;

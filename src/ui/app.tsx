@@ -1692,6 +1692,10 @@ function CommandPresentationView({
     </Box>
     {stdout.total === 0 ? null : <CommandOutputSection label="OUTPUT" value={stdout} tone={tone} error={false} />}
     {stderr.total === 0 ? null : <CommandOutputSection label="ERROR" value={stderr} tone={tone} error />}
+    {presentation.diagnostic === undefined ? null : <Box>
+      <Text color={tone}>│  </Text>
+      <Text color={tone}>{presentation.diagnostic}</Text>
+    </Box>}
     <Box>
       <Text color={tone}>└─ </Text>
       <Text dimColor>{commandFooter(presentation, state)}</Text>

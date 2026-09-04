@@ -15,7 +15,7 @@ describe("parseSlashCommand", () => {
     ["/permissions bubble", { name: "permissions", mode: "bubble" }],
     ["/compact", { name: "compact" }], ["/init", { name: "init" }],
     ["/tasks", { name: "tasks" }], ["/skills", { name: "skills" }],
-    ["/plugins", { name: "plugins" }], ["/hooks", { name: "hooks" }],
+    ["/plugins", { name: "plugins" }], ["/hooks", { name: "hooks" }], ["/doctor", { name: "doctor" }],
     ["/mcp", { name: "mcp", action: "status" }],
     ["/mcp status", { name: "mcp", action: "status" }],
     ["/mcp tools filesystem", { name: "mcp", action: "tools", target: "filesystem" }],

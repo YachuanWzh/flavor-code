@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { DockerExecutionEnvironment, buildDockerInvocation } from "../../src/execution/docker.js";
+import { DockerExecutionEnvironment, buildDockerInvocation, runDockerInvocation } from "../../src/execution/docker.js";
+import { createShellTool } from "../../src/tools/shell.js";
 
 describe("DockerExecutionEnvironment", () => {
   it("builds a fail-closed, injection-safe invocation with default isolation", () => {
@@ -37,5 +38,45 @@ describe("DockerExecutionEnvironment", () => {
     expect(run).toHaveBeenCalledOnce();
     expect(result.exitCode).toBe(127);
     expect(result.stderr).toContain("docker missing");
+  });
+
+  it("routes shell expressions through the container shell and preserves appended args", async () => {
+    const run = vi.fn(async (_invocation: ReturnType<typeof buildDockerInvocation>) => ({
+      exitCode: 0, signal: null, stdout: "ok", stderr: "", terminationReason: null,
+    }));
+    const environment = new DockerExecutionEnvironment({ workspace: "/work", image: "node:24", run });
+    const result = await createShellTool("/work", { executionEnvironment: environment }).execute({
+      command: "printf ok | grep ok; printf", args: ["-tail"],
+    }, new AbortController().signal);
+
+    expect(result.exitCode).toBe(0);
+    expect(run.mock.calls[0]?.[0].args.slice(-3)).toEqual([
+      "/bin/sh", "-c", "printf ok | grep ok; printf '-tail'",
+    ]);
+  });
+
+  it("bounds docker-client output before returning it to the Shell tool", async () => {
+    const result = await runDockerInvocation({
+      command: process.execPath,
+      args: ["-e", "process.stdout.write('abcdefghijklmno');process.stderr.write('ABCDEFGHIJKLMNO')"],
+    }, undefined, 5_000, 10);
+
+    expect(result).toMatchObject({
+      exitCode: 0, stdout: "abcde…klmno", stderr: "ABCDE…KLMNO", truncated: true,
+      truncation: {
+        stdout: { truncated: true, originalBytes: 15, limitBytes: 10 },
+        stderr: { truncated: true, originalBytes: 15, limitBytes: 10 },
+      },
+    });
+  });
+
+  it("terminates and resolves a timed-out docker client process", async () => {
+    const startedAt = Date.now();
+    const result = await runDockerInvocation({
+      command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"],
+    }, undefined, 30, 1_024);
+
+    expect(result.terminationReason).toBe("timeout");
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
   });
 });

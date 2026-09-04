@@ -1146,7 +1146,7 @@ describe("TerminalLayout", () => {
         presentation: {
           kind: "terminal", title: "git status", command: "git status --short",
           stdout: "", stderr: "'git status' 不是内部或外部命令，也不是可运行的程序。\n", exitCode: 1,
-          state: "failed",
+          state: "failed", diagnostic: "Executable \"git status\" was not found by the selected runtime shell.",
         },
       }, { kind: "text", text: "命令参数需要调整。" }],
     };
@@ -1159,6 +1159,8 @@ describe("TerminalLayout", () => {
     expect(plain).toContain("COMMAND · FAILED");
     expect(plain).toContain("git status --short");
     expect(plain).toContain("ERROR · 1 LINE");
+    expect(plain).toContain('Executable "git status" was not found by');
+    expect(plain).toContain("the selected runtime shell.");
     expect(plain).toContain("exit 1");
     expect(plain).toMatch(/exit 1\n\n\s+命令参数需要调整/u);
     expect(raw).not.toBe(plain);

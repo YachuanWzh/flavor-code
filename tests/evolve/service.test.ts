@@ -112,6 +112,21 @@ describe("CAPTURE (shell side-channel)", () => {
     expect(signals[0]).toMatchObject({ tool: "Shell", errorCode: "shell_exit_timeout", count: 1 });
   });
 
+  it("prefers structured Shell diagnostics when raw streams are empty", async () => {
+    const { hooks, service } = await fixture();
+    await runTool(hooks, "Shell", { command: "missing-tool", args: [] }, {
+      exitCode: 127, signal: null, stdout: "", stderr: "", truncated: false,
+      diagnostic: {
+        kind: "command-not-found",
+        message: 'Executable "missing-tool" was not found by the selected runtime shell.',
+      },
+    });
+
+    const signal = (await service.store.signals())[0];
+    expect(signal).toMatchObject({ errorCode: "shell_command-not-found" });
+    expect(signal?.error).toContain("was not found by the selected runtime shell");
+  });
+
   it("counts Shell failures toward the repeat threshold and notifies", async () => {
     const { hooks, service, notices } = await fixture();
     const output = {

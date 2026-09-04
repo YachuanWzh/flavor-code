@@ -83,6 +83,8 @@ flavor update
 
 Flavor 启动时会检查 npm registry，有新版本时在欢迎卡片中提示；运行 `flavor update` 即可一键升级到最新发行版，升级后重启 Flavor 生效。
 
+如果 Flavor 无法启动或本地工具行为异常，可在终端运行 `flavor doctor`；CLI 交互界面和桌面端可运行 `/doctor`。两个入口都会检查 Node.js、配置、Provider、Shell、ripgrep、插件目录和 npm registry；使用 `flavor doctor --json` 可生成便于提交问题的机器可读报告，报告不会输出 API Key。
+
 ## 配置模型
 
 最快的方式是设置环境变量：
@@ -156,6 +158,7 @@ OAuth PKCE 的运行时行为与配置约定见 [PKCE 规范](./docs/specs/pkce-
 | 命令 | 作用 |
 | --- | --- |
 | `/init` | 生成或更新 `FLAVOR.md` |
+| `/doctor` | 诊断本地运行时、配置、工具、插件和 npm 连通性 |
 | `/model` | 查看或切换主/子 Agent 模型 |
 | `/permissions` | 切换权限模式 |
 | `/tasks` | 查看任务计划和子 Agent 状态 |
