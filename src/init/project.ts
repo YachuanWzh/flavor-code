@@ -1,7 +1,5 @@
 import { lstat, mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
-import { copyFileSync, mkdirSync, readdirSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, isAbsolute, join, relative, sep } from "node:path";
 
 const GENERATED_START = "<!-- flavor-code:start -->";
 const GENERATED_END = "<!-- flavor-code:end -->";
@@ -579,37 +577,10 @@ async function createExampleFlavorConfig(cwd: string): Promise<void> {
   await writeFile(configPath, JSON.stringify(example, null, 2) + "\n");
 }
 
-const ASTGRAPH_SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), "astgraph");
-
-/**
- * Copy the astgraph plugin (runtime + vendored WASM grammars + zod) into the
- * workspace's project plugin directory. An existing installation is never
- * overwritten.
- */
-export async function copyAstgraphPlugin(cwd: string): Promise<void> {
-  const pluginDir = join(cwd, ".flavor", "plugins", "astgraph");
-  try {
-    await lstat(pluginDir);
-    return; // already exists, leave user modifications alone
-  } catch (error) {
-    if (!isMissingPathError(error)) throw error;
-  }
-  copyDirectory(ASTGRAPH_SRC_DIR, pluginDir);
-}
-
-function copyDirectory(from: string, to: string): void {
-  mkdirSync(to, { recursive: true, mode: 0o700 });
-  for (const entry of readdirSync(from, { withFileTypes: true })) {
-    const source = join(from, entry.name);
-    const target = join(to, entry.name);
-    if (entry.isDirectory()) copyDirectory(source, target);
-    else if (entry.isFile()) copyFileSync(source, target);
-  }
-}
-
 export async function initializeFlavor(cwd: string): Promise<InitResult> {
   await ensureFlavorDirectories(cwd);
-  await copyAstgraphPlugin(cwd);
+  // The astgraph code-graph plugin is opt-in: it is not shipped with the CLI
+  // and must be installed manually into .flavor/plugins/astgraph.
   await createExampleFlavorConfig(cwd);
   const facts = await inspectProject(cwd);
   const path = join(cwd, "FLAVOR.md");

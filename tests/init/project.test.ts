@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -233,6 +234,15 @@ it("does not install the retired codeisland project plugin", async () => {
   await initializeFlavor(cwd);
 
   await expect(lstat(join(cwd, ".flavor", "plugins", "codeisland"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("does not install the astgraph plugin into the workspace during init", async () => {
+  const cwd = await createRepository();
+  await writeFile(join(cwd, "package.json"), JSON.stringify({ name: "plain-app" }));
+
+  await initializeFlavor(cwd);
+
+  expect(existsSync(join(cwd, ".flavor", "plugins", "astgraph"))).toBe(false);
 });
 
 it("advises pairing ast_search with grep/glob only when a code graph index exists", async () => {

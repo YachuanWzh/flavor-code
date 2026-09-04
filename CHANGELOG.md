@@ -2,7 +2,15 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.0-beta.1 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.0-beta.2 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.0-beta.2] - 2026-09-05
+
+### 变更
+- astgraph 代码图插件改为手动安装的可选插件，不再随 CLI 打包分发：`flavor init` 不再自动把插件复制到项目的 `.flavor/plugins/astgraph/`，构建流程也不再将该目录（含约 9MB 的 tree-sitter WASM 语法与 vendored zod）复制进 `dist/astgraph`，显著减小 npm 安装包体积。需要代码图能力的用户可自行将插件目录（源码仓库 `src/init/astgraph/`）复制到项目的 `.flavor/plugins/astgraph/` 完成安装；已安装过插件的既有工作区不受影响，`FLAVOR.md` 的 Search 章节仍按 `.flavor/astgraph/index.db` 是否存在自动生成
+
+### 测试
+- 移除 `copyAstgraphPlugin` 的复制行为测试；新增 `flavor init` 不会向工作区安装 astgraph 插件的回归测试
 
 ## [1.4.0-beta.1] - 2026-09-04
 
@@ -684,6 +692,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.4.0-beta.2 | 2026-09-05 | astgraph 代码图插件改为手动安装的可选插件，不再随 CLI 打包（`flavor init` 不再自动复制、构建不再复制进 `dist/astgraph`），显著减小安装包体积 |
 | 1.4.0-beta.1 | 2026-09-04 | 新增 `flavor doctor`/`/doctor` 本地诊断；Docker 执行有界输出与升级式终止；macOS 桌面端继承登录 shell PATH；Shell 结构化 argv 直启、统一运行时解析和分类诊断，修复 Windows `cmd /c` 引号、可执行名解析及桌面 stderr 展示；修复 macOS CLI 剪贴板图片输出 |
 | 1.3.21 | 2026-09-02 | 修复 macOS 剪贴板 ObjC nil/TIFF 桥接异常，以及列表代码块在终端 resize/滚动后折行或正文消失的问题；补充可执行 JXA 模拟与原生屏幕缓冲区回归测试 |
 | 1.3.20 | 2026-08-30 | 会话写租约（writer lease）杜绝双进程并发写同一 session；Windows 子进程启动统一走 `prepareSpawnInvocation` 结构化解析；崩溃守护清理回调注册 |
