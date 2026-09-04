@@ -1,0 +1,3 @@
+# 统一行尾：仓库索引存 LF，所有平台检出 LF（覆盖 core.autocrlf），
+# 消除 Windows 上 "LF will be replaced by CRLF" 警告。
+* text=auto eol=lf
