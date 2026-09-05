@@ -13,9 +13,10 @@
  *   stays outstanding (blocking new spend, even across day rollover) until a
  *   later settlement reports the confirmed consumption.
  * - Idempotency: the same `idempotencyKey` returns the original decision and
- *   never reserves (or bills) twice — including refusals. The ledger's dedup
- *   spans *all* event types, so a key already used by another request kind,
- *   or reused with different job/amount content, is a conflict, not a grant.
+ *   never reserves (or bills) twice — including refusals and settlements
+ *   (a crash-retry of one `settle` replays its logical result). The ledger's
+ *   dedup spans *all* event types, so a key already used by another request
+ *   kind, or reused with different content, is a conflict, not a grant.
  * - The cap is a fixed daily window keyed by `YYYY-MM-DD`; outstanding
  *   reservations always count against the limit regardless of their day, so
  *   rollover cannot launder a debt.
@@ -25,7 +26,7 @@
 
 import { z } from "zod";
 
-import type { RsiControlStore, RsiControlTransaction } from "./store.js";
+import type { RsiControlEventRecord, RsiControlStore, RsiControlTransaction } from "./store.js";
 
 const ReservePayloadSchema = z.object({
   jobId: z.string().min(1),
@@ -174,33 +175,45 @@ export class RsiBudgetLedger {
    * keeps the full amount outstanding until a later settle reports the real
    * usage. Repeated unknown settles on a held job are idempotent no-ops.
    */
-  async settle(input: { jobId: string; consumed?: number }): Promise<BudgetSettleResult> {
+  async settle(input: {
+    jobId: string;
+    consumed?: number;
+    /** Trusted call identity; a crash-retry of the same settle replays it. */
+    idempotencyKey?: string;
+  }): Promise<BudgetSettleResult> {
     if (input.consumed !== undefined && (!Number.isSafeInteger(input.consumed) || input.consumed < 0)) {
       throw new Error("consumed must be a non-negative integer when provided");
     }
     return this.#store.transact(async (tx) => {
       const state = await deriveState(tx);
+      if (input.idempotencyKey !== undefined) {
+        const prior = await findKeyRecord(tx, input.idempotencyKey);
+        if (prior !== undefined) {
+          const replay = settleReplayFrom(prior, input, state);
+          if (replay !== undefined) return replay;
+        }
+      }
       const reservation = state.reservations.get(input.jobId);
       if (reservation === undefined || reservation.status === "settled") {
         throw new Error(`No outstanding budget reservation for job ${input.jobId}`);
       }
-      if (input.consumed === undefined) {
-        if (reservation.status === "disputed") {
-          return { status: "awaiting_reconciliation", released: 0, consumed: reservation.amount };
-        }
-        await tx.appendEvent({
-          type: "budget.settled",
-          payload: { jobId: input.jobId, consumed: null } satisfies BudgetSettlePayload,
-        });
-        return { status: "awaiting_reconciliation", released: 0, consumed: reservation.amount };
-      }
-      if (input.consumed > reservation.amount) {
+      if (input.consumed !== undefined && input.consumed > reservation.amount) {
         throw new Error(`Settled usage ${input.consumed} exceeds reserved allowance ${reservation.amount} for job ${input.jobId}`);
       }
-      await tx.appendEvent({
+      const payload: BudgetSettlePayload = { jobId: input.jobId, consumed: input.consumed ?? null };
+      const appended = await tx.appendEvent({
         type: "budget.settled",
-        payload: { jobId: input.jobId, consumed: input.consumed } satisfies BudgetSettlePayload,
+        ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+        payload,
       });
+      if (appended.duplicate) {
+        throw new RsiIdempotencyConflictError(
+          `Settlement append for key ${JSON.stringify(input.idempotencyKey)} was deduplicated against an unrelated event`,
+        );
+      }
+      if (input.consumed === undefined) {
+        return { status: "awaiting_reconciliation", released: 0, consumed: reservation.amount };
+      }
       return { status: "settled", released: reservation.amount - input.consumed, consumed: input.consumed };
     });
   }
@@ -245,6 +258,36 @@ export class RsiBudgetLedger {
  * event would make `appendEvent` skip the write while `reserve` still
  * reported a grant.
  */
+/**
+ * Resolve a settle retry from the durable event that already carries the
+ * key. Returns the original logical decision; any key misuse is a conflict.
+ */
+function settleReplayFrom(
+  prior: RsiControlEventRecord,
+  input: { jobId: string; consumed?: number; idempotencyKey: string },
+  state: DerivedBudgetState,
+): BudgetSettleResult | undefined {
+  if (prior.type !== "budget.settled") {
+    throw new RsiIdempotencyConflictError(
+      `Idempotency key ${JSON.stringify(input.idempotencyKey)} was already used by a ${prior.type} event; derive keys from the request identity`,
+    );
+  }
+  const payload = SettlePayloadSchema.parse(prior.payload);
+  if (payload.jobId !== input.jobId || payload.consumed !== (input.consumed ?? null)) {
+    throw new RsiIdempotencyConflictError(
+      `Idempotency key ${JSON.stringify(input.idempotencyKey)} was already used by a different settlement (${payload.jobId}/${payload.consumed})`,
+    );
+  }
+  const reservation = state.reservations.get(payload.jobId);
+  if (reservation === undefined) {
+    throw new Error(`Durable settlement references unknown job ${payload.jobId}`);
+  }
+  if (payload.consumed === null) {
+    return { status: "awaiting_reconciliation", released: 0, consumed: reservation.amount };
+  }
+  return { status: "settled", released: reservation.amount - payload.consumed, consumed: payload.consumed };
+}
+
 async function findKeyRecord(tx: RsiControlTransaction, idempotencyKey: string) {
   const events = await tx.listEvents();
   return events.find((record) => record.idempotencyKey === idempotencyKey);

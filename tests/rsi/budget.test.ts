@@ -145,6 +145,37 @@ describe("RsiBudgetLedger reserve/settle sequence (rsi.md E6, P0-03b)", () => {
     expect(retry.granted).toBe(true);
   });
 
+  it("retried settle with the same idempotency key returns the original decision", async () => {
+    await harness.ledger.reserve({ jobId: "A", amount: 70, idempotencyKey: "a-1" });
+    const first = await harness.ledger.settle({ jobId: "A", consumed: 30, idempotencyKey: "s-1" });
+    expect(first).toEqual({ status: "settled", released: 40, consumed: 30 });
+
+    // Crash-retry of the same settle: same answer, single billing.
+    const retry = await harness.ledger.settle({ jobId: "A", consumed: 30, idempotencyKey: "s-1" });
+    expect(retry).toEqual({ status: "settled", released: 40, consumed: 30 });
+    expect((await harness.ledger.summary()).dayConsumed).toBe(30);
+
+    // Same key, different content is a conflict, never a silent replay.
+    await expect(
+      harness.ledger.settle({ jobId: "A", consumed: 20, idempotencyKey: "s-1" }),
+    ).rejects.toThrow(/idempotency key/i);
+    await expect(
+      harness.ledger.settle({ jobId: "B", consumed: 30, idempotencyKey: "s-1" }),
+    ).rejects.toThrow(/idempotency key/i);
+  });
+
+  it("settling a closed job without a key stays rejected, with a key replays", async () => {
+    await harness.ledger.reserve({ jobId: "A", amount: 50, idempotencyKey: "a-1" });
+    await harness.ledger.settle({ jobId: "A", consumed: 10, idempotencyKey: "s-1" });
+    await expect(harness.ledger.settle({ jobId: "A", consumed: 10 })).rejects.toThrow(/No outstanding/i);
+    // Unknown-usage settle is also idempotent under a key.
+    await harness.ledger.reserve({ jobId: "C", amount: 20, idempotencyKey: "c-1" });
+    const held = await harness.ledger.settle({ jobId: "C", idempotencyKey: "c-hold" });
+    expect(held).toEqual({ status: "awaiting_reconciliation", released: 0, consumed: 20 });
+    const heldAgain = await harness.ledger.settle({ jobId: "C", idempotencyKey: "c-hold" });
+    expect(heldAgain).toEqual(held);
+  });
+
   it("repeated unknown settles stay pending; closing a settled job is rejected", async () => {
     await harness.ledger.reserve({ jobId: "A", amount: 50, idempotencyKey: "a-1" });
     expect((await harness.ledger.settle({ jobId: "A" })).status).toBe("awaiting_reconciliation");
