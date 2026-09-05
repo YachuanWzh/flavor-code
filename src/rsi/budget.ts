@@ -264,7 +264,7 @@ export class RsiBudgetLedger {
  */
 function settleReplayFrom(
   prior: RsiControlEventRecord,
-  input: { jobId: string; consumed?: number; idempotencyKey: string },
+  input: { jobId: string; consumed?: number; idempotencyKey?: string },
   state: DerivedBudgetState,
 ): BudgetSettleResult | undefined {
   if (prior.type !== "budget.settled") {
