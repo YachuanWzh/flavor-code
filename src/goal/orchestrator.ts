@@ -46,6 +46,8 @@ export interface GoalOrchestratorOptions {
    * a grown heap; the relaunched process resumes the goal from its state.
    */
   onRoundBoundary?(goalId: string): void | Promise<void>;
+  /** Also sampled inside planner/classifier streams and around host verification. */
+  onMemoryCheckpoint?(goalId: string): void | Promise<void>;
   verifyHost?(signal: AbortSignal): Promise<HostVerificationEvidence>;
 }
 
@@ -76,6 +78,7 @@ export class GoalOrchestrator {
       planPath: null,
       verifyRounds: 0,
       workerRounds: 0,
+      pendingVerification: null,
       lastGaps: [],
       gapFingerprint: "",
       stallStreak: 0,
@@ -120,6 +123,10 @@ export class GoalOrchestrator {
       state = { ...state, ...patch, updatedAt: timestamp() };
       await this.#options.persistence?.save(state);
     };
+    const memoryCheckpoint = async (): Promise<void> => {
+      await this.#options.onMemoryCheckpoint?.(state.id);
+      if (memoryRotationActive()) throw new Error("Heap rotation requested");
+    };
     await persistState();
     const workspace = this.#options.workspace;
 
@@ -129,11 +136,13 @@ export class GoalOrchestrator {
     if (state.plan === null) {
       try {
         signal.throwIfAborted();
+        await memoryCheckpoint();
         plan = await runPlanner({
           registry: this.#options.registry,
           modelId: this.#options.plannerModelId,
           objective: state.objective,
           signal,
+          onProgress: memoryCheckpoint,
         });
         planPath = await writePlanFile(workspace, plan);
         await persistState({ phase: "executing", plan, planPath, contractHash: contractHash(state.objective, plan) });
@@ -169,57 +178,72 @@ export class GoalOrchestrator {
       // resumable so the relaunched process picks the goal back up.
       if (memoryRotationActive()) return;
 
-      // Build the worker prompt with plan + prior gaps
-      const workerPrompt = buildWorkerPrompt(state.objective, plan, priorGaps, round);
-      await persistState({
-        phase: "executing",
-        status: "active",
-        workerRounds: round,
-        lastGaps: priorGaps,
-        gapFingerprint: priorFingerprint,
-        stallStreak,
-      });
-      yield { type: "goal-worker-start", round };
+      const pendingVerification = state.pendingVerification?.round === round
+        ? state.pendingVerification
+        : undefined;
+      let finalResponse = pendingVerification?.finalResponse ?? "";
+      if (pendingVerification === undefined) {
+        // Build the worker prompt with plan + prior gaps.
+        const workerPrompt = buildWorkerPrompt(state.objective, plan, priorGaps, round);
+        await persistState({
+          phase: "executing",
+          status: "active",
+          workerRounds: round,
+          pendingVerification: null,
+          lastGaps: priorGaps,
+          gapFingerprint: priorFingerprint,
+          stallStreak,
+        });
+        yield { type: "goal-worker-start", round };
 
-      let finalResponse = "";
-      let workerError: string | undefined;
-      let workerMemoryPressure = false;
-      try {
-        for await (const event of this.#options.runWorker({
-          goal: state.objective,
-          round,
-          workspace,
-          prompt: workerPrompt,
-          priorGaps: formatPriorGaps(priorGaps),
-          signal,
-        })) {
-          yield { type: "goal-worker-event", round, event };
-          if (event.type === "text") finalResponse += event.text;
-          if (event.type === "error") {
-            workerError = event.error.message;
-            // The worker hit the hard heap guard: the round is interrupted but
-            // the goal itself survives on the relaunched process, so leave
-            // the state resumable instead of terminalizing it.
-            if (event.error.code === "memory_pressure") workerMemoryPressure = true;
-            break;
+        let workerError: string | undefined;
+        let workerMemoryPressure = false;
+        try {
+          for await (const event of this.#options.runWorker({
+            goal: state.objective,
+            round,
+            workspace,
+            prompt: workerPrompt,
+            priorGaps: formatPriorGaps(priorGaps),
+            signal,
+          })) {
+            yield { type: "goal-worker-event", round, event };
+            if (event.type === "text") finalResponse = `${finalResponse}${event.text}`.slice(-16_000);
+            if (event.type === "error") {
+              workerError = event.error.message;
+              // The worker hit the hard heap guard: the round is interrupted but
+              // the goal itself survives on the relaunched process.
+              if (event.error.code === "memory_pressure") workerMemoryPressure = true;
+              break;
+            }
           }
+        } catch (error) {
+          if (memoryRotationActive()) return;
+          workerError = message(error);
         }
-      } catch (error) {
-        if (memoryRotationActive()) return;
-        workerError = message(error);
-      }
-      if (workerMemoryPressure) return;
-      if (workerError !== undefined) {
-        const reason = `Worker error in round ${round}: ${workerError}`;
-        await persistState({ phase: "complete", status: "failed" });
-        yield { type: "goal-failed", reason };
-        return;
+        if (workerMemoryPressure) return;
+        if (workerError !== undefined) {
+          const reason = `Worker error in round ${round}: ${workerError}`;
+          await persistState({ phase: "complete", status: "failed" });
+          yield { type: "goal-failed", reason };
+          return;
+        }
+        // The tool-bearing worker is complete. Persist this checkpoint before
+        // verifier/model work so a rotation never replays the worker round.
+        await persistState({
+          phase: "verifying",
+          status: "active",
+          pendingVerification: { round, finalResponse },
+        });
       }
 
       // ─── Phase 3: Verification ───
-      await persistState({ phase: "verifying", status: "active", verifyRounds: round });
       yield { type: "goal-verification-start", round };
+      await this.#options.onMemoryCheckpoint?.(state.id);
+      if (memoryRotationActive()) return;
       const hostVerification = await this.#options.verifyHost?.(signal);
+      await this.#options.onMemoryCheckpoint?.(state.id);
+      if (memoryRotationActive()) return;
       const evidence = await collectEvidence(
         workspace,
         state.objective,
@@ -228,7 +252,7 @@ export class GoalOrchestrator {
         state.contractHash,
         hostVerification,
       );
-      await persistState({ evidenceRounds: [...state.evidenceRounds, {
+      await persistState({ evidenceRounds: [...state.evidenceRounds.filter((item) => item.round !== round), {
         round,
         workspaceDiffHash: evidence.workspaceDiffHash,
         ...(hostVerification === undefined ? {} : { hostVerification }),
@@ -252,13 +276,19 @@ export class GoalOrchestrator {
           skepticCount: this.#options.skepticCount,
           workspace,
           signal,
+          onProgress: memoryCheckpoint,
         });
       } catch (error) {
+        if (memoryRotationActive()) return;
         outcome = {
           type: "blocked",
           reason: `Classifier infrastructure error: ${message(error)}`,
         };
       }
+
+      // verifyRounds means completed verification, never merely started. This
+      // is the commit point that lets resumeStartRound safely advance.
+      await persistState({ verifyRounds: round, pendingVerification: null });
 
       yield {
         type: "goal-verdict",
@@ -339,6 +369,9 @@ function contractHash(objective: string, plan: Plan | null): string {
  * A fresh goal (both zero) starts at round 1.
  */
 function resumeStartRound(state: GoalState): number {
+  if (state.pendingVerification !== undefined && state.pendingVerification !== null) {
+    return state.pendingVerification.round;
+  }
   return state.verifyRounds >= state.workerRounds
     ? state.workerRounds + 1
     : Math.max(state.workerRounds, 1);

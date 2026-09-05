@@ -42,6 +42,8 @@ export interface LoopOrchestratorOptions {
    * a grown heap; the relaunched process resumes the loop from its state.
    */
   onCycleBoundary?(loopId: string): void | Promise<void>;
+  /** Also sampled around verification and confidence checks. */
+  onMemoryCheckpoint?(loopId: string): void | Promise<void>;
   /** Optional hallucination guard for confidence checks and retry monitoring. */
   hallucinationGuard?: HallucinationGuard;
   now?(): string;
@@ -72,6 +74,7 @@ export class LoopOrchestrator {
         approvals: [],
       },
       cycles: [],
+      pendingCycle: null,
     });
     await this.#options.persistence.create(state);
     yield* this.#execute(state, request.goal, request.signal);
@@ -107,6 +110,8 @@ export class LoopOrchestrator {
     let state = initialState;
 
     try {
+      await this.#options.onMemoryCheckpoint?.(loopId);
+      if (memoryRotationActive()) return;
       const workspaceResolution = await this.#options.prepareWorkspace({
         root: this.#options.workspace, loopId, goal, signal,
       });
@@ -123,16 +128,21 @@ export class LoopOrchestrator {
         cycleCheckpoint: state.budget.cycleCheckpoint, tokenCheckpoint: state.budget.tokenCheckpoint,
       };
 
-      let previousVerification: LoopVerificationEvidence | undefined = plan.commands.length === 0
+      const lastCompletedCycle = state.cycles.at(-1);
+      let previousVerification: LoopVerificationEvidence | undefined = lastCompletedCycle?.verification ?? (plan.commands.length === 0
         ? {
             passed: false,
             commands: [],
             summary: `${plan.needsHumanReason ?? "No deterministic verification command was found."} `
               + "Inspect the project and establish a meaningful project-native deterministic check; never add a trivial pass-through verifier.",
           }
-        : undefined;
-      let previousFailureSignature: string | undefined;
-      let repeatedFailures = 0;
+        : undefined);
+      let previousFailureSignature = lastCompletedCycle === undefined
+        ? undefined
+        : `${lastCompletedCycle.workspaceFingerprint}\n${lastCompletedCycle.verification.summary}`;
+      let repeatedFailures = previousFailureSignature === undefined
+        ? 0
+        : countTrailingFailureSignature(state.cycles, previousFailureSignature);
       while (state.status === "running") {
         signal.throwIfAborted();
         // Cycle boundary: the previous cycle is fully persisted, so a heap
@@ -141,63 +151,70 @@ export class LoopOrchestrator {
         // A boundary rotation was requested: stop cleanly and leave the state
         // running so the relaunched process resumes from the persisted cycle.
         if (memoryRotationActive()) return;
-        const cycle = state.budget.cyclesUsed + 1;
-        const startedAt = now();
-        await this.#options.persistence.append({ version: 1, type: "cycle_started", timestamp: startedAt, loopId, payload: { cycle } });
-        yield { type: "loop-cycle-start", loopId, cycle };
-        const prompt = buildLoopCyclePrompt({
-          goal, cycle,
-          ...(previousVerification === undefined ? {} : {
-            memory: `Previous host verification: ${previousVerification.summary}`,
-            verification: previousVerification,
-          }),
-        });
-        let cycleInputTokens = 0;
-        let cycleOutputTokens = 0;
-        let workerError: string | undefined;
-        let workerMemoryPressure = false;
-        let workerText = "";
-        for await (const event of this.#options.runWorker({
-          goal, cycle, workspace: executionWorkspace.root, prompt, signal,
-        })) {
-          if (event.type === "usage") {
-            cycleInputTokens += event.inputTokens;
-            cycleOutputTokens += event.outputTokens;
-          }
-          if (event.type === "error") {
-            workerError = event.error.message;
-            // The worker hit the hard heap guard: the cycle is interrupted but
-            // the loop itself survives on the relaunched process, so leave
-            // the state running instead of terminalizing it.
-            if (event.error.code === "memory_pressure") workerMemoryPressure = true;
-          }
-          if (event.type === "text") workerText += event.text;
-          // Hallucination guard: record tool calls and results
-          if (this.#options.hallucinationGuard !== undefined) {
-            if (event.type === "tool-start") {
-              this.#options.hallucinationGuard.recordToolCall(event.name, event.input, event.id);
-            } else if (event.type === "tool-end") {
-              this.#options.hallucinationGuard.recordToolResult(event.name, event.result, event.id);
+        const pendingCycle = state.pendingCycle;
+        const cycle = pendingCycle?.cycle ?? state.budget.cyclesUsed + 1;
+        const startedAt = pendingCycle?.startedAt ?? now();
+        let cycleInputTokens = pendingCycle?.inputTokens ?? 0;
+        let cycleOutputTokens = pendingCycle?.outputTokens ?? 0;
+        let workerText = pendingCycle?.workerText ?? "";
+        if (pendingCycle === undefined || pendingCycle === null) {
+          await this.#options.persistence.append({ version: 1, type: "cycle_started", timestamp: startedAt, loopId, payload: { cycle } });
+          yield { type: "loop-cycle-start", loopId, cycle };
+          const prompt = buildLoopCyclePrompt({
+            goal, cycle,
+            ...(previousVerification === undefined ? {} : {
+              memory: `Previous host verification: ${previousVerification.summary}`,
+              verification: previousVerification,
+            }),
+          });
+          let workerError: string | undefined;
+          let workerMemoryPressure = false;
+          for await (const event of this.#options.runWorker({
+            goal, cycle, workspace: executionWorkspace.root, prompt, signal,
+          })) {
+            if (event.type === "usage") {
+              cycleInputTokens += event.inputTokens;
+              cycleOutputTokens += event.outputTokens;
             }
+            if (event.type === "error") {
+              workerError = event.error.message;
+              if (event.error.code === "memory_pressure") workerMemoryPressure = true;
+            }
+            if (event.type === "text") workerText = `${workerText}${event.text}`.slice(-16_000);
+            if (this.#options.hallucinationGuard !== undefined) {
+              if (event.type === "tool-start") {
+                this.#options.hallucinationGuard.recordToolCall(event.name, event.input, event.id);
+              } else if (event.type === "tool-end") {
+                this.#options.hallucinationGuard.recordToolResult(event.name, event.result, event.id);
+              }
+            }
+            yield { type: "worker-event", event };
           }
-          yield { type: "worker-event", event };
-        }
-        if (workerMemoryPressure) return;
-        if (workerError !== undefined) {
+          if (workerMemoryPressure) return;
+          if (workerError !== undefined) {
+            state = LoopStateSchema.parse({
+              ...state,
+              budget: {
+                ...state.budget,
+                cyclesUsed: cycle,
+                inputTokens: state.budget.inputTokens + cycleInputTokens,
+                outputTokens: state.budget.outputTokens + cycleOutputTokens,
+              },
+            });
+            state = await this.#terminal(state, "failed", workerError, now());
+            yield { type: "loop-terminal", loopId, status: "failed", reason: workerError };
+            return;
+          }
           state = LoopStateSchema.parse({
             ...state,
-            budget: {
-              ...state.budget,
-              cyclesUsed: cycle,
-              inputTokens: state.budget.inputTokens + cycleInputTokens,
-              outputTokens: state.budget.outputTokens + cycleOutputTokens,
-            },
+            pendingCycle: { cycle, startedAt, inputTokens: cycleInputTokens, outputTokens: cycleOutputTokens, workerText },
+            updatedAt: now(),
           });
-          state = await this.#terminal(state, "failed", workerError, now());
-          yield { type: "loop-terminal", loopId, status: "failed", reason: workerError };
-          return;
+          await this.#options.persistence.save(state);
         }
 
+        await this.#options.onMemoryCheckpoint?.(loopId);
+        if (memoryRotationActive()) return;
         if (plan.commands.length === 0) {
           plan = await this.#options.inferVerification(executionWorkspace.root);
           if (plan.commands.length > 0) {
@@ -216,7 +233,32 @@ export class LoopOrchestrator {
               summary: plan.needsHumanReason ?? "No deterministic verification command was found after the discovery cycle.",
             }
           : await this.#options.runVerifier(plan, executionWorkspace.root, signal);
+        await this.#options.onMemoryCheckpoint?.(loopId);
+        if (memoryRotationActive()) return;
         const fingerprint = await this.#options.fingerprint(executionWorkspace.root);
+        // Keep pendingCycle durable through the final confidence check. If a
+        // rotation happens here, resume repeats verification/guard only and
+        // never replays the tool-bearing worker.
+        let guardWarnings: string[] = [];
+        if (evidence.passed && this.#options.hallucinationGuard !== undefined) {
+          try {
+            await this.#options.onMemoryCheckpoint?.(loopId);
+            if (memoryRotationActive()) return;
+            const report = await this.#options.hallucinationGuard.evaluate(goal, workerText);
+            await this.#options.onMemoryCheckpoint?.(loopId);
+            if (memoryRotationActive()) return;
+            if (!report.passed) {
+              const guardReason = report.blockingReasons.join("; ")
+                || "Hallucination guard blocked completion.";
+              state = await this.#terminal(state, "failed", guardReason, now());
+              yield { type: "loop-terminal", loopId, status: "failed", reason: guardReason };
+              return;
+            }
+            guardWarnings = report.warnings;
+          } catch {
+            // Guard evaluation failure is advisory; deterministic verification still decides success.
+          }
+        }
         const completedAt = now();
         state = LoopStateSchema.parse({
           ...state,
@@ -231,6 +273,7 @@ export class LoopOrchestrator {
             cycle, startedAt, completedAt, inputTokens: cycleInputTokens, outputTokens: cycleOutputTokens,
             workspaceFingerprint: fingerprint, verification: evidence,
           }],
+          pendingCycle: null,
         });
         await this.#options.persistence.save(state);
         await this.#options.persistence.append({
@@ -247,23 +290,6 @@ export class LoopOrchestrator {
         }
 
         if (evidence.passed) {
-          // Hallucination guard: check confidence before declaring success
-          let guardWarnings: string[] = [];
-          if (this.#options.hallucinationGuard !== undefined) {
-            try {
-              const report = await this.#options.hallucinationGuard.evaluate(goal, workerText);
-              if (!report.passed) {
-                const guardReason = report.blockingReasons.join("; ")
-                  || "Hallucination guard blocked completion.";
-                state = await this.#terminal(state, "failed", guardReason, now());
-                yield { type: "loop-terminal", loopId, status: "failed", reason: guardReason };
-                return;
-              }
-              guardWarnings = report.warnings;
-            } catch {
-              // Guard evaluation failure is not fatal — proceed with success
-            }
-          }
           const reason = [evidence.summary, ...guardWarnings].filter(Boolean).join("; ");
           state = await this.#terminal(state, "succeeded", reason, now());
           yield { type: "loop-terminal", loopId, status: "succeeded", reason };
@@ -333,4 +359,14 @@ export class LoopOrchestrator {
     });
     return state;
   }
+}
+
+function countTrailingFailureSignature(cycles: LoopState["cycles"], signature: string): number {
+  let count = 0;
+  for (let index = cycles.length - 1; index >= 0; index -= 1) {
+    const cycle = cycles[index]!;
+    if (`${cycle.workspaceFingerprint}\n${cycle.verification.summary}` !== signature) break;
+    count += 1;
+  }
+  return count;
 }

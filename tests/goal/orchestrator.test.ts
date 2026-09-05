@@ -270,4 +270,25 @@ describe("GoalOrchestrator runtime events", () => {
     expect(events[0]).toMatchObject({ type: "goal-resumed", goalId: "goal-test", round: 2 });
     expect(events.some((event) => event.type === "goal-complete")).toBe(true);
   });
+
+  it("resumes a pending verification without replaying the completed worker", async () => {
+    const root = await workspace();
+    const store = new GoalMemoryStore();
+    store.states.push({
+      ...seededNotAchieved(),
+      status: "active",
+      phase: "verifying",
+      verifyRounds: 0,
+      pendingVerification: { round: 1, finalResponse: "worker already finished" },
+    });
+    let workerCalls = 0;
+    const resumed = makeOrchestrator(root, store, {
+      runWorker: async function* () { workerCalls += 1; yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } }; },
+    });
+    const events = [];
+    for await (const event of resumed.resume({ goalId: "goal-test", signal: new AbortController().signal })) events.push(event);
+    expect(workerCalls).toBe(0);
+    expect(events[0]).toMatchObject({ type: "goal-resumed", round: 1 });
+    expect(store.states.at(-1)).toMatchObject({ status: "achieved", verifyRounds: 1, pendingVerification: null });
+  });
 });

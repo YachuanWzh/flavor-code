@@ -37,6 +37,8 @@ export interface MemoryRestartContinuation {
 
 export interface MemoryRestartMarker {
   sessionId: string;
+  /** Start of the fixed accounting window; unlike requestedAt this does not slide. */
+  windowStartedAt?: string;
   requestedAt: string;
   attempts: number;
   continuation?: MemoryRestartContinuation;
@@ -47,13 +49,15 @@ let rotationActive = false;
 /** Recorded when a rotation is requested; orchestrators skip terminal bookkeeping on the way out. */
 export function markMemoryRotation(): void { rotationActive = true; }
 export function memoryRotationActive(): boolean { return rotationActive; }
+/** In-process hosts clear this only after the old runtime has been fully disposed. */
+export function clearMemoryRotation(): void { rotationActive = false; }
 
 export function memoryRestartMarkerPath(workspace: string): string {
   return join(workspace, ".flavor", "tmp", MEMORY_RESTART_MARKER_FILE);
 }
 
 /**
- * Count restarts per session inside a rolling window. A marker for a
+ * Count restarts per session inside a fixed window. A marker for a
  * different session or an expired window starts counting from one again, so
  * a healthy long-lived session never exhausts the budget.
  */
@@ -63,15 +67,31 @@ export function nextMemoryRestartMarker(
   now: Date,
   continuation?: MemoryRestartContinuation,
 ): MemoryRestartMarker {
+  const previousWindowStart = previous?.windowStartedAt ?? previous?.requestedAt;
   const reusable = previous !== undefined
     && previous.sessionId === sessionId
-    && now.getTime() - Date.parse(previous.requestedAt) < MEMORY_RESTART_WINDOW_MS
+    && previousWindowStart !== undefined
+    && now.getTime() - Date.parse(previousWindowStart) < MEMORY_RESTART_WINDOW_MS
     && Number.isInteger(previous.attempts) && previous.attempts > 0;
   return {
     sessionId,
+    windowStartedAt: reusable ? previousWindowStart : now.toISOString(),
     requestedAt: now.toISOString(),
     attempts: reusable ? previous!.attempts + 1 : 1,
     ...(continuation === undefined ? {} : { continuation }),
+  };
+}
+
+/**
+ * Remove a consumed continuation without turning marker consumption into a
+ * second restart attempt or extending the accounting/cooldown windows.
+ */
+export function consumedMemoryRestartMarker(marker: MemoryRestartMarker): MemoryRestartMarker {
+  return {
+    sessionId: marker.sessionId,
+    ...(marker.windowStartedAt === undefined ? {} : { windowStartedAt: marker.windowStartedAt }),
+    requestedAt: marker.requestedAt,
+    attempts: marker.attempts,
   };
 }
 
@@ -115,9 +135,10 @@ export function memoryRestartArgs(argv: readonly string[], marker: MemoryRestart
       continue;
     }
     if (argument.startsWith("--resume=")) continue;
+    if (argument === "--memory-restart") continue;
     stripped.push(argument);
   }
-  return [...stripped, "--resume", marker!.sessionId];
+  return [...stripped, "--resume", marker!.sessionId, "--memory-restart"];
 }
 
 export function parseMemoryRestartMarker(json: string): MemoryRestartMarker | undefined {
@@ -133,8 +154,11 @@ export function parseMemoryRestartMarker(json: string): MemoryRestartMarker | un
         || typeof continuation.id !== "string")) {
       return undefined;
     }
+    const windowStartedAt = value.windowStartedAt;
+    if (windowStartedAt !== undefined && typeof windowStartedAt !== "string") return undefined;
     return {
       sessionId: value.sessionId,
+      ...(windowStartedAt === undefined ? {} : { windowStartedAt }),
       requestedAt: value.requestedAt,
       attempts: value.attempts,
       ...(continuation === undefined ? {} : { continuation }),

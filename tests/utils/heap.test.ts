@@ -16,14 +16,20 @@ vi.mock("node:v8", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:v8")>();
   return { ...actual, getHeapStatistics: () => ({ ...actual.getHeapStatistics(), heap_size_limit: HEAP_LIMIT }) };
 });
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return { ...actual, totalmem: () => HEAP_LIMIT };
+});
 
 let heapUsedValue = 0;
+let rssValue = 0;
+let externalValue = 0;
 // restoreMocks: true (vitest.config.ts) restores top-level spies before each
 // test, so the process.memoryUsage stub must be re-applied per test or readHeap
 // would observe the real heap. The node:v8 module mock is unaffected.
 beforeEach(() => {
   vi.spyOn(process, "memoryUsage").mockImplementation(() => ({
-    rss: 0, heapTotal: HEAP_LIMIT, heapUsed: heapUsedValue, external: 0, arrayBuffers: 0,
+    rss: rssValue, heapTotal: HEAP_LIMIT, heapUsed: heapUsedValue, external: externalValue, arrayBuffers: externalValue,
   }));
 });
 
@@ -39,6 +45,8 @@ afterEach(() => {
   delete (globalThis as { gc?: unknown }).gc;
   delete process.env.FLAVOR_HEAP_SNAPSHOT_ON_ROTATE;
   heapUsedValue = 0;
+  rssValue = 0;
+  externalValue = 0;
 });
 
 describe("readHeap", () => {
@@ -72,6 +80,15 @@ describe("verifiedHeapPressure (hard guard)", () => {
     setHeap(0.9 * HEAP_LIMIT);
     expect(verifiedHeapPressure(MEMORY_PRESSURE_HEAP_RATIO)).toMatchObject({ gcVerified: false, ratio: 0.9 });
   });
+
+  it("reports RSS pressure even when the JavaScript heap is small", () => {
+    setHeap(0.2 * HEAP_LIMIT, { gc: true, afterGc: 0.2 * HEAP_LIMIT });
+    rssValue = 0.8 * HEAP_LIMIT;
+    externalValue = 0.5 * HEAP_LIMIT;
+    expect(verifiedHeapPressure(MEMORY_PRESSURE_HEAP_RATIO)).toMatchObject({
+      gcVerified: true, rssRatio: 0.8, external: 0.5 * HEAP_LIMIT,
+    });
+  });
 });
 
 describe("heapRotationNeeded (soft boundary guard)", () => {
@@ -98,6 +115,12 @@ describe("heapRotationNeeded (soft boundary guard)", () => {
     setHeap(0.85 * HEAP_LIMIT);
     expect(heapRotationNeeded()).toMatchObject({ gcVerified: false });
   });
+
+  it("rotates for a GC-stable RSS/native-memory watermark", () => {
+    setHeap(0.2 * HEAP_LIMIT, { gc: true, afterGc: 0.2 * HEAP_LIMIT });
+    rssValue = 0.65 * HEAP_LIMIT;
+    expect(heapRotationNeeded()).toMatchObject({ gcVerified: true, rssRatio: 0.65 });
+  });
 });
 
 describe("heapSnapshotWarranted", () => {
@@ -106,9 +129,9 @@ describe("heapSnapshotWarranted", () => {
     ...(verifiedRatio === undefined ? {} : { verifiedRatio }), gcVerified: verifiedRatio !== undefined,
   });
 
-  it("dumps a snapshot only near the hard limit", () => {
+  it("does not synchronously dump a snapshot in the automatic recovery path", () => {
     expect(heapSnapshotWarranted(reading(0.7))).toBe(false);
-    expect(heapSnapshotWarranted(reading(0.9))).toBe(true);
+    expect(heapSnapshotWarranted(reading(0.9))).toBe(false);
   });
 
   it("always dumps under the explicit env override", () => {

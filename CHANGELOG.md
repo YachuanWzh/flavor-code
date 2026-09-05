@@ -7,13 +7,15 @@
 ## [1.4.0-beta.4] - 2026-09-05
 
 ### 新增
-- 长程任务内存有界改为构造性保证：不再依赖单点堵漏，而是在 turn、`/loop` 周期、`/goal` 轮次这三类工作单元边界做无缝堆轮换。软水位（GC 核实后 60%）触发时，先持久化状态再退出（退出码 75），launcher 携 `--resume` 重启到全新堆上继续运行，使无人值守的多日任务不会因堆增长而崩溃。
+- 长程任务内存保护改为跨进程轮换：不再依赖单点堵漏，而是在 turn、`/loop` 周期、`/goal` 轮次这三类工作单元边界做无缝堆轮换。软水位（GC 核实后 60%）触发时，先持久化状态再退出（退出码 75），launcher 携 `--resume` 重启到全新堆上继续运行，降低无人值守多日任务因堆增长而崩溃的风险。
 - `/loop` 与 `/goal` 跨轮换自动续跑：轮换标记写入 `continuation`，重启后的进程读取持久化状态并从中断处继续——`/loop` 按已完成周期数续跑，`/goal` 用 `verifyRounds` 与 `workerRounds` 消歧，判断是推进下一轮还是重跑被中断的轮次，绝不重放已完成轮。
-- 轮换自动取证：每次轮换留存一份保留普查（各内存持有者自报 entries/chars/bytes 与 GC 核实前后的堆水位），核实后活动集接近硬上限（85%）或设置 `FLAVOR_HEAP_SNAPSHOT_ON_ROTATE=1` 时额外落一份 `.heapsnapshot`；分别保留最近 5 份普查与 2 份快照，让下一次复发能直接指认增长源。
+- 轮换自动取证：每次轮换留存一份保留普查（各内存持有者自报 entries/chars/bytes、V8 堆、RSS、external 与 ArrayBuffer 水位）；launcher 仍使用 V8 的 near-heap-limit 快照，额外同步快照仅在显式设置 `FLAVOR_HEAP_SNAPSHOT_ON_ROTATE=1` 时生成，避免恢复路径自身耗尽内存。
+- `/goal` 和 `/loop` 在 worker 完成后持久化“待验证”检查点；若验证器或审查模型阶段发生轮换，新进程只重做可重复的验证，不重放已经完成的工具工作。`/goal` 默认最大轮次提升到 100，并可通过 `goal.maxRounds`、`goal.maxStallStreak` 配置。
 
 ### 变更
-- 水位判定改为 GC 核实：`--expose-gc` 可用时先做完整 GC 再判断，排除“未回收垃圾”造成的误报；硬 guard 80% 仅在活动集真正越限时才停当前 turn，软轮换在 45% 以下走廉价检查、不付出 GC 停顿。launcher 默认注入 `--expose-gc`、`--report-on-fatalerror` 与 `--heapsnapshot-near-heap-limit=1`，物理内存 ≥12GB 且用户未固定堆上限时注入 `--max-old-space-size=8192`。
-- 轮换预算放宽以适配多日运行：滚动窗口内最多 24 次/小时，并加 5 分钟最小间隔冷却，避免“新堆出生即重”时陷入轮换自旋；此时交回硬 guard 决策。
+- 水位判定改为 GC 核实并同时覆盖进程 RSS：`--expose-gc` 可用时先做完整 GC 再判断，排除“未回收垃圾”造成的误报；V8 堆硬/软水位为 80%/60%，RSS 硬/软水位为可用内存限制的 75%/60%。launcher 默认注入 `--expose-gc`、`--report-on-fatalerror` 与 `--heapsnapshot-near-heap-limit=1`，内存限制 ≥12GB 且用户未固定堆上限时注入 `--max-old-space-size=8192`。
+- 轮换预算放宽以适配多日运行：每个固定的一小时窗口内最多 24 次，并加 5 分钟最小间隔冷却，避免“新堆出生即重”时陷入轮换自旋；此时交回硬 guard 决策。
+- CLI interactive、`--print` 与 RPC 均保留退出码 75 并由 launcher 恢复；`--print` 恢复 continuation 时不重放原始命令，RPC 重启时保留父 launcher 的标准输入输出连接。Electron 桌面端在释放旧 runtime 并 GC 后重建同一 session。
 
 ### 修复
 - 修复 `/loop`、`/goal` 续跑必然失败的问题：`resume()` 此前把持久层的 `load` 方法从对象上摘下后脱离 receiver 调用，真实 Store 读取 `#私有` 字段时会抛错，导致每次续跑都退化为失败终态；改为在持久层对象上直接调用。

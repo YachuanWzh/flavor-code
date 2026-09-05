@@ -1,5 +1,5 @@
 ﻿import { readFile } from "node:fs/promises";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir, release as osRelease, tmpdir, version as osVersion } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
@@ -59,7 +59,9 @@ import { SESSION_VERSION, SessionStore, type SessionDocument, type SessionLease 
 import { SessionHistory } from "./session/tree.js";
 import {
   MEMORY_RESTART_EXIT_CODE,
+  consumedMemoryRestartMarker,
   markMemoryRotation,
+  memoryRotationActive,
   memoryRestartMarkerPath,
   nextMemoryRestartMarker,
   parseMemoryRestartMarker,
@@ -200,6 +202,11 @@ export interface ProductionRuntimeOptions {
   home?: string;
   environment?: NodeJS.ProcessEnv;
   output(event: SessionOutput): void;
+  /**
+   * Embedder-owned restart hook. CLI callers omit it and exit with code 75;
+   * desktop callers dispose and recreate the runtime around the saved session.
+   */
+  onMemoryRestartRequested?(sessionId: string): void;
   onApprovalChange?(): void;
   /** Called whenever the active registerTool-managed command set changes. */
   onToolsChange?(): void;
@@ -1513,7 +1520,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       ...(continuation === undefined ? {} : { continuation }),
       ...(reading === undefined ? {} : { reading }),
       holders: collectRotationHolders(),
-    });
+    }, options.onMemoryRestartRequested);
   };
 
   /**
@@ -1524,6 +1531,13 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
    */
   const maybeRotateAtBoundary = (continuation: MemoryRestartContinuation): void => {
     activeLongTask = continuation;
+    const pressure = verifiedHeapPressure(MEMORY_PRESSURE_HEAP_RATIO);
+    if (pressure !== undefined) {
+      // At the hard watermark recovery beats cooldown; the restart budget is
+      // the final spin guard and the current process has no safe headroom.
+      rotateForHeap(continuation, pressure);
+      return;
+    }
     const reading = heapRotationNeeded();
     if (reading === undefined) return;
     if (rotationCooldownActive(readMemoryRestartMarker(), sessionId, new Date())) return;
@@ -1552,7 +1566,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     // same session does not resume a task that already finished.
     try {
       const markerPath = memoryRestartMarkerPath(workspace);
-      writeFileSync(markerPath, `${JSON.stringify(nextMemoryRestartMarker(marker, sessionId, new Date()))}\n`, "utf8");
+      writeMarkerAtomically(markerPath, consumedMemoryRestartMarker(marker));
     } catch { /* consuming is best-effort */ }
     return continuation;
   };
@@ -1564,6 +1578,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     persistence: loopStore,
     hallucinationGuard,
     onCycleBoundary: (loopId) => maybeRotateAtBoundary({ kind: "loop", id: loopId }),
+    onMemoryCheckpoint: (loopId) => maybeRotateAtBoundary({ kind: "loop", id: loopId }),
     prepareWorkspace: (input) => prepareLoopWorkspace(input),
     inferVerification: inferVerificationPlan,
     runWorker: ({ workspace: executionWorkspace, prompt, signal }) =>
@@ -1605,10 +1620,11 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     plannerModelId: mainModel,
     classifierModelId: mainModel,
     skepticCount: 3,
-    maxRounds: 5,
-    maxStallStreak: 2,
+    maxRounds: config.goal.maxRounds,
+    maxStallStreak: config.goal.maxStallStreak,
     persistence: goalStore,
     onRoundBoundary: (goalId) => maybeRotateAtBoundary({ kind: "goal", id: goalId }),
+    onMemoryCheckpoint: (goalId) => maybeRotateAtBoundary({ kind: "goal", id: goalId }),
     verifyHost: async (signal) => runVerificationPlan(
       await inferVerificationPlan(workspace), workspace, signal, executionEnvironment,
     ),
@@ -2598,10 +2614,23 @@ function requestMemoryRestart(
   sessionId: string,
   emitOutput: (event: SessionOutput) => void,
   rotation?: MemoryRestartRotation,
+  onRestartRequested?: (sessionId: string) => void,
 ): void {
+  // Several parallel provider streams may observe the same watermark. Only
+  // the first one owns marker accounting, forensics, and host notification.
+  if (memoryRotationActive()) return;
+  markMemoryRotation();
   const continuation = rotation?.continuation;
-  // Forensics first: a census (and, near the hard limit, a heap snapshot) so
-  // the next recurrence names its own grower instead of restarting blind.
+  // Persist the restart intent before optional diagnostics. In particular a
+  // heap snapshot can itself be slow or memory hungry near the limit.
+  try {
+    const markerPath = memoryRestartMarkerPath(workspace);
+    let previous: MemoryRestartMarker | undefined;
+    try { previous = parseMemoryRestartMarker(readFileSync(markerPath, "utf8")); }
+    catch { /* missing or unreadable marker simply starts a new window */ }
+    writeMarkerAtomically(markerPath, nextMemoryRestartMarker(previous, sessionId, new Date(), continuation));
+  } catch { /* state is still durable; the host will surface a manual-restart path */ }
+
   if (rotation?.reading !== undefined) {
     const census: RotationCensus = {
       at: new Date().toISOString(),
@@ -2613,26 +2642,28 @@ function requestMemoryRestart(
     writeRotationCensus(workspace, census);
     if (heapSnapshotWarranted(rotation.reading)) writeRotationHeapSnapshot(workspace);
   }
-  // From here the orchestrators skip terminal bookkeeping so a /loop or /goal
-  // stays "running" and the relaunched process can resume it.
-  markMemoryRotation();
-  try {
-    const markerPath = memoryRestartMarkerPath(workspace);
-    let previous: MemoryRestartMarker | undefined;
-    try { previous = parseMemoryRestartMarker(readFileSync(markerPath, "utf8")); }
-    catch { /* missing or unreadable marker simply restarts the budget */ }
-    mkdirSync(dirname(markerPath), { recursive: true });
-    const marker = nextMemoryRestartMarker(previous, sessionId, new Date(), continuation);
-    writeFileSync(markerPath, `${JSON.stringify(marker)}\n`, "utf8");
-  } catch { /* marker is an optimization, not a precondition */ }
-  process.exitCode = MEMORY_RESTART_EXIT_CODE;
   emitOutput({
     type: "notice",
     message: continuation === undefined
       ? "Memory watermark reached; the session is saved and Flavor is restarting with a fresh heap."
       : `Memory watermark reached; the session and the running ${continuation.kind} are saved, and Flavor is restarting with a fresh heap to continue it.`,
   });
-  emitOutput({ type: "exit" });
+  if (onRestartRequested !== undefined) onRestartRequested(sessionId);
+  else {
+    process.exitCode = MEMORY_RESTART_EXIT_CODE;
+    emitOutput({ type: "exit" });
+  }
+}
+
+function writeMarkerAtomically(path: string, marker: MemoryRestartMarker): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(marker)}\n`, { encoding: "utf8", mode: 0o600 });
+    renameSync(temporary, path);
+  } finally {
+    try { unlinkSync(temporary); } catch { /* rename removes it; cleanup is best-effort */ }
+  }
 }
 
 interface GitCommandDeps {

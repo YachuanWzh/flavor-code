@@ -7,18 +7,12 @@ import { GoalOrchestrator } from "../../src/goal/orchestrator.js";
 import type { GoalRuntimeEvent, GoalState } from "../../src/goal/types.js";
 import { ModelRegistry } from "../../src/models/registry.js";
 import { modelContentText, type ModelAdapter } from "../../src/models/types.js";
-import { markMemoryRotation, memoryRotationActive } from "../../src/utils/memory-restart.js";
-
-/**
- * Isolated on purpose: markMemoryRotation() flips a one-way module global, so a
- * boundary-rotation test would poison every later orchestrator run in the same
- * file. Vitest gives each file a fresh module registry, so this file holds
- * exactly one rotation scenario.
- */
+import { clearMemoryRotation, markMemoryRotation, memoryRotationActive } from "../../src/utils/memory-restart.js";
 
 const roots: string[] = [];
 
 afterEach(async () => {
+  clearMemoryRotation();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -83,5 +77,85 @@ describe("GoalOrchestrator boundary heap rotation", () => {
     expect(events.some((event) => event.type === "goal-failed")).toBe(false);
     expect(events.some((event) => event.type === "goal-complete")).toBe(false);
     expect(states.at(-1)).toMatchObject({ status: "active", phase: "executing", workerRounds: 0, verifyRounds: 0 });
+  });
+
+  it("continues a saved verification checkpoint and finishes without rerunning the worker", async () => {
+    const root = await workspace();
+    const states: GoalState[] = [];
+    const persistence = {
+      save: async (state: GoalState) => { states.push(structuredClone(state)); },
+      load: async () => structuredClone(states.at(-1)!),
+    };
+    let workerCalls = 0;
+    const options = {
+      workspace: root, registry: registry(), plannerModelId: "capture:main", classifierModelId: "capture:main",
+      skepticCount: 1, maxRounds: 3, maxStallStreak: 2, idFactory: () => "goal-verify-rotate",
+      now: () => "2026-08-25T00:00:00.000Z", persistence,
+      runWorker: async function* () {
+        workerCalls += 1;
+        yield { type: "text" as const, text: "worker completed" };
+        yield { type: "done" as const, usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+      onMemoryCheckpoint: () => {
+        if (states.at(-1)?.pendingVerification !== null && states.at(-1)?.pendingVerification !== undefined) {
+          markMemoryRotation();
+        }
+      },
+    };
+    const interrupted = new GoalOrchestrator(options);
+    for await (const event of interrupted.run({ goal: "fix it", signal: new AbortController().signal })) void event;
+    expect(states.at(-1)).toMatchObject({ phase: "verifying", pendingVerification: { round: 1 } });
+    expect(workerCalls).toBe(1);
+
+    clearMemoryRotation();
+    const { onMemoryCheckpoint: _checkpoint, ...resumeOptions } = options;
+    const resumed = new GoalOrchestrator(resumeOptions);
+    const events: GoalRuntimeEvent[] = [];
+    for await (const event of resumed.resume({ goalId: "goal-verify-rotate", signal: new AbortController().signal })) events.push(event);
+    expect(workerCalls).toBe(1);
+    expect(events.some((event) => event.type === "goal-complete")).toBe(true);
+    expect(states.at(-1)).toMatchObject({ status: "achieved", verifyRounds: 1, pendingVerification: null });
+  });
+
+  it("survives repeated round-boundary rotations and reaches the final verdict", async () => {
+    const root = await workspace();
+    const states: GoalState[] = [];
+    const persistence = {
+      save: async (state: GoalState) => { states.push(structuredClone(state)); },
+      load: async () => structuredClone(states.at(-1)!),
+    };
+    const workerRounds: number[] = [];
+    const make = (rotateAfter: number | undefined, hostPassed: boolean) => new GoalOrchestrator({
+      workspace: root, registry: registry(), plannerModelId: "capture:main", classifierModelId: "capture:main",
+      skepticCount: 1, maxRounds: 5, maxStallStreak: 4, idFactory: () => "goal-multi-rotate",
+      now: () => "2026-08-25T00:00:00.000Z", persistence,
+      runWorker: async function* ({ round }) {
+        workerRounds.push(round);
+        yield { type: "text", text: `work-${round}` };
+        yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+      verifyHost: async () => ({
+        passed: hostPassed,
+        summary: hostPassed ? "tests pass" : `tests still fail after round ${states.at(-1)?.workerRounds ?? 0}`,
+        commands: [{ command: "npm", args: ["test"], exitCode: hostPassed ? 0 : 1 }],
+      }),
+      ...(rotateAfter === undefined ? {} : {
+        onRoundBoundary: () => {
+          if (states.at(-1)?.verifyRounds === rotateAfter) markMemoryRotation();
+        },
+      }),
+    });
+
+    for await (const event of make(1, false).run({ goal: "fix it", signal: new AbortController().signal })) void event;
+    expect(states.at(-1)).toMatchObject({ status: "not_achieved", verifyRounds: 1 });
+    clearMemoryRotation();
+    for await (const event of make(2, false).resume({ goalId: "goal-multi-rotate", signal: new AbortController().signal })) void event;
+    expect(states.at(-1)).toMatchObject({ status: "not_achieved", verifyRounds: 2 });
+    clearMemoryRotation();
+    const finalEvents: GoalRuntimeEvent[] = [];
+    for await (const event of make(undefined, true).resume({ goalId: "goal-multi-rotate", signal: new AbortController().signal })) finalEvents.push(event);
+    expect(workerRounds).toEqual([1, 2, 3]);
+    expect(finalEvents.some((event) => event.type === "goal-complete")).toBe(true);
+    expect(states.at(-1)).toMatchObject({ status: "achieved", verifyRounds: 3 });
   });
 });

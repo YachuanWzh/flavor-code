@@ -75,3 +75,24 @@ it("does not replay a restored transcript in print mode", async () => {
   expect(output.join("")).toContain("new answer");
   expect(output.join("")).not.toMatch(/old prompt|old answer/);
 });
+
+it("waits for a restored long-task continuation without replaying the print prompt", async () => {
+  const submit = vi.fn(async () => undefined);
+  const whenIdle = vi.fn(async () => undefined);
+  const runtime = {
+    session: {
+      rotationContinuationResumed: true,
+      start: vi.fn(async () => undefined),
+      submit,
+      whenIdle,
+      close: vi.fn(async () => undefined),
+    },
+    dispose: vi.fn(async () => undefined),
+  } as unknown as ProductionRuntime;
+  const code = await runPrint("/goal original", {
+    createRuntime: async () => runtime, stdout: () => undefined, stderr: () => undefined,
+  }, "session-saved", true);
+  expect(code).toBe(0);
+  expect(whenIdle).toHaveBeenCalledOnce();
+  expect(submit).not.toHaveBeenCalled();
+});

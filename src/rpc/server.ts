@@ -65,7 +65,18 @@ export class FlavorRpcServer {
   async start(): Promise<void> {
     this.#runtime = await this.#options.createRuntime({
       workspace: this.#options.workspace,
-      output: (event) => { void this.#emit({ type: "event", sessionId: this.#runtime?.sessionId, event }, "output"); },
+      output: (event) => {
+        const emitted = this.#emit({ type: "event", sessionId: this.#runtime?.sessionId, event }, "output");
+        if (event.type === "exit") {
+          // A memory rotation must let the launcher observe exit code 75. Keep
+          // stdin itself open so the relaunched RPC child inherits the same
+          // client connection from the supervising launcher.
+          void emitted.finally(() => {
+            this.#closing = true;
+            this.#lines?.close();
+          });
+        }
+      },
     });
     await this.#runtime.session.start();
     const lines = createInterface({ input: this.#options.input, crlfDelay: Infinity });

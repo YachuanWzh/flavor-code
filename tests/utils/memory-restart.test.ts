@@ -1,10 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   MEMORY_RESTART_CONTINUATION_TTL_MS,
   MEMORY_RESTART_MAX_ATTEMPTS,
   MEMORY_RESTART_MIN_GAP_MS,
   MEMORY_RESTART_WINDOW_MS,
+  consumedMemoryRestartMarker,
+  clearMemoryRotation,
   markMemoryRotation,
   memoryRestartArgs,
   memoryRestartMarkerPath,
@@ -19,6 +21,8 @@ import {
 
 const SESSION = "session-20260828155654859-1591978c";
 
+afterEach(() => clearMemoryRotation());
+
 function marker(overrides: Partial<MemoryRestartMarker> = {}): MemoryRestartMarker {
   return { sessionId: SESSION, requestedAt: "2026-08-29T03:00:00.000Z", attempts: 1, ...overrides };
 }
@@ -31,7 +35,7 @@ describe("memory restart protocol", () => {
   it("starts the attempt budget at one and increments inside the window", () => {
     const now = new Date("2026-08-29T03:05:00.000Z");
     const first = nextMemoryRestartMarker(undefined, SESSION, now);
-    expect(first).toEqual({ sessionId: SESSION, requestedAt: now.toISOString(), attempts: 1 });
+    expect(first).toEqual({ sessionId: SESSION, windowStartedAt: now.toISOString(), requestedAt: now.toISOString(), attempts: 1 });
     const second = nextMemoryRestartMarker(first, SESSION, new Date("2026-08-29T03:06:00.000Z"));
     expect(second.attempts).toBe(2);
   });
@@ -57,12 +61,13 @@ describe("memory restart protocol", () => {
   });
 
   it("replaces any existing --resume selection with the requested session", () => {
-    expect(memoryRestartArgs(["-p", "task"], marker())).toEqual(["-p", "task", "--resume", SESSION]);
+    const suffix = ["--resume", SESSION, "--memory-restart"];
+    expect(memoryRestartArgs(["-p", "task"], marker())).toEqual(["-p", "task", ...suffix]);
     expect(memoryRestartArgs(["--resume", "session-old", "-p", "task"], marker()))
-      .toEqual(["-p", "task", "--resume", SESSION]);
+      .toEqual(["-p", "task", ...suffix]);
     expect(memoryRestartArgs(["--resume=latest", "--print", "task"], marker()))
-      .toEqual(["--print", "task", "--resume", SESSION]);
-    expect(memoryRestartArgs(["--resume"], marker())).toEqual(["--resume", SESSION]);
+      .toEqual(["--print", "task", ...suffix]);
+    expect(memoryRestartArgs(["--resume", "--memory-restart"], marker())).toEqual(suffix);
   });
 
   it("refuses to relaunch once the budget is exhausted", () => {
@@ -75,6 +80,16 @@ describe("memory restart protocol", () => {
     expect(MEMORY_RESTART_MAX_ATTEMPTS).toBeGreaterThanOrEqual(24);
     expect(MEMORY_RESTART_WINDOW_MS).toBe(60 * 60 * 1_000);
     expect(shouldRelaunchForMemoryRestart(marker({ attempts: 24 }))).toBe(true);
+  });
+
+  it("uses a fixed accounting window and does not count continuation consumption as a restart", () => {
+    const start = new Date("2026-08-29T03:00:00.000Z");
+    const first = nextMemoryRestartMarker(undefined, SESSION, start, { kind: "goal", id: "goal-1" });
+    const consumed = consumedMemoryRestartMarker(first);
+    expect(consumed).toMatchObject({ attempts: 1, requestedAt: start.toISOString(), windowStartedAt: start.toISOString() });
+    expect(consumed.continuation).toBeUndefined();
+    const afterWindow = nextMemoryRestartMarker(consumed, SESSION, new Date(start.getTime() + MEMORY_RESTART_WINDOW_MS + 1));
+    expect(afterWindow.attempts).toBe(1);
   });
 
   it("carries a loop or goal continuation through the marker so the relaunched process resumes it", () => {

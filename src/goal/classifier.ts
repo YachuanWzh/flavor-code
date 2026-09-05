@@ -21,6 +21,8 @@ export interface ClassifierOptions {
   skepticCount: number;
   workspace: string;
   signal?: AbortSignal;
+  /** Safe-point hook used by long-running hosts to rotate before OOM. */
+  onProgress?(): void | Promise<void>;
 }
 
 function buildSkepticPrompt(evidence: EvidencePacket, plan: Plan, index: number): string {
@@ -91,7 +93,7 @@ export async function runClassifier(
   // Run N skeptics in parallel
   const skepticResults = await Promise.all(
     Array.from({ length: n }, (_, i) =>
-      runOneSkeptic(evidence, plan, i + 1, adapter, model, options.signal),
+      runOneSkeptic(evidence, plan, i + 1, adapter, model, options.signal, options.onProgress),
     ),
   );
 
@@ -120,7 +122,9 @@ async function runOneSkeptic(
   adapter: { stream: (req: any) => AsyncIterable<any> },
   model: string,
   signal?: AbortSignal,
+  onProgress?: () => void | Promise<void>,
 ): Promise<string> {
+  await onProgress?.();
   const prompt = buildSkepticPrompt(evidence, plan, index);
   const messages: ModelMessage[] = [{ role: "user", content: prompt }];
 
@@ -131,6 +135,7 @@ async function runOneSkeptic(
     tools: [],
     ...(signal === undefined ? {} : { signal }),
   })) {
+    await onProgress?.();
     if (event.type === "text") text += event.text;
     else if (event.type === "error") throw event.error;
     else if (event.type === "done") break;

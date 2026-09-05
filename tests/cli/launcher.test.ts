@@ -34,7 +34,10 @@ describe("CLI runtime launcher", () => {
     totalmem.mockReturnValue(16 * GB);
     expect(cliMainArguments("/opt/flavor/cli-main.js", [])).toContain("--max-old-space-size=8192");
     // A user-pinned heap always wins, so we never fight an explicit choice.
-    expect(cliMainArguments("/opt/flavor/cli-main.js", ["--max-old-space-size=4096"])).not.toContain("--max-old-space-size=8192");
+    const pinned = cliMainArguments("/opt/flavor/cli-main.js", ["--max-old-space-size=4096"]);
+    expect(pinned).not.toContain("--max-old-space-size=8192");
+    expect(pinned.filter((argument) => argument === "--max-old-space-size=4096")).toHaveLength(1);
+    expect(pinned.indexOf("--max-old-space-size=4096")).toBeLessThan(pinned.indexOf("/opt/flavor/cli-main.js"));
     // Below the headroom floor the default V8 limit stands.
     totalmem.mockReturnValue(8 * GB);
     expect(cliMainArguments("/opt/flavor/cli-main.js", [])).not.toContain("--max-old-space-size=8192");

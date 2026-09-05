@@ -60,6 +60,14 @@ export const LoopStateSchema = z.object({
     approvals: z.array(LoopApprovalSchema),
   }).strict(),
   cycles: z.array(LoopCycleEvidenceSchema),
+  /** Completed worker awaiting host verification; avoids replaying tool work after rotation. */
+  pendingCycle: z.object({
+    cycle: z.number().int().positive(),
+    startedAt: z.string().datetime({ offset: true }),
+    inputTokens: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+    workerText: z.string().max(16_000),
+  }).strict().nullable().optional(),
   terminalReason: z.string().optional(),
 }).strict();
 

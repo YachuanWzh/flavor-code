@@ -143,7 +143,9 @@ describe("P0 crash-fix regression evidence", () => {
     console.log(`  [E3] runs=${runs} legacyRetention=${mb(legacyRetention)} fixedRetention=${mb(fixedRetention)}`);
     console.log(`  [E3] legacySavePeak=${mb(legacySave.length)} fixedSavePeak=${mb(fixedSave.length)}`);
 
-    expect(legacyRetention).toBeGreaterThan(80 * 1024 * 1024); // sanity: legacy really leaks
+    // Keep the sanity floor below allocator/platform variance; the ratio below
+    // is the actual regression signal.
+    expect(legacyRetention).toBeGreaterThan(64 * 1024 * 1024);
     expect(fixedRetention).toBeLessThan(legacyRetention / 8);
     expect(fixedSave.length).toBeLessThan(legacySave.length / 8);
     expect(charsOf(context.snapshot().visibilityLog)).toBeLessThan(4 * 1024 * 1024);

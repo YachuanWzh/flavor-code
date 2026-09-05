@@ -1,16 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import type { AgentEvent } from "../../src/agent/types.js";
 import { LoopOrchestrator, type LoopPersistence, type LoopRuntimeEvent } from "../../src/loop/orchestrator.js";
 import type { LoopEvent, LoopState, LoopVerificationEvidence } from "../../src/loop/types.js";
-import { markMemoryRotation, memoryRotationActive } from "../../src/utils/memory-restart.js";
+import { clearMemoryRotation, markMemoryRotation, memoryRotationActive } from "../../src/utils/memory-restart.js";
 
-/**
- * Isolated on purpose: markMemoryRotation() flips a one-way module global, so
- * a boundary-rotation test would poison every later orchestrator run in the
- * same file (each would return at the first boundary). Vitest gives each file
- * a fresh module registry, so this file holds exactly one rotation scenario.
- */
+afterEach(() => clearMemoryRotation());
 
 class MemoryPersistence implements LoopPersistence {
   states: LoopState[] = [];
@@ -18,6 +13,7 @@ class MemoryPersistence implements LoopPersistence {
   async create(state: LoopState) { this.states.push(structuredClone(state)); }
   async save(state: LoopState) { this.states.push(structuredClone(state)); }
   async append(event: LoopEvent) { this.events.push(structuredClone(event)); }
+  async load(): Promise<LoopState> { return structuredClone(this.states.at(-1)!); }
 }
 
 function worker(events: AgentEvent[]): AsyncIterable<AgentEvent> {
@@ -66,5 +62,45 @@ describe("LoopOrchestrator boundary heap rotation", () => {
     expect(events.some((event) => event.type === "loop-terminal")).toBe(false);
     // The last persisted state is still running with cycle 1 fully accounted for.
     expect(persistence.states.at(-1)).toMatchObject({ status: "running", budget: { cyclesUsed: 1 } });
+  });
+
+  it("survives repeated cycle rotations and eventually completes", async () => {
+    const persistence = new MemoryPersistence();
+    const workerCycles: number[] = [];
+    const make = (rotateAfter: number | undefined, verifierPassed: boolean) => new LoopOrchestrator({
+      workspace: "C:/work/project",
+      config: { maxCycles: 20, maxTokens: 500_000, isolation: "auto" },
+      persistence,
+      now: () => "2026-08-25T00:00:00.000Z",
+      idFactory: () => "loop-multi-rotate",
+      prepareWorkspace: async () => ({ kind: "ready", workspace: { root: "C:/work/project", mode: "current" } }),
+      inferVerification: async () => ({ commands: [{ label: "test", command: "npm", args: ["test"] }] }),
+      runWorker: ({ cycle }) => {
+        workerCycles.push(cycle);
+        return worker([
+          { type: "usage", inputTokens: 10, outputTokens: 5, totalInputTokens: 10, totalOutputTokens: 5 },
+          { type: "done", usage: { inputTokens: 10, outputTokens: 5 } },
+        ]);
+      },
+      runVerifier: async () => verification(verifierPassed, verifierPassed ? "passed" : `failed-${persistence.states.at(-1)?.budget.cyclesUsed ?? 0}`),
+      confirmBudget: async () => "approved",
+      fingerprint: async () => `fingerprint-${persistence.states.at(-1)?.budget.cyclesUsed ?? 0}`,
+      ...(rotateAfter === undefined ? {} : {
+        onCycleBoundary: () => {
+          if (persistence.states.at(-1)?.budget.cyclesUsed === rotateAfter) markMemoryRotation();
+        },
+      }),
+    });
+
+    await collect(make(1, false).run({ goal: "fix tests", signal: new AbortController().signal }));
+    expect(persistence.states.at(-1)).toMatchObject({ status: "running", budget: { cyclesUsed: 1 } });
+    clearMemoryRotation();
+    await collect(make(2, false).resume({ loopId: "loop-multi-rotate", signal: new AbortController().signal }));
+    expect(persistence.states.at(-1)).toMatchObject({ status: "running", budget: { cyclesUsed: 2 } });
+    clearMemoryRotation();
+    const finalEvents = await collect(make(undefined, true).resume({ loopId: "loop-multi-rotate", signal: new AbortController().signal }));
+    expect(workerCycles).toEqual([1, 2, 3]);
+    expect(finalEvents.at(-1)).toMatchObject({ type: "loop-terminal", status: "succeeded" });
+    expect(persistence.states.at(-1)).toMatchObject({ status: "succeeded", budget: { cyclesUsed: 3 } });
   });
 });

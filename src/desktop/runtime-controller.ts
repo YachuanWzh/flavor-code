@@ -46,6 +46,7 @@ import type { Question } from "../tools/ask-user-question.js";
 import type { MultimodalSessionInput, SessionOutput } from "../ui/session.js";
 import type { TranscriptState } from "../ui/transcript.js";
 import { message } from "../utils/error.js";
+import { clearMemoryRotation } from "../utils/memory-restart.js";
 import { modelContentText } from "../models/types.js";
 import type { ApprovalDecision } from "../tools/runtime.js";
 import type { PermissionProfile } from "../permissions/engine.js";
@@ -127,6 +128,7 @@ export interface RuntimeLike {
     followUp(prompt: string): void;
     queueSnapshot(): { steering: readonly string[]; followUp: readonly string[] };
     interrupt(): "cancelled" | "exit";
+    whenIdle?(): Promise<void>;
     close(): Promise<void>;
   };
   readonly services: {
@@ -173,7 +175,7 @@ export interface RuntimeLike {
 }
 
 export interface RuntimeFactoryOptions extends Pick<ProductionRuntimeOptions,
-  "workspace" | "home" | "output" | "onApprovalChange" | "onToolsChange" | "approvalPolicy" | "resumeSession" | "extraTools" | "collaboration"> {}
+  "workspace" | "home" | "output" | "onMemoryRestartRequested" | "onApprovalChange" | "onToolsChange" | "approvalPolicy" | "resumeSession" | "extraTools" | "collaboration"> {}
 
 export interface DesktopTerminalServiceLike {
   open(input: { owner: string; cwd?: string; shell?: string; args?: string[]; columns?: number; rows?: number }): TerminalSnapshot;
@@ -261,6 +263,7 @@ export class DesktopRuntimeController {
   #busy = false;
   #tasks: TaskSnapshot | undefined;
   #disposeJobSubscription: (() => void) | undefined;
+  #memoryRestartPromise: Promise<void> | undefined;
   readonly #d2cMocks = new Map<string, D2cRunningMock>();
   readonly #d2cPreviews = new Map<string, RunningProject>();
   readonly #d2cProductPreviews = new Map<string, RunningProject>();
@@ -394,6 +397,7 @@ export class DesktopRuntimeController {
         this.#captureSessionOutput(event);
         this.#emit({ type: "session-output", sessionId: outputSessionId, event });
       },
+      onMemoryRestartRequested: (sessionId) => this.#scheduleMemoryRestart(sessionId),
       onApprovalChange: () => {
         if (this.#runtime !== undefined) this.#publishSnapshot();
       },
@@ -1431,6 +1435,37 @@ export class DesktopRuntimeController {
     if (runtime === undefined) return;
     await runtime.session.close();
     await runtime.dispose();
+  }
+
+  /**
+   * Electron owns the process, so a heap rotation rebuilds only the production
+   * runtime. Disposing every holder and forcing GC gives the resumed /loop or
+   * /goal a clean live set without terminating the desktop application.
+   */
+  #scheduleMemoryRestart(sessionId: string): void {
+    if (this.#memoryRestartPromise !== undefined) return;
+    const previous = this.#runtime;
+    this.#memoryRestartPromise = (async () => {
+      await previous?.session.whenIdle?.().catch(() => undefined);
+      if (previous === undefined || this.#runtime !== previous) return;
+      await this.#disposeRuntime();
+      clearMemoryRotation();
+      const gc = (globalThis as { gc?: () => void }).gc;
+      if (typeof gc === "function") { gc(); gc(); }
+      await this.startSession(sessionId);
+      const resumed = this.#runtime;
+      if (resumed !== undefined) {
+        this.#busy = true;
+        this.#publishSnapshot();
+        await resumed.session.whenIdle?.();
+      }
+    })().catch((error) => {
+      this.#emit({ type: "runtime-error", sessionId, message: `Memory restart failed: ${message(error)}` });
+    }).finally(() => {
+      this.#memoryRestartPromise = undefined;
+      this.#busy = false;
+      this.#publishSnapshot();
+    });
   }
 
   async #stopAllD2cMocks(): Promise<void> {

@@ -107,6 +107,11 @@ export const GoalStateSchema = z.object({
   planPath: z.string().nullable(),
   verifyRounds: z.number().int().min(0),
   workerRounds: z.number().int().min(0),
+  /** Worker output checkpoint used to resume verification without rerunning tools. */
+  pendingVerification: z.object({
+    round: z.number().int().positive(),
+    finalResponse: z.string().max(16_000),
+  }).strict().nullable().optional(),
   lastGaps: z.array(GapSchema),
   gapFingerprint: z.string(),
   stallStreak: z.number().int().min(0),

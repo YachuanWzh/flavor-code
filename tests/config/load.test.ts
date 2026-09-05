@@ -109,6 +109,14 @@ it("uses loop tranche defaults and validates explicit overrides", () => {
   expect(() => FlavorConfigSchema.parse({ loop: { isolation: "current" } })).toThrow();
 });
 
+it("uses long-running goal defaults and validates explicit overrides", () => {
+  expect(FlavorConfigSchema.parse({}).goal).toEqual({ maxRounds: 100, maxStallStreak: 3 });
+  expect(FlavorConfigSchema.parse({ goal: { maxRounds: 500, maxStallStreak: 8 } }).goal)
+    .toEqual({ maxRounds: 500, maxStallStreak: 8 });
+  expect(() => FlavorConfigSchema.parse({ goal: { maxRounds: 0 } })).toThrow();
+  expect(() => FlavorConfigSchema.parse({ goal: { maxStallStreak: 0 } })).toThrow();
+});
+
 it("supports the six canonical permission modes and defaults to default", () => {
   expect(FlavorConfigSchema.parse({}).permissionMode).toBe("default");
   for (const permissionMode of [

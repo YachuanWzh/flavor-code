@@ -41,11 +41,21 @@ export function cliMainArguments(mainPath: string, argv: readonly string[]): str
     // work. Exposing gc lets the watermark measure the live set instead.
     "--expose-gc",
   ];
-  const userPinnedHeap = [...process.execArgv, ...argv].some((argument) => argument.startsWith("--max-old-space-size"));
-  if (!userPinnedHeap && totalmem() >= HEAP_HEADROOM_MIN_TOTALMEM) {
-    flags.push(`--max-old-space-size=${HEAP_HEADROOM_MB}`);
+  const processHeapFlag = process.execArgv.find((argument) => argument.startsWith("--max-old-space-size"));
+  const argvHeapFlag = argv.find((argument) => argument.startsWith("--max-old-space-size"));
+  const userHeapFlag = processHeapFlag ?? argvHeapFlag;
+  if (userHeapFlag !== undefined) {
+    // execArgv is not inherited when we construct a fresh Node command line.
+    // Forward the explicit choice before mainPath where Node will honor it.
+    flags.push(userHeapFlag);
+  } else {
+    const constrained = process.constrainedMemory?.() ?? 0;
+    const availableLimit = constrained > 0 ? Math.min(totalmem(), constrained) : totalmem();
+    if (availableLimit >= HEAP_HEADROOM_MIN_TOTALMEM) {
+      flags.push(`--max-old-space-size=${HEAP_HEADROOM_MB}`);
+    }
   }
-  return [...flags, mainPath, ...argv];
+  return [...flags, mainPath, ...argv.filter((argument) => argument !== argvHeapFlag)];
 }
 
 export async function launchCli(): Promise<void> {

@@ -7,6 +7,8 @@ export interface PlannerOptions {
   modelId: string;
   objective: string;
   signal?: AbortSignal;
+  /** Safe-point hook used by long-running hosts to rotate before OOM. */
+  onProgress?(): void | Promise<void>;
 }
 
 function buildPlannerPrompt(objective: string): string {
@@ -40,6 +42,7 @@ function buildPlannerPrompt(objective: string): string {
 }
 
 export async function runPlanner(options: PlannerOptions): Promise<Plan> {
+  await options.onProgress?.();
   const { adapter, model } = options.registry.get(options.modelId);
   const prompt = buildPlannerPrompt(options.objective);
   const messages: ModelMessage[] = [{ role: "user", content: prompt }];
@@ -52,6 +55,7 @@ export async function runPlanner(options: PlannerOptions): Promise<Plan> {
     tools: [],
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   })) {
+    await options.onProgress?.();
     if (event.type === "text") text += event.text;
     else if (event.type === "error") throw event.error;
     else if (event.type === "done") { completed = true; break; }

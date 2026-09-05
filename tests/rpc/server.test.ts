@@ -84,4 +84,35 @@ describe("FlavorRpcServer", () => {
     }));
     expect(runtime.dispose).toHaveBeenCalledOnce();
   });
+
+  it("closes the current RPC runtime when a memory rotation emits exit", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let outputEvent!: (event: SessionOutput) => void;
+    const runtime = {
+      sessionId: "session-rpc",
+      session: {
+        active: false,
+        start: vi.fn(async () => undefined),
+        submit: vi.fn(async () => undefined),
+        steer: vi.fn(), followUp: vi.fn(), interrupt: vi.fn(() => "exit" as const),
+        queueSnapshot: vi.fn(() => ({ steering: [], followUp: [] })),
+        clearQueue: vi.fn(() => ({ steering: [], followUp: [] })),
+        whenIdle: vi.fn(async () => undefined),
+        close: vi.fn(async () => undefined),
+      },
+      dispose: vi.fn(async () => undefined),
+    };
+    const server = new FlavorRpcServer({
+      input, output, workspace: "/work",
+      createRuntime: async (options) => { outputEvent = options.output; return runtime; },
+    });
+    const running = server.start();
+    await vi.waitFor(() => expect(outputEvent).toBeTypeOf("function"));
+    outputEvent({ type: "exit" });
+    await running;
+    expect(runtime.session.close).toHaveBeenCalledOnce();
+    expect(runtime.dispose).toHaveBeenCalledOnce();
+    expect(input.destroyed).toBe(false);
+  });
 });

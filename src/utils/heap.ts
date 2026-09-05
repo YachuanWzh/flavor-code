@@ -1,4 +1,5 @@
 import { getHeapStatistics } from "node:v8";
+import { totalmem } from "node:os";
 
 /**
  * Heap watermarks for the controlled rotation protocol.
@@ -19,12 +20,11 @@ import { getHeapStatistics } from "node:v8";
  */
 export const MEMORY_PRESSURE_HEAP_RATIO = 0.8;
 export const MEMORY_ROTATION_HEAP_RATIO = 0.6;
+export const MEMORY_PRESSURE_RSS_RATIO = 0.75;
+export const MEMORY_ROTATION_RSS_RATIO = 0.6;
 
 /** Below this raw ratio no GC verification is worth the pause. */
 const ROTATION_PRECHECK_RATIO = 0.45;
-
-/** At or above this verified ratio a rotation also dumps a heap snapshot. */
-const SNAPSHOT_HEAP_RATIO = 0.85;
 
 export interface HeapReading {
   heapUsed: number;
@@ -33,6 +33,11 @@ export interface HeapReading {
   /** Ratio measured after a forced full GC; undefined when gc is not exposed. */
   verifiedRatio?: number;
   gcVerified: boolean;
+  rss?: number;
+  memoryLimit?: number;
+  rssRatio?: number;
+  external?: number;
+  arrayBuffers?: number;
 }
 
 export function readHeap(): { heapUsed: number; heapLimit: number; ratio: number } {
@@ -53,6 +58,26 @@ function ratioOf(heapLimit: number, heapUsed: number): number {
   return heapLimit > 0 ? heapUsed / heapLimit : 0;
 }
 
+function effectiveMemoryLimit(): number {
+  const physical = totalmem();
+  const constrained = process.constrainedMemory?.() ?? 0;
+  return constrained > 0 ? Math.min(physical, constrained) : physical;
+}
+
+function withRss(reading: Omit<HeapReading, "gcVerified">, gcVerified: boolean): HeapReading {
+  const usage = process.memoryUsage();
+  const memoryLimit = effectiveMemoryLimit();
+  return {
+    ...reading,
+    gcVerified,
+    rss: usage.rss,
+    memoryLimit,
+    rssRatio: ratioOf(memoryLimit, usage.rss),
+    external: usage.external,
+    arrayBuffers: usage.arrayBuffers,
+  };
+}
+
 /**
  * Hard-guard reading. Returns undefined below the threshold; when the raw
  * reading crosses it, a full GC (if exposed) decides whether the live set
@@ -60,12 +85,15 @@ function ratioOf(heapLimit: number, heapUsed: number): number {
  */
 export function verifiedHeapPressure(threshold: number): HeapReading | undefined {
   const raw = readHeap();
-  if (raw.heapLimit <= 0 || raw.ratio < threshold) return undefined;
-  if (!forceFullGc()) return { ...raw, gcVerified: false };
+  const before = withRss(raw, false);
+  const rssThreshold = threshold >= MEMORY_PRESSURE_HEAP_RATIO ? MEMORY_PRESSURE_RSS_RATIO : threshold;
+  if ((raw.heapLimit <= 0 || raw.ratio < threshold) && (before.rssRatio ?? 0) < rssThreshold) return undefined;
+  if (!forceFullGc()) return before;
   const heapUsed = process.memoryUsage().heapUsed;
   const ratio = ratioOf(raw.heapLimit, heapUsed);
-  if (ratio < threshold) return undefined;
-  return { heapUsed, heapLimit: raw.heapLimit, ratio, verifiedRatio: ratio, gcVerified: true };
+  const verified = withRss({ heapUsed, heapLimit: raw.heapLimit, ratio, verifiedRatio: ratio }, true);
+  if (ratio < threshold && (verified.rssRatio ?? 0) < rssThreshold) return undefined;
+  return verified;
 }
 
 /**
@@ -76,18 +104,26 @@ export function verifiedHeapPressure(threshold: number): HeapReading | undefined
  */
 export function heapRotationNeeded(): HeapReading | undefined {
   const raw = readHeap();
-  if (raw.heapLimit <= 0 || raw.ratio < ROTATION_PRECHECK_RATIO) return undefined;
+  const before = withRss(raw, false);
+  if ((raw.heapLimit <= 0 || raw.ratio < ROTATION_PRECHECK_RATIO)
+    && (before.rssRatio ?? 0) < ROTATION_PRECHECK_RATIO) return undefined;
   if (!forceFullGc()) {
-    return raw.ratio >= MEMORY_PRESSURE_HEAP_RATIO ? { ...raw, gcVerified: false } : undefined;
+    return raw.ratio >= MEMORY_PRESSURE_HEAP_RATIO || (before.rssRatio ?? 0) >= MEMORY_PRESSURE_RSS_RATIO
+      ? before
+      : undefined;
   }
   const heapUsed = process.memoryUsage().heapUsed;
   const ratio = ratioOf(raw.heapLimit, heapUsed);
-  if (ratio < MEMORY_ROTATION_HEAP_RATIO) return undefined;
-  return { heapUsed, heapLimit: raw.heapLimit, ratio, verifiedRatio: ratio, gcVerified: true };
+  const verified = withRss({ heapUsed, heapLimit: raw.heapLimit, ratio, verifiedRatio: ratio }, true);
+  if (ratio < MEMORY_ROTATION_HEAP_RATIO && (verified.rssRatio ?? 0) < MEMORY_ROTATION_RSS_RATIO) return undefined;
+  return verified;
 }
 
-/** Whether a rotation should also leave a .heapsnapshot retainer trail. */
-export function heapSnapshotWarranted(reading: HeapReading): boolean {
-  if (process.env.FLAVOR_HEAP_SNAPSHOT_ON_ROTATE === "1") return true;
-  return (reading.verifiedRatio ?? reading.ratio) >= SNAPSHOT_HEAP_RATIO;
+/**
+ * Explicit opt-in only. The launcher already asks V8 for one near-limit
+ * snapshot; synchronously taking another in the recovery path can exhaust the
+ * very heap/RSS headroom needed to persist and exit cleanly.
+ */
+export function heapSnapshotWarranted(_reading: HeapReading): boolean {
+  return process.env.FLAVOR_HEAP_SNAPSHOT_ON_ROTATE === "1";
 }

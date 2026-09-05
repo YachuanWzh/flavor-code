@@ -249,6 +249,8 @@ export class FlavorSession {
 
   get active(): boolean { return this.#active !== undefined; }
   queueSnapshot(): AgentQueueSnapshot { return this.#queue.snapshot(); }
+  /** True when start() admitted a persisted /loop or /goal continuation. */
+  get rotationContinuationResumed(): boolean { return this.#continuationResumeStarted; }
   clearQueue(): AgentQueueSnapshot {
     const snapshot = this.#queue.clear();
     for (const kind of ["steer", "followUp"] as const) {
@@ -955,4 +957,3 @@ function requiredPals(service: PalSessionServices | undefined): PalSessionServic
   if (service === undefined) throw new Error("Pal collaboration commands are unavailable");
   return service;
 }
-

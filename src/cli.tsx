@@ -12,6 +12,7 @@ import { runUpdate, type UpdateOutcome } from "./update/apply.js";
 import { NPM_PACKAGE_NAME } from "./update/check.js";
 import { installCrashGuard } from "./utils/crash-guard.js";
 import { message } from "./utils/error.js";
+import { MEMORY_RESTART_EXIT_CODE } from "./utils/memory-restart.js";
 import { redactErrorText } from "./utils/redact.js";
 import { packageVersion } from "./utils/version.js";
 import { staticTaskLines } from "./ui/task-progress-model.js";
@@ -55,6 +56,7 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
     .option("--rpc-streamed-writes", "stream proposed file writes to an RPC client before committing them")
     .option("--trace <path>", "write a redacted JSONL execution trace")
     .option("--pal-name <alias>", "name this interactive Flavor instance for /pals and /chat")
+    .addOption(new Option("--memory-restart").hideHelp())
     .addOption(new Option("--pals-broker <address>").hideHelp());
 
   program
@@ -154,7 +156,7 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
 
   program.action(async (options: {
     print?: string; resume?: string | boolean; mode?: string; workspace?: string; trace?: string; rpcApprovals?: boolean; rpcStreamedWrites?: boolean;
-    palName?: string; palsBroker?: string;
+    palName?: string; palsBroker?: string; memoryRestart?: boolean;
   }) => {
     if (options.palsBroker !== undefined) {
       if (!isLocalPalBrokerAddress(options.palsBroker, process.platform)) {
@@ -181,7 +183,7 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
       return;
     }
     if (options.print !== undefined) {
-      process.exitCode = await runPrint(options.print, {}, resumeSession);
+      process.exitCode = await runPrint(options.print, {}, resumeSession, options.memoryRestart === true);
       return;
     }
     if (!(dependencies.isTTY?.() ?? process.stdin.isTTY)) {
@@ -282,7 +284,7 @@ export async function runRpcMode(options: {
     });
     await server.start();
     await recorder?.close();
-    return 0;
+    return process.exitCode === MEMORY_RESTART_EXIT_CODE ? MEMORY_RESTART_EXIT_CODE : 0;
   } catch (error) {
     await recorder?.close().catch(() => undefined);
     process.stderr.write(`rpc: ${safeError(error)}\n`);
@@ -300,7 +302,12 @@ export interface PrintDependencies {
   stderr?(text: string): void;
 }
 
-export async function runPrint(prompt: string, dependencies: PrintDependencies = {}, resumeSession?: string | true): Promise<number> {
+export async function runPrint(
+  prompt: string,
+  dependencies: PrintDependencies = {},
+  resumeSession?: string | true,
+  memoryRestart = false,
+): Promise<number> {
   let code = 0;
   let runtime: ProductionRuntime;
   const stdout = dependencies.stdout ?? ((text: string) => process.stdout.write(text));
@@ -324,7 +331,13 @@ export async function runPrint(prompt: string, dependencies: PrintDependencies =
   }
   try {
     await runtime.session.start();
-    await runtime.session.submit(prompt);
+    if (runtime.session.rotationContinuationResumed) {
+      // start() admitted the persisted /loop or /goal. Wait for that task;
+      // replaying --print would create a second long-running command.
+      await runtime.session.whenIdle();
+    } else if (!memoryRestart) {
+      await runtime.session.submit(prompt);
+    }
   } catch (error) {
     stderr(`runtime: ${safeError(error)}\n`); code = 1;
   } finally {
@@ -333,8 +346,9 @@ export async function runPrint(prompt: string, dependencies: PrintDependencies =
     try { await runtime.dispose(); }
     catch (error) { stderr(`runtime: ${safeError(error)}\n`); code = 1; }
   }
-  if (code === 0) stdout("\n");
-  return code;
+  const restarting = process.exitCode === MEMORY_RESTART_EXIT_CODE;
+  if (code === 0 && !restarting) stdout("\n");
+  return restarting ? MEMORY_RESTART_EXIT_CODE : code;
 }
 
 function safeError(error: unknown): string {

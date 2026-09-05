@@ -33,6 +33,7 @@ function fakeRuntime(output: (event: SessionOutput) => void, sessionId = "sessio
       followUp: vi.fn(),
       queueSnapshot: vi.fn(() => ({ steering: [], followUp: [] })),
       interrupt: vi.fn(() => "cancelled" as const),
+      whenIdle: vi.fn(async () => undefined),
       close: vi.fn(async () => undefined),
     },
     services: {
@@ -55,6 +56,27 @@ function fakeRuntime(output: (event: SessionOutput) => void, sessionId = "sessio
 }
 
 describe("DesktopRuntimeController", () => {
+  it("recreates and resumes the runtime when a memory rotation is requested", async () => {
+    const first = fakeRuntime(() => undefined, "session-live");
+    const second = fakeRuntime(() => undefined, "session-live");
+    let requestRestart: ((sessionId: string) => void) | undefined;
+    const createRuntime = vi.fn(async (options: Parameters<NonNullable<ConstructorParameters<typeof DesktopRuntimeController>[0]["createRuntime"]>>[0]) => {
+      requestRestart = options.onMemoryRestartRequested;
+      return createRuntime.mock.calls.length === 1 ? first : second;
+    });
+    const controller = new DesktopRuntimeController({
+      home: demoHome, createRuntime, listSessions: async () => [], emit: () => undefined,
+    });
+    await controller.openWorkspace(workDemoDir);
+    await controller.startSession();
+    requestRestart?.("session-live");
+    await vi.waitFor(() => expect(createRuntime).toHaveBeenCalledTimes(2));
+    expect(first.session.close).toHaveBeenCalledOnce();
+    expect(first.dispose).toHaveBeenCalledOnce();
+    expect(createRuntime).toHaveBeenLastCalledWith(expect.objectContaining({ resumeSession: "session-live" }));
+    await controller.dispose();
+  });
+
   it("reads bounded job output for the active desktop session", async () => {
     const runtime = fakeRuntime(() => undefined);
     const read = vi.fn(() => ({

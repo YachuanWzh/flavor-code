@@ -145,6 +145,12 @@ export const FlavorConfigSchema = z.object({
       isolation: z.literal("auto").default("auto"),
     })
     .prefault({}),
+  goal: z
+    .object({
+      maxRounds: z.number().int().positive().max(10_000).default(100),
+      maxStallStreak: z.number().int().positive().max(100).default(3),
+    })
+    .prefault({}),
   context: z
     .object({
       windowTokens: z.number().int().positive().default(200_000),

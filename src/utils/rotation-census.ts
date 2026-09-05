@@ -29,6 +29,9 @@ export interface RotationCensus {
     gcVerified: boolean;
     rssMb: number;
     externalMb: number;
+    arrayBuffersMb: number;
+    memoryLimitMb?: number;
+    rssRatio?: number;
   };
   holders: Record<string, RotationCensusHolder>;
 }
@@ -49,6 +52,9 @@ export function censusHeapBlock(reading: HeapReading): RotationCensus["heap"] {
     gcVerified: reading.gcVerified,
     rssMb: mb(usage.rss),
     externalMb: mb(usage.external),
+    arrayBuffersMb: mb(usage.arrayBuffers),
+    ...(reading.memoryLimit === undefined ? {} : { memoryLimitMb: mb(reading.memoryLimit) }),
+    ...(reading.rssRatio === undefined ? {} : { rssRatio: Number(reading.rssRatio.toFixed(3)) }),
   };
 }
 

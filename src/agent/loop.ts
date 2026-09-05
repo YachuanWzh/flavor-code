@@ -52,7 +52,10 @@ export function memoryPressureError(heapUsed: number, heapLimit: number): AgentE
 function currentMemoryPressure(): AgentError | undefined {
   const reading = verifiedHeapPressure(MEMORY_PRESSURE_HEAP_RATIO);
   if (reading === undefined) return undefined;
-  return memoryPressureError(reading.heapUsed, reading.heapLimit);
+  return memoryPressureError(reading.heapUsed, reading.heapLimit) ?? {
+    code: "memory_pressure",
+    message: `Process RSS reached ${Math.round((reading.rssRatio ?? 0) * 100)}% of the available memory limit; stopping before system OOM`,
+  };
 }
 
 export interface AgentLoopOptions {

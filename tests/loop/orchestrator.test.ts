@@ -298,6 +298,42 @@ describe("LoopOrchestrator", () => {
     expect(shared.states.at(-1)).toMatchObject({ status: "succeeded", budget: { cyclesUsed: 1 } });
   });
 
+  it("resumes pending verification without replaying a completed worker cycle", async () => {
+    const shared = new ResumablePersistence();
+    shared.states.push({
+      version: 1,
+      loopId: "loop-test",
+      goal: "fix tests",
+      workspace: "C:/work/project",
+      createdAt: "2026-07-15T00:00:00.000Z",
+      updatedAt: "2026-07-15T00:00:00.000Z",
+      status: "running",
+      config: { cycleStep: 20, tokenStep: 500_000, isolation: "auto" },
+      budget: { cyclesUsed: 0, inputTokens: 0, outputTokens: 0, cycleCheckpoint: 20, tokenCheckpoint: 500_000, approvals: [] },
+      cycles: [],
+      pendingCycle: {
+        cycle: 1,
+        startedAt: "2026-07-15T00:00:00.000Z",
+        inputTokens: 100,
+        outputTokens: 50,
+        workerText: "worker already finished",
+      },
+    });
+    let workerCalls = 0;
+    const resumed = fixture({
+      persistence: shared,
+      runWorker: () => { workerCalls += 1; return worker([]); },
+    });
+    const events = await collect(resumed.orchestrator.resume({ loopId: "loop-test", signal: new AbortController().signal }));
+    expect(workerCalls).toBe(0);
+    expect(events.at(-1)).toMatchObject({ type: "loop-terminal", status: "succeeded" });
+    expect(shared.states.at(-1)).toMatchObject({
+      status: "succeeded",
+      pendingCycle: null,
+      budget: { cyclesUsed: 1, inputTokens: 100, outputTokens: 50 },
+    });
+  });
+
   it("terminalizes a resume of a loop that is no longer running", async () => {
     const shared = new ResumablePersistence();
     const finished = fixture({ persistence: shared });
