@@ -1,4 +1,5 @@
-import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -163,5 +164,60 @@ describe("RSI artifact manifest (rsi.md E5, P0-04a)", () => {
     await expect(buildArtifactManifest(baseInput(fixture.root, { runtimeMode: "in-process" as never })))
       .rejects.toThrow();
     await expect(buildArtifactManifest(baseInput(fixture.root, { entries: [] }))).rejects.toThrow();
+  });
+
+  it("accepts a file whose name repeats its parent directory segment", async () => {
+    await mkdir(join(fixture.root, "same"), { recursive: true });
+    await writeFile(join(fixture.root, "same", "same"), "ok\n", "utf8");
+    const manifest = await buildArtifactManifest(baseInput(fixture.root, {
+      entries: [...BASE_ENTRIES, "same/same"],
+    }));
+    expect(manifest.files.map((file) => file.path)).toContain("same/same");
+    const frozen = await freezeArtifact({ store: fixture.store, root: fixture.root, manifest });
+    await expect(verifyArtifact({ store: fixture.store, artifactHash: frozen.artifactHash }))
+      .resolves.toEqual(manifest);
+  });
+
+  it("rejects a frozen subtree swapped for an out-of-tree junction with identical content", async () => {
+    const manifest = await buildArtifactManifest(baseInput(fixture.root));
+    const frozen = await freezeArtifact({ store: fixture.store, root: fixture.root, manifest });
+    const external = join(fixture.store, "external-src");
+    await mkdir(external, { recursive: true });
+    await writeFile(join(external, "index.ts"), "export const value = 1;\n", "utf8");
+    await writeFile(join(external, "helper.mjs"), "export const help = 2;\n", "utf8");
+    await rm(join(frozen.directory, "files", "src"), { recursive: true, force: true });
+    let linked = true;
+    try {
+      await symlink(external, join(frozen.directory, "files", "src"), process.platform === "win32" ? "junction" : "dir");
+    } catch {
+      linked = false; // platform without link privileges
+    }
+    if (!linked) return;
+    // Byte-level hashes would still pass; the physical boundary must not.
+    await expect(verifyArtifact({ store: fixture.store, artifactHash: frozen.artifactHash }))
+      .rejects.toThrow(/outside|symbolic link|link/);
+  });
+
+  it("rejects files smuggled into the frozen tree that the manifest does not list", async () => {
+    const manifest = await buildArtifactManifest(baseInput(fixture.root));
+    const frozen = await freezeArtifact({ store: fixture.store, root: fixture.root, manifest });
+    await writeFile(join(frozen.directory, "files", "extra.txt"), "not in the manifest\n", "utf8");
+    await expect(verifyArtifact({ store: fixture.store, artifactHash: frozen.artifactHash }))
+      .rejects.toThrow(/not listed in the manifest/);
+  });
+
+  it("uses one recursive canonical encoding for both JSON output and hashing", async () => {
+    const a = await buildArtifactManifest(baseInput(fixture.root, {
+      config: { mode: "strict", retries: 2, opts: { z: 1, a: { y: 2, b: 3 } } },
+    }));
+    const b = await buildArtifactManifest(baseInput(fixture.root, {
+      config: { retries: 2, opts: { a: { b: 3, y: 2 }, z: 1 }, mode: "strict" },
+    }));
+    expect(artifactManifestHash(a)).toBe(artifactManifestHash(b));
+    expect(canonicalArtifactManifestJson(a)).toBe(canonicalArtifactManifestJson(b));
+    // Cross-implementation recomputation: the hash IS sha256 over exactly
+    // the canonical bytes, no second serialization rule.
+    expect(createHash("sha256").update(canonicalArtifactManifestJson(a)).digest("hex"))
+      .toBe(artifactManifestHash(a));
   });
 });

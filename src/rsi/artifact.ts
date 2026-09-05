@@ -11,20 +11,22 @@
  * Path policy mirrors E5 step 2: entries are normalized to forward-relative
  * paths, and both the logical path and the physical (realpath-resolved) path
  * must stay inside the artifact root, rejecting `..`, drive-absolute paths,
- * symlinks, and Windows junctions before any bytes are read.
+ * symlinks, and Windows junctions before any bytes are read. `verifyArtifact`
+ * re-applies the same physical-chain check to the *stored* tree (a frozen
+ * subtree swapped for a junction after sealing is rejected even when the
+ * bytes hash identically) and requires the stored file set to match the
+ * manifest exactly. Hashing is defined as SHA-256 over the single canonical
+ * encoding produced by {@link canonicalArtifactManifestJson}, so any
+ * implementation that can reproduce those bytes reproduces the identity.
  */
 
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { z } from "zod";
 
-import { hashJson } from "../harness/journal.js";
-
 export const RSI_ARTIFACT_SCHEMA_VERSION = 1 as const;
-
-const FILE_ENTRY_KEYS = ["path", "sha256", "sizeBytes"] as const;
 
 const ArtifactFileEntrySchema = z.object({
   path: z.string().min(1),
@@ -92,33 +94,44 @@ function assertUniqueNormalizedPaths(entries: readonly string[]): string[] {
 }
 
 /**
+ * Assert that every path segment under `rootReal` forms a link-free chain of
+ * real directories (a symlinked or junctioned parent smuggles later segments
+ * out of the tree), ending in the expected file kind.
+ */
+async function checkPhysicalChain(rootReal: string, segments: readonly string[], final: "file" | "directory"): Promise<void> {
+  let walked = rootReal;
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index] as string;
+    const isLast = index === segments.length - 1;
+    walked = join(walked, segment);
+    const info = await lstat(walked).catch((error: unknown) => {
+      throw new Error(`Artifact path cannot be stat'ed (${segments.join("/")}): ${error instanceof Error ? error.message : String(error)}`);
+    });
+    if (info.isSymbolicLink()) throw new Error(`Artifact path is a symbolic link: ${segments.join("/")}`);
+    const physical = await realpath(walked);
+    if (!isWithin(rootReal, physical)) {
+      throw new Error(`Artifact path resolves outside the root through a reparse point (junction?): ${segments.join("/")}`);
+    }
+    if (isLast) {
+      if (final === "file" && !info.isFile()) throw new Error(`Artifact path is not a regular file: ${segments.join("/")}`);
+      if (final === "directory" && !info.isDirectory()) throw new Error(`Artifact path is not a directory: ${segments.join("/")}`);
+    } else if (!info.isDirectory()) {
+      throw new Error(`Artifact parent is not a directory: ${segments.join("/")}`);
+    }
+  }
+}
+
+/**
  * Verify one declared entry resolves to a regular non-link file inside the
  * canonical root, and read+hash its bytes.
  */
 async function hashArtifactFile(rootReal: string, normalized: string): Promise<ArtifactFileEntry> {
-  const logical = resolve(rootReal, ...normalized.split("/"));
+  const segments = normalized.split("/");
+  const logical = resolve(rootReal, ...segments);
   if (!isWithin(rootReal, logical)) {
     throw new Error(`Artifact entry resolves outside the root: ${normalized}`);
   }
-  // lstat must not follow links; every parent segment must also be link-free,
-  // because a symlinked directory smuggles later segments out of the root.
-  let walked = rootReal;
-  for (const segment of normalized.split("/")) {
-    walked = join(walked, segment);
-    const info = await lstat(walked).catch((error: unknown) => {
-      throw new Error(`Artifact entry cannot be stat'ed (${normalized}): ${error instanceof Error ? error.message : String(error)}`);
-    });
-    if (info.isSymbolicLink()) throw new Error(`Artifact entry is a symbolic link: ${normalized}`);
-    const physical = await realpath(walked);
-    if (!isWithin(rootReal, physical)) {
-      throw new Error(`Artifact entry resolves outside the root through a reparse point (junction?): ${normalized}`);
-    }
-    if (segment === normalized.split("/").at(-1)) {
-      if (!info.isFile()) throw new Error(`Artifact entry is not a regular file: ${normalized}`);
-    } else if (!info.isDirectory()) {
-      throw new Error(`Artifact parent is not a directory: ${normalized}`);
-    }
-  }
+  await checkPhysicalChain(rootReal, segments, "file");
   const bytes = await readFile(logical);
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   return { path: normalized, sha256, sizeBytes: bytes.length };
@@ -148,25 +161,51 @@ export async function buildArtifactManifest(input: BuildArtifactManifestInput): 
   });
 }
 
-/** Canonical (key-order-stable) serialization used for cross-implementation hashing. */
-export function canonicalArtifactManifestJson(manifest: ArtifactManifest): string {
-  const parsed = ArtifactManifestSchema.parse(manifest);
-  const orderedFiles = parsed.files.map((file) => Object.fromEntries(
-    FILE_ENTRY_KEYS.map((key) => [key, file[key]]),
-  ));
-  return JSON.stringify({
-    schemaVersion: parsed.schemaVersion,
-    files: orderedFiles,
-    runtimeMode: parsed.runtimeMode,
-    config: parsed.config,
-    stateSchemaVersion: parsed.stateSchemaVersion,
-    dependencyIds: parsed.dependencyIds,
-  });
+/**
+ * Recursively sort every object's keys (arrays stay order-sensitive) and
+ * reject values JSON cannot round-trip byte-for-byte.
+ */
+function canonicalJsonValue(value: unknown, pathLabel: string): unknown {
+  if (value === null) return null;
+  switch (typeof value) {
+    case "string":
+    case "boolean":
+      return value;
+    case "number":
+      if (!Number.isFinite(value)) throw new Error(`Manifest is not canonical-JSON safe at ${pathLabel}: non-finite number`);
+      return value;
+    case "undefined":
+    case "function":
+    case "bigint":
+    case "symbol":
+      throw new Error(`Manifest is not canonical-JSON safe at ${pathLabel}: ${typeof value}`);
+    default:
+      break;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item, index) => canonicalJsonValue(item, `${pathLabel}[${index}]`));
+  }
+  const source = value as Record<string, unknown>;
+  const target: Record<string, unknown> = {};
+  for (const key of Object.keys(source).sort()) {
+    target[key] = canonicalJsonValue(source[key], `${pathLabel}.${key}`);
+  }
+  return target;
 }
 
-/** The artifact identity: SHA-256 over the canonical manifest encoding. */
+/**
+ * The single canonical encoding of a manifest (E5 step 5): schema-validated,
+ * every object key sorted recursively, UTF-8 JSON with no whitespace. The
+ * manifest hash is defined over exactly these bytes.
+ */
+export function canonicalArtifactManifestJson(manifest: ArtifactManifest): string {
+  const parsed = ArtifactManifestSchema.parse(manifest);
+  return JSON.stringify(canonicalJsonValue(parsed, "$"));
+}
+
+/** The artifact identity: SHA-256 over the canonical manifest bytes. */
 export function artifactManifestHash(manifest: ArtifactManifest): string {
-  return hashJson(ArtifactManifestSchema.parse(manifest));
+  return createHash("sha256").update(canonicalArtifactManifestJson(manifest), "utf8").digest("hex");
 }
 
 export interface FreezeArtifactResult {
@@ -221,29 +260,58 @@ export async function freezeArtifact(input: {
   return { artifactHash, directory: target, manifest: input.manifest };
 }
 
-/** Re-hash stored bytes against the stored manifest; any drift rejects. */
+/**
+ * Re-hash stored bytes against the stored manifest; any drift rejects. The
+ * whole chain (artifact dir, manifest.json, files/) is link-checked first,
+ * each listed file re-passes the per-segment physical boundary check, and
+ * the stored file set must equal the manifest's exactly.
+ */
 export async function verifyArtifact(input: { store: string; artifactHash: string }): Promise<ArtifactManifest> {
   if (!/^[a-f0-9]{64}$/.test(input.artifactHash)) throw new Error("artifactHash must be a lowercase SHA-256 hex digest");
-  const root = resolve(input.store);
-  const directory = join(root, "artifacts", input.artifactHash);
-  // Defense in depth: the caller-provided hash is regex-bounded, so this
-  // cannot escape, but keep the containment assertion anyway.
-  if (!isWithin(await realpath(root), directory)) throw new Error("Artifact directory escapes the store");
-  const manifest = ArtifactManifestSchema.parse(JSON.parse(await readFile(join(directory, "manifest.json"), "utf8")) as unknown);
+  const rootReal = await realpath(resolve(input.store));
+  const directorySegments = ["artifacts", input.artifactHash];
+  await checkPhysicalChain(rootReal, directorySegments, "directory");
+  const manifestSegments = [...directorySegments, "manifest.json"];
+  await checkPhysicalChain(rootReal, manifestSegments, "file");
+  const manifest = ArtifactManifestSchema.parse(
+    JSON.parse(await readFile(join(rootReal, ...manifestSegments), "utf8")) as unknown,
+  );
   const hash = artifactManifestHash(manifest);
   if (hash !== input.artifactHash) {
     throw new Error(`Artifact manifest does not hash to its content-address (${hash} != ${input.artifactHash})`);
   }
+  const filesSegments = [...directorySegments, "files"];
+  await checkPhysicalChain(rootReal, filesSegments, "directory");
+  const filesRoot = join(rootReal, ...filesSegments);
   for (const file of manifest.files) {
-    const bytes = await readFile(join(directory, "files", ...file.path.split("/"))).catch(() => {
-      throw new Error(`Artifact file is missing from the frozen store: ${file.path}`);
+    // A subtree swapped for a junction after sealing must fail the chain
+    // check here even when the remote bytes hash identically.
+    const entry = await hashArtifactFile(filesRoot, file.path).catch((error: unknown) => {
+      if (error instanceof Error && /cannot be stat'ed/.test(error.message)) {
+        throw new Error(`Artifact file is missing from the frozen store: ${file.path}`);
+      }
+      throw error;
     });
-    const sha256 = createHash("sha256").update(bytes).digest("hex");
-    if (sha256 !== file.sha256 || bytes.length !== file.sizeBytes) {
+    if (entry.sha256 !== file.sha256 || entry.sizeBytes !== file.sizeBytes) {
       throw new Error(`Frozen artifact was tampered after sealing: ${file.path}`);
     }
   }
+  await assertNoUnlistedFiles(filesRoot, new Set(manifest.files.map((file) => file.path)), "");
   return manifest;
+}
+
+/** Every stored path must be covered by the manifest: no smuggled extras. */
+async function assertNoUnlistedFiles(base: string, listed: ReadonlySet<string>, relDir: string): Promise<void> {
+  for (const dirent of await readdir(join(base, relDir), { withFileTypes: true })) {
+    const rel = relDir.length > 0 ? `${relDir}/${dirent.name}` : dirent.name;
+    if (dirent.isSymbolicLink()) throw new Error(`Frozen tree contains a symbolic link: ${rel}`);
+    if (dirent.isDirectory()) {
+      await assertNoUnlistedFiles(base, listed, rel);
+      continue;
+    }
+    if (!dirent.isFile()) throw new Error(`Frozen tree contains a special file: ${rel}`);
+    if (!listed.has(rel)) throw new Error(`Frozen tree contains a file not listed in the manifest: ${rel}`);
+  }
 }
 
 function isWithin(root: string, target: string): boolean {
