@@ -40,6 +40,7 @@ export const RSI_CONTROL_EVENT_TYPES = [
   "promotion.committed",
   "rollback.started",
   "rollback.completed",
+  "tool_outcomes",
 ] as const;
 export type RsiControlEventType = (typeof RSI_CONTROL_EVENT_TYPES)[number];
 

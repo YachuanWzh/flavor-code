@@ -26,6 +26,9 @@ import { HOOK_EVENT_NAMES, type HookDecision, type HookEventName } from "./hooks
 import { createIncidentReporter } from "./incidents/reporter.js";
 import { createIslandControlServer, type IslandControlServer } from "./island/control-server.js";
 import { createEvolveService } from "./evolve/service.js";
+import { ToolOutcomeCollector } from "./rsi/observer.js";
+import { RsiControlStore } from "./rsi/store.js";
+import type { RsiToolTerminal } from "./rsi/types.js";
 import { initializeFlavor } from "./init/project.js";
 import { LoopOrchestrator, type LoopRuntimeEvent } from "./loop/orchestrator.js";
 import { GoalOrchestrator } from "./goal/orchestrator.js";
@@ -625,6 +628,39 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     },
   });
   tools.push(evolveService.toolDefinition());
+  // ─── RSI P0-02c: trusted runtime observation ───
+  // The ToolRuntime is the single choke point that produces tool terminals;
+  // `mode: off` emits nothing. Every other mode accumulates snapshots in a
+  // ToolOutcomeCollector and flushes them as durable `tool_outcomes` events
+  // to the control store (the control service in P0-03c owns reads).
+  const rsiOutcomes = config.rsi.mode === "off" ? undefined : new ToolOutcomeCollector();
+  const rsiLaunchId = randomUUID().slice(0, 8);
+  let rsiRunSeq = 0;
+  let rsiRunId = `run-${rsiLaunchId}-0`;
+  let rsiStore: RsiControlStore | undefined;
+  let rsiFlushSeq = 0;
+  const flushRsiOutcomes = async (): Promise<void> => {
+    if (rsiOutcomes === undefined) return;
+    const snapshot = rsiOutcomes.finalize();
+    if (snapshot.comparableCalls === 0 && snapshot.cancelled === 0 && snapshot.conflicts === 0) return;
+    try {
+      const outcomeSessionId = hookSessionId ?? "session-pending";
+      rsiStore ??= new RsiControlStore({ directory: join(workspace, ".flavor", "rsi", "control") });
+      rsiFlushSeq += 1;
+      await rsiStore.appendEvent({
+        type: "tool_outcomes",
+        idempotencyKey: `tool_outcomes:${outcomeSessionId}:${rsiFlushSeq}`,
+        payload: { sessionId: outcomeSessionId, runId: rsiRunId, snapshot },
+      });
+    } catch (error) {
+      emitOutput({ type: "notice", message: `[rsi] tool outcome flush failed: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  };
+  const rsiObserver = rsiOutcomes === undefined ? undefined : {
+    sessionId: () => hookSessionId ?? "session-pending",
+    runId: () => rsiRunId,
+    record: (terminal: RsiToolTerminal) => { rsiOutcomes.record(terminal); },
+  };
   let sleepScheduler: ProjectSleepScheduler | undefined;
   let collaborationClient: PalClientLike | undefined;
   let collaborationUnavailableDiagnostic: string | undefined;
@@ -1055,6 +1091,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       complete: (id, completed, error) => harnessJournal.completeModel(id, completed, error),
     },
     approve: resolveToolApproval,
+    ...(rsiObserver === undefined ? {} : { rsi: rsiObserver }),
   });
   harnessCreated = true;
   if (recovered !== undefined) harness.main.context.restore({
@@ -1450,9 +1487,12 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         complete: (id, completed, error) => harnessJournal.completeModel(id, completed, error),
       },
       approve: resolveToolApproval,
+      ...(rsiObserver === undefined ? {} : { rsi: rsiObserver }),
     });
     loopHarnessCreated = true;
     let runReason = "finished";
+    rsiRunSeq += 1;
+    rsiRunId = `run-${rsiLaunchId}-${rsiRunSeq}`;
     try {
       evolveService.beginRun();
       yield* loopHarness.main.loop.run({ prompt: input.prompt, signal: input.signal });
@@ -1470,6 +1510,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       throw error;
     } finally {
       await evolveService.endRun(runReason);
+      await flushRsiOutcomes();
       loopHarness.dispose();
       await loopExecutionEnvironment?.dispose();
     }
@@ -2203,6 +2244,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       if (ideSessionId !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "ide-end-session", ide.endSession(ideSessionId));
       if (executionEnvironment !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "execution-environment", executionEnvironment.dispose());
       if (islandControlServer !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "island-control", islandControlServer.close());
+      await flushRsiOutcomes();
       terminals.dispose();
       await boundedStep(stepTimeoutMs, diagnostics, "language-servers", lspManager.dispose());
       await boundedStep(stepTimeoutMs, diagnostics, "jobs", jobs.dispose());

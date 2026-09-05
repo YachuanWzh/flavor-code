@@ -39,6 +39,8 @@ export interface LocalHarnessOptions {
   loopMode?: boolean;
   afterToolSuccess?(tool: string, paths: readonly string[], input: unknown, output: unknown, context: import("../tools/types.js").ToolContext): Promise<readonly string[]>;
   toolJournal?: ToolRuntimeOptions["journal"];
+  /** RSI P0-02c trusted observation sink, forwarded to every ToolRuntime. */
+  rsi?: ToolRuntimeOptions["rsi"];
   permissionPolicy?: CompiledPermissionPolicy;
   modelJournal?: AgentLoopOptions["modelJournal"];
 }
@@ -212,6 +214,7 @@ export class LocalHarness {
         }),
       } : {}),
       ...(this.#options.toolJournal === undefined ? {} : { journal: this.#options.toolJournal }),
+      ...(this.#options.rsi === undefined ? {} : { rsi: this.#options.rsi }),
     });
     try {
       const tools = definitions.map(toModelTool);

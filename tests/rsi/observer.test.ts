@@ -1,6 +1,16 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
+
+import { HookBus } from "../../src/hooks/bus.js";
+import { PermissionEngine } from "../../src/permissions/engine.js";
 import { ToolOutcomeCollector } from "../../src/rsi/observer.js";
 import type { RsiToolOutcome, RsiToolTerminal } from "../../src/rsi/types.js";
+import { ToolRuntime } from "../../src/tools/runtime.js";
+import type { ToolDefinition } from "../../src/tools/types.js";
 
 function terminal(
   toolCallId: string,
@@ -92,5 +102,74 @@ describe("ToolOutcomeCollector (P0-02b / E2)", () => {
     expect(final.failureRate).toBe(1);
     expect(collector.snapshot().comparableCalls).toBe(0);
     expect(collector.snapshot().failureRate).toBeNull();
+  });
+});
+
+describe("ToolRuntime trusted-terminal wiring (P0-02c)", () => {
+  class AllowPermissions extends PermissionEngine {
+    override decide() {
+      return { decision: "allow" as const };
+    }
+  }
+
+  function wiringFixture() {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-rsi-wire-"));
+    const collector = new ToolOutcomeCollector();
+    const okTool: ToolDefinition<{ path: string }> = {
+      name: "Ok", description: "ok", inputSchema: z.object({ path: z.string() }),
+      paths: (input) => [input.path], execute: async () => "done",
+    };
+    const boomTool: ToolDefinition<{ path: string }> = {
+      name: "Boom", description: "boom", inputSchema: z.object({ path: z.string() }),
+      paths: (input) => [input.path], execute: async () => { throw new Error("tool exploded"); },
+    };
+    const runtime = new ToolRuntime({
+      tools: [okTool, boomTool],
+      hooks: new HookBus(),
+      permissions: new AllowPermissions({ workspace }),
+      rsi: { sessionId: () => "s-wire", runId: () => "r-wire", record: (t) => { collector.record(t); } },
+    });
+    return { workspace, collector, runtime };
+  }
+
+  it("records success, failure, cancellation, and unknown-tool terminals", async () => {
+    const { collector, runtime } = wiringFixture();
+    await expect(runtime.execute({ id: "c1", name: "Ok", input: { path: "x" } }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: true });
+    await expect(runtime.execute({ id: "c2", name: "Boom", input: { path: "x" } }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: false, error: { code: "tool_error" } });
+    const abort = new AbortController();
+    abort.abort("user pressed esc");
+    await expect(runtime.execute({ id: "c3", name: "Ok", input: { path: "x" } }, { agent: "main", signal: abort.signal }))
+      .resolves.toMatchObject({ ok: false, error: { code: "cancelled" } });
+    await expect(runtime.execute({ id: "c4", name: "Nope", input: {} }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: false, error: { code: "unknown_tool" } });
+
+    const snap = collector.snapshot();
+    expect(snap.success).toBe(1);
+    expect(snap.failure).toBe(2); // boom + unknown tool
+    expect(snap.cancelled).toBe(1);
+    expect(snap.comparableCalls).toBe(3);
+    expect(snap.evidenceComplete).toBe(true);
+  });
+
+  it("an observer fault never changes the tool's own result", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-rsi-wire-"));
+    const okTool: ToolDefinition<{ path: string }> = {
+      name: "Ok", description: "ok", inputSchema: z.object({ path: z.string() }),
+      paths: (input) => [input.path], execute: async () => "done",
+    };
+    const runtime = new ToolRuntime({
+      tools: [okTool],
+      hooks: new HookBus(),
+      permissions: new AllowPermissions({ workspace }),
+      rsi: {
+        sessionId: () => "s",
+        runId: () => "r",
+        record: () => { throw new Error("observer down"); },
+      },
+    });
+    await expect(runtime.execute({ id: "c1", name: "Ok", input: { path: "x" } }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: true, output: "done" });
   });
 });

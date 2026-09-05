@@ -5,6 +5,7 @@ import { z } from "zod";
 
 import type { HookBus } from "../hooks/bus.js";
 import { coerceByJsonSchema, jsonSchemaFromZod } from "../models/structured.js";
+import type { RsiToolOutcome, RsiToolTerminal } from "../rsi/types.js";
 import { type PermissionEngine, type PermissionRequest, getToolCategory, type ToolCategory } from "../permissions/engine.js";
 import type { PermissionClassifier } from "../permissions/classifier.js";
 import { getToolPresentation, type ToolCall, type ToolContext, type ToolDefinition, type ToolResult } from "./types.js";
@@ -34,6 +35,17 @@ export interface ToolRuntimeOptions {
     start(tool: string, input: unknown, retrySafe: boolean): string;
     complete(id: string, result: ToolResult): void;
     interrupt(id: string, reason: string): void;
+  };
+  /**
+   * RSI P0-02c trusted observation: the runtime is the single choke point
+   * where every tool call terminates, so it — never the model or a candidate —
+   * produces the terminal events. A sink fault must not change the tool's own
+   * result; identity getters keep events bound to the current session/run.
+   */
+  rsi?: {
+    sessionId(): string;
+    runId(): string;
+    record(terminal: RsiToolTerminal): void;
   };
 }
 
@@ -91,6 +103,7 @@ export class ToolRuntime {
   readonly #outputLimits: ToolOutputLimits;
   readonly #afterSuccess: ToolRuntimeOptions["afterSuccess"];
   readonly #journal: ToolRuntimeOptions["journal"];
+  readonly #rsi: ToolRuntimeOptions["rsi"];
   #turnOutputChars = 0;
   #disposed = false;
 
@@ -105,6 +118,7 @@ export class ToolRuntime {
     this.#outputLimits = { ...DEFAULT_TOOL_OUTPUT_LIMITS, ...options.outputLimits };
     this.#afterSuccess = options.afterSuccess;
     this.#journal = options.journal;
+    this.#rsi = options.rsi;
     validateOutputLimit("perToolChars", this.#outputLimits.perToolChars);
     validateOutputLimit("perTurnChars", this.#outputLimits.perTurnChars);
     this.#disposeSchemas = [
@@ -213,11 +227,38 @@ export class ToolRuntime {
     return this.validate({ ...call, input });
   }
 
+  /**
+   * Single terminal choke point: run the call, then hand the trusted RSI
+   * observer exactly one terminal per call. An observer fault is swallowed —
+   * observation must never change the tool's own result.
+   */
   async #execute(call: ToolCall, context: ToolContext): Promise<ToolResult> {
+    const toolCallId = call.id ?? randomUUID();
+    const result = await this.#run(call, context, toolCallId);
+    if (this.#rsi !== undefined) {
+      const outcome: RsiToolOutcome = result.ok
+        ? "success"
+        : (result.error?.code === "cancelled" ? "cancelled" : "failure");
+      try {
+        this.#rsi.record({
+          sessionId: this.#rsi.sessionId(),
+          runId: this.#rsi.runId(),
+          toolCallId,
+          tool: call.name,
+          outcome,
+        });
+      } catch {
+        // Observer faults are silently ignored here; they only mark evidence
+        // incomplete via the collector, never alter this call's result.
+      }
+    }
+    return result;
+  }
+
+  async #run(call: ToolCall, context: ToolContext, toolCallId: string): Promise<ToolResult> {
     const tool = this.#tools.get(call.name);
     if (tool === undefined) return { ok: false, error: { code: "unknown_tool", message: `Unknown tool: ${call.name}` } };
     const signal = context.signal ?? new AbortController().signal;
-    const toolCallId = call.id ?? randomUUID();
     if (tool.agents !== undefined && !tool.agents.includes(context.agent)) {
       return this.#fail(toolCallId, tool.name, call.input, context.agent, "permission_denied", `Tool ${tool.name} is not available to ${context.agent} agents`);
     }
