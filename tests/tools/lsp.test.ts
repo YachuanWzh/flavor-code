@@ -7,7 +7,17 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createLspTools, RealLspManager, type LspManager } from "../../src/tools/lsp.js";
 
 const roots: string[] = [];
-afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
+afterEach(async () => {
+  // The bundled tsserver releases its handles asynchronously, so on Windows a
+  // just-finished workspace can still be busy. Retry instead of failing the
+  // suite for a cleanup race that has nothing to do with the assertions.
+  await Promise.all(roots.splice(0).map((root) => rm(root, {
+    recursive: true,
+    force: true,
+    maxRetries: 20,
+    retryDelay: 100,
+  })));
+});
 
 function fakeManager(): LspManager {
   return {
