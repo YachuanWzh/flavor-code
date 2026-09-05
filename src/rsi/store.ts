@@ -42,6 +42,9 @@ export const RSI_CONTROL_EVENT_TYPES = [
   "rollback.completed",
   "tool_outcomes",
   "trial.reported",
+  "artifact.referenced",
+  "artifact.reference_released",
+  "artifact.lineage",
 ] as const;
 export type RsiControlEventType = (typeof RSI_CONTROL_EVENT_TYPES)[number];
 
