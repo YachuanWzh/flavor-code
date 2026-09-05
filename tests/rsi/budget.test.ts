@@ -46,7 +46,7 @@ describe("RsiBudgetLedger reserve/settle sequence (rsi.md E6, P0-03b)", () => {
     expect(b).toMatchObject({ granted: false, reason: "exceeds_daily_limit" });
 
     const settled = await harness.ledger.settle({ jobId: "A", consumed: 30 });
-    expect(settled).toEqual({ released: 40, consumed: 30 });
+    expect(settled).toMatchObject({ released: 40, consumed: 30, status: "settled" });
 
     const bRetry = await harness.ledger.reserve({ jobId: "B", amount: 50, idempotencyKey: "b-2" });
     expect(bRetry.granted).toBe(true);
@@ -66,7 +66,7 @@ describe("RsiBudgetLedger reserve/settle sequence (rsi.md E6, P0-03b)", () => {
     expect(summary.unsettledJobs).toEqual(["A"]);
   });
 
-  it("replays an unknown-usage reservation as fully charged after a restart", async () => {
+  it("replays an unknown-usage reservation as a conservative hold after a restart", async () => {
     await harness.ledger.reserve({ jobId: "A", amount: 70, idempotencyKey: "a-1" });
 
     // Simulated crash + restart: fresh instances over the same directory.
@@ -79,10 +79,79 @@ describe("RsiBudgetLedger reserve/settle sequence (rsi.md E6, P0-03b)", () => {
     const refused = await reopened.reserve({ jobId: "B", amount: 40, idempotencyKey: "b-1" });
     expect(refused.granted).toBe(false);
 
-    // Reconciliation without confirmed usage keeps the full amount charged.
-    const settled = await reopened.settle({ jobId: "A" });
-    expect(settled).toEqual({ released: 0, consumed: 70 });
-    expect((await reopened.summary()).dayConsumed).toBe(70);
+    // Reconciliation without confirmed usage keeps the full amount on hold.
+    const held = await reopened.settle({ jobId: "A" });
+    expect(held).toMatchObject({ status: "awaiting_reconciliation", released: 0, consumed: 70 });
+    const after = await reopened.summary();
+    expect(after.outstanding).toBe(70);
+    expect(after.unsettledJobs).toEqual(["A"]);
+    expect(after.reconciliationJobs).toEqual(["A"]);
+    expect(after.dayConsumed).toBe(0);
+  });
+
+  it("rejects a reserve whose idempotency key was already used by a different event type", async () => {
+    // Store-level dedup spans *all* events; a cross-type key collision must
+    // never surface as "granted" without a durable budget.reserved record.
+    await harness.store.appendEvent({
+      type: "candidate.proposed",
+      idempotencyKey: "shared-1",
+      payload: { proposalId: "p-1" },
+    });
+    await expect(
+      harness.ledger.reserve({ jobId: "A", amount: 100, idempotencyKey: "shared-1" }),
+    ).rejects.toThrow(/idempotency key/i);
+    const summary = await harness.ledger.summary();
+    expect(summary.outstanding).toBe(0);
+    expect(summary.unsettledJobs).toEqual([]);
+  });
+
+  it("rejects a retry that reuses an idempotency key with different request content", async () => {
+    await harness.ledger.reserve({ jobId: "A", amount: 70, idempotencyKey: "a-1" });
+    await expect(
+      harness.ledger.reserve({ jobId: "B", amount: 20, idempotencyKey: "a-1" }),
+    ).rejects.toThrow(/idempotency key/i);
+    await expect(
+      harness.ledger.reserve({ jobId: "A", amount: 80, idempotencyKey: "a-1" }),
+    ).rejects.toThrow(/idempotency key/i);
+    const summary = await harness.ledger.summary();
+    expect(summary.outstanding).toBe(70);
+  });
+
+  it("keeps unknown usage as a pending-reconciliation hold until real cost is reported", async () => {
+    await harness.ledger.reserve({ jobId: "A", amount: 70, idempotencyKey: "a-1" });
+    const held = await harness.ledger.settle({ jobId: "A" });
+    expect(held).toMatchObject({ status: "awaiting_reconciliation", released: 0, consumed: 70 });
+
+    // Conservative hold blocks new spend on the reservation day ...
+    const refused = await harness.ledger.reserve({ jobId: "B", amount: 40, idempotencyKey: "b-1" });
+    expect(refused.granted).toBe(false);
+    // ... and across the day boundary: rollover must not launder the debt.
+    harness.clock.nowMs = DAY_TWO_MS;
+    const refusedNextDay = await harness.ledger.reserve({ jobId: "C", amount: 60, idempotencyKey: "c-1" });
+    expect(refusedNextDay.granted).toBe(false);
+
+    // Late-reported actual usage closes the hold and releases the remainder.
+    const closed = await harness.ledger.settle({ jobId: "A", consumed: 30 });
+    expect(closed).toEqual({ status: "settled", released: 40, consumed: 30 });
+    const summary = await harness.ledger.summary();
+    expect(summary.outstanding).toBe(0);
+    expect(summary.unsettledJobs).toEqual([]);
+    expect(summary.reconciliationJobs).toEqual([]);
+    // Consumption is attributed to the original reservation day, not the close day.
+    expect(summary.dayConsumed).toBe(0);
+    expect(summary.totalConsumed).toBe(30);
+
+    const retry = await harness.ledger.reserve({ jobId: "B", amount: 50, idempotencyKey: "b-2" });
+    expect(retry.granted).toBe(true);
+  });
+
+  it("repeated unknown settles stay pending; closing a settled job is rejected", async () => {
+    await harness.ledger.reserve({ jobId: "A", amount: 50, idempotencyKey: "a-1" });
+    expect((await harness.ledger.settle({ jobId: "A" })).status).toBe("awaiting_reconciliation");
+    expect((await harness.ledger.settle({ jobId: "A" })).status).toBe("awaiting_reconciliation");
+    expect((await harness.ledger.summary()).outstanding).toBe(50);
+    await harness.ledger.settle({ jobId: "A", consumed: 10 });
+    await expect(harness.ledger.settle({ jobId: "A", consumed: 10 })).rejects.toThrow(/No outstanding/i);
   });
 
   it("two racing ledgers cannot oversell the same remaining budget", async () => {
@@ -114,7 +183,7 @@ describe("RsiBudgetLedger reserve/settle sequence (rsi.md E6, P0-03b)", () => {
     await expect(harness.ledger.settle({ jobId: "A", consumed: 60 })).rejects.toThrow(/exceeds reserved allowance/);
     await expect(
       harness.ledger.reserve({ jobId: "A", amount: 10, idempotencyKey: "a-2" }),
-    ).rejects.toThrow(/already holds an open reservation/);
+    ).rejects.toThrow(/already holds an outstanding reservation/);
   });
 
   it("settled usage stays attributed to its reservation day while new days re-open capacity", async () => {

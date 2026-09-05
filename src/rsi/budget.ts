@@ -9,9 +9,13 @@
  * - Reserve-before-spend: a job may only start after its full worst-case
  *   allowance (input + max output + grader share) is atomically reserved.
  * - Settlement releases only the unused remainder; an *unknown* final usage
- *   keeps the whole reservation charged (conservative accounting).
+ *   moves the reservation to a pending-reconciliation hold: the full amount
+ *   stays outstanding (blocking new spend, even across day rollover) until a
+ *   later settlement reports the confirmed consumption.
  * - Idempotency: the same `idempotencyKey` returns the original decision and
- *   never reserves (or bills) twice — including refusals.
+ *   never reserves (or bills) twice — including refusals. The ledger's dedup
+ *   spans *all* event types, so a key already used by another request kind,
+ *   or reused with different job/amount content, is a conflict, not a grant.
  * - The cap is a fixed daily window keyed by `YYYY-MM-DD`; outstanding
  *   reservations always count against the limit regardless of their day, so
  *   rollover cannot launder a debt.
@@ -33,12 +37,20 @@ const ReservePayloadSchema = z.object({
 
 const SettlePayloadSchema = z.object({
   jobId: z.string().min(1),
-  /** null = usage unknown after a crash; the full reservation stays charged. */
+  /** null = usage unknown after a crash; the reservation enters the hold. */
   consumed: z.number().int().nonnegative().nullable(),
 }).strict();
 
 export type BudgetReservePayload = z.infer<typeof ReservePayloadSchema>;
 export type BudgetSettlePayload = z.infer<typeof SettlePayloadSchema>;
+
+/** Thrown when an idempotency key collides with a different request. */
+export class RsiIdempotencyConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RsiIdempotencyConflictError";
+  }
+}
 
 export interface BudgetReserveResult {
   granted: boolean;
@@ -49,16 +61,29 @@ export interface BudgetReserveResult {
   reason: string | null;
 }
 
+export type BudgetSettleStatus = "settled" | "awaiting_reconciliation";
+
+export interface BudgetSettleResult {
+  status: BudgetSettleStatus;
+  /** Allowance released back to the cap by this call. */
+  released: number;
+  /** Amount still charged/held after this call. */
+  consumed: number;
+}
+
 export interface BudgetSummary {
   limit: number;
   day: string;
-  /** Reserved-and-not-yet-settled allowances (crash-unknown usage stays here). */
+  /** Reserved-and-not-yet-settled allowances (pending holds stay here). */
   outstanding: number;
   /** Settled consumption attributed to `day`. */
   dayConsumed: number;
   /** Settled consumption across all days. */
   totalConsumed: number;
+  /** Jobs whose reservation is not closed yet (open or pending reconciliation). */
   unsettledJobs: string[];
+  /** Subset of `unsettledJobs` held conservatively for unknown usage. */
+  reconciliationJobs: string[];
 }
 
 export interface RsiBudgetLedgerOptions {
@@ -93,9 +118,19 @@ export class RsiBudgetLedger {
       throw new Error("reserve amount must be a positive integer");
     }
     return this.#store.transact(async (tx) => {
-      const prior = await findKey(tx, input.idempotencyKey);
+      const prior = await findKeyRecord(tx, input.idempotencyKey);
       if (prior !== undefined) {
+        if (prior.type !== "budget.reserved") {
+          throw new RsiIdempotencyConflictError(
+            `Idempotency key ${JSON.stringify(input.idempotencyKey)} was already used by a ${prior.type} event; derive keys from the request identity`,
+          );
+        }
         const payload = ReservePayloadSchema.parse(prior.payload);
+        if (payload.jobId !== input.jobId || payload.amount !== input.amount) {
+          throw new RsiIdempotencyConflictError(
+            `Idempotency key ${JSON.stringify(input.idempotencyKey)} was already used by a different reservation (${payload.jobId}/${payload.amount})`,
+          );
+        }
         return {
           granted: payload.granted,
           jobId: payload.jobId,
@@ -107,52 +142,66 @@ export class RsiBudgetLedger {
       const day = this.#day();
       const state = await deriveState(tx);
       const existing = state.reservations.get(input.jobId);
-      if (existing !== undefined && existing.open) {
-        throw new Error(`Job ${input.jobId} already holds an open reservation; settle it before reserving again`);
+      if (existing !== undefined && existing.status !== "settled") {
+        throw new Error(`Job ${input.jobId} already holds an outstanding reservation; settle it before reserving again`);
       }
       const outstandingOther = sumOutstanding(state, input.jobId);
       const dayConsumed = state.dayConsumed.get(day) ?? 0;
-      if (outstandingOther + dayConsumed + input.amount > this.#limit) {
-        await tx.appendEvent({
-          type: "budget.reserved",
-          idempotencyKey: input.idempotencyKey,
-          payload: { jobId: input.jobId, amount: input.amount, day, granted: false, reason: "exceeds_daily_limit" } satisfies BudgetReservePayload,
-        });
-        return { granted: false, jobId: input.jobId, amount: input.amount, duplicate: false, reason: "exceeds_daily_limit" };
+      const granted = outstandingOther + dayConsumed + input.amount <= this.#limit;
+      const payload = {
+        jobId: input.jobId,
+        amount: input.amount,
+        day,
+        granted,
+        reason: granted ? null : "exceeds_daily_limit",
+      } satisfies BudgetReservePayload;
+      const appended = await tx.appendEvent({ type: "budget.reserved", idempotencyKey: input.idempotencyKey, payload });
+      if (appended.duplicate) {
+        // The store dedupes by key across all events; if it skipped our
+        // append, the earlier record was not the reservation we intended.
+        throw new RsiIdempotencyConflictError(
+          `Budget reservation append for key ${JSON.stringify(input.idempotencyKey)} was deduplicated against an unrelated event`,
+        );
       }
-      await tx.appendEvent({
-        type: "budget.reserved",
-        idempotencyKey: input.idempotencyKey,
-        payload: { jobId: input.jobId, amount: input.amount, day, granted: true, reason: null } satisfies BudgetReservePayload,
-      });
-      return { granted: true, jobId: input.jobId, amount: input.amount, duplicate: false, reason: null };
+      return { granted, jobId: input.jobId, amount: input.amount, duplicate: false, reason: payload.reason };
     });
   }
 
   /**
-   * Settle a finished job. Known usage releases the unused reservation;
-   * omitting `consumed` (crash / unconfirmed proxy accounting) keeps the full
-   * amount charged until the reconciliation owner decides otherwise.
+   * Settle a finished job. Known usage closes the reservation and releases
+   * the unused remainder; omitting `consumed` (crash / unconfirmed proxy
+   * accounting) puts the reservation into a pending-reconciliation hold that
+   * keeps the full amount outstanding until a later settle reports the real
+   * usage. Repeated unknown settles on a held job are idempotent no-ops.
    */
-  async settle(input: { jobId: string; consumed?: number }): Promise<{ released: number; consumed: number }> {
+  async settle(input: { jobId: string; consumed?: number }): Promise<BudgetSettleResult> {
     if (input.consumed !== undefined && (!Number.isSafeInteger(input.consumed) || input.consumed < 0)) {
       throw new Error("consumed must be a non-negative integer when provided");
     }
     return this.#store.transact(async (tx) => {
       const state = await deriveState(tx);
       const reservation = state.reservations.get(input.jobId);
-      if (reservation === undefined || !reservation.open) {
+      if (reservation === undefined || reservation.status === "settled") {
         throw new Error(`No outstanding budget reservation for job ${input.jobId}`);
       }
-      const consumed = input.consumed ?? reservation.amount;
-      if (consumed > reservation.amount) {
-        throw new Error(`Settled usage ${consumed} exceeds reserved allowance ${reservation.amount} for job ${input.jobId}`);
+      if (input.consumed === undefined) {
+        if (reservation.status === "disputed") {
+          return { status: "awaiting_reconciliation", released: 0, consumed: reservation.amount };
+        }
+        await tx.appendEvent({
+          type: "budget.settled",
+          payload: { jobId: input.jobId, consumed: null } satisfies BudgetSettlePayload,
+        });
+        return { status: "awaiting_reconciliation", released: 0, consumed: reservation.amount };
+      }
+      if (input.consumed > reservation.amount) {
+        throw new Error(`Settled usage ${input.consumed} exceeds reserved allowance ${reservation.amount} for job ${input.jobId}`);
       }
       await tx.appendEvent({
         type: "budget.settled",
-        payload: { jobId: input.jobId, consumed: input.consumed ?? null } satisfies BudgetSettlePayload,
+        payload: { jobId: input.jobId, consumed: input.consumed } satisfies BudgetSettlePayload,
       });
-      return { released: reservation.amount - consumed, consumed };
+      return { status: "settled", released: reservation.amount - input.consumed, consumed: input.consumed };
     });
   }
 
@@ -163,10 +212,12 @@ export class RsiBudgetLedger {
       const day = this.#day();
       let outstanding = 0;
       const unsettledJobs: string[] = [];
+      const reconciliationJobs: string[] = [];
       for (const [jobId, reservation] of state.reservations) {
-        if (reservation.open) {
+        if (reservation.status !== "settled") {
           outstanding += reservation.amount;
           unsettledJobs.push(jobId);
+          if (reservation.status === "disputed") reconciliationJobs.push(jobId);
         }
       }
       let totalConsumed = 0;
@@ -178,6 +229,7 @@ export class RsiBudgetLedger {
         dayConsumed: state.dayConsumed.get(day) ?? 0,
         totalConsumed,
         unsettledJobs,
+        reconciliationJobs,
       };
     });
   }
@@ -187,52 +239,68 @@ export class RsiBudgetLedger {
   }
 }
 
-async function findKey(tx: RsiControlTransaction, idempotencyKey: string) {
+/**
+ * Locate any event carrying this idempotencyKey. Must mirror the store's
+ * dedup scope (all event types), otherwise a key collision with a foreign
+ * event would make `appendEvent` skip the write while `reserve` still
+ * reported a grant.
+ */
+async function findKeyRecord(tx: RsiControlTransaction, idempotencyKey: string) {
   const events = await tx.listEvents();
-  return events.find((record) => record.type === "budget.reserved" && record.idempotencyKey === idempotencyKey);
+  return events.find((record) => record.idempotencyKey === idempotencyKey);
 }
 
+type ReservationStatus = "open" | "disputed" | "settled";
+
 interface DerivedBudgetState {
-  reservations: Map<string, { amount: number; day: string; open: boolean }>;
+  reservations: Map<string, { amount: number; day: string; status: ReservationStatus }>;
   dayConsumed: Map<string, number>;
 }
 
 /** Replay the event log; must run inside a store transaction (lock held). */
 async function deriveState(tx: RsiControlTransaction): Promise<DerivedBudgetState> {
   const events = await tx.listEvents();
-  const reservations = new Map<string, { amount: number; day: string; open: boolean }>();
+  const reservations = new Map<string, { amount: number; day: string; status: ReservationStatus }>();
   const dayConsumed = new Map<string, number>();
   for (const record of events) {
     if (record.type === "budget.reserved") {
       const payload = ReservePayloadSchema.parse(record.payload);
       if (payload.granted) {
         const existing = reservations.get(payload.jobId);
-        if (existing !== undefined && existing.open) {
-          throw new Error(`Job ${payload.jobId} already holds an open reservation; settle it before reserving again`);
+        if (existing !== undefined && existing.status !== "settled") {
+          throw new Error(`Job ${payload.jobId} already holds an outstanding reservation; settle it before reserving again`);
         }
-        reservations.set(payload.jobId, { amount: payload.amount, day: payload.day, open: true });
+        reservations.set(payload.jobId, { amount: payload.amount, day: payload.day, status: "open" });
       }
     } else if (record.type === "budget.settled") {
       const payload = SettlePayloadSchema.parse(record.payload);
       const reservation = reservations.get(payload.jobId);
-      if (reservation === undefined || !reservation.open) {
-        throw new Error(`budget.settled without an open reservation for job ${payload.jobId}`);
+      if (reservation === undefined || reservation.status === "settled") {
+        throw new Error(`budget.settled without an outstanding reservation for job ${payload.jobId}`);
       }
-      reservation.open = false;
-      const consumed = payload.consumed ?? reservation.amount;
-      dayConsumed.set(reservation.day, (dayConsumed.get(reservation.day) ?? 0) + consumed);
+      if (payload.consumed === null) {
+        // Unknown usage: conservative hold. Nothing is billed to any day and
+        // the full amount stays outstanding until a settle reports real usage.
+        reservation.status = "disputed";
+        continue;
+      }
+      if (payload.consumed > reservation.amount) {
+        throw new Error(`budget.settled usage ${payload.consumed} exceeds reserved allowance ${reservation.amount} for job ${payload.jobId}`);
+      }
+      reservation.status = "settled";
+      dayConsumed.set(reservation.day, (dayConsumed.get(reservation.day) ?? 0) + payload.consumed);
     }
   }
   return { reservations, dayConsumed };
 }
 
 function sumOutstanding(
-  state: { reservations: Map<string, { amount: number; day: string; open: boolean }> },
+  state: { reservations: Map<string, { amount: number; day: string; status: ReservationStatus }> },
   excludeJobId: string,
 ): number {
   let total = 0;
   for (const [jobId, reservation] of state.reservations) {
-    if (reservation.open && jobId !== excludeJobId) total += reservation.amount;
+    if (reservation.status !== "settled" && jobId !== excludeJobId) total += reservation.amount;
   }
   return total;
 }
