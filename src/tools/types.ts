@@ -91,9 +91,9 @@ export function withToolPresentation<T extends object>(output: T, presentation: 
   return output;
 }
 
-export function getToolPresentation(output: unknown): FileChangePresentation | undefined {
+export function getToolPresentation(output: unknown): ToolPresentation | undefined {
   return typeof output === "object" && output !== null
-    ? (output as PresentedOutput)[TOOL_PRESENTATION] as FileChangePresentation | undefined
+    ? (output as PresentedOutput)[TOOL_PRESENTATION]
     : undefined;
 }
 

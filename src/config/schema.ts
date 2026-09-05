@@ -132,15 +132,15 @@ export const FlavorConfigSchema = z.object({
     .prefault({}),
   maxIterations: z
     .object({
-      main: z.number().int().min(10).max(500).default(80),
-      subagent: z.number().int().min(10).max(200).default(40),
+      main: z.number().int().min(10).max(500).default(300),
+      subagent: z.number().int().min(10).max(200).default(100),
       softLimitFactor: z.number().min(0.5).max(1.0).default(0.8),
-      extendBy: z.number().int().min(5).max(100).default(20),
+      extendBy: z.number().int().min(5).max(100).default(50),
     })
     .prefault({}),
   loop: z
     .object({
-      maxCycles: z.number().int().positive().max(10_000).default(20),
+      maxCycles: z.number().int().positive().max(10_000).default(100),
       maxTokens: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(500_000),
       isolation: z.literal("auto").default("auto"),
     })

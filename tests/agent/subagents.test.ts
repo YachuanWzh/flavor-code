@@ -430,6 +430,28 @@ describe("LocalHarness", () => {
     harness.dispose();
   });
 
+  it("propagates iteration budget options from config to main and subagent loops", () => {
+    const hooks = new HookBus();
+    const adapter: ModelAdapter = { async *stream() { yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } }; } };
+    const registry = new ModelRegistry().register("fake", adapter);
+    const harness = new LocalHarness({
+      registry, hooks, workspace: process.cwd(), mainModelId: "fake:main", subagentModelId: "fake:child", tools: [],
+      createContext: () => contextFixture(hooks),
+      maxIterationsMain: 300,
+      maxIterationsSubagent: 100,
+      softLimitFactor: 0.8,
+      extendIterations: 50,
+    });
+    const child = harness.createSubagent(node("budget-child"));
+    expect(harness.main.loop.maxIterations).toBe(300);
+    expect(harness.main.loop.softLimitFactor).toBe(0.8);
+    expect(harness.main.loop.extendIterations).toBe(50);
+    expect(child.loop.maxIterations).toBe(100);
+    expect(child.loop.extendIterations).toBe(50);
+    child.dispose();
+    harness.dispose();
+  });
+
   it("creates isolated cheaper subagents without Task and with bubble permissions", async () => {
     const hooks = new HookBus();
     const adapter: ModelAdapter = { async *stream() { yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } }; } };

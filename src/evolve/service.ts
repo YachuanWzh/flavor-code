@@ -562,10 +562,12 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
           "kind=prompt_rule instead stores a concise guardrail rule (from `implementation`) that is injected into future " +
           "system prompts and closes the suggestion. Use when the model proposes a concrete fix for a suggestion in the system prompt.",
         inputSchema,
-        paths: () => [],
-        execute: async (input) => {
+        paths: (input) => [join(workspace, ".flavor", "evolve"), ...((input as { kind?: string }).kind === "prompt_rule" ? [] : [join(workspace, ".flavor", "plugins")])],
+        execute: async (input, signal) => {
+          signal.throwIfAborted();
           const { suggestionId, implementation, kind } = input as { suggestionId: string; implementation: string; kind?: "plugin" | "prompt_rule" };
           const suggestions = await openWithTrends(100);
+          signal.throwIfAborted();
           const suggestion = suggestions.find((item) => item.id === suggestionId);
           if (suggestion === undefined) throw new Error(`No open suggestion with id "${suggestionId}".`);
 

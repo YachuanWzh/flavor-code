@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,6 +40,34 @@ function fixture(decision: "allow" | "deny" | "ask" = "allow") {
 }
 
 describe("ToolRuntime", () => {
+  it("keeps output bounded when overflow persistence fails after successful execution", async () => {
+    const f = fixture();
+    writeFileSync(join(f.workspace, ".flavor"), "not a directory");
+    const runtime = new ToolRuntime({ tools: [{ ...f.tool, execute: async () => "x".repeat(100) }], hooks: f.hooks, permissions: f.permissions, workspace: f.workspace, outputLimits: { perToolChars: 10 } });
+    const result = await runtime.execute({ name: "Test", input: { path: "x" } }, { agent: "main" });
+    expect(result).toMatchObject({ ok: true, output: { truncated: true, previewChars: 10, storageError: expect.stringContaining("Tool succeeded") } });
+    expect(result.output).not.toHaveProperty("savedTo");
+  });
+  it("keeps successful execution successful when presentation and context callbacks fail", async () => {
+    const f = fixture();
+    const tool = { ...f.tool, presentResult: () => { throw new Error("UI failed"); } };
+    const runtime = new ToolRuntime({ tools: [tool], hooks: f.hooks, permissions: f.permissions,
+      afterSuccess: async () => { throw new Error("context failed"); } });
+    const result = await runtime.execute({ name: "Test", input: { path: "x" } }, { agent: "main" });
+    expect(result).toMatchObject({ ok: true, output: "done" });
+    expect(result.additionalContext?.join("\n")).toContain("UI failed");
+    expect(result.additionalContext?.join("\n")).toContain("context failed");
+    expect(f.calls.filter((value) => value === "execute")).toHaveLength(1);
+  });
+
+  it("enforces role restrictions and disposal before invoking tools", async () => {
+    const f = fixture();
+    const runtime = new ToolRuntime({ tools: [{ ...f.tool, agents: ["main"] }], hooks: f.hooks, permissions: f.permissions });
+    await expect(runtime.execute({ name: "Test", input: { path: "x" } }, { agent: "subagent" })).resolves.toMatchObject({ ok: false, error: { code: "permission_denied" } });
+    runtime.dispose();
+    await expect(runtime.execute({ name: "Test", input: { path: "x" } }, { agent: "main" })).resolves.toMatchObject({ ok: false, error: { code: "runtime_disposed" } });
+    expect(f.calls).not.toContain("execute");
+  });
   it("normalizes weak provider argument shapes inside the runtime before execution", async () => {
     const f = fixture();
     let received: unknown;

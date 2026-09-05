@@ -50,10 +50,15 @@ export function createSkillResourceTool(
     name: "SkillResource",
     description: "Read a bounded resource explicitly referenced by a discovered skill; scripts are returned as data and never executed",
     inputSchema: SkillResourceInput,
+    readOnly: true,
     paths: () => [],
     execute: async (input, signal) => {
       signal.throwIfAborted();
-      const skill = (await registry.discover()).find((candidate) => candidate.name === input.skill);
+      const requested = input.skill.trim();
+      const alias = requested.includes(":") ? requested.slice(requested.lastIndexOf(":") + 1) : requested;
+      const discovered = await registry.discover();
+      const skill = discovered.find((candidate) => candidate.name === requested)
+        ?? discovered.find((candidate) => candidate.name === alias);
       if (skill === undefined) throw new Error(`Unknown skill: ${input.skill}`);
       const capability = await registry.resolveResource(skill, input.reference);
       const content = await registry.readResource(capability);

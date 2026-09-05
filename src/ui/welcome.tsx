@@ -24,9 +24,9 @@ export function WelcomeCard({
 }: WelcomeCardProps): React.JSX.Element {
   const wide = Math.max(1, Math.floor(columns)) >= WIDE_WELCOME_COLUMNS;
   const updateHint = updateTo === undefined ? null : (
-    <Text color="yellowBright" wrap="truncate-end">
+    <Text color="yellowBright" wrap="wrap">
       {"▲ "}Update available: v{packageVersion()} {"\u2192"} v{updateTo}
-      {" \u00b7 run: flavor update"}
+      {"\nRun: flavor update"}
     </Text>
   );
 

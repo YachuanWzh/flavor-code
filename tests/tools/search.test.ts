@@ -80,6 +80,48 @@ describe("search tools", () => {
     }
   });
 
+  it("restricts a file path to that file in both backends", async () => {
+    const root = fixture();
+    const signal = new AbortController().signal;
+    for (const forceNode of [false, true]) {
+      const result = await createGrepTool(root, { forceNode }).execute({ pattern: "needle", path: "src/a.ts" }, signal) as SearchResult<GrepMatch>;
+      expect(result.matches.length).toBeGreaterThan(0);
+      expect([...new Set(result.matches.map((match) => match.path))]).toEqual(["src/a.ts"]);
+    }
+  });
+
+  it("supports literal Markdown and regex punctuation in both backends", async () => {
+    const root = fixture();
+    const text = "[更新公告 2026-09-04](./CHANGELOG/beta.1.md) $x + * ? { \\";
+    writeFileSync(join(root, "README.md"), `${text}\n`);
+    const signal = new AbortController().signal;
+    for (const forceNode of [false, true]) {
+      const tool = createGrepTool(root, { forceNode });
+      const input = tool.inputSchema.parse({ path: "README.md", pattern: text, fixedStrings: "true" });
+      const result = await tool.execute(input, signal) as SearchResult<GrepMatch>;
+      expect(result.matches).toEqual([{ path: "README.md", line: 1, column: 1, text, before: [], after: [] }]);
+      expect(await tool.execute({ path: "README.md", pattern: "absent" }, signal)).toEqual({ matches: [], truncated: false });
+    }
+  });
+
+  it("honors filters and ignore rules for explicit file paths", async () => {
+    const root = fixture();
+    const signal = new AbortController().signal;
+    for (const forceNode of [false, true]) {
+      const tool = createGrepTool(root, { forceNode });
+      for (const input of [
+        { path: "src/a.ts", glob: "**/*.md" },
+        { path: "src/a.ts", fileType: "md" as const },
+        { path: "ignored/secret.ts" },
+      ]) {
+        expect(await tool.execute({ ...input, pattern: "needle" }, signal)).toEqual({ matches: [], truncated: false });
+      }
+      const result = await tool.execute({ path: "ignored/secret.ts", pattern: "needle", includeIgnored: true }, signal) as SearchResult<GrepMatch>;
+      expect(result.matches.map((match) => match.path)).toEqual(["ignored/secret.ts"]);
+      await expect(tool.execute({ path: "missing.md", pattern: "needle" }, signal)).rejects.toThrow("Search path does not exist");
+    }
+  });
+
   it("keeps regex, glob, context, and limits in parity", async () => {
     const root = fixture();
     const input = { pattern: "needle\\s+(one|two)", glob: "**/*.ts", context: 1, limit: 1 };

@@ -132,11 +132,11 @@ export function createD2cTools(workspace: string, options: D2cToolOptions = {}):
     description:
       "Import a Pixso HTML design export for D2C (design-to-code) comparison. Copies the export directory into .flavor/d2c/<task>/design/. The task name must be lowercase letters, digits and dashes.",
     inputSchema: D2cImportInput,
-    paths: (input) => [input.exportDir],
+    paths: (input) => [resolve(workspace, input.exportDir), resolve(workspace, ".flavor", "d2c", input.task)],
     summarize: (input) => `${input.task} ← ${input.exportDir}`,
     execute: async (input, signal) => {
       signal.throwIfAborted();
-      const manifest = await importDesign(workspace, input.task, input.exportDir);
+      const manifest = await importDesign(workspace, input.task, resolve(workspace, input.exportDir));
       return {
         task: input.task,
         entryHtml: manifest.entryHtml,
@@ -152,7 +152,7 @@ export function createD2cTools(workspace: string, options: D2cToolOptions = {}):
     description:
       "Compare an imported Pixso design against the rendered implementation and score visual fidelity. The implementation is a frontend project directory (Vue or React, Vite-based; dependencies are installed and the dev server is started and stopped automatically), a localhost URL of an already running server, or a workspace-relative .html file. Returns a similarity score plus structured offsets, color deviations, font mismatches and missing or extra elements, and stores the report with screenshots under .flavor/d2c/<task>/reports/. Requires the desktop app for rendering.",
     inputSchema: D2cCompareInput,
-    paths: (input) => [input.implementation],
+    paths: (input) => [resolve(workspace, ".flavor", "d2c", input.task), ...(/^https?:\/\//iu.test(input.implementation) ? [] : [resolve(workspace, input.implementation)])],
     summarize: (input) => input.task,
     execute: async (input, signal) => {
       signal.throwIfAborted();

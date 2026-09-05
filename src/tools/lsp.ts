@@ -7,6 +7,8 @@ import { z } from "zod";
 
 import { prepareSpawnInvocation } from "../utils/spawn-executable.js";
 import type { ToolDefinition } from "./types.js";
+import { waitWithSignal } from "../utils/abort.js";
+import { terminateProcessTree } from "../utils/process-tree.js";
 
 // ---------------------------------------------------------------------------
 // LSP protocol types (subset used by the tools)
@@ -18,7 +20,7 @@ interface LspLocation {
 }
 
 interface LspHover {
-  contents: { kind: string; language?: string; value: string } | string;
+  contents: { kind?: string; language?: string; value: string } | string | Array<string | { language: string; value: string }>;
   range?: { start: { line: number; character: number }; end: { line: number; character: number } };
 }
 
@@ -71,7 +73,6 @@ type PendingCall = {
   reject(error: Error): void;
 };
 
-const LSP_START_TIMEOUT_MS = 30_000;
 const LSP_REQUEST_TIMEOUT_MS = 15_000;
 
 class LspConnection {
@@ -83,6 +84,7 @@ class LspConnection {
   #nextId = 1;
   #disposed = false;
   #initError: Error | undefined;
+  #shutdownPromise: Promise<void> | undefined;
 
   constructor(command: string, args: string[], cwd: string) {
     const invocation = prepareSpawnInvocation(command, args, { cwd });
@@ -90,6 +92,7 @@ class LspConnection {
       cwd,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
+      detached: process.platform !== "win32",
       ...(invocation.windowsVerbatimArguments === undefined ? {} : { windowsVerbatimArguments: invocation.windowsVerbatimArguments }),
     });
 
@@ -102,10 +105,13 @@ class LspConnection {
       const reason = signal !== null
         ? `LSP server "${command}" exited with signal ${signal}`
         : `LSP server "${command}" exited with code ${code}`;
-      this.#rejectAll(new Error(reason));
+      this.#initError = new Error(reason);
+      this.#rejectAll(this.#initError);
     });
 
     this.#process.stdout!.on("data", (chunk: Buffer) => this.#buffer.feed(chunk, this.#onMessage));
+    this.#process.stderr!.resume(); // Servers can log enough to fill the pipe.
+    this.#process.stdin!.on("error", (error) => { this.#initError = error; this.#rejectAll(error); });
   }
 
   async initialize(rootUri: string): Promise<void> {
@@ -131,24 +137,26 @@ class LspConnection {
     this.#notify("initialized", {});
   }
 
-  async findReferences(uri: string, line: number, character: number): Promise<LspLocation[]> {
+  async findReferences(uri: string, line: number, character: number, signal?: AbortSignal): Promise<LspLocation[]> {
+    signal?.throwIfAborted();
     await this.#syncDocument(uri);
     const result = await this.#request("textDocument/references", {
       textDocument: { uri },
       position: { line, character },
       context: { includeDeclaration: false },
-    });
+    }, signal);
     if (result === null || result === undefined) return [];
     if (!Array.isArray(result)) return [];
     return result.filter(isLocation);
   }
 
-  async hover(uri: string, line: number, character: number): Promise<LspHover | null> {
+  async hover(uri: string, line: number, character: number, signal?: AbortSignal): Promise<LspHover | null> {
+    signal?.throwIfAborted();
     await this.#syncDocument(uri);
     const result = await this.#request("textDocument/hover", {
       textDocument: { uri },
       position: { line, character },
-    });
+    }, signal);
     if (result === null || result === undefined) return null;
     if (typeof result === "object" && "contents" in (result as Record<string, unknown>)) {
       return result as LspHover;
@@ -156,46 +164,59 @@ class LspConnection {
     return null;
   }
 
-  async diagnostics(uri: string): Promise<LspDiagnostic[]> {
+  async diagnostics(uri: string, signal?: AbortSignal): Promise<LspDiagnostic[]> {
+    signal?.throwIfAborted();
     await this.#syncDocument(uri);
     const result = await this.#request("textDocument/diagnostic", {
       textDocument: { uri },
-    });
+    }, signal);
     if (result === null || result === undefined) return [];
     const items = (result as Record<string, unknown>)?.items ?? result;
     if (!Array.isArray(items)) return [];
     return items.filter(isDiagnostic);
   }
 
-  async shutdown(): Promise<void> {
-    if (this.#disposed) return;
+  shutdown(): Promise<void> {
+    if (this.#shutdownPromise !== undefined) return this.#shutdownPromise;
     this.#disposed = true;
-    try { await this.#request("shutdown", null); } catch { /* best effort */ }
-    this.#notify("exit", null);
-    this.#process.kill();
+    // Dispose must also work for a server that never completed initialization.
     this.#rejectAll(new Error("LSP connection disposed"));
+    this.#shutdownPromise = (async () => {
+      await terminateProcessTree(this.#process.pid);
+      this.#process.stdin!.destroy();
+      this.#process.stdout!.destroy();
+      this.#process.stderr!.destroy();
+    })();
+    return this.#shutdownPromise;
   }
 
   // -- JSON-RPC core -------------------------------------------------------
 
-  async #request(method: string, params: unknown): Promise<unknown> {
+  async #request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
     if (this.#disposed) throw new Error("LSP connection disposed");
+    if (this.#initError !== undefined) throw this.#initError;
+    signal?.throwIfAborted();
     const id = this.#nextId++;
     const request: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
 
-    const timeout = AbortSignal.timeout(LSP_REQUEST_TIMEOUT_MS);
+    let timer: NodeJS.Timeout | undefined;
+    let onAbort: (() => void) | undefined;
     const promise = new Promise<unknown>((resolve, reject) => {
       this.#pending.set(id, { resolve, reject });
-      timeout.addEventListener("abort", () => {
-        if (this.#pending.has(id)) {
-          this.#pending.delete(id);
-          reject(new Error(`LSP request "${method}" timed out after ${LSP_REQUEST_TIMEOUT_MS}ms`));
-        }
-      }, { once: true });
+      timer = setTimeout(() => reject(new Error(`LSP request "${method}" timed out after ${LSP_REQUEST_TIMEOUT_MS}ms`)), LSP_REQUEST_TIMEOUT_MS);
+      timer.unref();
+      onAbort = () => {
+        try { this.#notify("$/cancelRequest", { id }); } catch { /* The server may already have exited. */ }
+        reject(signal?.reason);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
     });
-
-    this.#send(request);
-    return promise;
+    try { this.#send(request); return await promise; }
+    finally {
+      if (timer !== undefined) clearTimeout(timer);
+      if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
+      this.#pending.delete(id);
+    }
   }
 
   #notify(method: string, params: unknown): void {
@@ -213,6 +234,7 @@ class LspConnection {
     let parsed: JsonRpcResponse | JsonRpcNotification | JsonRpcServerRequest;
     try { parsed = JSON.parse(body) as JsonRpcResponse | JsonRpcNotification | JsonRpcServerRequest; }
     catch { return; }
+    if (typeof parsed !== "object" || parsed === null) return;
     if ("method" in parsed) {
       if ("id" in parsed) this.#handleServerRequest(parsed);
       return; // notification from server, ignore
@@ -364,13 +386,15 @@ const KNOWN_SERVERS: LanguageServerConfig[] = [
 ];
 
 export interface LspManager {
-  findReferences(uri: string, line: number, character: number): Promise<LspLocation[]>;
-  hover(uri: string, line: number, character: number): Promise<LspHover | null>;
-  diagnostics(uri: string): Promise<LspDiagnostic[]>;
-  dispose(): void;
+  findReferences(uri: string, line: number, character: number, signal?: AbortSignal): Promise<LspLocation[]>;
+  hover(uri: string, line: number, character: number, signal?: AbortSignal): Promise<LspHover | null>;
+  diagnostics(uri: string, signal?: AbortSignal): Promise<LspDiagnostic[]>;
+  dispose(): void | Promise<void>;
 }
 
 export class RealLspManager implements LspManager {
+  #disposed = false;
+  #disposal: Promise<void> | undefined;
   readonly #workspace: string;
   readonly #connections = new Map<string, LspConnection>();
   readonly #pendingStarts = new Map<string, Promise<LspConnection>>();
@@ -383,30 +407,34 @@ export class RealLspManager implements LspManager {
     this.#onStatus = options.onStatus;
   }
 
-  dispose(): void {
-    for (const [, connection] of this.#connections) {
-      connection.shutdown().catch(() => {});
-    }
+  dispose(): Promise<void> {
+    if (this.#disposal !== undefined) return this.#disposal;
+    this.#disposed = true;
+    const shutdowns = [...this.#connections.values()].map((connection) => connection.shutdown());
+    // Starts already in flight observe #disposed and shut themselves down.
+    shutdowns.push(...[...this.#pendingStarts.values()].map(async (start) => { const connection = await start; await connection.shutdown(); }));
     this.#connections.clear();
     this.#pendingStarts.clear();
+    this.#disposal = Promise.allSettled(shutdowns).then(() => undefined);
+    return this.#disposal;
   }
 
-  async findReferences(uri: string, line: number, character: number): Promise<LspLocation[]> {
-    const connection = await this.#getConnection(uri);
-    if (connection === undefined) return [];
-    return connection.findReferences(uri, line, character);
+  async findReferences(uri: string, line: number, character: number, signal?: AbortSignal): Promise<LspLocation[]> {
+    signal?.throwIfAborted();
+    const connection = await waitWithSignal(this.#getConnection(uri), signal);
+    return connection.findReferences(uri, line, character, signal);
   }
 
-  async hover(uri: string, line: number, character: number): Promise<LspHover | null> {
-    const connection = await this.#getConnection(uri);
-    if (connection === undefined) return null;
-    return connection.hover(uri, line, character);
+  async hover(uri: string, line: number, character: number, signal?: AbortSignal): Promise<LspHover | null> {
+    signal?.throwIfAborted();
+    const connection = await waitWithSignal(this.#getConnection(uri), signal);
+    return connection.hover(uri, line, character, signal);
   }
 
-  async diagnostics(uri: string): Promise<LspDiagnostic[]> {
-    const connection = await this.#getConnection(uri);
-    if (connection === undefined) return [];
-    return connection.diagnostics(uri);
+  async diagnostics(uri: string, signal?: AbortSignal): Promise<LspDiagnostic[]> {
+    signal?.throwIfAborted();
+    const connection = await waitWithSignal(this.#getConnection(uri), signal);
+    return connection.diagnostics(uri, signal);
   }
 
   #languageForUri(uri: string): string | undefined {
@@ -423,25 +451,27 @@ export class RealLspManager implements LspManager {
     return undefined;
   }
 
-  async #getConnection(uri: string): Promise<LspConnection | undefined> {
+  async #getConnection(uri: string): Promise<LspConnection> {
+    if (this.#disposed) throw new Error("LSP manager is disposed");
     const language = this.#languageForUri(uri);
-    if (language === undefined) return undefined;
+    if (language === undefined) throw new Error(`No language server configured for ${uri}; use Read/Grep or the project compiler`);
     const existing = this.#connections.get(language);
     if (existing !== undefined) return existing;
     const pending = this.#pendingStarts.get(language);
     if (pending !== undefined) return pending;
 
     const config = this.#serverConfigs.find((c) => c.language === language);
-    if (config === undefined) return undefined;
+    if (config === undefined) throw new Error(`No language server configured for ${language}`);
 
     // Only start if the project has the root file for this language
     const hasRoot = config.rootFiles.some((file) => existsSync(resolve(this.#workspace, file)));
-    if (!hasRoot) return undefined;
+    if (!hasRoot) throw new Error(`Cannot start ${language} language server: workspace needs ${config.rootFiles.join(" or ")}`);
 
     const startPromise = this.#startServer(config);
     this.#pendingStarts.set(language, startPromise);
     try {
       const connection = await startPromise;
+      if (this.#disposed) { await connection.shutdown(); throw new Error("LSP manager is disposed"); }
       this.#connections.set(language, connection);
       return connection;
     } finally {
@@ -460,6 +490,7 @@ export class RealLspManager implements LspManager {
       await connection.initialize(rootUri);
       this.#onStatus?.(`${config.language} Language Server ready (${config.command})`);
     } catch (error) {
+      await connection.shutdown();
       this.#onStatus?.(`${config.language} Language Server failed: ${error instanceof Error ? error.message : String(error)}`);
       throw error;
     }
@@ -473,14 +504,14 @@ export class RealLspManager implements LspManager {
 
 const LspFindRefsInput = z.object({
   file: z.string().min(1),
-  line: z.coerce.number().int().nonnegative(),
-  character: z.coerce.number().int().nonnegative(),
+  line: z.coerce.number().int().nonnegative().describe("Zero-based line number (first line is 0)."),
+  character: z.coerce.number().int().nonnegative().describe("Zero-based UTF-16 character offset."),
 });
 
 const LspHoverInput = z.object({
   file: z.string().min(1),
-  line: z.coerce.number().int().nonnegative(),
-  character: z.coerce.number().int().nonnegative(),
+  line: z.coerce.number().int().nonnegative().describe("Zero-based line number (first line is 0)."),
+  character: z.coerce.number().int().nonnegative().describe("Zero-based UTF-16 character offset."),
 });
 
 const LspDiagnosticsInput = z.object({
@@ -517,10 +548,11 @@ export function createLspTools(workspace: string, options: LspToolOptions = {}):
     inputSchema: LspFindRefsInput,
     paths: (input) => [guard(input.file)],
     summarize: (input) => `${basename(input.file)}:${input.line}:${input.character}${langTag(input.file)}`,
-    execute: async (input, _signal) => {
+    execute: async (input, signal) => {
+      signal.throwIfAborted();
       const path = guard(input.file);
       const uri = toUri(path);
-      const refs = await manager.findReferences(uri, input.line, input.character);
+      const refs = await waitWithSignal(manager.findReferences(uri, input.line, input.character, signal), signal);
       if (refs.length === 0) return `No references found at ${input.file}:${input.line}:${input.character}`;
       return refs.map((loc) => {
         const filePath = uriToPath(loc.uri);
@@ -535,14 +567,14 @@ export function createLspTools(workspace: string, options: LspToolOptions = {}):
     inputSchema: LspHoverInput,
     paths: (input) => [guard(input.file)],
     summarize: (input) => `${basename(input.file)}:${input.line}:${input.character}${langTag(input.file)}`,
-    execute: async (input, _signal) => {
+    execute: async (input, signal) => {
+      signal.throwIfAborted();
       const path = guard(input.file);
       const uri = toUri(path);
-      const info = await manager.hover(uri, input.line, input.character);
+      const info = await waitWithSignal(manager.hover(uri, input.line, input.character, signal), signal);
       if (info === null) return `No hover information at ${input.file}:${input.line}:${input.character}`;
-      const contents = typeof info.contents === "string"
-        ? info.contents
-        : info.contents.value;
+      const parts = Array.isArray(info.contents) ? info.contents : [info.contents];
+      const contents = parts.map((part) => typeof part === "string" ? part : part.value).join("\n\n");
       return contents;
     },
   };
@@ -553,10 +585,11 @@ export function createLspTools(workspace: string, options: LspToolOptions = {}):
     inputSchema: LspDiagnosticsInput,
     paths: (input) => [guard(input.file)],
     summarize: (input) => `${basename(input.file)}${langTag(input.file)}`,
-    execute: async (input, _signal) => {
+    execute: async (input, signal) => {
+      signal.throwIfAborted();
       const path = guard(input.file);
       const uri = toUri(path);
-      const diags = await manager.diagnostics(uri);
+      const diags = await waitWithSignal(manager.diagnostics(uri, signal), signal);
       if (diags.length === 0) return `No diagnostics for ${input.file}`;
       return diags.map((d) => {
         const severity = severityLabel(d.severity);
@@ -578,6 +611,9 @@ function languageIdForPath(filePath: string): string {
     case ".tsx": return "typescriptreact";
     case ".mts": return "typescript";
     case ".cts": return "typescript";
+    case ".py": case ".pyi": case ".pyx": return "python";
+    case ".rs": return "rust";
+    case ".go": return "go";
     default: return "typescript";
   }
 }
@@ -590,7 +626,7 @@ function isWithin(root: string, candidate: string): boolean {
 function uriToPath(uri: string): string {
   try {
     const url = new URL(uri);
-    if (url.protocol === "file:") return decodeURIComponent(url.pathname);
+    if (url.protocol === "file:") return fileURLToPath(url);
   } catch { /* fall through */ }
   return uri;
 }

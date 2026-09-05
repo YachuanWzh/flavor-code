@@ -21,6 +21,21 @@ class FakePty implements PtyLike {
 }
 
 describe("TerminalService", () => {
+  it("rejects writes to exited sessions and cleans up PTYs when job registration fails", () => {
+    const root = mkdtempSync(join(tmpdir(), "flavor-terminal-"));
+    const backend = new FakePty();
+    const service = new TerminalService(root, { factory: () => backend });
+    const opened = service.open({ owner: "main" });
+    backend.exit({ exitCode: 0 });
+    expect(() => service.write(opened.id, "main", "echo x")).toThrow(/exited/);
+    expect(backend.writes).toEqual([]);
+    service.dispose();
+    const jobs = new JobRegistry({ maxJobs: 1 });
+    jobs.create({ kind: "shell", owner: "main", label: "busy" });
+    const failing = new TerminalService(root, { jobs, factory: () => backend });
+    expect(() => failing.open({ owner: "main" })).toThrow(/limit/);
+    expect(backend.killed).toBe(true);
+  });
   it("keeps an interactive PTY alive across writes and cursor reads", () => {
     const root = mkdtempSync(join(tmpdir(), "flavor-terminal-"));
     const jobs = new JobRegistry();
@@ -63,6 +78,7 @@ describe("TerminalService", () => {
     const opened = await open.execute({}, signal, context) as { id: string };
     backend.data("interactive output\n");
     const result = await read.execute({ id: opened.id }, signal, context);
+    expect(JSON.parse(read.renderForModel!(result, { id: opened.id }))).toMatchObject({ id: opened.id, cursor: 19, state: "running", output: "interactive output\n" });
 
     expect(open.presentResult?.(opened, {})).toMatchObject({ kind: "terminal", variant: "terminal", state: "running" });
     expect(read.presentResult?.(result, { id: opened.id })).toMatchObject({

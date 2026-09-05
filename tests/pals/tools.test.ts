@@ -47,6 +47,13 @@ function tool(client: PalClientLike, name: string) {
 }
 
 describe("model-facing pals tools", () => {
+  it("does not send when cancelled during target lookup", async () => {
+    const client = fakeClient();
+    const controller = new AbortController();
+    client.list = vi.fn(async () => { controller.abort(new Error("cancelled")); return [presence(B, "api")]; });
+    await expect(tool(client, "PalSend").execute({ target: "api", message: "hello" }, controller.signal)).rejects.toThrow("cancelled");
+    expect(client.sendChat).not.toHaveBeenCalled();
+  });
   it("redacts every outbound content field and enforces one cumulative UTF-8 budget", async () => {
     const client = fakeClient();
     const secret = "sk-live-secret";

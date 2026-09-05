@@ -48,6 +48,7 @@ export class TerminalService {
     this.#factory = options.factory ?? defaultFactory;
     this.#jobs = options.jobs;
     this.#maxOutputChars = options.maxOutputChars ?? 200_000;
+    if (!Number.isSafeInteger(this.#maxOutputChars) || this.#maxOutputChars <= 0) throw new Error("maxOutputChars must be a positive integer");
   }
 
   open(input: { owner: string; cwd?: string; shell?: string; args?: string[]; columns?: number; rows?: number }): TerminalSnapshot {
@@ -63,7 +64,9 @@ export class TerminalService {
       id, owner: input.owner, shell, cwd, state: "running", createdAt: new Date().toISOString(),
       pty, output: "", outputStart: 0, outputChars: 0, truncated: false, disposables: [],
     };
-    const job = this.#jobs?.create({ kind: "terminal", owner: input.owner, label: shell, cancel: () => this.close(id, input.owner) });
+    let job: JobHandle | undefined;
+    try { job = this.#jobs?.create({ kind: "terminal", owner: input.owner, label: shell, cancel: () => this.close(id, input.owner) }); }
+    catch (error) { pty.kill(); throw error; }
     if (job !== undefined) { jobId = job.id; record.jobId = job.id; record.job = job; }
     record.disposables.push(pty.onData((data) => {
       record.output += data;
@@ -85,8 +88,8 @@ export class TerminalService {
     return { ...snapshot(record), ...(jobId === undefined ? {} : { jobId }) };
   }
 
-  write(id: string, owner: string, data: string): void { this.#owned(id, owner).pty.write(data); }
-  resize(id: string, owner: string, columns: number, rows: number): void { this.#owned(id, owner).pty.resize(columns, rows); }
+  write(id: string, owner: string, data: string): void { this.#running(id, owner).pty.write(data); }
+  resize(id: string, owner: string, columns: number, rows: number): void { this.#running(id, owner).pty.resize(columns, rows); }
 
   read(id: string, owner: string, cursor = 0): TerminalReadResult {
     const record = this.#owned(id, owner);
@@ -117,6 +120,12 @@ export class TerminalService {
     const record = this.#sessions.get(id);
     if (record === undefined) throw new Error(`Unknown terminal: ${id}`);
     if (record.owner !== owner) throw new Error("Terminal owner mismatch");
+    return record;
+  }
+
+  #running(id: string, owner: string): TerminalRecord {
+    const record = this.#owned(id, owner);
+    if (record.state !== "running") throw new Error(`Terminal ${id} is ${record.state}; use TerminalOpen to start a new session`);
     return record;
   }
 }

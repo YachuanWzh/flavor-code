@@ -19,8 +19,12 @@ const ReadInput = z.object({
   force: z.union([z.boolean(), z.string().refine((value) => value === "true" || value === "false")]).nullable().optional(),
 });
 const WriteInput = z.object({ path: z.string().min(1), content: z.string() });
-const EditInput = z.object({ path: z.string().min(1), oldText: z.string().min(1), newText: z.string() });
-const ApplyPatchInput = z.object({ patch: z.string().min(1) });
+const EditInput = z.object({
+  path: z.string().min(1),
+  oldText: z.string().min(1).describe("Copy exact current file text from Read, without displayed line numbers or diff prefixes. Include enough context for one unique match."),
+  newText: z.string(),
+});
+const ApplyPatchInput = z.object({ patch: z.string().min(1).describe("One-file unified diff with --- a/path, +++ b/path and @@ hunk headers. Use /dev/null as the old path to create a file.") });
 
 export interface ReadFileHandle {
   read(buffer: Buffer, offset: number, length: number, position: number | null): Promise<{ bytesRead: number }>;
@@ -93,9 +97,9 @@ export function createReadTool(workspace: string, options: ReadToolOptions = {})
       if (isBinary(contents)) throw new Error("Cannot read binary file as text");
       // Trim to a UTF-8 character boundary so the returned text never ends
       // mid-character; the byte count may sit up to 3 bytes below windowBytes.
-      const textEnd = utf8SafeEnd(contents, windowBytes);
+      const textEnd = contents.length > windowBytes ? utf8SafeEnd(contents, windowBytes) : contents.length;
       const truncated = contents.length > windowBytes;
-      const text = contents.subarray(0, textEnd).toString("utf8").replaceAll("\r\n", "\n");
+      const text = decodeFileText(contents.subarray(0, textEnd)).replaceAll("\r\n", "\n");
       options.observations?.set(path, versionOfStat(info));
       const lines = text.split("\n");
       if (lines.at(-1) === "") lines.pop();
@@ -178,7 +182,7 @@ export function createEditTool(workspace: string, options: FileMutationOptions =
   const guard = createPathGuard(workspace);
   return {
     name: "Edit",
-    description: "Replace one unique exact text match",
+    description: "Replace one unique exact text match, accepting LF or CRLF input. Read the file before editing; after a mismatch, re-read with force=true and copy the current text instead of retrying the same oldText.",
     inputSchema: EditInput,
     paths: (input) => [guard.lexical(input.path)],
     execute: async (input, signal) => {
@@ -192,14 +196,14 @@ export function createEditTool(workspace: string, options: FileMutationOptions =
       const expected = await expectedMutationVersion(path, options.observations);
       const contents = await readText(path);
       const hasCRLF = contents.includes("\r\n");
-      const norm = (s: string): string => hasCRLF ? s.replace(/\r\n/g, "\n") : s;
+      const norm = (s: string): string => s.replace(/\r\n/g, "\n");
       const contentsLF = norm(contents);
       const oldTextLF = norm(input.oldText);
       const newTextLF = norm(input.newText);
       const first = contentsLF.indexOf(oldTextLF);
-      const second = first < 0 ? -1 : contentsLF.indexOf(oldTextLF, first + oldTextLF.length);
+      const second = first < 0 ? -1 : contentsLF.indexOf(oldTextLF, first + 1);
       if (first < 0 || second >= 0) {
-        const diagnosis = buildEditDiagnosis(contentsLF, oldTextLF, first, second);
+        const diagnosis = buildEditDiagnosis(contentsLF, oldTextLF, second);
         throw new Error(diagnosis);
       }
       const updatedLF = contentsLF.slice(0, first) + newTextLF + contentsLF.slice(first + oldTextLF.length);
@@ -220,7 +224,7 @@ export function createApplyPatchTool(workspace: string, options: FileMutationOpt
   const guard = createPathGuard(workspace);
   return {
     name: "ApplyPatch",
-    description: "Apply a workspace-limited unified diff, relocating hunks only by unique exact context",
+    description: "Apply a single-file workspace-limited unified diff, relocating hunks only by unique exact context. Submit separate calls for multiple files.",
     inputSchema: ApplyPatchInput,
     paths: (input) => parsePatch(input.patch).map((file) => guard.lexical(file.path)),
     execute: async (input, signal) => {
@@ -315,9 +319,16 @@ async function atomicWrite(path: string, content: string, signal: AbortSignal, e
   abortIfNeeded(signal);
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${randomUUID()}.tmp`;
+  let mode: number | undefined;
+  try { mode = (await stat(path)).mode & 0o777; }
+  catch (error) { if (!isMissing(error)) throw error; }
   try {
     const handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
-    try { await handle.writeFile(content, "utf8"); await handle.sync(); }
+    try {
+      await handle.writeFile(content, "utf8");
+      if (mode !== undefined) await handle.chmod(mode);
+      await handle.sync();
+    }
     finally { await handle.close(); }
     abortIfNeeded(signal);
     if (expectedVersion !== undefined && await fileVersion(path) !== expectedVersion) {
@@ -332,7 +343,12 @@ async function atomicWrite(path: string, content: string, signal: AbortSignal, e
 async function readText(path: string): Promise<string> {
   const contents = await readFile(path);
   if (isBinary(contents)) throw new Error("Cannot edit binary file as text");
-  return contents.toString("utf8");
+  return decodeFileText(contents);
+}
+
+function decodeFileText(contents: Uint8Array): string {
+  try { return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(contents); }
+  catch { throw new Error("File is not valid UTF-8 text. Convert its encoding before using Read/Edit/ApplyPatch to avoid corrupting its contents."); }
 }
 
 const ABSENT_VERSION = "absent";
@@ -574,11 +590,12 @@ function patchPath(header: string): string {
   return raw.startsWith("a/") || raw.startsWith("b/") ? raw.slice(2) : raw;
 }
 
-function buildEditDiagnosis(contentsLF: string, oldTextLF: string, first: number, second: number): string {
+function buildEditDiagnosis(contentsLF: string, oldTextLF: string, second: number): string {
   let diagnosis = "oldText must match exactly once";
   if (second >= 0) {
-    const count = contentsLF.split(oldTextLF).length - 1;
-    diagnosis += ` — matched ${count} times in the file`;
+    let count = 0;
+    for (let index = contentsLF.indexOf(oldTextLF); index >= 0; index = contentsLF.indexOf(oldTextLF, index + 1)) count += 1;
+    diagnosis += ` — matched ${count} times in the file. No changes made. Include more surrounding text to select one occurrence.`;
     return diagnosis;
   }
   // Find the best partial match: longest line in oldText that appears in the file.
@@ -610,7 +627,7 @@ function buildEditDiagnosis(contentsLF: string, oldTextLF: string, first: number
     const fileSnippet = fileLines.slice(0, 5).map((l, i) => `  ${String(i + 1).padStart(4)}: ${l.length > 80 ? l.slice(0, 80) + "…" : l}`).join("\n");
     diagnosis += `\nCould not locate oldText. First lines of oldText:\n${snippet}\nFirst lines of file:\n${fileSnippet}`;
   }
-  return diagnosis;
+  return `${diagnosis}\nNo changes made. Use Read with force=true to retrieve current text, or Grep with fixedStrings=true to locate it. Copy oldText exactly without line-number prefixes; do not repeat the same failed edit.`;
 }
 
 function applyHunks(original: string, hunks: readonly PatchHunk[]): AppliedHunks {

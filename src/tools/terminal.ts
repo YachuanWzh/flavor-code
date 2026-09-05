@@ -46,7 +46,7 @@ export function createTerminalTools(terminals: TerminalService, workspace = proc
       name: "TerminalRead", description: "Read output produced by a persistent terminal since a cursor",
       inputSchema: ReadInput, paths: () => [],
       execute: async (input, _signal, context) => terminals.read(input.id, owner(context), input.cursor ?? 0),
-      renderForModel: (output) => (output as { output: string }).output,
+      renderForModel: (output) => JSON.stringify(output),
       presentResult: (output) => {
         const result = output as { id: string; output: string; state: "running" | "exited" | "closed"; exitCode?: number; truncated: boolean };
         return {

@@ -72,6 +72,15 @@ describe("createD2cTools", () => {
 });
 
 describe("D2cImport", () => {
+  it("resolves export directories against the workspace and declares output paths", async () => {
+    const workspace = await tempDir();
+    await mkdir(join(workspace, "export"));
+    await writeFile(join(workspace, "export", "index.html"), "<html></html>");
+    const tool = requireTool(workspace, "D2cImport");
+    expect(tool.paths({ task: "relative", exportDir: "export" })).toEqual([join(workspace, "export"), join(workspace, ".flavor", "d2c", "relative")]);
+    await expect(tool.execute({ task: "relative", exportDir: "export" }, new AbortController().signal)).resolves.toMatchObject({ entryHtml: "index.html" });
+    expect(requireTool(workspace, "D2cCompare").paths({ task: "relative", implementation: "http://localhost:3000" })).toEqual([join(workspace, ".flavor", "d2c", "relative")]);
+  });
   it("imports the export without installing any skill", async () => {
     const workspace = await tempDir();
     const exportDir = await tempDir();

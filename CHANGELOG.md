@@ -2,7 +2,29 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.0-beta.2 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.0-beta.3 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.0-beta.3] - 2026-09-05
+
+### 变更
+- 为支持多轮长程任务，扩大迭代轮次默认上限：主 Agent 80→300，子 Agent 40→100，自动延长步长 `extendBy` 20→50，loop 模式最大周期 `maxCycles` 20→100。主 Agent 标准模式下有进展时可自动延长至 450 轮，D2C 模式最高 800 轮。同时修复 `maxIterations.softLimitFactor` 与 `maxIterations.extendBy` 两项配置此前未接入执行链路、修改后不生效的问题，现在会真正传递到 Agent 循环。
+
+### 修复
+- 内置 Shell 修复 Windows `cmd /c` 参数二次转义、PowerShell 命名参数错位，以及 `npm` 等命令误选无扩展名 Unix 脚本的问题；保留脚本自身的引号，并为 Node 脚本语法错误提供结构化参数调用指引。
+- Grep 的文件路径现在严格限定到该文件，不再扩展为父目录搜索；新增 `fixedStrings=true` 字面量匹配，统一 ripgrep 与 Node 后备实现的文件过滤和忽略规则，区分路径不存在与正常的零匹配。
+- Edit 双向兼容 LF/CRLF，拒绝重叠重复匹配，失败后提供重新读取当前内容的明确提示；文件替换保留既有权限，Read/Edit/ApplyPatch 拒绝文件末尾不完整的 UTF-8，避免静默丢字节或写入替代字符；ApplyPatch 明确说明单文件 unified diff 格式。
+- TerminalRead 向模型保留游标、状态和退出信息；退出后的终端拒绝继续写入；后台任务数量上限真正生效，JobWait 释放取消监听，JobKill 等待异步取消结果并捕获错误，带错误诊断的空退出码不再误报成功。
+- LSP 支持数组形式的悬浮信息、Windows 文件 URI 和正确的 Python/Rust/Go 文档语言标识；服务不可用时返回明确原因，避免误报“无诊断”。请求支持取消，清理超时监听与失败启动，排空 stderr，并在会话结束时等待语言服务进程树退出。
+- WebFetch 的总超时覆盖 DNS 与重定向链，超出响应大小限制后立即停止读取，未知 charset 回退为 UTF-8；WebSearch 遵守结果数量限制并响应取消。
+- GitHistory 支持空仓库、字面量特殊文件名、规范化工作区路径与取消；SkillResource 支持与 Skill 一致的限定名称别名；D2cImport 按工作区解析相对导出目录，D2C 和 evolve 工具补齐读写路径声明。
+- TaskPlan/TaskUpdate 阻止依赖未完成时提前开始，并允许失败或阻塞任务重新进入执行；AskUserQuestion 取消后不会因延迟返回重新弹出；协作工具在状态查询后、发送或变更前再次检查取消。
+- 工具运行时执行角色限制和销毁状态检查，为内置读取工具登记可恢复执行；展示、上下文更新或结果落盘失败不再把已完成的操作误报成执行失败，超长输出仍保持有界并说明保存失败。
+- 欢迎页更新提示分行展示，避免较长的预发布版本号截断 `flavor update` 命令。
+
+### 测试与维护
+- 排查内置工具及共享执行链路，范围与验证记录见 [内置工具可靠性排查](./docs/internal-tools-audit-beta.3.md)；不修改 `.flavor/plugins` 磁盘插件或外部 MCP 工具实现。
+- 新增 Windows 命令、文件编码与权限、搜索后备实现、后台任务、提问取消、Web 传输、Git 历史及真实 TypeScript LSP 回归测试。
+- `package.json` 与 `package-lock.json` 的项目版本统一为 `1.4.0-beta.3`。
 
 ## [1.4.0-beta.2] - 2026-09-05
 
@@ -692,6 +714,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.4.0-beta.3 | 2026-09-05 | 全面修复内置工具与共享执行链路可靠性（Shell/Grep/Edit/Terminal/LSP/Web/GitHistory/TaskPlan 等）；扩大多轮长程任务默认上限（主 Agent 300 轮、子 Agent 100 轮、`extendBy` 50、loop `maxCycles` 100），并修复 `softLimitFactor`/`extendBy` 配置未生效问题 |
 | 1.4.0-beta.2 | 2026-09-05 | astgraph 代码图插件改为手动安装的可选插件，不再随 CLI 打包（`flavor init` 不再自动复制、构建不再复制进 `dist/astgraph`），显著减小安装包体积 |
 | 1.4.0-beta.1 | 2026-09-04 | 新增 `flavor doctor`/`/doctor` 本地诊断；Docker 执行有界输出与升级式终止；macOS 桌面端继承登录 shell PATH；Shell 结构化 argv 直启、统一运行时解析和分类诊断，修复 Windows `cmd /c` 引号、可执行名解析及桌面 stderr 展示；修复 macOS CLI 剪贴板图片输出 |
 | 1.3.21 | 2026-09-02 | 修复 macOS 剪贴板 ObjC nil/TIFF 桥接异常，以及列表代码块在终端 resize/滚动后折行或正文消失的问题；补充可执行 JXA 模拟与原生屏幕缓冲区回归测试 |

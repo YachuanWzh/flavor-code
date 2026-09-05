@@ -148,6 +148,7 @@ export function createPalsTools(client: PalClientLike, options: PalsToolOptions)
       execute: async (input: z.infer<typeof SendInput>, signal: AbortSignal) => {
         signal.throwIfAborted();
         const recipientId = await assertSendTarget(client, input.target, input.coWorkId);
+        signal.throwIfAborted();
         return client.sendChat(recipientId, shareGuard.protect(input.message));
       },
     },
@@ -168,6 +169,7 @@ export function createPalsTools(client: PalClientLike, options: PalsToolOptions)
       execute: async (input: { plan: CoWorkPlan }, signal: AbortSignal) => {
         signal.throwIfAborted();
         assertRequiredParticipant(await client.coWorkStatus(input.plan.coWorkId), options.selfId);
+        signal.throwIfAborted();
         const plan = CoWorkPlanSchema.parse({
           ...input.plan,
           goal: shareGuard.protect(input.plan.goal),
@@ -184,11 +186,13 @@ export function createPalsTools(client: PalClientLike, options: PalsToolOptions)
       execute: async (input: z.infer<typeof TokenInput>, signal: AbortSignal) => {
         signal.throwIfAborted();
         let state = await assertCurrentToken(client, input);
+        signal.throwIfAborted();
         assertRequiredParticipant(state, options.selfId);
         if (!state.planAcceptedParticipantIds.includes(options.selfId)) {
           state = await client.coWorkAction({ type: "cowork-plan-accept", ...input });
         }
         if (state.readyParticipantIds.includes(options.selfId) || state.phase === "running") return state;
+        signal.throwIfAborted();
         return client.coWorkAction({ type: "cowork-ready", ...input });
       },
     },
@@ -202,6 +206,7 @@ export function createPalsTools(client: PalClientLike, options: PalsToolOptions)
       execute: async (input: z.infer<typeof ProgressInput>, signal: AbortSignal) => {
         signal.throwIfAborted();
         const recipientId = await assertSendTarget(client, input.target, input.coWorkId);
+        signal.throwIfAborted();
         return client.sendChat(recipientId, `[co-work ${input.coWorkId} progress] ${shareGuard.protect(input.detail)}`);
       },
     },
@@ -215,6 +220,7 @@ export function createPalsTools(client: PalClientLike, options: PalsToolOptions)
       execute: async (input: z.infer<typeof CompleteInput>, signal: AbortSignal) => {
         signal.throwIfAborted();
         const state = await assertCurrentToken(client, input);
+        signal.throwIfAborted();
         assertRequiredParticipant(state, options.selfId);
         if (state.phase !== "running" || !state.acceptedParticipantIds.includes(options.selfId) || !state.readyParticipantIds.includes(options.selfId)) {
           throw new Error("A required participant must be accepted, ready, and running before reporting completion");
@@ -232,6 +238,7 @@ export function createPalsTools(client: PalClientLike, options: PalsToolOptions)
       execute: async (input: z.infer<typeof IntegrateInput>, signal: AbortSignal) => {
         signal.throwIfAborted();
         const state = await assertCurrentToken(client, input);
+        signal.throwIfAborted();
         assertRequiredParticipant(state, options.selfId);
         if (state.integrationOwnerId !== options.selfId) throw new Error("Only the broker-designated integration owner can finalize integration");
         if (state.phase !== "verifying") throw new Error("Co-work is not ready for integration verification");

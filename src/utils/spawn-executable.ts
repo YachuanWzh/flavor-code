@@ -71,7 +71,9 @@ function resolveWindowsCommand(command: string, cwd: string | undefined, env: No
     ];
 
   for (const base of bases) {
-    const candidates = extname(base).length > 0 ? [base] : [base, ...pathExt.map((extension) => `${base}${extension}`)];
+    // npm ships both a POSIX `npm` script and `npm.cmd`. Windows must prefer
+    // PATHEXT candidates, otherwise we try to execute the POSIX shim as a PE.
+    const candidates = extname(base).length > 0 ? [base] : [...pathExt.map((extension) => `${base}${extension}`), base];
     for (const candidate of candidates) {
       if (isRegularFile(candidate)) return resolve(candidate);
     }

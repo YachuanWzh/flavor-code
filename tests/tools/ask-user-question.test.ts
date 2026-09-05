@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   createAskUserQuestionTool,
@@ -86,6 +86,17 @@ describe("AskUserQuestion tool", () => {
 });
 
 describe("QuestionBridge", () => {
+  it("does not reopen a local prompt after cancellation during a relay", async () => {
+    let finish!: (value: undefined) => void;
+    const bridge = new QuestionBridge(undefined, () => new Promise((resolve) => { finish = resolve; }));
+    const controller = new AbortController();
+    const pending = bridge.ask([{ question: "Proceed?", header: "Confirm", options: [{ label: "Yes", description: "Go" }] }], controller.signal);
+    controller.abort(new Error("cancelled"));
+    await expect(pending).rejects.toThrow("cancelled");
+    finish(undefined);
+    await Promise.resolve();
+    expect(bridge.pending).toBeUndefined();
+  });
   it("returns a hook-relayed answer without opening the local prompt", async () => {
     const qs = [{ question: "Proceed?", header: "Confirm", options: [{ label: "Yes", description: "Go" }] }];
     const bridge = new QuestionBridge(undefined, async (received) => {
@@ -101,8 +112,7 @@ describe("QuestionBridge", () => {
     const qs = [{ question: "Proceed?", header: "Confirm", options: [{ label: "Yes", description: "Go" }] }];
     const bridge = new QuestionBridge(undefined, async () => undefined);
     const promise = bridge.ask(qs, new AbortController().signal);
-    await Promise.resolve();
-    expect(bridge.pending).toEqual(qs);
+    await vi.waitFor(() => expect(bridge.pending).toEqual(qs));
     bridge.answer({ 0: "Yes" });
     await expect(promise).resolves.toEqual({ 0: "Yes" });
   });

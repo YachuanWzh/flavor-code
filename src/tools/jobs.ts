@@ -27,7 +27,7 @@ export function createJobTools(registry: JobRegistry): ToolDefinition<unknown>[]
     } satisfies ToolDefinition<z.infer<typeof IdInput>>,
     {
       name: "JobKill", description: "Cancel an owned background job and its process tree", inputSchema: IdInput, paths: () => [],
-      execute: async (input, _signal, context) => { registry.kill(input.id, owner(context)); return registry.read(input.id, owner(context)); },
+      execute: async (input, _signal, context) => { await registry.kill(input.id, owner(context)); return registry.read(input.id, owner(context)); },
       presentResult: (output) => jobPresentation("kill", output as JobReadResult),
     } satisfies ToolDefinition<z.infer<typeof IdInput>>,
   ];

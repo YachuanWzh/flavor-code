@@ -10,6 +10,12 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("prepareSpawnInvocation", () => {
+  it.runIf(process.platform === "win32")("prefers Windows shims over extensionless POSIX scripts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "flavor-spawn-shim-")); roots.push(root);
+    await writeFile(join(root, "npm"), "#!/bin/sh\n");
+    await writeFile(join(root, "npm.cmd"), "@echo off\r\n");
+    expect(resolveExecutablePath("npm", { cwd: root, env: { PATH: root, PATHEXT: ".EXE;.CMD" } })?.toLowerCase()).toBe(join(root, "npm.cmd").toLowerCase());
+  });
   it("preserves structured commands outside Windows", () => {
     expect(prepareSpawnInvocation("npm", ["run", "check value"], { platform: "linux" }))
       .toEqual({ command: "npm", args: ["run", "check value"] });

@@ -10,13 +10,15 @@ export interface GitResult {
   code: number;
 }
 
-export async function git(workspace: string, args: readonly string[], timeoutMs = 30_000): Promise<GitResult> {
-  const result = await execFileNoThrow("git", ["-C", workspace, ...args], { timeout: timeoutMs, useCwd: false });
+export async function git(workspace: string, args: readonly string[], timeoutMs = 30_000, signal?: AbortSignal): Promise<GitResult> {
+  signal?.throwIfAborted();
+  const result = await execFileNoThrow("git", ["-C", workspace, ...args], { timeout: timeoutMs, useCwd: false, ...(signal === undefined ? {} : { signal }) });
+  signal?.throwIfAborted();
   return { ok: result.code === 0, stdout: result.stdout, stderr: result.stderr, code: result.code };
 }
 
-export async function isGitRepository(workspace: string): Promise<boolean> {
-  const result = await git(workspace, ["rev-parse", "--is-inside-work-tree"], 2_000);
+export async function isGitRepository(workspace: string, signal?: AbortSignal): Promise<boolean> {
+  const result = await git(workspace, ["rev-parse", "--is-inside-work-tree"], 2_000, signal);
   return result.ok && result.stdout.trim() === "true";
 }
 
@@ -116,13 +118,17 @@ export interface GitHistoryEntry {
 }
 
 /** Commit history for the repository, or for one file when a path is given. */
-export async function fileHistory(workspace: string, path: string | undefined, limit: number): Promise<GitHistoryEntry[]> {
+export async function fileHistory(workspace: string, path: string | undefined, limit: number, signal?: AbortSignal): Promise<GitHistoryEntry[]> {
   const args = [
-    "log", `--max-count=${limit}`, "--date=short", "--pretty=format:%h%x1f%ad%x1f%an%x1f%s",
+    "--literal-pathspecs", "log", `--max-count=${limit}`, "--date=short", "--pretty=format:%h%x1f%ad%x1f%an%x1f%s",
     ...(path === undefined ? [] : ["--follow", "--", path]),
   ];
-  const result = await git(workspace, args, 15_000);
-  if (!result.ok) throw gitFailure(result, "log");
+  const result = await git(workspace, args, 15_000, signal);
+  if (!result.ok) {
+    const head = await git(workspace, ["rev-parse", "--verify", "HEAD"], 2_000, signal);
+    if (!head.ok && await isGitRepository(workspace, signal)) return [];
+    throw gitFailure(result, "log");
+  }
   return result.stdout
     .split("\n")
     .filter((line) => line.trim().length > 0)

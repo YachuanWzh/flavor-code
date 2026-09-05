@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { ToolDefinition } from "./types.js";
+import { waitWithSignal } from "../utils/abort.js";
 
 const QuestionOptionSchema = z.object({
   label: z.string().trim().min(1),
@@ -85,7 +86,8 @@ export class QuestionBridge {
 
   async #askRelayed(questions: readonly Question[], signal: AbortSignal): Promise<Record<number, string>> {
     try {
-      const answers = await this.#relay!(questions, signal);
+      const answers = await waitWithSignal(this.#relay!(questions, signal), signal);
+      signal.throwIfAborted();
       if (answers !== undefined) {
         this.#active = false;
         return answers;
@@ -98,10 +100,12 @@ export class QuestionBridge {
   }
 
   #askLocally(questions: readonly Question[], signal: AbortSignal): Promise<Record<number, string>> {
+    if (signal.aborted) { this.#active = false; return Promise.reject(signal.reason); }
     return new Promise<Record<number, string>>((resolve, reject) => {
       const onAbort = () => {
         this.#pending = undefined;
         this.#active = false;
+        this.#onChange?.();
         reject(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason)));
       };
       signal.addEventListener("abort", onAbort, { once: true });

@@ -100,6 +100,9 @@ export class AgentLoop {
 
   get modelId(): string { return this.#options.modelId; }
   get iterationLimitMode(): "standard" | "d2c" { return this.#iterationLimitMode; }
+  get maxIterations(): number { return this.#options.maxIterations; }
+  get softLimitFactor(): number { return this.#options.softLimitFactor; }
+  get extendIterations(): number { return this.#options.extendIterations; }
 
   setModel(modelId: string): void {
     this.#options.registry.get(modelId);

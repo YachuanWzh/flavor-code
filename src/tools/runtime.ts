@@ -48,7 +48,8 @@ export interface ToolOutputOverflow {
   preview: string;
   originalChars: number;
   previewChars: number;
-  savedTo: string;
+  savedTo?: string;
+  storageError?: string;
 }
 
 export const DEFAULT_TOOL_OUTPUT_LIMITS: Readonly<ToolOutputLimits> = Object.freeze({
@@ -184,10 +185,11 @@ export class ToolRuntime {
   }
 
   async execute(call: ToolCall, context: ToolContext): Promise<ToolResult> {
+    if (this.#disposed) return { ok: false, error: { code: "runtime_disposed", message: "ToolRuntime is disposed" } };
     const definition = this.#tools.get(call.name);
     const journalId = definition === undefined || this.#journal === undefined
       ? undefined
-      : this.#journal.start(call.name, call.input, definition.retrySafe === true || definition.readOnly === true);
+      : this.#journal.start(call.name, call.input, definition.retrySafe === true || definition.readOnly === true || getToolCategory(call.name) === "read");
     try {
       const result = await this.#execute(call, context);
       if (journalId !== undefined) this.#journal?.complete(journalId, result);
@@ -216,6 +218,10 @@ export class ToolRuntime {
     if (tool === undefined) return { ok: false, error: { code: "unknown_tool", message: `Unknown tool: ${call.name}` } };
     const signal = context.signal ?? new AbortController().signal;
     const toolCallId = call.id ?? randomUUID();
+    if (tool.agents !== undefined && !tool.agents.includes(context.agent)) {
+      return this.#fail(toolCallId, tool.name, call.input, context.agent, "permission_denied", `Tool ${tool.name} is not available to ${context.agent} agents`);
+    }
+    if (signal.aborted) return this.#fail(toolCallId, tool.name, call.input, context.agent, "cancelled", message(signal.reason));
 
     const validation = this.normalize(call);
     if (!validation.ok) {
@@ -337,15 +343,26 @@ export class ToolRuntime {
       let rawOutput: unknown;
       try { rawOutput = tool.outputSchema === undefined ? executed : tool.outputSchema.parse(executed); }
       catch (error) { return this.#fail(toolCallId, tool.name, input, context.agent, "invalid_output", message(error)); }
-      const declaredPresentation = tool.presentResult?.(rawOutput, input);
-      const presentation = declaredPresentation ?? getToolPresentation(rawOutput);
-      const rendered = tool.renderForModel?.(rawOutput, input);
+      // Execution has succeeded. Auxiliary UI/context failures must not invite
+      // the model to repeat a completed mutation or external action.
+      const warnings: string[] = [];
+      let presentation = getToolPresentation(rawOutput);
+      try { presentation = tool.presentResult?.(rawOutput, input) ?? presentation; }
+      catch (error) { warnings.push(`Tool succeeded; result presentation failed: ${message(error)}`); }
+      let rendered: string | undefined;
+      try { rendered = tool.renderForModel?.(rawOutput, input); }
+      catch (error) { warnings.push(`Tool succeeded; result rendering failed: ${message(error)}`); }
       const output = rendered === undefined ? await this.#limitOutput(tool.name, rawOutput) : rawOutput;
       const content = rendered === undefined ? undefined : await this.#limitText(tool.name, rendered);
-      const additionalContext = await this.#afterSuccess?.(tool.name, tool.paths(input), input, rawOutput, context);
-      await this.#hooks.emit({
-        version: 1, type: "PostToolUse", payload: { toolCallId, tool: tool.name, input, agent: context.agent, output },
-      });
+      let additionalContext: readonly string[] = [];
+      try { additionalContext = await this.#afterSuccess?.(tool.name, tool.paths(input), input, rawOutput, context) ?? []; }
+      catch (error) { warnings.push(`Tool succeeded; context update failed: ${message(error)}`); }
+      try {
+        await this.#hooks.emit({
+          version: 1, type: "PostToolUse", payload: { toolCallId, tool: tool.name, input, agent: context.agent, output },
+        });
+      } catch (error) { warnings.push(`Tool succeeded; PostToolUse hook failed: ${message(error)}`); }
+      additionalContext = [...additionalContext, ...warnings];
       return { ok: true, output, ...(content === undefined ? {} : { content }), ...(presentation === undefined ? {} : { presentation }),
         ...(additionalContext === undefined || additionalContext.length === 0 ? {} : { additionalContext }) };
     } catch (error) {
@@ -373,17 +390,23 @@ export class ToolRuntime {
     // Reserve the inline budget before asynchronous persistence so concurrent callers cannot oversubscribe it.
     this.#turnOutputChars += preview.length;
     const directory = join(this.#workspace, ".flavor", "tool-results");
-    await mkdir(directory, { recursive: true });
     const filename = `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID()}-${safeFilename(tool)}.txt`;
     const savedTo = join(directory, filename);
-    await writeFile(savedTo, serialized, "utf8");
+    let storage: { savedTo: string } | { storageError: string };
+    try {
+      await mkdir(directory, { recursive: true });
+      await writeFile(savedTo, serialized, "utf8");
+      storage = { savedTo };
+    } catch (error) {
+      storage = { storageError: `Tool succeeded, but the full output could not be saved: ${message(error)}` };
+    }
     return {
       truncated: true,
       reason,
       preview,
       originalChars: serialized.length,
       previewChars: preview.length,
-      savedTo,
+      ...storage,
     } satisfies ToolOutputOverflow;
   }
 

@@ -1,9 +1,35 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { getEventListeners } from "node:events";
 
 import { JobRegistry } from "../../src/jobs/registry.js";
 import { createJobTools } from "../../src/tools/jobs.js";
 
 describe("JobRegistry", () => {
+  it("releases wait listeners, enforces capacity, and reuses completed slots", async () => {
+    const jobs = new JobRegistry({ maxJobs: 1 });
+    const job = jobs.create({ kind: "shell", owner: "main", label: "first" });
+    expect(() => jobs.create({ kind: "shell", owner: "main", label: "second" })).toThrow(/limit/);
+    const signal = new AbortController().signal;
+    const waiting = jobs.wait(job.id, "main", signal);
+    job.complete();
+    await waiting;
+    expect(getEventListeners(signal, "abort")).toHaveLength(0);
+    expect(() => jobs.create({ kind: "shell", owner: "main", label: "second" })).not.toThrow();
+  });
+
+  it("reports cancellation callback failures without unhandled rejections", async () => {
+    const jobs = new JobRegistry();
+    const job = jobs.create({ kind: "shell", owner: "main", label: "broken", cancel: async () => { throw new Error("kill failed"); } });
+    jobs.kill(job.id, "main");
+    await vi.waitFor(() => expect(jobs.read(job.id, "main")).toMatchObject({ state: "failed", error: "Cancellation failed: kill failed" }));
+  });
+
+  it("does not report a diagnostic with a null exit code as successful", () => {
+    const jobs = new JobRegistry();
+    const job = jobs.create({ kind: "shell", owner: "main", label: "terminated" });
+    job.complete({ exitCode: null, error: "terminated by signal" });
+    expect(jobs.read(job.id, "main").state).toBe("failed");
+  });
   it("tracks incremental bounded output and terminal state", async () => {
     const jobs = new JobRegistry({ maxOutputChars: 8 });
     const job = jobs.create({ kind: "shell", owner: "main", label: "serve" });

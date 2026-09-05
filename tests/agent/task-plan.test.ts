@@ -48,10 +48,18 @@ describe("updatePlanTask", () => {
     expect(plan.tasks[0]?.status).toBe("pending");
   });
 
-  it("rejects unknown tasks and completion while dependencies are incomplete", () => {
-    const plan = TaskPlanSchema.parse({ tasks: [task("a"), task("b", "in_progress", ["a"])] });
+  it("rejects unknown tasks and starting work while dependencies are incomplete", () => {
+    const plan = TaskPlanSchema.parse({ tasks: [task("a"), task("b", "pending", ["a"])] });
     expect(() => updatePlanTask(plan, { taskId: "missing", status: "in_progress" })).toThrow(/unknown task/i);
-    expect(() => updatePlanTask(plan, { taskId: "b", status: "completed" })).toThrow(/dependency/i);
+    expect(() => updatePlanTask(plan, { taskId: "b", status: "in_progress" })).toThrow(/dependency/i);
+    expect(() => TaskPlanSchema.parse({ tasks: [task("a"), task("b", "in_progress", ["a"])] })).toThrow(/dependency/i);
+  });
+
+  it("allows retrying failed or unblocked work", () => {
+    for (const status of ["blocked", "failed"] as const) {
+      const plan = TaskPlanSchema.parse({ tasks: [task("a", status)] });
+      expect(updatePlanTask(plan, { taskId: "a", status: "in_progress" }).tasks[0]?.status).toBe("in_progress");
+    }
   });
 
   it("requires work to enter in-progress before completion and keeps terminal states terminal", () => {

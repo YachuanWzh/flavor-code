@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { open, opendir, stat } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { rgPath as bundledRgPath } from "@vscode/ripgrep";
 import createIgnore from "ignore";
 import { z } from "zod";
@@ -56,9 +56,10 @@ const GlobInput = z.object({
 });
 
 const GrepInput = z.object({
-  pattern: z.string().min(1),
+  pattern: z.string().min(1).describe("Regular expression without / delimiters, or literal text when fixedStrings=true."),
+  fixedStrings: BooleanInput.describe("Match literal text, useful for Markdown links and paths containing regex punctuation.").nullable().optional(),
   path: z.string().min(1)
-    .describe('Workspace-relative search path. Use JSON null, not the string "null", for the workspace root.')
+    .describe('Workspace-relative file or directory. A file restricts the search to that file. Use glob for multiple filenames and JSON null for the workspace root.')
     .nullable().optional(),
   glob: z.string().min(1).nullable().optional(),
   fileType: z.enum(FILE_TYPES).nullable().optional(),
@@ -169,7 +170,7 @@ export function createGrepTool(
   const resources = searchResources(options);
   return {
     name: "Grep",
-    description: `Search workspace text with a regular expression. fileType must be one of: ${FILE_TYPES.join(", ")}.`,
+    description: `Search workspace text with a regular expression or fixedStrings=true for literal text. Zero matches is a successful search, not a path error. fileType must be one of: ${FILE_TYPES.join(", ")}.`,
     inputSchema: GrepInput,
     paths: (input) => [scope(root, searchPath(input.path))],
     summarize: (input) => {
@@ -177,11 +178,11 @@ export function createGrepTool(
       const where = path ? ` in ${path}` : "";
       const kind = input.fileType ? ` [${input.fileType}]` : "";
       const ignored = input.includeIgnored === true ? " (including ignored files)" : "";
-      return `pattern: /${input.pattern}/${kind}${where}${ignored}`;
+      return `pattern: ${input.fixedStrings === true ? JSON.stringify(input.pattern) : `/${input.pattern}/`}${kind}${where}${ignored}`;
     },
     execute: async (input, signal) => {
       // Compile eagerly so both backends report invalid expressions consistently.
-      const expression = new RegExp(input.pattern);
+      const expression = new RegExp(input.fixedStrings === true ? input.pattern.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&") : input.pattern);
       const limit = input.limit ?? options.defaultLimit ?? DEFAULT_RESULT_LIMIT;
       const context = input.context ?? 0;
       const start = await resolveGrepPath(root, searchPath(input.path));
@@ -251,10 +252,12 @@ async function rgGrep(
   }
   const args = ["--json", "--line-number", "--column", "--sort", "path", "--hidden", "--glob", "!.git", "--glob", "!.git/**", "--max-filesize", String(maxFileBytes), "--context", String(context)];
   if (input.includeIgnored === true) args.push("--no-ignore");
+  if (input.fixedStrings === true) args.push("--fixed-strings");
   if (input.glob !== undefined && input.glob !== null) args.push("--glob", input.glob);
   else for (const extension of typeExtensions ?? []) args.push("--glob", `*${extension}`);
   args.push("--regexp", input.pattern, "--", relative(root, start) || ".");
   const matches: GrepMatch[] = [];
+  const matcher = input.glob == null ? undefined : globRegex(input.glob);
   const ignoreLayers = input.includeIgnored === true ? [] : await collectIgnoreLayers(root, start, signal, resources, ignoreBudget);
   const parser = delimitedParser(10, (record) => {
     if (record.length === 0) return true;
@@ -267,6 +270,7 @@ async function rgGrep(
     const lineWithEnding = tryDecodeUtf8(lineValue);
     if (decodedPath === undefined || lineWithEnding === undefined) return true;
     const path = normalizePath(decodedPath).replace(/^\.\//, "");
+    if (matcher !== undefined && !matcher.test(path)) return true;
     if (typeExtensions !== undefined && !typeExtensions.some((extension) => path.endsWith(extension))) return true;
     if (ignored(path, false, ignoreLayers)) return true;
     const text = lineWithEnding.replace(/\r?\n$/, "");
@@ -426,7 +430,12 @@ async function nodeFiles(
     }
     ignores.length = ruleCount;
   }
-  await walk(start);
+  if ((await stat(start)).isFile()) {
+    const path = normalizedRelative(root, start);
+    if (!isGitMetadataPath(root, start) && (includeIgnored || !ignored(path, false, ignores)) && accept(path)) output.push(path);
+  } else {
+    await walk(start);
+  }
   return output;
 }
 
@@ -463,7 +472,7 @@ async function collectIgnoreLayers(
       if (!ignored(path, true, layers)) await walk(absolute);
     }
   }
-  await walk(start);
+  if (!(await stat(start)).isFile()) await walk(start);
   return layers;
 }
 
@@ -602,8 +611,13 @@ async function resolveGrepPath(root: string, path = "."): Promise<string> {
   const candidate = scope(root, path);
   try {
     const info = await stat(candidate);
-    if (info.isFile()) return dirname(candidate);
-  } catch { /* path does not exist yet; keep as-is */ }
+    if (!info.isFile() && !info.isDirectory()) throw new Error("Search path must be a file or directory");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`Search path does not exist: ${path}. Use Glob to find the file; put filename patterns in glob, not path.`);
+    }
+    throw error;
+  }
   return candidate;
 }
 

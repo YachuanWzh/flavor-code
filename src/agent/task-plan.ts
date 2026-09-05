@@ -47,7 +47,7 @@ export const TaskPlanSchema = z.object({
       }
       dependencies.add(dependency);
     }
-    if (task.status === "completed") {
+    if (task.status === "completed" || task.status === "in_progress") {
       const incomplete = task.dependencies.find((dependency) =>
         plan.tasks.find((candidate) => candidate.id === dependency)?.status !== "completed");
       if (incomplete !== undefined) {
@@ -87,7 +87,7 @@ export function updatePlanTask(plan: TaskPlan, input: TaskUpdateInput): TaskPlan
     throw new Error(`Invalid task transition for ${update.taskId}: ${previousStatus} -> ${update.status}`);
   }
 
-  if (update.status === "completed") {
+  if (update.status === "completed" || update.status === "in_progress") {
     const incomplete = current.tasks[index]!.dependencies.find((dependency) =>
       current.tasks.find((task) => task.id === dependency)?.status !== "completed");
     if (incomplete !== undefined) throw new Error(`Task ${update.taskId} has an incomplete dependency: ${incomplete}`);
@@ -119,6 +119,7 @@ function isValidTransition(from: PlanTaskStatus, to: PlanTaskStatus): boolean {
   if (from === "in_progress") {
     return to === "completed" || to === "failed" || to === "blocked" || to === "cancelled";
   }
+  if (from === "blocked" || from === "failed") return to === "pending" || to === "in_progress" || to === "cancelled";
   return false;
 }
 

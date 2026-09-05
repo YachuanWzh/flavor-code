@@ -5,6 +5,7 @@ import { request as httpsRequest } from "node:https";
 import { z } from "zod";
 
 import type { ToolDefinition } from "./types.js";
+import { waitWithSignal } from "../utils/abort.js";
 
 const WebFetchInput = z.object({
   url: z.string().url().max(8_192),
@@ -58,7 +59,12 @@ export function createWebSearchTool(provider: WebSearchProvider = createDefaultW
     summarize: (input) => input.query,
     presentCall: (input) => ({ kind: "web", title: `Searching: ${input.query}` }),
     permissions: () => ({ paths: [] }),
-    execute: async (input, signal) => ({ query: input.query, results: [...await provider.search(input.query, input.maxResults ?? 8, signal)] }),
+    execute: async (input, signal) => {
+      signal.throwIfAborted();
+      const maxResults = input.maxResults ?? 8;
+      const results = await waitWithSignal(provider.search(input.query, maxResults, signal), signal);
+      return { query: input.query, results: [...results].slice(0, maxResults) };
+    },
     renderForModel: (output) => output.results.length === 0
       ? `No web results found for: ${output.query}`
       : output.results.map((item, index) => `${index + 1}. ${item.title}\n${item.url}\n${item.snippet}`).join("\n\n"),
@@ -109,10 +115,14 @@ export async function fetchPublic(
   initialUrl: string,
   options: { signal: AbortSignal; timeoutMs: number; maxBytes: number; rawHtml?: boolean },
 ): Promise<WebFetchResult> {
+  options.signal.throwIfAborted();
+  const deadline = AbortSignal.timeout(options.timeoutMs);
+  options = { ...options, signal: AbortSignal.any([options.signal, deadline]) };
   let current = new URL(initialUrl);
   for (let redirects = 0; redirects <= 5; redirects += 1) {
+    options.signal.throwIfAborted();
     validateUrl(current);
-    const addresses = await lookup(normalizedHostname(current.hostname), { all: true, verbatim: true });
+    const addresses = await waitWithSignal(lookup(normalizedHostname(current.hostname), { all: true, verbatim: true }), options.signal);
     if (addresses.length === 0) throw new Error("Host did not resolve");
     if (addresses.some((entry) => isBlockedResolvedAddress(entry.address, current.hostname))) {
       throw new Error("Blocked private or special network destination");
@@ -124,7 +134,10 @@ export async function fetchPublic(
       continue;
     }
     const contentType = response.contentType;
-    const decoded = new TextDecoder(charset(contentType), { fatal: false }).decode(response.body);
+    let decoder: TextDecoder;
+    try { decoder = new TextDecoder(charset(contentType), { fatal: false }); }
+    catch { decoder = new TextDecoder("utf-8"); }
+    const decoded = decoder.decode(response.body);
     const content = !options.rawHtml && /text\/html|application\/xhtml\+xml/i.test(contentType) ? htmlToText(decoded) : decoded;
     return { url: current.href, status: response.status, contentType, content, truncated: response.truncated };
   }
@@ -164,8 +177,8 @@ async function requestAddress(
       const status = response.statusCode ?? 0;
       const location = response.headers.location;
       if (location !== undefined && [301, 302, 303, 307, 308].includes(status)) {
-        response.resume();
         finish({ status, contentType: "", body: new Uint8Array(), truncated: false, redirect: location });
+        response.destroy();
         return;
       }
       const chunks: Buffer[] = [];
@@ -181,7 +194,11 @@ async function requestAddress(
         const accepted = chunk.subarray(0, options.maxBytes - bytes);
         chunks.push(accepted);
         bytes += accepted.length;
-        if (accepted.length < chunk.length) truncated = true;
+        if (accepted.length < chunk.length) {
+          truncated = true;
+          finish({ status, contentType: String(response.headers["content-type"] ?? "application/octet-stream"), body: Buffer.concat(chunks), truncated });
+          response.destroy();
+        }
       });
       response.once("end", () => finish({
         status,

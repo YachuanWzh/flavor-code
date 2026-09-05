@@ -7,6 +7,26 @@ import { FileObservationStore, createApplyPatchTool, createEditTool, createReadT
 import { getToolPresentation } from "../../src/tools/types.js";
 
 describe("file tools", () => {
+  it("rejects incomplete UTF-8 at EOF without silently trimming or corrupting bytes", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "legacy.txt");
+    const bytes = Buffer.from([0x61, 0x62, 0xe4]);
+    writeFileSync(path, bytes);
+    const signal = new AbortController().signal;
+    await expect(createReadTool(workspace).execute({ path }, signal)).rejects.toThrow(/UTF-8/);
+    await expect(createEditTool(workspace).execute({ path, oldText: "a", newText: "c" }, signal)).rejects.toThrow(/UTF-8/);
+    expect(readFileSync(path)).toEqual(bytes);
+  });
+
+  it.skipIf(process.platform === "win32")("preserves executable permissions on replacement", async () => {
+    const { chmod, stat } = await import("node:fs/promises");
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "run.sh");
+    writeFileSync(path, "echo old\n");
+    await chmod(path, 0o755);
+    await createEditTool(workspace).execute({ path, oldText: "old", newText: "new" }, new AbortController().signal);
+    expect((await stat(path)).mode & 0o777).toBe(0o755);
+  });
   it("refuses to overwrite a file changed after the model read it", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
     const path = join(workspace, "shared.txt");
@@ -273,6 +293,22 @@ describe("file tools", () => {
     expect(readFileSync(path, "utf8")).toBe("same\nsame\n");
   });
 
+  it("Edit accepts CRLF input against an LF file without changing its line endings", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "one\ntwo\n");
+    await createEditTool(workspace).execute({ path, oldText: "one\r\ntwo", newText: "three\r\nfour" }, new AbortController().signal);
+    expect(readFileSync(path, "utf8")).toBe("three\nfour\n");
+  });
+
+  it("Edit rejects overlapping matches without changing the file", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "aaa");
+    await expect(createEditTool(workspace).execute({ path, oldText: "aa", newText: "b" }, new AbortController().signal)).rejects.toThrow(/exactly once/i);
+    expect(readFileSync(path, "utf8")).toBe("aaa");
+  });
+
   it("Write atomically replaces content and leaves no temporary file", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
     const path = join(workspace, "file.txt");
@@ -342,8 +378,10 @@ describe("file tools", () => {
     expect(getToolPresentation(output)).toMatchObject({
       operation: "update", path, added: 1, removed: 1,
     });
-    expect(getToolPresentation(output)?.lines).toContainEqual({ kind: "removed", oldLine: 4, text: "old" });
-    expect(getToolPresentation(output)?.lines).toContainEqual({ kind: "added", newLine: 4, text: "new" });
+    const presentation = getToolPresentation(output);
+    if (presentation?.kind !== "file-change") throw new Error("Expected file-change presentation");
+    expect(presentation.lines).toContainEqual({ kind: "removed", oldLine: 4, text: "old" });
+    expect(presentation.lines).toContainEqual({ kind: "added", newLine: 4, text: "new" });
   });
 
   it("Edit echoes the caller-supplied path when the workspace sits behind an aliased path component", async () => {
@@ -420,8 +458,10 @@ describe("file tools", () => {
     const output = await createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal);
 
     expect(readFileSync(path, "utf8")).toBe("zero\nONE\ntwo\nthree\n");
-    expect(getToolPresentation(output)?.lines).toContainEqual({ kind: "removed", oldLine: 2, text: "one" });
-    expect(getToolPresentation(output)?.lines).toContainEqual({ kind: "added", newLine: 2, text: "ONE" });
+    const presentation = getToolPresentation(output);
+    if (presentation?.kind !== "file-change") throw new Error("Expected file-change presentation");
+    expect(presentation.lines).toContainEqual({ kind: "removed", oldLine: 2, text: "one" });
+    expect(presentation.lines).toContainEqual({ kind: "added", newLine: 2, text: "ONE" });
   });
 
   it("ApplyPatch relocates multiple hunks independently", async () => {

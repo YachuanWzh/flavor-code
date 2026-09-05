@@ -82,9 +82,20 @@ it("uses Claude-style token compaction defaults and accepts explicit overrides",
   } }).context).toMatchObject({ windowTokens: 128_000, compactAtChars: 4_000 });
 });
 
+it("uses long-task defaults for maxIterations", () => {
+  expect(FlavorConfigSchema.parse({}).maxIterations).toEqual({
+    main: 300,
+    subagent: 100,
+    softLimitFactor: 0.8,
+    extendBy: 50,
+  });
+  expect(FlavorConfigSchema.parse({ maxIterations: { main: 10 } }).maxIterations).toMatchObject({ main: 10 });
+  expect(() => FlavorConfigSchema.parse({ maxIterations: { main: 9 } })).toThrow();
+});
+
 it("uses loop tranche defaults and validates explicit overrides", () => {
   expect(FlavorConfigSchema.parse({}).loop).toEqual({
-    maxCycles: 20,
+    maxCycles: 100,
     maxTokens: 500_000,
     isolation: "auto",
   });

@@ -8,11 +8,11 @@ import type { ExecutionEnvironment } from "../execution/types.js";
 import type { JobRegistry } from "../jobs/registry.js";
 import { prepareSpawnInvocation, resolveExecutablePath } from "../utils/spawn-executable.js";
 import { owner } from "./jobs.js";
+import { terminateProcessTree } from "../utils/process-tree.js";
 
 export const DEFAULT_MAX_OUTPUT_BYTES = 1_048_576;
 export const DEFAULT_SHELL_TIMEOUT_MS = 10 * 60_000;
 const ELLIPSIS = "\u2026";
-const TERMINATION_GRACE_MS = 250;
 const TERMINATION_FAILURE_MS = 5_000;
 const STREAM_CLOSE_GRACE_MS = 500;
 
@@ -70,13 +70,8 @@ export function normalizeShellCommand(input: { command: string; args: readonly s
   if ((executable === "cmd" || executable === "cmd.exe") && /^\/[ck]$/iu.test(args[0] ?? "")) {
     return { command, args: [args[0]!, ...args.slice(1).map(unquoteToken)] };
   }
-  if ((executable === "pwsh" || executable === "pwsh.exe" || executable === "powershell" || executable === "powershell.exe")
-    && /^(?:-c|-command)$/iu.test(args[0] ?? "") && args.length > 1) {
-    return { command, args: [args[0]!, ...args.slice(1).map(unquoteToken)] };
-  }
-  if (/^(?:sh|bash|zsh|fish)$/iu.test(executable) && args[0] === "-c" && args[1] !== undefined) {
-    return { command, args: [args[0], unquoteToken(args[1]), ...args.slice(2)] };
-  }
+  // Script arguments are already logical values. Their leading/trailing quotes
+  // can be executable syntax (e.g. PowerShell 'literal'), not transport quoting.
   if (!/\s/u.test(command) || containsShellSyntax(command)) return { command, args };
   const tokens = tokenizeCommandLine(command);
   if (tokens.length <= 1) return { command, args };
@@ -211,6 +206,7 @@ function shellInvocation(input: { command: string; args: readonly string[] }, cw
         return {
           command: resolved,
           args: [...input.args.slice(0, commandFlag + 1), `chcp 65001>nul & ${payload}`],
+          windowsVerbatimArguments: true,
         };
       }
     }
@@ -233,6 +229,7 @@ function shellInvocation(input: { command: string; args: readonly string[] }, cw
   if (shell.kind === "cmd") return {
     command: shell.command,
     args: ["/d", "/s", "/c", `chcp 65001>nul & ${script}`],
+    windowsVerbatimArguments: true,
   };
   const encoded = Buffer.from(script, "utf16le").toString("base64");
   return {
@@ -267,8 +264,10 @@ function executionEnvironmentCommand(
 function structuredShellScript(shell: RuntimeShell, command: string, args: readonly string[]): string {
   if (shell.kind === "posix") return [command, ...args].map(posixQuote).join(" ");
   if (shell.kind === "cmd") return serializeCmdCommand([command, ...args]);
-  const invocation = `& ${psQuote(command)}${args.length > 0 ? ` ${args.map(psQuote).join(" ")}` : ""}`;
-  return `$ErrorActionPreference='Stop'; try { ${invocation}; if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE } else { exit 0 } } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 127 }`;
+  // Quoted '-Name' values become positional strings for cmdlets. Bare, strictly
+  // validated parameter names must remain syntax; values stay literal strings.
+  const invocation = `& ${psQuote(command)}${args.length > 0 ? ` ${args.map((arg) => /^-[A-Za-z][A-Za-z0-9-]*$/u.test(arg) ? arg : psQuote(arg)).join(" ")}` : ""}`;
+  return `$ErrorActionPreference='Stop'; try { ${invocation}; if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE } else { exit 0 } } catch { [Console]::Error.WriteLine($_.Exception.Message); if ($_.Exception -is [System.Management.Automation.CommandNotFoundException]) { exit 127 } else { exit 1 } }`;
 }
 
 function posixQuote(value: string): string {
@@ -310,7 +309,7 @@ function classifyShellFailure(
     return {
       kind: "command-not-found",
       message: `Executable "${command}" was not found by the selected runtime shell.`,
-      hint: "Use a command available on PATH, or pass an existing executable path without surrounding quotes.",
+      hint: "Use a command available on PATH, or pass an existing executable path without surrounding quotes. For an unavailable PowerShell cmdlet, check Get-Command and its module in the selected shell; do not keep retrying the same command.",
     };
   }
   if (code === "EACCES" || /(?:permission denied|access is denied|拒绝访问)/iu.test(detail)) {
@@ -319,10 +318,10 @@ function classifyShellFailure(
   if (/(?:no such file or directory|cannot find (?:the )?path|system cannot find|系统找不到指定的路径)/iu.test(detail)) {
     return { kind: "path-not-found", message: "The command referenced a path that does not exist." };
   }
-  if (/(?:syntax error|unexpected token|parsererror|语法错误)/iu.test(detail)) {
+  if (/(?:syntax\s*error|unexpected token|parsererror|unterminated (?:regexp|string)|语法错误)/iu.test(detail)) {
     return {
-      kind: "shell-syntax", message: "The selected runtime shell rejected the command syntax.",
-      hint: "Pass normal arguments through args; reserve shell syntax for pipes, redirects, and operators.",
+      kind: "shell-syntax", message: "The command or interpreter rejected the syntax.",
+      hint: 'Pass normal arguments through args. For JavaScript use command="node", args=["-e", "<complete script>"] without an extra shell or surrounding quotes. Legacy Windows PowerShell can strip quotes when forwarding native arguments.',
     };
   }
   return {
@@ -351,7 +350,7 @@ export function createShellTool(
   }
   return {
     name: "Shell",
-    description: "Run a bounded command reliably inside the workspace. Pass a bare executable in command and one unquoted logical value per args entry; shell syntax is supported only when command contains pipes, redirects, or operators. stdout/stderr are returned verbatim and failures include a structured diagnostic. background=true returns a managed job id.",
+    description: 'Run a bounded command reliably inside the workspace. Pass a bare executable in command and one logical value per args entry, without adding surrounding shell quotes. For Node scripts use command="node", args=["-e", "<complete JavaScript>"]; do not wrap native commands in cmd /c or PowerShell -Command unless shell syntax is needed, since legacy PowerShell can strip embedded quotes. Use Grep for text searches and Read/Edit for file changes. stdout/stderr are returned verbatim and failures include a structured diagnostic. background=true returns a managed job id.',
     inputSchema: ShellInput,
     paths: (input) => [workingDirectory(root, input.cwd ?? undefined)],
     summarize: (input) => [input.command, ...input.args].join(" "),
@@ -468,7 +467,7 @@ export async function executeShell(
         void finishResolve(observedExitCode ?? child.exitCode, observedSignal ?? child.signalCode);
         return;
       }
-      termination = terminateTree(child.pid);
+      termination = terminateProcessTree(child.pid);
       terminalTimer = setTimeout(() => finishReject(new Error(`Process did not close after ${reason} termination`)), TERMINATION_FAILURE_MS);
       terminalTimer.unref();
     };
@@ -646,40 +645,6 @@ function workingDirectory(root: string, cwd = "."): string {
   const delta = relative(root, candidate);
   if (delta === ".." || delta.startsWith(`..${sep}`) || isAbsolute(delta)) throw new Error("Working directory is outside the workspace");
   return candidate;
-}
-
-async function terminateTree(pid: number | undefined): Promise<void> {
-  if (pid === undefined) return;
-  if (process.platform === "win32") {
-    await waitForProcess(spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { shell: false, windowsHide: true }));
-    try { process.kill(pid); } catch { /* The direct child may already have exited. */ }
-  } else {
-    try { process.kill(-pid, "SIGTERM"); }
-    catch { try { process.kill(pid, "SIGTERM"); } catch { /* Already exited. */ } }
-    await delay(TERMINATION_GRACE_MS);
-    try { process.kill(-pid, "SIGKILL"); }
-    catch { try { process.kill(pid, "SIGKILL"); } catch { /* ESRCH: the whole group has exited. */ } }
-  }
-}
-
-function waitForProcess(child: ReturnType<typeof spawn>): Promise<void> {
-  return new Promise((resolvePromise) => {
-    let settled = false;
-    const finish = (): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolvePromise();
-    };
-    const timer = setTimeout(finish, TERMINATION_FAILURE_MS);
-    timer.unref();
-    child.once("error", finish);
-    child.once("close", finish);
-  });
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
 }
 
 function decodeOutput(buffer: Buffer): string {

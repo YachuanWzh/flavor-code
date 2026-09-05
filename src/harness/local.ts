@@ -31,6 +31,8 @@ export interface LocalHarnessOptions {
   approve?: ApprovalCallback;
   maxIterationsMain?: number;
   maxIterationsSubagent?: number;
+  softLimitFactor?: number;
+  extendIterations?: number;
   hasActiveProgress?(): boolean;
   hallucinationGuard?: HallucinationGuard;
   /** When true, non-destructive tools skip the approval callback. Destructive tools still require confirmation. */
@@ -226,6 +228,8 @@ export class LocalHarness {
         agent,
         ownerId,
         ...(maxIterations === undefined ? {} : { maxIterations }),
+        ...(this.#options.softLimitFactor === undefined ? {} : { softLimitFactor: this.#options.softLimitFactor }),
+        ...(this.#options.extendIterations === undefined ? {} : { extendIterations: this.#options.extendIterations }),
         ...(isMain && this.#options.hasActiveProgress !== undefined ? { hasActiveProgress: this.#options.hasActiveProgress } : {}),
         ...(isMain && this.#options.hallucinationGuard !== undefined ? { hallucinationGuard: this.#options.hallucinationGuard } : {}),
         ...(this.#options.modelJournal === undefined ? {} : { modelJournal: this.#options.modelJournal }),

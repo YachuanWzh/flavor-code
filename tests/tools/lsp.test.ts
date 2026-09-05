@@ -1,6 +1,7 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createLspTools, RealLspManager, type LspManager } from "../../src/tools/lsp.js";
@@ -35,6 +36,26 @@ function fakeManager(): LspManager {
 }
 
 describe("LSP tools", () => {
+  it("renders array hover contents and native file URI paths", async () => {
+    const workspace = join(tmpdir(), "flavor lsp unicode 中文");
+    const path = join(workspace, "index.ts");
+    const manager: LspManager = { ...fakeManager(),
+      hover: async () => ({ contents: ["documentation", { language: "ts", value: "const x: number" }] }),
+      findReferences: async () => [{ uri: pathToFileURL(path).href, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } }],
+    };
+    const tools = createLspTools(workspace, { manager });
+    const signal = new AbortController().signal;
+    expect(await tools[0]!.execute({ file: "index.ts", line: 0, character: 0 }, signal)).toBe(`${path}:0:0`);
+    expect(await tools[1]!.execute({ file: "index.ts", line: 0, character: 0 }, signal)).toBe("documentation\n\nconst x: number");
+  });
+
+  it("cancels an in-flight LSP wait promptly", async () => {
+    const tools = createLspTools(tmpdir(), { manager: { ...fakeManager(), hover: async () => new Promise(() => {}) } });
+    const controller = new AbortController();
+    const result = tools[1]!.execute({ file: "x.ts", line: 0, character: 0 }, controller.signal);
+    controller.abort(new Error("cancelled"));
+    await expect(result).rejects.toThrow("cancelled");
+  });
   it("LspFindRefs returns formatted reference locations", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-lsp-")); roots.push(workspace);
     const tools = createLspTools(workspace, { manager: fakeManager() });
@@ -135,6 +156,26 @@ describe("LSP tools", () => {
 });
 
 describe("RealLspManager", () => {
+  it("queries the bundled TypeScript server against a real workspace", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-lsp-real-")); roots.push(workspace);
+    await writeFile(join(workspace, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true }, include: ["*.ts"] }));
+    const file = join(workspace, "index.ts");
+    await writeFile(file, 'const answer: number = "wrong";\n');
+    const manager = new RealLspManager({ workspace });
+    try {
+      const signal = AbortSignal.timeout(10_000);
+      const info = await manager.hover(pathToFileURL(file).href, 0, 8, signal);
+      expect(JSON.stringify(info)).toContain("number");
+      const diagnostics = await manager.diagnostics(pathToFileURL(file).href, signal);
+      expect(diagnostics.some((item) => item.message.includes("not assignable"))).toBe(true);
+    } finally { await manager.dispose(); }
+  });
+  it("reports unavailable language servers instead of a false clean result", async () => {
+    const manager = new RealLspManager({ workspace: tmpdir(), serverConfigs: [] });
+    await expect(manager.diagnostics(pathToFileURL(join(tmpdir(), "x.ts")).href)).rejects.toThrow(/No language server configured/);
+    manager.dispose();
+    await expect(manager.diagnostics(pathToFileURL(join(tmpdir(), "x.ts")).href)).rejects.toThrow(/disposed/);
+  });
   it("creates an empty manager with auto-detect", () => {
     const manager = new RealLspManager({ workspace: "/tmp" });
     expect(manager).toBeDefined();

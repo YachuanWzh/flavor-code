@@ -1,4 +1,5 @@
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -69,6 +70,59 @@ describe("normalizeShellCommand", () => {
 });
 
 describe("Shell", () => {
+  it.skipIf(process.platform !== "win32")("binds structured PowerShell named parameters", async () => {
+    const result = await createShellTool(process.cwd()).execute({ command: "Get-FileHash", args: ["-LiteralPath", "package.json", "-Algorithm", "SHA256"] }, signal);
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stdout).toContain("SHA256");
+  });
+  it("hashes files with structured node arguments without corrupting JavaScript", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor node hash "));
+    writeFileSync(join(workspace, "fixture.txt"), "hash me");
+    const script = `const {createHash}=require('crypto'),{readFileSync}=require('fs'); const f=p=>createHash('sha256').update(readFileSync(p)).digest('hex').slice(0,16); console.log(JSON.stringify({hash:f('./fixture.txt'),path:'a/b'.replace(/\\//g,"-")}));`;
+    const result = await createShellTool(workspace).execute({ command: "node", args: ["-e", script] }, signal);
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ hash: createHash("sha256").update("hash me").digest("hex").slice(0, 16), path: "a-b" });
+  });
+
+  it("provides actionable diagnostics for interpreter syntax errors", async () => {
+    const result = await createShellTool(process.cwd()).execute({ command: node, args: ["-e", "const broken = /unterminated"] }, signal);
+    expect(result.diagnostic).toMatchObject({ kind: "shell-syntax", hint: expect.stringContaining('args=["-e"') });
+  });
+
+  it.skipIf(process.platform !== "win32")("preserves script quotes that are PowerShell syntax", async () => {
+    const result = await createShellTool(process.cwd()).execute({ command: "powershell", args: ["-Command", "'literal with spaces'"] }, signal);
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("literal with spaces");
+  });
+
+  it.skipIf(process.platform !== "win32")("preserves quoted cmd search arguments in a workspace with spaces", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor cmd search "));
+    writeFileSync(join(workspace, "README.md"), "[release](./CHANGELOG.md)\r\n");
+    const result = await createShellTool(workspace).execute({
+      command: "cmd", args: ["/c", "findstr", "/n", '"CHANGELOG.md)"', "README.md"],
+    }, signal);
+    expect(result).toMatchObject({ exitCode: 0 });
+    expect(result.stdout).toContain("1:[release]");
+  });
+
+  it.skipIf(process.platform !== "win32")("preserves quotes through explicit PowerShell Command", async () => {
+    for (const command of ["powershell", "pwsh"]) {
+      const result = await createShellTool(process.cwd()).execute({ command,
+        args: ["-NoProfile", "-Command", `Write-Output '{"value":"quoted"}'`],
+      }, signal);
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe('{"value":"quoted"}');
+    }
+  });
+
+  it.skipIf(process.platform !== "win32")("can load Get-FileHash in the runtime PowerShell environment", async () => {
+    const result = await createShellTool(process.cwd()).execute({
+      command: "(Get-FileHash -LiteralPath package.json -Algorithm SHA256).Hash", args: [],
+    }, signal);
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toMatch(/^[A-F0-9]{64}$/);
+  });
+
   it("rejects empty commands and null bytes at the tool boundary", () => {
     const schema = createShellTool(process.cwd()).inputSchema;
     expect(() => schema.parse({ command: "   ", args: [] })).toThrow();

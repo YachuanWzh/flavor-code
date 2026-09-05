@@ -6,6 +6,7 @@ export interface ExecFileNoThrowOptions {
   env?: NodeJS.ProcessEnv;
   stdin?: "ignore" | "inherit" | "pipe";
   input?: string;
+  signal?: AbortSignal;
 }
 
 export function execFileNoThrow(
@@ -20,6 +21,7 @@ export function execFileNoThrow(
       env: options.env,
       encoding: "utf8",
       windowsHide: true,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
     }, (error, stdout, stderr) => {
       resolve({ stdout, stderr, code: typeof error?.code === "number" ? error.code : error ? 1 : 0,
         ...(error === null ? {} : { error: error.message }) });

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { waitWithSignal } from "../utils/abort.js";
 
 export type JobState = "running" | "completed" | "failed" | "cancelled";
 export type JobKind = "shell" | "terminal" | "d2c-preview" | "e2e-backend" | "process";
@@ -51,6 +52,7 @@ export class JobRegistry {
 
   create(input: CreateJobInput): JobHandle {
     this.#pruneCompleted();
+    if (this.#jobs.size >= this.#maxJobs) throw new Error(`Background job limit (${this.#maxJobs}) reached; wait for or cancel an existing job first`);
     const id = `job-${randomUUID().slice(0, 12)}`;
     const now = new Date().toISOString();
     let settle!: (snapshot: JobSnapshot) => void;
@@ -78,7 +80,7 @@ export class JobRegistry {
       },
       complete: (result = {}) => this.#finish(
         record,
-        result.exitCode !== undefined && result.exitCode !== null && result.exitCode !== 0 ? "failed" : "completed",
+        result.error !== undefined || (result.exitCode !== undefined && result.exitCode !== null && result.exitCode !== 0) ? "failed" : "completed",
         result,
       ),
       fail: (error) => this.#finish(record, "failed", { error: error instanceof Error ? error.message : String(error) }),
@@ -100,19 +102,25 @@ export class JobRegistry {
   }
 
   async wait(id: string, owner: string, signal?: AbortSignal): Promise<JobSnapshot> {
+    signal?.throwIfAborted();
     const job = this.#owned(id, owner);
     if (job.state !== "running") return snapshot(job);
-    if (signal === undefined) return job.done;
-    return Promise.race([job.done, new Promise<JobSnapshot>((_resolve, reject) => {
-      if (signal.aborted) { reject(signal.reason); return; }
-      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-    })]);
+    return waitWithSignal(job.done, signal);
   }
 
-  kill(id: string, owner: string): void {
+  kill(id: string, owner: string): void | Promise<void> {
     const job = this.#owned(id, owner);
     if (job.state !== "running") return;
-    void job.cancel?.();
+    try {
+      const cancellation = job.cancel?.();
+      if (cancellation !== undefined) return cancellation.then(
+        () => this.#finish(job, "cancelled", {}),
+        (error: unknown) => this.#finish(job, "failed", { error: `Cancellation failed: ${error instanceof Error ? error.message : String(error)}` }),
+      );
+    } catch (error) {
+      this.#finish(job, "failed", { error: `Cancellation failed: ${error instanceof Error ? error.message : String(error)}` });
+      return;
+    }
     this.#finish(job, "cancelled", {});
   }
 

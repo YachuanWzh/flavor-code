@@ -23,6 +23,8 @@ describe("SkillResource tool", () => {
       permissions: new PermissionEngine({ workspace }) });
     await expect(runtime.execute({ name: "SkillResource", input: { skill: "cook", reference: "references/info.txt" } }, { agent: "subagent" }))
       .resolves.toMatchObject({ ok: true, output: { encoding: "utf8", content: "saffron" } });
+    await expect(runtime.execute({ name: "SkillResource", input: { skill: "bundle:cook", reference: "references/info.txt" } }, { agent: "subagent" }))
+      .resolves.toMatchObject({ ok: true, output: { encoding: "utf8", content: "saffron" } });
     await expect(runtime.execute({ name: "SkillResource", input: { skill: "cook", reference: "assets/pic.bin" } }, { agent: "main" }))
       .resolves.toMatchObject({ ok: true, output: { encoding: "base64", content: "/wD+", size: 3 } });
     await expect(runtime.execute({ name: "SkillResource", input: { skill: "cook", reference: "references/hidden.txt" } }, { agent: "main" }))

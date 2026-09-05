@@ -75,7 +75,7 @@ import {
 import { createGlobTool, createGrepTool } from "./tools/search.js";
 import { createShellTool, resolveRuntimeShell } from "./tools/shell.js";
 import { createWebFetchTool, createWebSearchTool } from "./tools/web.js";
-import { createLspTools } from "./tools/lsp.js";
+import { createLspTools, RealLspManager } from "./tools/lsp.js";
 import {
   changeSummary,
   commit as gitCommitChange,
@@ -490,6 +490,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const executionEnvironment = createExecutionEnvironment(workspace, config.execution);
   const jobs = new JobRegistry();
   const terminals = new TerminalService(workspace, { jobs });
+  const lspManager = new RealLspManager({ workspace, onStatus: (message) => emitOutput({ type: "notice", message }) });
   const observations = new FileObservationStore();
   const workspaceInstructions = new WorkspaceInstructions(workspace);
   const fileMutationOptions = {
@@ -507,9 +508,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       ...(executionEnvironment === undefined ? {} : { executionEnvironment }),
     }),
     createWebFetchTool(), createWebSearchTool(), ...createJobTools(jobs), ...createTerminalTools(terminals, workspace),
-    ...createLspTools(workspace, {
-      onStatus: (message) => emitOutput({ type: "notice", message }),
-    }),
+    ...createLspTools(workspace, { manager: lspManager }),
     ...(options.approvalPolicy === "deny" ? [] : [createAskUserQuestionTool(askUserQuestionHandler)]),
     createTaskOutputTool(),
     createTodoWriteTool(),
@@ -1022,6 +1021,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     permissionPolicy,
     maxIterationsMain: config.maxIterations.main,
     maxIterationsSubagent: config.maxIterations.subagent,
+    softLimitFactor: config.maxIterations.softLimitFactor,
+    extendIterations: config.maxIterations.extendBy,
     hasActiveProgress,
     afterToolSuccess: async (_tool, paths, _input, _output, context) => workspaceInstructions.discover(paths, context.ownerId ?? context.agent),
     toolJournal: {
@@ -1415,6 +1416,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       permissionPolicy,
       maxIterationsMain: config.maxIterations.main,
       maxIterationsSubagent: config.maxIterations.subagent,
+      softLimitFactor: config.maxIterations.softLimitFactor,
+      extendIterations: config.maxIterations.extendBy,
       loopMode: true,
       afterToolSuccess: async (_tool, paths, _input, _output, context) => loopInstructions.discover(paths, context.ownerId ?? context.agent),
       toolJournal: {
@@ -2080,6 +2083,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       if (executionEnvironment !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "execution-environment", executionEnvironment.dispose());
       if (islandControlServer !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "island-control", islandControlServer.close());
       terminals.dispose();
+      await boundedStep(stepTimeoutMs, diagnostics, "language-servers", lspManager.dispose());
       await boundedStep(stepTimeoutMs, diagnostics, "jobs", jobs.dispose());
       auditLogger.close();
       evolveService.dispose();
@@ -2111,6 +2115,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       if (sleepScheduler !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "sleep-scheduler", sleepScheduler.dispose());
       if (executionEnvironment !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "execution-environment", executionEnvironment.dispose());
       terminals.dispose();
+      await boundedStep(stepTimeoutMs, diagnostics, "language-servers", lspManager.dispose());
       await boundedStep(stepTimeoutMs, diagnostics, "jobs", jobs.dispose());
       unsubscribeCollaboration?.();
       pendingCollaborationEvents.length = 0;
