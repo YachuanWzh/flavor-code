@@ -35,7 +35,7 @@ const ArtifactFileEntrySchema = z.object({
 }).strict();
 export type ArtifactFileEntry = z.infer<typeof ArtifactFileEntrySchema>;
 
-const ArtifactManifestSchema = z.object({
+export const ArtifactManifestSchema = z.object({
   schemaVersion: z.literal(RSI_ARTIFACT_SCHEMA_VERSION),
   /** Sorted by normalized path; insertion order can never shift the hash. */
   files: z.array(ArtifactFileEntrySchema).min(1),

@@ -41,6 +41,7 @@ export const RSI_CONTROL_EVENT_TYPES = [
   "rollback.started",
   "rollback.completed",
   "tool_outcomes",
+  "trial.reported",
 ] as const;
 export type RsiControlEventType = (typeof RSI_CONTROL_EVENT_TYPES)[number];
 
