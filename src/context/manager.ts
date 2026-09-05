@@ -333,6 +333,27 @@ export class ContextManager {
     return estimateMessageTokens(this.messagesForModel());
   }
 
+  /** Retained sizes for the rotation census: what this context holds right now. */
+  census(): {
+    messages: number;
+    messageChars: number;
+    visibilityEntries: number;
+    visibilityChars: number;
+    transientEntries: number;
+    transientChars: number;
+  } {
+    const chars = (messages: readonly ModelMessage[]): number =>
+      messages.reduce((sum, entry) => sum + modelContentText(entry.content).length, 0);
+    return {
+      messages: this.#messages.length,
+      messageChars: chars(this.#messages),
+      visibilityEntries: this.#visibilityLog.length,
+      visibilityChars: this.#visibilityLog.reduce((sum, record) => sum + record.content.length, 0),
+      transientEntries: this.#activeTransientSystem.size,
+      transientChars: chars([...this.#activeTransientSystem.values()]),
+    };
+  }
+
   needsCompaction(): boolean {
     if (modelVisibleText(this.messagesForModel()).length >= this.#compactAtChars) return true;
     return calculateContextPressure(this.#currentTokenUsage(), this.#compaction).shouldAutoCompact;

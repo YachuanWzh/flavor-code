@@ -2,7 +2,7 @@ import type { ContextManager } from "../context/manager.js";
 import type { HallucinationGuard } from "../hallucination/guard.js";
 import type { HookBus } from "../hooks/bus.js";
 import type { ModelRegistry } from "../models/registry.js";
-import { getHeapStatistics } from "node:v8";
+import { MEMORY_PRESSURE_HEAP_RATIO, verifiedHeapPressure } from "../utils/heap.js";
 import { withStructuredOutput } from "../models/structured.js";
 import { normalizeProviderError, type ModelMessage, type ModelThinkingBlock, type ModelTool, type ProviderError } from "../models/types.js";
 import type { ToolRuntime } from "../tools/runtime.js";
@@ -35,9 +35,10 @@ function envMaxIterations(): number | undefined {
  * leak otherwise ends in a native OOM crash with no recovery; tripping this
  * watermark saves the session and lets the launcher relaunch on a fresh heap.
  * 0.8 keeps headroom for compaction payloads and the GC death spiral that
- * starts near ~0.95.
+ * starts near ~0.95. The reading is GC-verified: uncollected garbage alone
+ * must not stop a turn.
  */
-export const MEMORY_PRESSURE_HEAP_RATIO = 0.8;
+export { MEMORY_PRESSURE_HEAP_RATIO };
 
 export function memoryPressureError(heapUsed: number, heapLimit: number): AgentError | undefined {
   if (heapLimit <= 0 || heapUsed < heapLimit * MEMORY_PRESSURE_HEAP_RATIO) return undefined;
@@ -49,7 +50,9 @@ export function memoryPressureError(heapUsed: number, heapLimit: number): AgentE
 }
 
 function currentMemoryPressure(): AgentError | undefined {
-  return memoryPressureError(process.memoryUsage().heapUsed, getHeapStatistics().heap_size_limit);
+  const reading = verifiedHeapPressure(MEMORY_PRESSURE_HEAP_RATIO);
+  if (reading === undefined) return undefined;
+  return memoryPressureError(reading.heapUsed, reading.heapLimit);
 }
 
 export interface AgentLoopOptions {

@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto";
 import { appendFile, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { HarnessJournal } from "../../src/harness/journal.js";
+import { HarnessJournal, hashJson } from "../../src/harness/journal.js";
 import { harnessInvariantViolations } from "../../src/harness/invariants.js";
 
 const roots: string[] = [];
@@ -138,5 +139,44 @@ describe("HarnessJournal", () => {
       expect.objectContaining({ id: incompleteTool, tool: "Write", retrySafe: false }),
     ]);
     expect(harnessInvariantViolations(reopened.records)).toEqual([]);
+  });
+});
+
+describe("hashJson streaming digest", () => {
+  // Reference: before the churn fix, hashJson materialized one stableJson
+  // string and hashed it. The streaming stableHashInto must emit an identical
+  // byte stream, otherwise journals written by older builds stop verifying.
+  function stableJson(value: unknown): string {
+    if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+    if (typeof value === "object" && value !== null) {
+      const object = value as Record<string, unknown>;
+      return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${stableJson(object[key])}`).join(",")}}`;
+    }
+    return JSON.stringify(value) ?? String(value);
+  }
+  const referenceHash = (value: unknown): string => createHash("sha256").update(stableJson(value)).digest("hex");
+
+  const cases: unknown[] = [
+    null,
+    true,
+    42,
+    3.14,
+    "plain",
+    "quotes \" and \\ backslash and \u00e9",
+    "",
+    [],
+    {},
+    [1, "two", false, null, [3, { nested: true }]],
+    { b: 2, a: 1, c: [{ z: 26, y: 25 }] },
+    { messages: [{ role: "user", content: "x".repeat(1024) }], model: "fake:model" },
+  ];
+
+  it.each(cases)("matches the pre-refactor digest for case %#", (value) => {
+    expect(hashJson(value)).toBe(referenceHash(value));
+  });
+
+  it("is independent of object key insertion order", () => {
+    expect(hashJson({ a: 1, b: [2, 3], c: { d: 4 } }))
+      .toBe(hashJson({ c: { d: 4 }, b: [2, 3], a: 1 }));
   });
 });

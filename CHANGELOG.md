@@ -2,7 +2,27 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.0-beta.3 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.0-beta.4 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.0-beta.4] - 2026-09-05
+
+### 新增
+- 长程任务内存有界改为构造性保证：不再依赖单点堵漏，而是在 turn、`/loop` 周期、`/goal` 轮次这三类工作单元边界做无缝堆轮换。软水位（GC 核实后 60%）触发时，先持久化状态再退出（退出码 75），launcher 携 `--resume` 重启到全新堆上继续运行，使无人值守的多日任务不会因堆增长而崩溃。
+- `/loop` 与 `/goal` 跨轮换自动续跑：轮换标记写入 `continuation`，重启后的进程读取持久化状态并从中断处继续——`/loop` 按已完成周期数续跑，`/goal` 用 `verifyRounds` 与 `workerRounds` 消歧，判断是推进下一轮还是重跑被中断的轮次，绝不重放已完成轮。
+- 轮换自动取证：每次轮换留存一份保留普查（各内存持有者自报 entries/chars/bytes 与 GC 核实前后的堆水位），核实后活动集接近硬上限（85%）或设置 `FLAVOR_HEAP_SNAPSHOT_ON_ROTATE=1` 时额外落一份 `.heapsnapshot`；分别保留最近 5 份普查与 2 份快照，让下一次复发能直接指认增长源。
+
+### 变更
+- 水位判定改为 GC 核实：`--expose-gc` 可用时先做完整 GC 再判断，排除“未回收垃圾”造成的误报；硬 guard 80% 仅在活动集真正越限时才停当前 turn，软轮换在 45% 以下走廉价检查、不付出 GC 停顿。launcher 默认注入 `--expose-gc`、`--report-on-fatalerror` 与 `--heapsnapshot-near-heap-limit=1`，物理内存 ≥12GB 且用户未固定堆上限时注入 `--max-old-space-size=8192`。
+- 轮换预算放宽以适配多日运行：滚动窗口内最多 24 次/小时，并加 5 分钟最小间隔冷却，避免“新堆出生即重”时陷入轮换自旋；此时交回硬 guard 决策。
+
+### 修复
+- 修复 `/loop`、`/goal` 续跑必然失败的问题：`resume()` 此前把持久层的 `load` 方法从对象上摘下后脱离 receiver 调用，真实 Store 读取 `#私有` 字段时会抛错，导致每次续跑都退化为失败终态；改为在持久层对象上直接调用。
+- 修复交互主体在 turn 内被内存误报打断：turn 干净结束时按软水位无缝轮换，会话自动恢复、下一 turn 在全新堆运行，不中断当前 turn。
+- 止损二次方堆 churn：`JobRegistry` 输出改为分块存储并对读取游标做钳制，保持严格可观测上界；harness journal 的 `hashJson` 改为流式喂入哈希，字节流与旧 `stableJson` 完全一致、digest 向后兼容，避免每次调用都拼接兆级字符串。
+
+### 测试与维护
+- 新增堆水位（GC 核实/软轮换/快照阈值）、轮换取证（普查形状/写盘/prune）、`GoalStore` 载入往返与损坏隔离、`/loop` 与 `/goal` 边界轮换干净退出与续跑、journal 流式 digest 兼容等回归；边界轮换测试因 `markMemoryRotation` 是单向模块标志而单独成文件，避免污染同文件后续用例。
+- `package.json` 与 `package-lock.json` 的项目版本统一为 `1.4.0-beta.4`。
 
 ## [1.4.0-beta.3] - 2026-09-05
 

@@ -65,6 +65,8 @@ export class SessionHistory {
   }
 
   get leafId(): string | null { return this.#leafId; }
+  /** Cheap retained-node count for the rotation census (no cloning). */
+  get nodeCount(): number { return this.#nodes.length; }
   tree(): readonly SessionTreeNode[] { return this.#nodes.map((node) => structuredClone(node)); }
 
   async append(input: { prompt: string; context: ContextSnapshot; label?: string }): Promise<SessionTreeNode> {

@@ -22,12 +22,21 @@ export interface JobReadResult extends JobSnapshot { output: string; cursor: num
 export interface CreateJobInput { kind: JobKind; owner: string; label: string; cancel?: () => void | Promise<void> }
 
 interface JobRecord extends JobSnapshot {
-  output: string;
+  /**
+   * The retained output window, kept as chunks: appending to one growing
+   * string re-copied the whole window on every write, a quadratic churn that
+   * showed up as heap pressure on churning background jobs.
+   */
+  chunks: string[];
+  windowChars: number;
   outputStart: number;
   cancel?: () => void | Promise<void>;
   settle: (snapshot: JobSnapshot) => void;
   done: Promise<JobSnapshot>;
 }
+
+/** Re-slice the window only after this much new output accumulates. */
+const OUTPUT_SLICE_SLACK_CHARS = 64 * 1024;
 
 export interface JobHandle {
   readonly id: string;
@@ -59,7 +68,7 @@ export class JobRegistry {
     const done = new Promise<JobSnapshot>((resolve) => { settle = resolve; });
     const record: JobRecord = {
       id, ...input, state: "running", createdAt: now, updatedAt: now,
-      outputChars: 0, truncated: false, output: "", outputStart: 0, settle, done,
+      outputChars: 0, truncated: false, chunks: [], windowChars: 0, outputStart: 0, settle, done,
     };
     this.#jobs.set(id, record);
     this.#publish();
@@ -67,11 +76,18 @@ export class JobRegistry {
       id,
       append: (text) => {
         if (record.state !== "running" || text === "") return;
-        record.output += text;
+        record.chunks.push(text);
+        record.windowChars += text.length;
         record.outputChars += text.length;
-        if (record.output.length > this.#maxOutputChars) {
-          const removed = record.output.length - this.#maxOutputChars;
-          record.output = record.output.slice(removed);
+        // Logical truncation is decided by everything ever produced, so the
+        // flag stays correct even while the physical window still holds slack.
+        if (record.outputChars > this.#maxOutputChars) record.truncated = true;
+        if (record.windowChars > this.#maxOutputChars + OUTPUT_SLICE_SLACK_CHARS) {
+          const joined = record.chunks.join("");
+          const kept = joined.slice(joined.length - this.#maxOutputChars);
+          const removed = joined.length - kept.length;
+          record.chunks = [kept];
+          record.windowChars = kept.length;
           record.outputStart += removed;
           record.truncated = true;
         }
@@ -97,8 +113,24 @@ export class JobRegistry {
 
   read(id: string, owner: string, cursor = 0): JobReadResult {
     const job = this.#owned(id, owner);
-    const effective = Math.max(cursor, job.outputStart);
-    return { ...snapshot(job), output: job.output.slice(effective - job.outputStart), cursor: job.outputStart + job.output.length };
+    const window = job.chunks.join("");
+    // The physical window transiently retains up to maxOutputChars + slack to
+    // keep appends amortized; expose only the bounded tail so even a
+    // from-scratch read never returns more than maxOutputChars.
+    const dropped = Math.max(0, window.length - this.#maxOutputChars);
+    const effective = Math.max(cursor, job.outputStart + dropped);
+    return { ...snapshot(job), output: window.slice(effective - job.outputStart), cursor: job.outputStart + window.length };
+  }
+
+  /** Retained sizes for the rotation census. */
+  census(): { jobs: number; running: number; windowChars: number } {
+    let windowChars = 0;
+    let running = 0;
+    for (const job of this.#jobs.values()) {
+      windowChars += job.windowChars;
+      if (job.state === "running") running += 1;
+    }
+    return { jobs: this.#jobs.size, running, windowChars };
   }
 
   async wait(id: string, owner: string, signal?: AbortSignal): Promise<JobSnapshot> {

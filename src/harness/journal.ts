@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, type Hash } from "node:crypto";
 import { closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, truncateSync, unlinkSync, writeSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
@@ -91,6 +91,8 @@ export class HarnessJournal {
 
   get path(): string { return this.#path; }
   get records(): readonly HarnessJournalRecord[] { return this.#records.map((record) => structuredClone(record)); }
+  /** Retained record count for the rotation census. */
+  get recordCount(): number { return this.#records.length; }
 
   admitQueue<T>(kind: "steer" | "followUp", payload: T): string {
     QueueKindSchema.parse(kind);
@@ -369,21 +371,47 @@ function jsonSafeRecord(value: Record<string, unknown>): Record<string, unknown>
 }
 
 export function hashJson(value: unknown): string {
-  return createHash("sha256").update(stableJson(value)).digest("hex");
+  const hash = createHash("sha256");
+  stableHashInto(hash, value);
+  return hash.digest("hex");
+}
+
+/**
+ * Feed the stable JSON serialization straight into the hash instead of
+ * materializing one giant string: model requests and tool inputs can be
+ * megabytes, and concatenating them per call churned the heap hard enough to
+ * move the watermark. The byte stream is identical to stableJson output, so
+ * digests stay compatible with existing journals.
+ */
+function stableHashInto(hash: Hash, value: unknown): void {
+  if (Array.isArray(value)) {
+    hash.update("[");
+    for (let index = 0; index < value.length; index += 1) {
+      if (index > 0) hash.update(",");
+      stableHashInto(hash, value[index]);
+    }
+    hash.update("]");
+    return;
+  }
+  if (typeof value === "object" && value !== null) {
+    const object = value as Record<string, unknown>;
+    hash.update("{");
+    const keys = Object.keys(object).sort();
+    for (let index = 0; index < keys.length; index += 1) {
+      const key = keys[index]!;
+      if (index > 0) hash.update(",");
+      hash.update(`${JSON.stringify(key)}:`);
+      stableHashInto(hash, object[key]);
+    }
+    hash.update("}");
+    return;
+  }
+  hash.update(JSON.stringify(value) ?? String(value));
 }
 
 function recordHash(record: HarnessJournalRecord): string {
   const { hash: _hash, ...unsigned } = record;
   return hashJson(unsigned);
-}
-
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (typeof value === "object" && value !== null) {
-    const object = value as Record<string, unknown>;
-    return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${stableJson(object[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? String(value);
 }
 
 function assertSessionId(value: string): void {

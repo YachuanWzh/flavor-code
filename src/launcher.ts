@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { realpathSync, readFileSync } from "node:fs";
+import { totalmem } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -16,11 +17,16 @@ export interface LauncherRuntime {
 /** Relaunching is required whenever node flags must be applied to the CLI. */
 export function needsRelaunch(runtime: LauncherRuntime): boolean {
   if (!runtime.execArgv.some((argument) => argument === "--report-on-fatalerror")) return true;
-  return !runtime.execArgv.some((argument) => argument.startsWith("--heapsnapshot-near-heap-limit"));
+  if (!runtime.execArgv.some((argument) => argument.startsWith("--heapsnapshot-near-heap-limit"))) return true;
+  return !runtime.execArgv.some((argument) => argument === "--expose-gc");
 }
 
+/** Machines with room to spare get a larger heap: longer rotation cycles, fewer restarts per day. */
+const HEAP_HEADROOM_MB = 8192;
+const HEAP_HEADROOM_MIN_TOTALMEM = 12 * 1024 * 1024 * 1024;
+
 export function cliMainArguments(mainPath: string, argv: readonly string[]): string[] {
-  return [
+  const flags = [
     // Fatal V8 errors (heap OOM, native crashes) bypass crash-guard.ts and
     // leave only an unusable native stack. Ask Node to dump a diagnostic
     // report next to the working directory so the next crash has a scene.
@@ -30,9 +36,16 @@ export function cliMainArguments(mainPath: string, argv: readonly string[]): str
     // Capture one heap snapshot as the heap nears its limit so the next
     // crash leaves a .heapsnapshot retainer trail next to the report.
     "--heapsnapshot-near-heap-limit=1",
-    mainPath,
-    ...argv,
+    // The heap watermarks are GC-verified: heapUsed counts uncollected
+    // garbage, and stopping turns or rotating on garbage alone would waste
+    // work. Exposing gc lets the watermark measure the live set instead.
+    "--expose-gc",
   ];
+  const userPinnedHeap = [...process.execArgv, ...argv].some((argument) => argument.startsWith("--max-old-space-size"));
+  if (!userPinnedHeap && totalmem() >= HEAP_HEADROOM_MIN_TOTALMEM) {
+    flags.push(`--max-old-space-size=${HEAP_HEADROOM_MB}`);
+  }
+  return [...flags, mainPath, ...argv];
 }
 
 export async function launchCli(): Promise<void> {

@@ -29,6 +29,7 @@ import { createEvolveService } from "./evolve/service.js";
 import { initializeFlavor } from "./init/project.js";
 import { LoopOrchestrator, type LoopRuntimeEvent } from "./loop/orchestrator.js";
 import { GoalOrchestrator } from "./goal/orchestrator.js";
+import type { GoalRuntimeEvent } from "./goal/types.js";
 import { GoalStore } from "./goal/store.js";
 import { prepareLoopWorkspace } from "./loop/isolation.js";
 import { LoopStore } from "./loop/store.js";
@@ -58,11 +59,30 @@ import { SESSION_VERSION, SessionStore, type SessionDocument, type SessionLease 
 import { SessionHistory } from "./session/tree.js";
 import {
   MEMORY_RESTART_EXIT_CODE,
+  markMemoryRotation,
   memoryRestartMarkerPath,
   nextMemoryRestartMarker,
   parseMemoryRestartMarker,
+  pendingContinuation,
+  rotationCooldownActive,
+  type MemoryRestartContinuation,
   type MemoryRestartMarker,
 } from "./utils/memory-restart.js";
+import {
+  MEMORY_PRESSURE_HEAP_RATIO,
+  heapRotationNeeded,
+  heapSnapshotWarranted,
+  readHeap,
+  verifiedHeapPressure,
+  type HeapReading,
+} from "./utils/heap.js";
+import {
+  censusHeapBlock,
+  writeRotationCensus,
+  writeRotationHeapSnapshot,
+  type RotationCensus,
+  type RotationCensusHolder,
+} from "./utils/rotation-census.js";
 import { ProjectSleepOrganizer, ProjectSleepScheduler, localDateKey } from "./sleep/organizer.js";
 import {
   createApplyPatchTool,
@@ -1455,12 +1475,95 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     }
   };
 
+  // ─── Heap rotation (seamless, boundary-driven) ───
+  // A single long-lived process is the real risk: per-holder caps still let
+  // the heap grow across turns/cycles/rounds until V8 dies. So at every safe
+  // boundary we GC-verify the live set and, past the soft watermark, rotate
+  // onto a fresh heap. The session and any /loop or /goal are already
+  // persisted at the boundary, and the relaunched process resumes them.
+  let activeLongTask: MemoryRestartContinuation | undefined;
+
+  const readMemoryRestartMarker = (): MemoryRestartMarker | undefined => {
+    try { return parseMemoryRestartMarker(readFileSync(memoryRestartMarkerPath(workspace), "utf8")); }
+    catch { return undefined; }
+  };
+
+  const currentPressureReading = (): HeapReading =>
+    verifiedHeapPressure(MEMORY_PRESSURE_HEAP_RATIO) ?? { ...readHeap(), gcVerified: false };
+
+  const collectRotationHolders = (): Record<string, RotationCensusHolder> => {
+    const holders: Record<string, RotationCensusHolder> = {};
+    try {
+      const context = harness.main.context.census();
+      holders.context = { entries: context.messages, chars: context.messageChars };
+      holders.contextVisibility = { entries: context.visibilityEntries, chars: context.visibilityChars };
+      holders.contextTransient = { entries: context.transientEntries, chars: context.transientChars };
+    } catch { /* census is best-effort and must never block a rotation */ }
+    try { holders.journal = { entries: harnessJournal.recordCount }; } catch { /* best-effort */ }
+    try {
+      const jobCensus = jobs.census();
+      holders.jobs = { entries: jobCensus.jobs, chars: jobCensus.windowChars };
+    } catch { /* best-effort */ }
+    try { holders.sessionTree = { entries: sessionHistory.nodeCount }; } catch { /* best-effort */ }
+    return holders;
+  };
+
+  const rotateForHeap = (continuation?: MemoryRestartContinuation, reading?: HeapReading): void => {
+    requestMemoryRestart(workspace, sessionId, emitOutput, {
+      ...(continuation === undefined ? {} : { continuation }),
+      ...(reading === undefined ? {} : { reading }),
+      holders: collectRotationHolders(),
+    });
+  };
+
+  /**
+   * Boundary rotation gate. Cheap below the precheck ratio; past it the live
+   * set is GC-verified against the soft watermark. A rotation requested too
+   * soon after the previous one is skipped (a fresh heap born heavy would only
+   * spin) — the hard guard still protects the in-flight unit of work.
+   */
+  const maybeRotateAtBoundary = (continuation: MemoryRestartContinuation): void => {
+    activeLongTask = continuation;
+    const reading = heapRotationNeeded();
+    if (reading === undefined) return;
+    if (rotationCooldownActive(readMemoryRestartMarker(), sessionId, new Date())) return;
+    rotateForHeap(continuation, reading);
+  };
+
+  /**
+   * Interactive turn boundary: the turn is fully persisted, so rotating here is
+   * seamless — the session resumes and the next prompt runs on a fresh heap
+   * instead of tripping the hard guard mid-turn. No continuation is attached
+   * because there is no autonomous task to pick back up.
+   */
+  const maybeRotateAtTurnBoundary = (): void => {
+    const reading = heapRotationNeeded();
+    if (reading === undefined) return;
+    if (rotationCooldownActive(readMemoryRestartMarker(), sessionId, new Date())) return;
+    rotateForHeap(undefined, reading);
+  };
+
+  /** The continuation a relaunched process should pick up, consumed once. */
+  const consumePendingContinuation = (): MemoryRestartContinuation | undefined => {
+    const marker = readMemoryRestartMarker();
+    const continuation = pendingContinuation(marker, sessionId, new Date());
+    if (continuation === undefined || marker === undefined) return undefined;
+    // Drop the continuation from the marker so a later unrelated start of the
+    // same session does not resume a task that already finished.
+    try {
+      const markerPath = memoryRestartMarkerPath(workspace);
+      writeFileSync(markerPath, `${JSON.stringify(nextMemoryRestartMarker(marker, sessionId, new Date()))}\n`, "utf8");
+    } catch { /* consuming is best-effort */ }
+    return continuation;
+  };
+
   const loopStore = new LoopStore({ workspace });
   const loopOrchestrator = new LoopOrchestrator({
     workspace,
     config: config.loop,
     persistence: loopStore,
     hallucinationGuard,
+    onCycleBoundary: (loopId) => maybeRotateAtBoundary({ kind: "loop", id: loopId }),
     prepareWorkspace: (input) => prepareLoopWorkspace(input),
     inferVerification: inferVerificationPlan,
     runWorker: ({ workspace: executionWorkspace, prompt, signal }) =>
@@ -1505,6 +1608,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     maxRounds: 5,
     maxStallStreak: 2,
     persistence: goalStore,
+    onRoundBoundary: (goalId) => maybeRotateAtBoundary({ kind: "goal", id: goalId }),
     verifyHost: async (signal) => runVerificationPlan(
       await inferVerificationPlan(workspace), workspace, signal, executionEnvironment,
     ),
@@ -1595,7 +1699,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         contextEpoch: harness.main.context.snapshot().epoch?.id ?? "legacy",
       });
       const turnId = harnessJournal.startTurn(turnConfig, { prompt, initialUserMessage: runOptions?.initialUserMessage });
-      return monitorMemoryRestart(durableTurn(persistAfter(runMain(
+      return monitorTurnMemory(durableTurn(persistAfter(runMain(
         harness, skills, prompt, signal, selectedModels.mainError,
         memoryStore === undefined || (!memoryHasRoutableEntries && userMemoryContext === undefined) ? undefined : {
           store: memoryStore, taskId: memoryLifecycle.taskId ?? sessionId,
@@ -1605,13 +1709,30 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         runOptions?.initialUserMessage,
         runOptions?.additionalContext,
         ide,
-      ), persist), harnessJournal, turnId, turnConfig), () => requestMemoryRestart(workspace, sessionId, emitOutput));
+      ), persist), harnessJournal, turnId, turnConfig),
+        () => rotateForHeap(undefined, currentPressureReading()),
+        () => maybeRotateAtTurnBoundary());
     },
     runSkill: (skill, prompt, signal) => persistAfter(
       runExplicitSkill(harness, skills, skill, prompt, signal, selectedModels.mainError), persist,
     ),
-    runLoop: (goal, signal) => runLoopSession(loopOrchestrator, hooks, goal, signal),
-    runGoal: (goal, signal) => persistEach(runGoalSession(goalOrchestrator, goal, signal), persist),
+    runLoop: (goal, signal) => monitorLongTaskRestart(
+      runLoopSession(loopOrchestrator, hooks, goal, signal),
+      () => rotateForHeap(activeLongTask, currentPressureReading()),
+    ),
+    runGoal: (goal, signal) => monitorLongTaskRestart(
+      persistEach(runGoalSession(goalOrchestrator, goal, signal), persist),
+      () => rotateForHeap(activeLongTask, currentPressureReading()),
+    ),
+    resumeLoop: (loopId, signal) => monitorLongTaskRestart(
+      runResumeLoopSession(loopOrchestrator, hooks, loopId, signal),
+      () => rotateForHeap(activeLongTask ?? { kind: "loop", id: loopId }, currentPressureReading()),
+    ),
+    resumeGoal: (goalId, signal) => monitorLongTaskRestart(
+      persistEach(runResumeGoalSession(goalOrchestrator, goalId, signal), persist),
+      () => rotateForHeap(activeLongTask ?? { kind: "goal", id: goalId }, currentPressureReading()),
+    ),
+    continuation: () => consumePendingContinuation(),
     mcp: async (command, signal) => {
       signal.throwIfAborted();
       const manager = await mcpReady;
@@ -2170,10 +2291,22 @@ function formatMcpReconnect(server: McpServerSummary): string {
 async function* runLoopSession(
   orchestrator: LoopOrchestrator, hooks: HookBus, goal: string, signal: AbortSignal,
 ): AsyncIterable<AgentEvent> {
+  yield* loopSessionEvents(orchestrator.run({ goal, signal }), hooks);
+}
+
+async function* runResumeLoopSession(
+  orchestrator: LoopOrchestrator, hooks: HookBus, loopId: string, signal: AbortSignal,
+): AsyncIterable<AgentEvent> {
+  yield* loopSessionEvents(orchestrator.resume({ loopId, signal }), hooks);
+}
+
+async function* loopSessionEvents(
+  events: AsyncIterable<LoopRuntimeEvent>, hooks: HookBus,
+): AsyncIterable<AgentEvent> {
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
   let latestVerification: LoopVerificationEvidence | undefined;
-  for await (const event of orchestrator.run({ goal, signal })) {
+  for await (const event of events) {
     if (event.type === "worker-event") {
       if (event.event.type === "usage") {
         totalInputTokens += event.event.inputTokens;
@@ -2404,12 +2537,35 @@ async function* durableTurn(
 }
 
 /**
- * Watch a turn's event stream for the heap watermark error. durableTurn has
- * already recorded the interruption and persistAfter has saved
- * the session by the time the stream drains, so triggering the controlled
- * restart afterwards cannot lose conversation state.
+ * Watch an interactive turn's event stream. Two outcomes:
+ * - Reactive: the hard heap guard tripped mid-turn (memory_pressure). durableTurn
+ *   recorded the interruption and persistAfter saved the session by the time the
+ *   stream drains, so rotating afterwards cannot lose conversation state.
+ * - Proactive: the turn drained cleanly, which is a safe boundary to rotate onto
+ *   a fresh heap before the next turn grows into the hard guard.
  */
-async function* monitorMemoryRestart(
+async function* monitorTurnMemory(
+  source: AsyncIterable<AgentEvent>,
+  onPressure: () => void,
+  onBoundary: () => void,
+): AsyncIterable<AgentEvent> {
+  let pressure = false;
+  for await (const event of source) {
+    if (event.type === "error" && event.error.code === "memory_pressure") pressure = true;
+    yield event;
+  }
+  if (pressure) onPressure();
+  else onBoundary();
+}
+
+/**
+ * Watch a /loop or /goal stream for the hard heap guard tripping mid-cycle.
+ * The orchestrator leaves the task state "running" and returns silently, so
+ * the stream simply ends after the worker's memory_pressure error; that is the
+ * cue to rotate onto a fresh heap and let the relaunched process resume the
+ * interrupted long-running task.
+ */
+async function* monitorLongTaskRestart(
   source: AsyncIterable<AgentEvent>,
   onRestartNeeded: () => void,
 ): AsyncIterable<AgentEvent> {
@@ -2421,27 +2577,61 @@ async function* monitorMemoryRestart(
   if (pressure) onRestartNeeded();
 }
 
+export interface MemoryRestartRotation {
+  /** Set when a /loop or /goal must be resumed by the relaunched process. */
+  continuation?: MemoryRestartContinuation;
+  /** Heap reading captured at the decision point; drives census + snapshot. */
+  reading?: HeapReading;
+  /** Retention census holders reported by the major in-memory owners. */
+  holders?: Record<string, RotationCensusHolder>;
+}
+
 /**
- * Ask the launcher to relaunch on a fresh heap: write the restart marker,
- * set the agreed exit code, and request a graceful UI shutdown. All steps are
- * best-effort — the turn is already persisted, so any failure here degrades
- * to "user restarts manually" instead of losing work.
+ * Ask the launcher to relaunch on a fresh heap: leave rotation forensics,
+ * write the restart marker (with any continuation), set the agreed exit code,
+ * and request a graceful UI shutdown. All steps are best-effort — the turn and
+ * any long-running task are already persisted, so any failure here degrades to
+ * "user restarts manually" instead of losing work.
  */
 function requestMemoryRestart(
   workspace: string,
   sessionId: string,
   emitOutput: (event: SessionOutput) => void,
+  rotation?: MemoryRestartRotation,
 ): void {
+  const continuation = rotation?.continuation;
+  // Forensics first: a census (and, near the hard limit, a heap snapshot) so
+  // the next recurrence names its own grower instead of restarting blind.
+  if (rotation?.reading !== undefined) {
+    const census: RotationCensus = {
+      at: new Date().toISOString(),
+      reason: continuation === undefined ? "memory-pressure" : `heap-rotation:${continuation.kind}`,
+      sessionId,
+      heap: censusHeapBlock(rotation.reading),
+      holders: rotation.holders ?? {},
+    };
+    writeRotationCensus(workspace, census);
+    if (heapSnapshotWarranted(rotation.reading)) writeRotationHeapSnapshot(workspace);
+  }
+  // From here the orchestrators skip terminal bookkeeping so a /loop or /goal
+  // stays "running" and the relaunched process can resume it.
+  markMemoryRotation();
   try {
     const markerPath = memoryRestartMarkerPath(workspace);
     let previous: MemoryRestartMarker | undefined;
     try { previous = parseMemoryRestartMarker(readFileSync(markerPath, "utf8")); }
     catch { /* missing or unreadable marker simply restarts the budget */ }
     mkdirSync(dirname(markerPath), { recursive: true });
-    writeFileSync(markerPath, `${JSON.stringify(nextMemoryRestartMarker(previous, sessionId, new Date()))}\n`, "utf8");
+    const marker = nextMemoryRestartMarker(previous, sessionId, new Date(), continuation);
+    writeFileSync(markerPath, `${JSON.stringify(marker)}\n`, "utf8");
   } catch { /* marker is an optimization, not a precondition */ }
   process.exitCode = MEMORY_RESTART_EXIT_CODE;
-  emitOutput({ type: "notice", message: "Memory watermark reached; the session is saved and Flavor is restarting with a fresh heap." });
+  emitOutput({
+    type: "notice",
+    message: continuation === undefined
+      ? "Memory watermark reached; the session is saved and Flavor is restarting with a fresh heap."
+      : `Memory watermark reached; the session and the running ${continuation.kind} are saved, and Flavor is restarting with a fresh heap to continue it.`,
+  });
   emitOutput({ type: "exit" });
 }
 
@@ -3016,7 +3206,23 @@ function attachCleanupError(primary: unknown, cleanup: unknown): void {
 export async function* runGoalSession(
   orchestrator: GoalOrchestrator, goal: string, signal: AbortSignal,
 ): AsyncIterable<AgentEvent> {
-  for await (const event of orchestrator.run({ goal, signal })) {
+  yield* goalSessionEvents(orchestrator.run({ goal, signal }));
+}
+
+export async function* runResumeGoalSession(
+  orchestrator: GoalOrchestrator, goalId: string, signal: AbortSignal,
+): AsyncIterable<AgentEvent> {
+  yield* goalSessionEvents(orchestrator.resume({ goalId, signal }));
+}
+
+async function* goalSessionEvents(
+  events: AsyncIterable<GoalRuntimeEvent>,
+): AsyncIterable<AgentEvent> {
+  for await (const event of events) {
+    if (event.type === "goal-resumed") {
+      yield { type: "notice", message: `Resuming goal ${event.goalId} at round ${event.round} after a heap rotation.` };
+      continue;
+    }
     if (event.type === "goal-plan-created") {
       yield { type: "notice", message: `Goal plan created (${event.plan.kind}) with ${event.plan.criteria.length} acceptance criteria.` };
       yield { type: "notice", message: `Plan file: ${event.planPath}` };

@@ -1,5 +1,6 @@
 import type { AgentEvent } from "../agent/types.js";
 import { message } from "../utils/error.js";
+import { memoryRotationActive } from "../utils/memory-restart.js";
 import { buildLoopCyclePrompt } from "../skills/builtin-loop.js";
 import { budgetDecision, extendBudget, rejectBudget, type BudgetDimension } from "./budget.js";
 import type { HallucinationGuard } from "../hallucination/guard.js";
@@ -11,6 +12,8 @@ export interface LoopPersistence {
   create(state: LoopState): Promise<void>;
   save(state: LoopState): Promise<void>;
   append(event: LoopEvent): Promise<void>;
+  /** Present when the store can reload a loop for resume after heap rotation. */
+  load?(loopId: string): Promise<LoopState>;
 }
 
 export type LoopConfirmation = "approved" | "rejected" | "unavailable";
@@ -33,6 +36,12 @@ export interface LoopOrchestratorOptions {
   runVerifier(plan: VerificationPlan, workspace: string, signal: AbortSignal): Promise<LoopVerificationEvidence>;
   confirmBudget(state: LoopState, dimensions: readonly BudgetDimension[], signal: AbortSignal): Promise<LoopConfirmation>;
   fingerprint(workspace: string): Promise<string>;
+  /**
+   * Called at every cycle boundary (state persisted). Production uses it to
+   * rotate onto a fresh heap between cycles so multi-day loops never die on
+   * a grown heap; the relaunched process resumes the loop from its state.
+   */
+  onCycleBoundary?(loopId: string): void | Promise<void>;
   /** Optional hallucination guard for confidence checks and retry monitoring. */
   hallucinationGuard?: HallucinationGuard;
   now?(): string;
@@ -65,10 +74,41 @@ export class LoopOrchestrator {
       cycles: [],
     });
     await this.#options.persistence.create(state);
+    yield* this.#execute(state, request.goal, request.signal);
+  }
+
+  /**
+   * Continue a loop whose process rotated onto a fresh heap. The persisted
+   * state decides where to pick up; an interrupted cycle simply runs again.
+   */
+  async *resume(request: { loopId: string; signal: AbortSignal }): AsyncIterable<LoopRuntimeEvent> {
+    // Call load() on its receiver: the real store reads #private fields, so a
+    // detached `const load = persistence.load` would throw on every resume.
+    const persistence = this.#options.persistence;
+    if (persistence.load === undefined) throw new Error("Loop persistence does not support resume");
+    let state: LoopState;
+    try {
+      state = await persistence.load(request.loopId);
+    } catch (error) {
+      yield { type: "loop-terminal", loopId: request.loopId, status: "failed", reason: message(error) };
+      return;
+    }
+    if (state.status !== "running") {
+      const status = state.status;
+      yield { type: "loop-terminal", loopId: state.loopId, status, reason: state.terminalReason ?? "The loop is not running." };
+      return;
+    }
+    yield* this.#execute(state, state.goal, request.signal);
+  }
+
+  async *#execute(initialState: LoopState, goal: string, signal: AbortSignal): AsyncIterable<LoopRuntimeEvent> {
+    const now = this.#options.now ?? (() => new Date().toISOString());
+    const loopId = initialState.loopId;
+    let state = initialState;
 
     try {
       const workspaceResolution = await this.#options.prepareWorkspace({
-        root: this.#options.workspace, loopId, goal: request.goal, signal: request.signal,
+        root: this.#options.workspace, loopId, goal, signal,
       });
       if (workspaceResolution.kind === "needs_human") {
         state = await this.#terminal(state, "needs_human", workspaceResolution.reason, now());
@@ -94,13 +134,19 @@ export class LoopOrchestrator {
       let previousFailureSignature: string | undefined;
       let repeatedFailures = 0;
       while (state.status === "running") {
-        request.signal.throwIfAborted();
+        signal.throwIfAborted();
+        // Cycle boundary: the previous cycle is fully persisted, so a heap
+        // rotation requested here loses nothing but the grown heap.
+        await this.#options.onCycleBoundary?.(loopId);
+        // A boundary rotation was requested: stop cleanly and leave the state
+        // running so the relaunched process resumes from the persisted cycle.
+        if (memoryRotationActive()) return;
         const cycle = state.budget.cyclesUsed + 1;
         const startedAt = now();
         await this.#options.persistence.append({ version: 1, type: "cycle_started", timestamp: startedAt, loopId, payload: { cycle } });
         yield { type: "loop-cycle-start", loopId, cycle };
         const prompt = buildLoopCyclePrompt({
-          goal: request.goal, cycle,
+          goal, cycle,
           ...(previousVerification === undefined ? {} : {
             memory: `Previous host verification: ${previousVerification.summary}`,
             verification: previousVerification,
@@ -109,15 +155,22 @@ export class LoopOrchestrator {
         let cycleInputTokens = 0;
         let cycleOutputTokens = 0;
         let workerError: string | undefined;
+        let workerMemoryPressure = false;
         let workerText = "";
         for await (const event of this.#options.runWorker({
-          goal: request.goal, cycle, workspace: executionWorkspace.root, prompt, signal: request.signal,
+          goal, cycle, workspace: executionWorkspace.root, prompt, signal,
         })) {
           if (event.type === "usage") {
             cycleInputTokens += event.inputTokens;
             cycleOutputTokens += event.outputTokens;
           }
-          if (event.type === "error") workerError = event.error.message;
+          if (event.type === "error") {
+            workerError = event.error.message;
+            // The worker hit the hard heap guard: the cycle is interrupted but
+            // the loop itself survives on the relaunched process, so leave
+            // the state running instead of terminalizing it.
+            if (event.error.code === "memory_pressure") workerMemoryPressure = true;
+          }
           if (event.type === "text") workerText += event.text;
           // Hallucination guard: record tool calls and results
           if (this.#options.hallucinationGuard !== undefined) {
@@ -129,6 +182,7 @@ export class LoopOrchestrator {
           }
           yield { type: "worker-event", event };
         }
+        if (workerMemoryPressure) return;
         if (workerError !== undefined) {
           state = LoopStateSchema.parse({
             ...state,
@@ -161,7 +215,7 @@ export class LoopOrchestrator {
               commands: [],
               summary: plan.needsHumanReason ?? "No deterministic verification command was found after the discovery cycle.",
             }
-          : await this.#options.runVerifier(plan, executionWorkspace.root, request.signal);
+          : await this.#options.runVerifier(plan, executionWorkspace.root, signal);
         const fingerprint = await this.#options.fingerprint(executionWorkspace.root);
         const completedAt = now();
         state = LoopStateSchema.parse({
@@ -197,7 +251,7 @@ export class LoopOrchestrator {
           let guardWarnings: string[] = [];
           if (this.#options.hallucinationGuard !== undefined) {
             try {
-              const report = await this.#options.hallucinationGuard.evaluate(request.goal, workerText);
+              const report = await this.#options.hallucinationGuard.evaluate(goal, workerText);
               if (!report.passed) {
                 const guardReason = report.blockingReasons.join("; ")
                   || "Hallucination guard blocked completion.";
@@ -232,7 +286,7 @@ export class LoopOrchestrator {
             type: "loop-budget", loopId, dimensions: decision.dimensions,
             cycleCheckpoint: state.budget.cycleCheckpoint, tokenCheckpoint: state.budget.tokenCheckpoint,
           };
-          const confirmation = await this.#options.confirmBudget(state, decision.dimensions, request.signal);
+          const confirmation = await this.#options.confirmBudget(state, decision.dimensions, signal);
           if (confirmation === "unavailable") {
             const reason = "Loop budget extension requires user confirmation.";
             state = await this.#terminal(state, "needs_human", reason, now());
@@ -256,8 +310,11 @@ export class LoopOrchestrator {
         }
       }
     } catch (error) {
-      const status = request.signal.aborted ? "cancelled" : "failed";
-      const reason = request.signal.aborted ? "Loop cancelled by user." : message(error);
+      // A heap rotation aborts this generator while the session shuts down;
+      // the loop state must stay "running" so the relaunched process resumes.
+      if (memoryRotationActive()) return;
+      const status = signal.aborted ? "cancelled" : "failed";
+      const reason = signal.aborted ? "Loop cancelled by user." : message(error);
       state = await this.#terminal(state, status, reason, now());
       yield { type: "loop-terminal", loopId, status, reason };
     }

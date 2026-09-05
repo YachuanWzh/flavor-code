@@ -14,6 +14,17 @@ class MemoryPersistence implements LoopPersistence {
   async append(event: LoopEvent) { this.events.push(structuredClone(event)); }
 }
 
+/** Persistence that can also reload the latest state, so resume() has a source. */
+class ResumablePersistence extends MemoryPersistence {
+  async load(loopId: string): Promise<LoopState> {
+    for (let index = this.states.length - 1; index >= 0; index -= 1) {
+      const state = this.states[index]!;
+      if (state.loopId === loopId) return structuredClone(state);
+    }
+    throw new Error(`Loop "${loopId}" was not found`);
+  }
+}
+
 function verification(passed: boolean, summary = passed ? "all checks passed" : "tests failed"): LoopVerificationEvidence {
   return { passed, summary, commands: [] };
 }
@@ -238,6 +249,62 @@ describe("LoopOrchestrator", () => {
 
     expect(inferenceCalls).toBe(2);
     expect(verifierCalls).toBe(1);
+    expect(events.at(-1)).toMatchObject({ type: "loop-terminal", status: "succeeded" });
+  });
+
+  it("invokes onCycleBoundary at the top of every cycle", async () => {
+    const boundaries: string[] = [];
+    let verifies = 0;
+    const f = fixture({
+      runVerifier: async () => ++verifies === 1 ? verification(false, "cycle 1 fails") : verification(true),
+      onCycleBoundary: (loopId) => { boundaries.push(loopId); },
+    });
+    await collect(f.orchestrator.run({ goal: "fix tests", signal: new AbortController().signal }));
+    // Two cycles ran (first failed verification, second passed): two boundaries.
+    expect(boundaries).toEqual(["loop-test", "loop-test"]);
+    expect(f.persistence.states.at(-1)).toMatchObject({ status: "succeeded", budget: { cyclesUsed: 2 } });
+  });
+
+  it("leaves the loop running when the worker trips the hard heap guard", async () => {
+    const f = fixture({
+      runWorker: () => worker([
+        { type: "usage", inputTokens: 10, outputTokens: 5, totalInputTokens: 10, totalOutputTokens: 5 },
+        { type: "error", error: { code: "memory_pressure", message: "Heap usage reached 80% of the V8 limit" } },
+      ]),
+    });
+    const events = await collect(f.orchestrator.run({ goal: "fix tests", signal: new AbortController().signal }));
+    // The interrupted cycle is not terminalized; the relaunched process resumes it.
+    expect(events.some((event) => event.type === "loop-terminal")).toBe(false);
+    expect(f.persistence.states.at(-1)).toMatchObject({ status: "running", budget: { cyclesUsed: 0 } });
+  });
+
+  it("resumes an interrupted loop and drives it to success on a fresh heap", async () => {
+    const shared = new ResumablePersistence();
+    // Phase 1: cycle 1 is interrupted by the hard heap guard mid-worker.
+    const interrupted = fixture({
+      persistence: shared,
+      runWorker: () => worker([
+        { type: "usage", inputTokens: 10, outputTokens: 5, totalInputTokens: 10, totalOutputTokens: 5 },
+        { type: "error", error: { code: "memory_pressure", message: "heap guard" } },
+      ]),
+    });
+    await collect(interrupted.orchestrator.run({ goal: "fix tests", signal: new AbortController().signal }));
+    expect(shared.states.at(-1)).toMatchObject({ status: "running", budget: { cyclesUsed: 0 } });
+
+    // Phase 2: the relaunched process resumes the same loop id and finishes cycle 1.
+    const resumed = fixture({ persistence: shared });
+    const events = await collect(resumed.orchestrator.resume({ loopId: "loop-test", signal: new AbortController().signal }));
+    expect(events.at(-1)).toMatchObject({ type: "loop-terminal", status: "succeeded" });
+    expect(shared.states.at(-1)).toMatchObject({ status: "succeeded", budget: { cyclesUsed: 1 } });
+  });
+
+  it("terminalizes a resume of a loop that is no longer running", async () => {
+    const shared = new ResumablePersistence();
+    const finished = fixture({ persistence: shared });
+    await collect(finished.orchestrator.run({ goal: "fix tests", signal: new AbortController().signal }));
+    expect(shared.states.at(-1)).toMatchObject({ status: "succeeded" });
+
+    const events = await collect(finished.orchestrator.resume({ loopId: "loop-test", signal: new AbortController().signal }));
     expect(events.at(-1)).toMatchObject({ type: "loop-terminal", status: "succeeded" });
   });
 });

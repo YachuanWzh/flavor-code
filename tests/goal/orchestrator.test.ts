@@ -43,6 +43,69 @@ function registry(): ModelRegistry {
   return new ModelRegistry().register("capture", adapter);
 }
 
+/** In-memory goal store that can also reload state, so resume() has a source. */
+class GoalMemoryStore {
+  states: GoalState[] = [];
+  async save(state: GoalState): Promise<void> { this.states.push(structuredClone(state)); }
+  async load(goalId: string): Promise<GoalState> {
+    for (let index = this.states.length - 1; index >= 0; index -= 1) {
+      const state = this.states[index]!;
+      if (state.id === goalId) return structuredClone(state);
+    }
+    throw new Error(`Goal "${goalId}" was not found`);
+  }
+}
+
+type GoalOptions = ConstructorParameters<typeof GoalOrchestrator>[0];
+
+function makeOrchestrator(root: string, store: GoalMemoryStore, overrides: Partial<GoalOptions> = {}): GoalOrchestrator {
+  return new GoalOrchestrator({
+    workspace: root,
+    registry: registry(),
+    plannerModelId: "capture:main",
+    classifierModelId: "capture:main",
+    skepticCount: 1,
+    maxRounds: 3,
+    maxStallStreak: 2,
+    now: () => "2026-07-26T00:00:00.000Z",
+    persistence: store,
+    runWorker: async function* () {
+      yield { type: "text", text: "Implemented and verified." };
+      yield { type: "done", usage: { inputTokens: 5, outputTokens: 3 } };
+    },
+    ...overrides,
+  });
+}
+
+/** A round-1-complete state that stopped short of achieving the goal. */
+function seededNotAchieved(): GoalState {
+  return {
+    id: "goal-test",
+    objective: "fix it",
+    phase: "verifying",
+    status: "not_achieved",
+    plan: {
+      kind: "code-change",
+      criteria: [{ id: 1, description: "The requested behavior works", type: "gating" }],
+      verificationPlan: "Run focused tests.",
+      nonGoals: [],
+      assumedScope: [],
+      approach: "Inspect, implement, verify.",
+      checklist: ["Inspect", "Implement", "Verify"],
+    },
+    planPath: null,
+    verifyRounds: 1,
+    workerRounds: 1,
+    lastGaps: [{ criterion: "ac-1", description: "still broken", blocking: "model_fixable" }],
+    gapFingerprint: "fp1",
+    stallStreak: 1,
+    contractHash: "a".repeat(64),
+    evidenceRounds: [],
+    createdAt: "2026-07-26T00:00:00.000Z",
+    updatedAt: "2026-07-26T00:00:00.000Z",
+  };
+}
+
 describe("GoalOrchestrator runtime events", () => {
   it("forwards detailed worker events and persists every goal phase", async () => {
     const root = await workspace();
@@ -153,5 +216,58 @@ describe("GoalOrchestrator runtime events", () => {
       outcome: expect.objectContaining({ type: "not_achieved", summary: expect.stringContaining("npm test failed") }),
     }));
     expect(events.some((event) => event.type === "goal-complete")).toBe(false);
+  });
+
+  it("leaves the goal resumable when the worker trips the hard heap guard", async () => {
+    const root = await workspace();
+    const store = new GoalMemoryStore();
+    const orchestrator = makeOrchestrator(root, store, {
+      idFactory: () => "goal-test",
+      runWorker: async function* () {
+        yield { type: "error", error: { code: "memory_pressure", message: "Heap usage reached 80% of the V8 limit" } };
+      },
+    });
+    const events = [];
+    for await (const event of orchestrator.run({ goal: "fix it", signal: new AbortController().signal })) events.push(event);
+    // The interrupted round is not terminalized; the relaunched process resumes it.
+    expect(events.some((event) => event.type === "goal-failed")).toBe(false);
+    expect(events.some((event) => event.type === "goal-complete")).toBe(false);
+    expect(store.states.at(-1)).toMatchObject({ status: "active", phase: "executing", workerRounds: 1, verifyRounds: 0 });
+  });
+
+  it("resumes an interrupted goal and completes it on a fresh heap", async () => {
+    const root = await workspace();
+    const store = new GoalMemoryStore();
+    const signal = new AbortController().signal;
+    // Phase 1: round 1 is interrupted by the hard heap guard mid-worker.
+    const interrupted = makeOrchestrator(root, store, {
+      idFactory: () => "goal-test",
+      runWorker: async function* () {
+        yield { type: "error", error: { code: "memory_pressure", message: "heap guard" } };
+      },
+    });
+    for await (const event of interrupted.run({ goal: "fix it", signal })) void event;
+    expect(store.states.at(-1)).toMatchObject({ status: "active", workerRounds: 1, verifyRounds: 0 });
+
+    // Phase 2: the relaunched process resumes the same goal id and finishes round 1.
+    const resumed = makeOrchestrator(root, store, { idFactory: () => "goal-test" });
+    const events = [];
+    for await (const event of resumed.resume({ goalId: "goal-test", signal })) events.push(event);
+    // verifyRounds(0) < workerRounds(1): the interrupted round 1 runs again.
+    expect(events[0]).toMatchObject({ type: "goal-resumed", goalId: "goal-test", round: 1 });
+    expect(events.some((event) => event.type === "goal-complete")).toBe(true);
+    expect(store.states.at(-1)).toMatchObject({ status: "achieved", phase: "complete" });
+  });
+
+  it("advances past a fully verified round instead of replaying it on resume", async () => {
+    const root = await workspace();
+    const store = new GoalMemoryStore();
+    store.states.push(seededNotAchieved());
+    const resumed = makeOrchestrator(root, store, { idFactory: () => "goal-test", maxRounds: 3 });
+    const events = [];
+    for await (const event of resumed.resume({ goalId: "goal-test", signal: new AbortController().signal })) events.push(event);
+    // verifyRounds(1) >= workerRounds(1): round 1 is done, so resume starts at round 2.
+    expect(events[0]).toMatchObject({ type: "goal-resumed", goalId: "goal-test", round: 2 });
+    expect(events.some((event) => event.type === "goal-complete")).toBe(true);
   });
 });

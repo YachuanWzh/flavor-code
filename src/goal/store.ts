@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
 import { GoalStateSchema, type GoalState } from "./types.js";
@@ -40,6 +40,29 @@ export class GoalStore {
     } finally {
       await handle?.close().catch(() => undefined);
       await rm(temporary, { force: true }).catch(() => undefined);
+    }
+  }
+
+  /** Reload a persisted goal so a rotated process can resume it. */
+  async load(goalId: string): Promise<GoalState> {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(goalId)) {
+      throw new Error(`Goal "${goalId}" was not found`);
+    }
+    await assertNoSymlink(this.#workspace, dirname(this.#root));
+    await assertNoSymlink(this.#workspace, this.#root);
+    const target = join(this.#root, `${goalId}.json`);
+    try {
+      const metadata = await stat(target);
+      if (!metadata.isFile() || metadata.size > this.#maxBytes) {
+        throw new Error("Goal state is not a bounded regular file");
+      }
+      const raw = await readFile(target, "utf8");
+      return GoalStateSchema.parse(JSON.parse(raw));
+    } catch (error) {
+      if (isCode(error, "ENOENT")) throw new Error(`Goal "${goalId}" was not found`);
+      const quarantine = `${target}.corrupt-${Date.now()}-${randomUUID().slice(0, 8)}`;
+      await rename(target, quarantine).catch(() => undefined);
+      throw new Error(`Goal "${goalId}" is corrupt and was quarantined`);
     }
   }
 }

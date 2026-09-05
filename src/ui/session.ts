@@ -6,6 +6,7 @@ import type { SkillMetadata } from "../skills/registry.js";
 import { parseSlashCommand, type McpSlashCommand, type ModelRole, type SlashCommand } from "./commands.js";
 import type { QuestionBridge } from "../tools/ask-user-question.js";
 import { message } from "../utils/error.js";
+import type { MemoryRestartContinuation } from "../utils/memory-restart.js";
 import type { MemoryType } from "../memory/types.js";
 import { AgentMessageQueue, type AgentQueueSnapshot } from "../agent/message-queue.js";
 import type { SessionTreeNode } from "../session/tree.js";
@@ -96,6 +97,12 @@ export interface SessionServices {
   runSkill(skill: string, prompt: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
   runLoop(goal: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
   runGoal(goal: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
+  /** Resume a /loop interrupted by a heap rotation, keyed by its persisted id. */
+  resumeLoop?(loopId: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
+  /** Resume a /goal interrupted by a heap rotation, keyed by its persisted id. */
+  resumeGoal?(goalId: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
+  /** The loop/goal a relaunched process should resume after a rotation, consumed once. */
+  continuation?(): MemoryRestartContinuation | undefined;
   mcp(command: McpSlashCommand, signal: AbortSignal): Promise<string>;
   ide?(): Promise<string>;
   ideContext?(): Promise<IdeEditorContext | undefined>;
@@ -166,6 +173,8 @@ type NormalizedSubmission = {
   coWorkPlanningKey?: string;
   controlOnly?: boolean;
   durableId?: string;
+  /** Set when this submission resumes a /loop or /goal after a heap rotation. */
+  continuation?: MemoryRestartContinuation;
 };
 
 type CoWorkFlow = { epoch: number; status: "planning" | "started" | "terminal" };
@@ -221,6 +230,7 @@ export class FlavorSession {
   readonly #pendingCoWorkStarts: NormalizedSubmission[] = [];
   readonly #activeSteeringDurableIds = new Set<string>();
   #durableResumeStarted = false;
+  #continuationResumeStarted = false;
   #permissionBaseline: PermissionMode | undefined;
   #activeSubmission: NormalizedSubmission | undefined;
 
@@ -387,6 +397,7 @@ export class FlavorSession {
       if (decision.additionalContext !== undefined) await this.#services.addContext?.(decision.additionalContext);
       this.#started = true;
       this.#resumeDurableQueue();
+      this.#resumeRotationContinuation();
     });
     return this.#startPromise;
   }
@@ -465,7 +476,8 @@ export class FlavorSession {
         skillNames,
         this.#services.managedToolCommands().map(({ name }) => name),
       );
-      if (command !== null) await this.#dispatch(command, controller.signal);
+      if (submission.continuation !== undefined) await this.#runContinuation(submission.continuation, controller.signal);
+      else if (command !== null) await this.#dispatch(command, controller.signal);
       else for await (const event of this.#services.run(prompt, controller.signal, {
         getSteeringMessages: () => this.#drainMessages("steer", true).map((item) => item.text),
         ...(decision.additionalContext === undefined
@@ -734,6 +746,39 @@ export class FlavorSession {
         this.#services.output({ type: "error", error: { code: "unknown", message: message(error) } });
       });
     }
+  }
+
+  /**
+   * After a heap rotation the relaunched process inherits the same session and
+   * a marker continuation naming the /loop or /goal that was in flight. Resume
+   * it once here so a multi-day autonomous run survives the rotation instead of
+   * silently stopping at the boundary.
+   */
+  #resumeRotationContinuation(): void {
+    if (this.#continuationResumeStarted || this.#closed) return;
+    const continuation = this.#services.continuation?.();
+    if (continuation === undefined) return;
+    const supported = continuation.kind === "loop"
+      ? this.#services.resumeLoop !== undefined
+      : this.#services.resumeGoal !== undefined;
+    if (!supported) return;
+    this.#continuationResumeStarted = true;
+    const displayText = `Resuming the interrupted ${continuation.kind} ${continuation.id} after a heap rotation.`;
+    this.#notice(displayText);
+    this.#enqueueNormalizedSubmission({ text: displayText, displayText, continuation }).catch((error) => {
+      this.#services.output({ type: "error", error: { code: "unknown", message: message(error) } });
+    });
+  }
+
+  async #runContinuation(continuation: MemoryRestartContinuation, signal: AbortSignal): Promise<void> {
+    const stream = continuation.kind === "loop"
+      ? this.#services.resumeLoop?.(continuation.id, signal)
+      : this.#services.resumeGoal?.(continuation.id, signal);
+    if (stream === undefined) {
+      this.#notice(`The runtime cannot resume the interrupted ${continuation.kind} ${continuation.id}; start it again with /${continuation.kind}.`);
+      return;
+    }
+    for await (const event of stream) this.#services.output(event);
   }
 
   #ackDurable(submission: NormalizedSubmission): void {
