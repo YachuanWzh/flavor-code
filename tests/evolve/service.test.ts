@@ -226,7 +226,7 @@ describe("REPEAT (beginRun/endRun)", () => {
     expect(loopEvents[1]).toMatchObject({ status: "error" });
   });
 
-  it("auto-verifies suggestions whose tool failures improved and keeps worsening ones open", async () => {
+  it("records improving trends without minting verified markers (RSI E3)", async () => {
     const { hooks, service } = await fixture();
 
     // Run 1: Read fails twice (>= minRepeats) → open suggestion.
@@ -238,15 +238,17 @@ describe("REPEAT (beginRun/endRun)", () => {
     expect(suggestion?.tool).toBe("Read");
     expect(await service.store.verifiedIds()).toEqual([]);
 
-    // Run 2: Read no longer fails (delta -2) → suggestion auto-verified.
+    // Run 2: Read no longer fails (delta -2). A negative delta is only a
+    // failure-count observation — it must NOT verify the suggestion, which
+    // stays open (zero exposure never proves a fix; rsi.md gap one).
     service.beginRun();
     await service.endRun("finished");
-    expect(await service.store.verifiedIds()).toEqual([suggestion!.id]);
-    expect(await service.store.openSuggestions({ threshold: 2, limit: 10 })).toEqual([]);
+    expect(await service.store.verifiedIds()).toEqual([]);
+    const stillOpen = await service.store.openSuggestions({ threshold: 2, limit: 10 });
+    expect(stillOpen.map((item) => item.id)).toEqual([suggestion!.id]);
     expect((await service.store.reflections(1))[0]?.perTool).toEqual({ Read: { failures: 0, delta: -2 } });
 
-    // Run 3 (in progress): Read regresses (fails 2x, delta +2 vs run 2) → the
-    // previously verified suggestion reopens with a worsening annotation.
+    // Run 3: Read regresses (fails 2x, delta +2 vs run 2) → worsening annotation.
     service.beginRun();
     await failTool(hooks, "Read", "ENOENT", "missing");
     await failTool(hooks, "Read", "ENOENT", "missing");
@@ -255,8 +257,7 @@ describe("REPEAT (beginRun/endRun)", () => {
     expect(reopened).toContain("worsening");
     await service.endRun("finished");
     expect((await service.store.reflections(1))[0]?.perTool).toEqual({ Read: { failures: 2, delta: 2 } });
-    // The verified marker stays; it only hides suggestions while stable/improving.
-    expect(await service.store.verifiedIds()).toEqual([suggestion!.id]);
+    expect(await service.store.verifiedIds()).toEqual([]);
   });
 
   it("orders suggestions by worsening trend and annotates deltas in suggest", async () => {
@@ -270,8 +271,6 @@ describe("REPEAT (beginRun/endRun)", () => {
     await failTool(hooks, "Read", "ENOENT", "missing");
     await failTool(hooks, "Read", "ENOENT", "missing");
     await service.endRun("finished");
-    const readSuggestionId = (await service.store.openSuggestions({ threshold: 1, limit: 100 }))
-      .find((suggestion) => suggestion.tool === "Read")!.id;
 
     // Run 2 (in progress): Read fails 1x (delta -1, improving), Glob fails 4x
     // (delta +1, worsening). Queries while the run is live reflect live trends.
@@ -294,19 +293,21 @@ describe("REPEAT (beginRun/endRun)", () => {
     expect(output).toContain("Read");
     expect(output).toContain("improving");
 
-    // endRun closes the live window; the improving Read suggestion gets verified.
+    // endRun closes the live window; an improving trend no longer verifies.
     await service.endRun("finished");
-    expect(await service.store.verifiedIds()).toEqual([readSuggestionId]);
+    expect(await service.store.verifiedIds()).toEqual([]);
   });
 
-  it("lists verified suggestions", async () => {
+  it("lists suggestions carrying the legacy verified marker", async () => {
     const { hooks, service } = await fixture();
     service.beginRun();
     await failTool(hooks, "Read", "ENOENT", "missing");
     await failTool(hooks, "Read", "ENOENT", "missing");
     await service.endRun("finished");
-    service.beginRun();
-    await service.endRun("finished");
+    // EndRun no longer verifies anything (RSI E3); exercise the compat write
+    // path explicitly to keep the read-only listing endpoint covered.
+    const [suggestion] = await service.store.openSuggestions({ threshold: 2, limit: 10 });
+    await service.store.markSuggestionVerified(suggestion!.id);
 
     const output = await service.handleCommand(["verified"]);
     expect(output).toContain("Read");
@@ -470,7 +471,7 @@ describe("NOTIFY (user-facing signals)", () => {
     expect(summaries[0]!.split("\n")).toHaveLength(1);
   });
 
-  it("notifies an end-run summary with improvement and auto-verification", async () => {
+  it("notifies an end-run summary that reports the trend without claiming verification", async () => {
     const { hooks, service, notices } = await fixture();
     service.beginRun();
     await failTool(hooks, "Read", "ENOENT", "missing");
@@ -481,9 +482,10 @@ describe("NOTIFY (user-facing signals)", () => {
     await service.endRun("finished");
 
     const summary = notices.filter((notice) => notice.includes("run finished")).at(-1)!;
-    expect(summary).toContain("improved");
+    expect(summary).toContain("fewer failures");
     expect(summary).toContain("-2");
-    expect(summary).toContain("auto-verified");
+    expect(summary).toContain("effectiveness not verified");
+    expect(summary).not.toContain("auto-verified");
   });
 
   it("notifies a worsening summary that reopens the suggestion", async () => {
@@ -493,7 +495,7 @@ describe("NOTIFY (user-facing signals)", () => {
     await failTool(hooks, "Read", "ENOENT", "missing");
     await service.endRun("finished");
     service.beginRun();
-    await service.endRun("finished"); // auto-verified
+    await service.endRun("finished"); // trend recorded; nothing verified
 
     service.beginRun();
     await failTool(hooks, "Read", "ENOENT", "missing");

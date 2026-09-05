@@ -165,6 +165,13 @@ it("uses evolve loop defaults and validates overrides", () => {
   }
 });
 
+it("carries conservative rsi defaults without granting promotion authority", () => {
+  const rsi = FlavorConfigSchema.parse({}).rsi;
+  expect(rsi.mode).toBe("observe");
+  expect(rsi.autoPromoteMaxRisk).toBeNull();
+  expect(() => FlavorConfigSchema.parse({ rsi: { unknownKnob: 1 } })).toThrow();
+});
+
 it("defaults MCP servers to an empty record", () => {
   expect(FlavorConfigSchema.parse({}).mcpServers).toEqual({});
 });

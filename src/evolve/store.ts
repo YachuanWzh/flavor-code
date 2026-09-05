@@ -311,7 +311,7 @@ export class EvolveStore {
             suggestion.hint += delta > 0
               ? ` Trend: worsening (+${delta} failures this run) — consider reverting or reworking the fix.`
               : delta < 0
-                ? ` Trend: improving (${delta} this run) — likely already fixed.`
+                ? ` Trend: improving (${delta} this run) — fewer failures; fix effectiveness not verified.`
                 : " Trend: stable.";
           }
           return suggestion;
@@ -330,12 +330,17 @@ export class EvolveStore {
     });
   }
 
-  /** Ids of suggestions whose underlying tool failure is improving (auto-verified). */
+  /** Ids carrying the legacy trend-based verified marker (kept for migration/compat reads only). */
   verifiedIds(): Promise<string[]> {
     return this.#enqueue(async () => readJsonArray(this.verifiedFile));
   }
 
-  /** Mark a suggestion as verified so it is no longer proposed. */
+  /**
+   * Legacy marker write. Daily runtime paths must not call this: under RSI
+   * (rsi.md E3) a verified conclusion requires a candidate plus an
+   * independent evaluation report, not a negative failure delta. Retained
+   * for explicit compatibility/migration use only.
+   */
   markSuggestionVerified(id: string): Promise<void> {
     return this.#enqueue(async () => {
       await mkdir(this.dir, { recursive: true, mode: 0o700 });

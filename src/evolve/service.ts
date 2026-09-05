@@ -96,7 +96,7 @@ const USAGE = [
   "  test      run the test suite",
   "  revert    restore the last good snapshot of a plugin",
   "  done      mark a suggestion as handled (no longer proposed)",
-  "  verified  list suggestions auto-verified by improving failure trends",
+  "  verified  list legacy trend-based verified markers (failure-count observations, not proof of a fix)",
   "  trends    cross-run dashboard: tool calls, failures, signalDelta, per-tool movement",
   "  rule      manage learned guardrails injected into system prompts (list/add <text>/remove <id>)",
   "  clear     reset signals, done markers, and verified markers",
@@ -336,18 +336,11 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
           failedTools,
           perTool,
         });
-        // Closed loop: a tool that failed less than last run means the fix is
-        // working — auto-verify its open suggestions so they stop being proposed.
-        const verifiedTools = new Set<string>();
-        for (const [tool, trend] of Object.entries(perTool)) {
-          if (trend.delta < 0) {
-            const suggestions = await store.openSuggestions({ threshold: minRepeats, limit: 100, trends });
-            for (const suggestion of suggestions.filter((item) => item.tool === tool)) {
-              await store.markSuggestionVerified(suggestion.id);
-            }
-            verifiedTools.add(tool);
-          }
-        }
+        // RSI P0-02 (rsi.md E3): a negative per-tool delta is only a raw
+        // failure-count trend — fewer calls, zero exposure, or an unrelated
+        // workload all shrink it — so it must never mint a "verified" label.
+        // A real fix verdict requires a candidate bound to matching task
+        // samples plus an independent evaluation report.
         // User-facing run summary: only meaningful lines, quiet when nothing happened.
         const sign = (value: number) => (value > 0 ? `+${value}` : String(value));
         const meaningful = Object.entries(perTool).filter(([, trend]) => trend.failures > 0 || trend.delta !== 0);
@@ -360,9 +353,9 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
           for (const [tool, trend] of meaningful) {
             if (trend.delta === 0) continue;
             const note = trend.delta < 0
-              ? (verifiedTools.has(tool) ? " — suggestion auto-verified" : "")
+              ? " — fewer failures; effectiveness not verified"
               : " — suggestion reopened";
-            lines.push(`  - ${tool}: ${trend.delta < 0 ? "improved" : "worsening"} (${sign(trend.delta)})${note}`);
+            lines.push(`  - ${tool}: ${trend.delta < 0 ? "fewer failures" : "worsening"} (${sign(trend.delta)})${note}`);
           }
         }
         notify(lines.join("\n"));

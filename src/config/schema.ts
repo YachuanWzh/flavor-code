@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { RsiConfigSchema } from "../rsi/config.js";
 
 export const PERMISSION_MODES = [
   "default", "acceptEdits", "plan", "bypassPermissions", "auto", "bubble",
@@ -183,6 +184,7 @@ export const FlavorConfigSchema = z.object({
       testTimeoutMs: z.number().int().min(1_000).max(600_000).default(120_000),
     })
     .prefault({}),
+  rsi: RsiConfigSchema.prefault({}),
 });
 
 export type FlavorConfig = z.infer<typeof FlavorConfigSchema>;
