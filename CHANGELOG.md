@@ -746,6 +746,8 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.4.0-beta.5 | 2026-09-06 | 修复长 turn 的模型请求级内存泄漏（每次 SDK 请求改用可释放的派生信号）；单个展示 turn 严格有界（最近 160 个展示块、64K assistant 文本，裁掉超大工具输入/结果/diff），不影响模型上下文与落盘证据；补长 turn 取消监听与展示内存上限回归测试 |
+| 1.4.0-beta.4 | 2026-09-05 | 长程任务内存保护改为跨进程无缝堆轮换（turn/`/loop` 周期/`/goal` 轮次边界，软水位退出码 75 由 launcher `--resume` 重启续跑）；`/loop` 与 `/goal` 跨轮换自动续跑并持久化待验证检查点；水位判定 GC 核实并覆盖 RSS，轮换自动取证；修复 `resume()` 脱离 receiver 导致续跑必然失败等问题 |
 | 1.4.0-beta.3 | 2026-09-05 | 全面修复内置工具与共享执行链路可靠性（Shell/Grep/Edit/Terminal/LSP/Web/GitHistory/TaskPlan 等）；扩大多轮长程任务默认上限（主 Agent 300 轮、子 Agent 100 轮、`extendBy` 50、loop `maxCycles` 100），并修复 `softLimitFactor`/`extendBy` 配置未生效问题 |
 | 1.4.0-beta.2 | 2026-09-05 | astgraph 代码图插件改为手动安装的可选插件，不再随 CLI 打包（`flavor init` 不再自动复制、构建不再复制进 `dist/astgraph`），显著减小安装包体积 |
 | 1.4.0-beta.1 | 2026-09-04 | 新增 `flavor doctor`/`/doctor` 本地诊断；Docker 执行有界输出与升级式终止；macOS 桌面端继承登录 shell PATH；Shell 结构化 argv 直启、统一运行时解析和分类诊断，修复 Windows `cmd /c` 引号、可执行名解析及桌面 stderr 展示；修复 macOS CLI 剪贴板图片输出 |
