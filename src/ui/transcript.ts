@@ -80,6 +80,12 @@ export interface TranscriptState {
  */
 export const MAX_TRANSCRIPT_TURNS = 200;
 export const MAX_TRANSCRIPT_CHARS = 2_000_000;
+/** A /loop or /goal is one presentation turn and can run for days. */
+export const MAX_ACTIVE_TRANSCRIPT_BLOCKS = 160;
+export const MAX_ACTIVE_ASSISTANT_CHARS = 64_000;
+const MAX_TRANSCRIPT_BLOCK_TEXT_CHARS = 16_000;
+const MAX_TRANSCRIPT_TOOL_VALUE_CHARS = 16_000;
+const MAX_TRANSCRIPT_PRESENTATION_CHARS = 32_000;
 
 export type TranscriptAction =
   | { type: "hydrate"; messages: readonly TranscriptHistoryMessage[]; compact?: TranscriptCompactBoundary }
@@ -506,12 +512,9 @@ function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot, include
     else blocks[index] = block;
   }
   return {
-    ...turn,
+    ...withBlocks(turn, blocks),
     taskSnapshot: snapshot,
     suppressedTaskIds: [...suppressed],
-    blocks,
-    statusLines: blocks.filter((block): block is Extract<TranscriptBlock, { kind: "status" }> => block.kind === "status")
-      .map((block) => block.text),
   };
 }
 
@@ -529,14 +532,10 @@ function upsertStatus(state: TranscriptState, block: Extract<TranscriptBlock, { 
   if (state.active === undefined) return state;
   const blocks = [...state.active.blocks];
   const index = blocks.findIndex((item) => item.kind === "status" && item.id === block.id);
-  if (index < 0) blocks.push(block);
-  else blocks[index] = block;
-  return { ...state, active: {
-    ...state.active,
-    statusLines: blocks.filter((item): item is Extract<TranscriptBlock, { kind: "status" }> => item.kind === "status")
-      .map((item) => item.text),
-    blocks,
-  } };
+  const bounded = boundedTranscriptBlock(block);
+  if (index < 0) blocks.push(bounded);
+  else blocks[index] = bounded;
+  return { ...state, active: withBlocks(state.active, blocks) };
 }
 
 function finishActive(state: TranscriptState): TranscriptState {
@@ -568,20 +567,15 @@ function attachThinking(turn: TranscriptTurn, text: string): TranscriptTurn {
     ...block,
     thinkingText: appendThinkingText(block.thinkingText, text),
   };
-  return { ...turn, blocks };
+  return withBlocks(turn, blocks);
 }
 
-function withoutModelActivity(turn: TranscriptTurn, id?: string): TranscriptTurn {  const blocks = turn.blocks.filter((block) => block.kind !== "status"
+function withoutModelActivity(turn: TranscriptTurn, id?: string): TranscriptTurn {
+  const blocks = turn.blocks.filter((block) => block.kind !== "status"
     || block.activity !== "model"
     || (id !== undefined && block.id !== id));
   if (blocks.length === turn.blocks.length) return turn;
-  return {
-    ...turn,
-    blocks,
-    statusLines: blocks
-      .filter((block): block is Extract<TranscriptBlock, { kind: "status" }> => block.kind === "status")
-      .map((block) => block.text),
-  };
+  return withBlocks(turn, blocks);
 }
 
 export function restoreTranscriptState(state: TranscriptState): TranscriptState {
@@ -689,16 +683,21 @@ function cloneTurn(turn: TranscriptTurn): TranscriptTurn {
 function upsertTurnStatus(turn: TranscriptTurn, block: Extract<TranscriptBlock, { kind: "status" }>): TranscriptTurn {
   const blocks = [...turn.blocks];
   const index = blocks.findIndex((item) => item.kind === "status" && item.id === block.id);
-  if (index < 0) blocks.push(block);
-  else blocks[index] = block;
+  const bounded = boundedTranscriptBlock(block);
+  if (index < 0) blocks.push(bounded);
+  else blocks[index] = bounded;
   return withBlocks(turn, blocks);
 }
 
 function withBlocks(turn: TranscriptTurn, blocks: TranscriptBlock[]): TranscriptTurn {
+  const bounded = blocks.length <= MAX_ACTIVE_TRANSCRIPT_BLOCKS
+    ? blocks
+    : blocks.slice(-MAX_ACTIVE_TRANSCRIPT_BLOCKS);
   return {
     ...turn,
-    blocks,
-    statusLines: blocks
+    assistantText: tailText(turn.assistantText, MAX_ACTIVE_ASSISTANT_CHARS),
+    blocks: bounded,
+    statusLines: bounded
       .filter((block): block is Extract<TranscriptBlock, { kind: "status" }> => block.kind === "status")
       .map((block) => block.text),
   };
@@ -715,20 +714,105 @@ function stripRetryBlocks(turn: TranscriptTurn): TranscriptTurn {
     if (block.id.startsWith("structured-retry:")) return false;
     return true;
   });
-  return {
-    ...turn,
-    blocks,
-    statusLines: blocks
-      .filter((item): item is Extract<TranscriptBlock, { kind: "status" }> => item.kind === "status")
-      .map((item) => item.text),
-  };
+  return withBlocks(turn, blocks);
 }
 
 function addText(turn: TranscriptTurn, text: string, onNewLine = false): TranscriptTurn {
-  const assistantText = onNewLine ? appendLine(turn.assistantText, text) : turn.assistantText + text;
+  const assistantText = tailText(
+    onNewLine ? appendLine(turn.assistantText, text) : turn.assistantText + text,
+    MAX_ACTIVE_ASSISTANT_CHARS,
+  );
   const blocks = [...turn.blocks];
   const last = blocks[blocks.length - 1];
-  if (!onNewLine && last?.kind === "text") blocks[blocks.length - 1] = { kind: "text", text: last.text + text };
-  else blocks.push({ kind: "text", text });
-  return { ...turn, assistantText, blocks };
+  if (!onNewLine && last?.kind === "text") {
+    blocks[blocks.length - 1] = { kind: "text", text: tailText(last.text + text, MAX_TRANSCRIPT_BLOCK_TEXT_CHARS) };
+  } else {
+    blocks.push({ kind: "text", text: tailText(text, MAX_TRANSCRIPT_BLOCK_TEXT_CHARS) });
+  }
+  return withBlocks({ ...turn, assistantText }, blocks);
+}
+
+function boundedTranscriptBlock(block: Extract<TranscriptBlock, { kind: "status" }>): Extract<TranscriptBlock, { kind: "status" }> {
+  const presentation = block.presentation === undefined
+    ? undefined
+    : boundedTranscriptPresentation(block.presentation);
+  const tool = block.tool === undefined ? undefined : {
+    name: block.tool.name,
+    input: boundedTranscriptValue(block.tool.input),
+    ...(block.tool.result === undefined ? {} : {
+      result: {
+        ok: block.tool.result.ok,
+        ...(block.tool.result.output === undefined ? {} : { output: boundedTranscriptValue(block.tool.result.output) }),
+        ...(block.tool.result.content === undefined ? {} : {
+          content: tailText(block.tool.result.content, MAX_TRANSCRIPT_TOOL_VALUE_CHARS),
+        }),
+        ...(block.tool.result.presentation === undefined ? {} : {
+          presentation: boundedTranscriptPresentation(block.tool.result.presentation),
+        }),
+        ...(block.tool.result.additionalContext === undefined ? {} : {
+          additionalContext: block.tool.result.additionalContext
+            .slice(-20)
+            .map((item) => tailText(item, MAX_TRANSCRIPT_TOOL_VALUE_CHARS)),
+        }),
+        ...(block.tool.result.error === undefined ? {} : { error: {
+          code: block.tool.result.error.code,
+          message: tailText(block.tool.result.error.message, MAX_TRANSCRIPT_BLOCK_TEXT_CHARS),
+        } }),
+      },
+    }),
+  };
+  return {
+    ...block,
+    text: tailText(block.text, MAX_TRANSCRIPT_BLOCK_TEXT_CHARS),
+    ...(block.hint === undefined ? {} : { hint: tailText(block.hint, MAX_TRANSCRIPT_BLOCK_TEXT_CHARS) }),
+    ...(block.details === undefined ? {} : { details: tailText(block.details, MAX_TRANSCRIPT_BLOCK_TEXT_CHARS) }),
+    ...(presentation === undefined ? {} : { presentation }),
+    ...(tool === undefined ? {} : { tool }),
+  };
+}
+
+function boundedTranscriptPresentation(presentation: ToolPresentation): ToolPresentation {
+  return jsonSize(presentation) <= MAX_TRANSCRIPT_PRESENTATION_CHARS
+    ? presentation
+    : {
+        kind: "generic",
+        title: "Tool output",
+        summary: "Large presentation omitted from the live transcript; the model-facing result remains available in context.",
+      };
+}
+
+function boundedTranscriptValue(value: unknown): unknown {
+  const chars = jsonSize(value);
+  if (chars <= MAX_TRANSCRIPT_TOOL_VALUE_CHARS) return value;
+  const record = typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+  const summary: Record<string, unknown> = { truncated: true, originalChars: chars };
+  for (const key of ["path", "command", "id", "name", "exitCode", "bytes", "replacements"] as const) {
+    const item = record?.[key];
+    if (typeof item === "string") summary[key] = tailText(item, 1_000);
+    else if (typeof item === "number" || typeof item === "boolean" || item === null) summary[key] = item;
+  }
+  return summary;
+}
+
+function jsonSize(value: unknown): number {
+  try { return JSON.stringify(value)?.length ?? 0; }
+  catch { return Number.POSITIVE_INFINITY; }
+}
+
+function tailText(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  const marker = `… ${text.length - limit} earlier characters omitted …\n`;
+  return marker.length >= limit ? text.slice(-limit) : marker + text.slice(-(limit - marker.length));
+}
+
+/** Rotation-only diagnostic; callers invoke it at most once per restart. */
+export function transcriptCensus(state: TranscriptState): { turns: number; blocks: number; chars: number } {
+  const turns = [...state.completed, ...(state.active === undefined ? [] : [state.active])];
+  return {
+    turns: turns.length,
+    blocks: turns.reduce((total, turn) => total + turn.blocks.length, 0),
+    chars: jsonSize(state),
+  };
 }

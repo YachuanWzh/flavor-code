@@ -18,6 +18,7 @@ import {
 import { normalizeToolCallInput } from "../utils/json.js";
 import { isEnvTruthy } from "../utils/envUtils.js";
 import { appendUsageLog, currentUsageSession } from "../utils/log.js";
+import { createScopedAbortSignal } from "../utils/abort.js";
 
 export interface AnthropicClient {
   messages: {
@@ -253,6 +254,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
   }
 
   async *stream(request: ModelRequest): AsyncIterable<ModelEvent> {
+    const requestAbort = createScopedAbortSignal(request.signal);
     let inputTokens = 0;
     let outputTokens = 0;
     let hasUsage = false;
@@ -412,7 +414,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
       };
       let stream: Awaited<ReturnType<AnthropicClient["messages"]["create"]>>;
       try {
-        stream = await this.client.messages.create(body, { signal: request.signal });
+        stream = await this.client.messages.create(body, { signal: requestAbort.signal });
       } catch (error) {
         // Gateways that predate extended thinking reject the `thinking`
         // parameter outright. Drop it once and retry so a mis-supported
@@ -421,7 +423,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
           this.#thinkingRejected = true;
           delete body.thinking;
           stripThinkingBlocks(body.messages);
-          stream = await this.client.messages.create(body, { signal: request.signal });
+          stream = await this.client.messages.create(body, { signal: requestAbort.signal });
         } else {
           throw error;
         }
@@ -562,6 +564,8 @@ export class AnthropicModelAdapter implements ModelAdapter {
         };
       }
       yield { type: "error", error: normalizeProviderError(error) };
+    } finally {
+      requestAbort.dispose();
     }
   }
 }

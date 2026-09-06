@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { getEventListeners } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -12,7 +13,8 @@ import { normalizeProviderError } from "../../src/models/types.js";
 import type { ModelEvent, ModelRequest } from "../../src/models/types.js";
 import { setUsageSession } from "../../src/utils/log.js";
 
-const signal = new AbortController().signal;
+const turnSignal = new AbortController().signal;
+const signal = expect.any(AbortSignal);
 const imageRoots: string[] = [];
 let usageRoot: string | undefined;
 let previousUsageFile: string | undefined;
@@ -59,7 +61,7 @@ const request: ModelRequest = {
       inputSchema: { type: "object", properties: { city: { type: "string" } } },
     },
   ],
-  signal,
+  signal: turnSignal,
 };
 
 async function* events(...values: unknown[]): AsyncIterable<unknown> {
@@ -81,6 +83,29 @@ function asAnthropicClient(client: unknown): AnthropicClient {
 }
 
 describe("OpenAIModelAdapter", () => {
+  it("does not accumulate provider abort listeners on a long-lived turn signal", async () => {
+    const controller = new AbortController();
+    const providerSignals: AbortSignal[] = [];
+    const client = { responses: { stream: (_body: unknown, options?: { signal?: AbortSignal }) => {
+      const providerSignal = options?.signal;
+      if (providerSignal !== undefined) {
+        providerSignals.push(providerSignal);
+        // Mirrors SDKs that retain a once listener until their signal aborts.
+        providerSignal.addEventListener("abort", () => undefined, { once: true });
+      }
+      return events();
+    } } };
+    const adapter = new OpenAIModelAdapter({ client: asOpenAIClient(client) });
+
+    for (let index = 0; index < 50; index += 1) {
+      await collect(adapter.stream({ ...request, signal: controller.signal }));
+    }
+
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+    expect(providerSignals).toHaveLength(50);
+    expect(providerSignals.every((providerSignal) => providerSignal !== controller.signal && providerSignal.aborted)).toBe(true);
+  });
+
   it("maps local image blocks to OpenAI Responses input images", async () => {
     const path = await imageFile();
     const stream = vi.fn(() => events());
@@ -599,6 +624,28 @@ describe("OpenAIModelAdapter", () => {
 });
 
 describe("AnthropicModelAdapter", () => {
+  it("does not accumulate SDK abort listeners on a long-lived loop signal", async () => {
+    const controller = new AbortController();
+    const providerSignals: AbortSignal[] = [];
+    const client = { messages: { create: (_body: unknown, options?: { signal?: AbortSignal }) => {
+      const providerSignal = options?.signal;
+      if (providerSignal !== undefined) {
+        providerSignals.push(providerSignal);
+        providerSignal.addEventListener("abort", () => undefined, { once: true });
+      }
+      return events();
+    } } };
+    const adapter = new AnthropicModelAdapter({ client: asAnthropicClient(client) });
+
+    for (let index = 0; index < 50; index += 1) {
+      await collect(adapter.stream({ ...request, signal: controller.signal }));
+    }
+
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+    expect(providerSignals).toHaveLength(50);
+    expect(providerSignals.every((providerSignal) => providerSignal !== controller.signal && providerSignal.aborted)).toBe(true);
+  });
+
   it("requests extended thinking and forwards thinking deltas plus sealed blocks", async () => {
     const create = vi.fn(() => events(
       { type: "content_block_start", index: 0, content_block: { type: "thinking" } },

@@ -118,7 +118,7 @@ import { createTodoWriteTool } from "./tools/todo-write.js";
 import { createManagedToolManagementTools, ManagedToolStore } from "./tools/managed.js";
 import type { ToolDefinition } from "./tools/types.js";
 import { FlavorSession, type SessionOutput, type SessionServices } from "./ui/session.js";
-import { createTranscriptState, restoreTranscriptState, transcriptReducer, type TranscriptState } from "./ui/transcript.js";
+import { createTranscriptState, restoreTranscriptState, transcriptCensus, transcriptReducer, type TranscriptState } from "./ui/transcript.js";
 import { MVP_COMMANDS } from "./ui/commands.js";
 import { formatDoctorReport, runDoctor } from "./doctor.js";
 import { resolveLanguage, languageInstruction } from "./utils/intl.js";
@@ -1512,6 +1512,11 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       holders.jobs = { entries: jobCensus.jobs, chars: jobCensus.windowChars };
     } catch { /* best-effort */ }
     try { holders.sessionTree = { entries: sessionHistory.nodeCount }; } catch { /* best-effort */ }
+    try {
+      const transcript = transcriptCensus(timelineState);
+      holders.transcript = { entries: transcript.blocks, chars: transcript.chars };
+      holders.transcriptTurns = { entries: transcript.turns };
+    } catch { /* best-effort */ }
     return holders;
   };
 

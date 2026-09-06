@@ -2,8 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createTranscriptState,
+  MAX_ACTIVE_ASSISTANT_CHARS,
+  MAX_ACTIVE_TRANSCRIPT_BLOCKS,
   MAX_TRANSCRIPT_TURNS,
   restoreTranscriptState,
+  transcriptCensus,
   transcriptReducer,
   type TranscriptBlock,
 } from "../../src/ui/transcript.js";
@@ -920,5 +923,35 @@ describe("transcriptReducer", () => {
     expect(state.completed[0]?.blocks).toContainEqual(
       expect.objectContaining({ id: "usage:1", text: "· 0 in · 0% cached · 0 out" }),
     );
+  });
+
+  it("bounds one multi-day active turn and drops large tool payloads from presentation history", () => {
+    let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "/loop keep working" });
+    const large = "x".repeat(40_000);
+    for (let index = 0; index < 250; index += 1) {
+      const id = String(index);
+      state = transcriptReducer(state, { type: "session", event: {
+        type: "tool-start", id, name: "Read", input: { path: `src/${id}.ts`, content: large },
+      } });
+      state = transcriptReducer(state, { type: "session", event: {
+        type: "tool-end", id, name: "Read", result: { ok: true, output: { path: `src/${id}.ts`, content: large } },
+      } });
+    }
+    for (let index = 0; index < 40; index += 1) {
+      state = transcriptReducer(state, { type: "session", event: { type: "text", text: large } });
+    }
+
+    expect(state.active?.blocks.length).toBeLessThanOrEqual(MAX_ACTIVE_TRANSCRIPT_BLOCKS);
+    expect(state.active?.assistantText.length).toBeLessThanOrEqual(MAX_ACTIVE_ASSISTANT_CHARS);
+    const latestTool = state.active?.blocks.find((block) => block.kind === "status" && block.id === "tool:249");
+    expect(latestTool).toMatchObject({
+      kind: "status",
+      tool: {
+        input: { truncated: true, path: "src/249.ts" },
+        result: { ok: true, output: { truncated: true, path: "src/249.ts" } },
+      },
+    });
+    expect(JSON.stringify(state).length).toBeLessThan(500_000);
+    expect(transcriptCensus(state)).toMatchObject({ turns: 1, blocks: state.active?.blocks.length });
   });
 });

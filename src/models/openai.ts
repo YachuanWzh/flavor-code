@@ -16,6 +16,7 @@ import {
 import { normalizeToolCallInput } from "../utils/json.js";
 import { isEnvTruthy } from "../utils/envUtils.js";
 import { appendUsageLog, currentUsageSession } from "../utils/log.js";
+import { createScopedAbortSignal } from "../utils/abort.js";
 
 type OpenAIStreamRequest = Parameters<OpenAI["responses"]["stream"]>[0];
 
@@ -156,6 +157,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
   }
 
   async *stream(request: ModelRequest): AsyncIterable<ModelEvent> {
+    const requestAbort = createScopedAbortSignal(request.signal);
     const callIds = new Map<number, string>();
     const pendingCalls = new Map<number, { name: string; arguments: string }>();
     const emittedCalls = new Set<number>();
@@ -172,7 +174,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
           strict: tool.strict ?? true,
         })),
       };
-      const stream = this.client.responses.stream(body, { signal: request.signal });
+      const stream = this.client.responses.stream(body, { signal: requestAbort.signal });
 
       for await (const event of stream) {
         if (
@@ -293,6 +295,8 @@ export class OpenAIModelAdapter implements ModelAdapter {
       }
     } catch (error) {
       yield { type: "error", error: normalizeProviderError(error) };
+    } finally {
+      requestAbort.dispose();
     }
   }
 }

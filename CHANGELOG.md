@@ -2,7 +2,17 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.0-beta.4 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.0-beta.5 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.0-beta.5] - 2026-09-06
+
+### 修复
+- 修复长 turn 的模型请求级内存泄漏：不再把同一个 turn 级 `AbortSignal` 直接复用给数百次 OpenAI/Anthropic SDK 请求；每次请求改用可释放的派生信号，请求结束即断开父监听并主动清理 SDK 的一次性监听，避免请求控制器与流对象一直存活到整轮结束。
+- 活动中的单个展示 turn（尤其是可运行数日的 `/loop`、`/goal`）也改为严格有界：仅保留最近 160 个展示块、64K assistant 文本，并从展示副本中裁掉超大工具输入、结果与 diff；模型上下文和落盘执行证据不受影响。轮换普查新增 transcript blocks/chars，便于后续直接区分前端展示占用与其他堆持有者。
+
+### 测试与维护
+- 新增长 turn 重复模型请求的取消监听回归，以及单 turn 250 次大工具输出的展示内存上限回归；生产压力场景验证 240 轮后完整 GC 堆保持稳定。
+- `package.json` 与 `package-lock.json` 的项目版本统一为 `1.4.0-beta.5`。
 
 ## [1.4.0-beta.4] - 2026-09-05
 
