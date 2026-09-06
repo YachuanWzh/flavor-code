@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "
 import { createHash, randomUUID } from "node:crypto";
 import { homedir, release as osRelease, tmpdir, version as osVersion } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { performance } from "node:perf_hooks";
 
 import {
   parseFinalSubagentMessage,
@@ -1516,6 +1517,11 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       const transcript = transcriptCensus(timelineState);
       holders.transcript = { entries: transcript.blocks, chars: transcript.chars };
       holders.transcriptTurns = { entries: transcript.turns };
+    } catch { /* best-effort */ }
+    try {
+      holders.userTiming = {
+        entries: performance.getEntriesByType("measure").length + performance.getEntriesByType("mark").length,
+      };
     } catch { /* best-effort */ }
     return holders;
   };

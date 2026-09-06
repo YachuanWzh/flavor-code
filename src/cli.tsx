@@ -16,6 +16,7 @@ import { MEMORY_RESTART_EXIT_CODE } from "./utils/memory-restart.js";
 import { redactErrorText } from "./utils/redact.js";
 import { packageVersion } from "./utils/version.js";
 import { staticTaskLines } from "./ui/task-progress-model.js";
+import { installUiUserTimingSweeper } from "./ui/user-timing.js";
 import { SkillManager } from "./skills/manager.js";
 import { registerMemoryCommands } from "./memory/cli.js";
 import { registerMcpCommands } from "./mcp/cli.js";
@@ -211,12 +212,17 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
 }
 
 async function runInteractiveCli(props: InteractiveCliProps): Promise<void> {
+  const disposeUserTimingSweeper = installUiUserTimingSweeper();
+  try {
     const [{ render, AlternateScreen }, { createElement }, { App }] = await Promise.all([
       import("./claude-ink/index.js"), import("react"), import("./ui/app.js"),
     ]);
     const instance = await render(createElement(AlternateScreen, { mouseTracking: true },
       createElement(App, props)), { exitOnCtrlC: false });
     await instance.waitUntilExit();
+  } finally {
+    disposeUserTimingSweeper();
+  }
 }
 
 function parsePalAlias(value: string): string {

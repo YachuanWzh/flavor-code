@@ -1,6 +1,6 @@
 {
   "name": "flavor-code",
-  "version": "1.4.0-beta.5",
+  "version": "1.4.0-beta.6",
   "author": "YachuanWzh",
   "type": "module",
   "publishConfig": {
@@ -31,7 +31,7 @@
   "scripts": {
     "build": "npm run build:icons && npm run build:cli && npm run build:desktop",
     "build:icons": "node scripts/build-icons.mjs",
-    "build:cli": "tsup && tsc -p tsconfig.sdk.json",
+    "build:cli": "tsup && tsc -p tsconfig.sdk.json && node scripts/assert-production-cli.mjs",
     "build:desktop": "npm run build:desktop:main && npm run build:desktop:renderer",
     "build:desktop:main": "tsup --config tsup.desktop.config.ts",
     "build:desktop:renderer": "vite build --config vite.desktop.config.ts",
@@ -52,6 +52,7 @@
     "smoke:install": "node scripts/smoke-install.mjs",
     "smoke:d2c-worker": "npm run build:desktop:main && node scripts/smoke-d2c-worker.mjs",
     "stress:context": "vitest run scripts/stress-context-memory.test.ts --reporter=verbose",
+    "stress:tui-memory": "npm run build:cli && node scripts/run-tui-memory-stress.mjs",
     "stress:production-memory": "npm run build:cli && node scripts/stress-production-memory.mjs",
     "evidence:crash-fix": "vitest run scripts/evidence-crash-replay.test.ts --reporter=verbose",
     "prepack": "npm run build"

@@ -2,7 +2,18 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.0-beta.5 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.0-beta.6 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.0-beta.6] - 2026-09-06
+
+### 修复
+- 根据 beta.5 真实 OOM 自动保留的 V8 allocation profile 修复 React/Ink TUI 主泄漏：发行 CLI 曾错误打包 `react-reconciler.development.js`，React 19 在每次 component commit 中调用 `performance.measure()`，Node User Timing 缓冲区不自动清空，最终在普通 turn 中保留约 7GB。CLI 构建现固定折叠 `NODE_ENV=production`，只打包 production reconciler。
+- launcher 同时强制子进程使用生产环境，覆盖未来 externalized React 依赖；交互 TUI 额外每 250ms 清理 marks/measures，保护源码开发运行和错误打包回归。
+- 内存轮换 census 新增 `userTiming` entry 数；若未来再次出现类似问题，事故文件会直接暴露 User Timing 缓冲区是否重新增长。
+
+### 测试与维护
+- CLI 构建完成后扫描全部发行 bundle；只要重新出现 `logComponentRender` 或 development reconciler 标记就直接构建失败。新增真实 Ink 10 万次 commit 的独立低堆压测，并把 `/goal` 多 worker 分段、host verification 重试和 skeptic panel 纳入生产 RPC 长压测。
+- `package.json` 与 `package-lock.json` 的项目版本统一为 `1.4.0-beta.6`。
 
 ## [1.4.0-beta.5] - 2026-09-06
 

@@ -38,6 +38,7 @@ const HEAP_MB = positiveInteger(process.env.FLAVOR_STRESS_HEAP_MB, 384);
 const PAYLOAD_BYTES = positiveInteger(process.env.FLAVOR_STRESS_PAYLOAD_BYTES, 8_192);
 const MANUAL_CHECKPOINTS = positiveInteger(process.env.FLAVOR_STRESS_MANUAL_CHECKPOINTS, 120);
 const KEEP_TEMP = process.env.FLAVOR_STRESS_KEEP_TEMP === "1";
+const ONLY_GOAL = process.env.FLAVOR_STRESS_ONLY_GOAL === "1";
 
 async function main() {
   if (!existsSync(CLI)) throw new Error(`Built CLI not found at ${CLI}; run npm run build:cli first`);
@@ -49,29 +50,113 @@ async function main() {
   await gateway.start();
   const startedAt = Date.now();
   try {
+    if (ONLY_GOAL) {
+      const longGoal = await runLongGoalSegmentSoak(root, probePath, gateway);
+      const report = {
+        version: "1.4.0-beta.6",
+        durationMs: Date.now() - startedAt,
+        heapLimitMb: HEAP_MB,
+        longGoal,
+        gateway: gateway.snapshot(),
+      };
+      await writeReport(report);
+      return;
+    }
     const exact = await runExactTaskStateRegression(root, probePath, gateway);
     const soak = await runFreshSoak(root, probePath, gateway, ROUNDS);
     const longLoop = await runLongLoopSegmentSoak(root, probePath, gateway);
+    const longGoal = await runLongGoalSegmentSoak(root, probePath, gateway);
     const report = {
-      version: "1.4.0-beta.5",
+      version: "1.4.0-beta.6",
       durationMs: Date.now() - startedAt,
       heapLimitMb: HEAP_MB,
       payloadBytes: PAYLOAD_BYTES,
       exact,
       soak,
       longLoop,
+      longGoal,
       gateway: gateway.snapshot(),
     };
-    const reportPath = process.env.FLAVOR_STRESS_REPORT?.trim();
-    if (reportPath) {
-      await mkdir(dirname(resolve(reportPath)), { recursive: true });
-      await writeFile(resolve(reportPath), `${JSON.stringify(report, null, 2)}\n`, "utf8");
-    }
-    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    await writeReport(report);
   } finally {
     await gateway.close();
     if (!KEEP_TEMP) await rm(root, { recursive: true, force: true });
     else process.stderr.write(`stress: retained ${root}\n`);
+  }
+}
+
+async function writeReport(report) {
+  const reportPath = process.env.FLAVOR_STRESS_REPORT?.trim();
+  if (reportPath) {
+    await mkdir(dirname(resolve(reportPath)), { recursive: true });
+    await writeFile(resolve(reportPath), `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  }
+  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+}
+
+async function runLongGoalSegmentSoak(tempRoot, probe, server) {
+  const workspace = join(tempRoot, "long-goal-segments");
+  await prepareWorkspace(workspace, server.baseURL, { contextWindow: 200_000 });
+  const configPath = join(workspace, ".flavor", "flavor.json");
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  config.maxIterations = { main: 20, subagent: 20, softLimitFactor: 0.8, extendBy: 10 };
+  config.goal = { maxRounds: 1, maxStallStreak: 1 };
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  await writeFile(join(workspace, "large-tool-output.txt"), `${"long-goal-tool-output-".repeat(64)}\n`.repeat(800), "utf8");
+  await writeFile(join(workspace, "package.json"), JSON.stringify({
+    name: "long-goal-stress",
+    private: true,
+    scripts: {
+      test: "node -e \"const fs=require('node:fs');const f='.verify-count';const n=Number(fs.existsSync(f)?fs.readFileSync(f,'utf8'):0)+1;fs.writeFileSync(f,String(n));process.exit(n>=4?0:1)\"",
+    },
+  }), "utf8");
+  await writeFile(join(workspace, ".gitignore"), ".flavor/\n.flavor-code/\nheap-metrics.jsonl*\n.verify-count\n", "utf8");
+  execFileSync("git", ["-C", workspace, "init"], { stdio: "ignore", windowsHide: true });
+  execFileSync("git", ["-C", workspace, "config", "user.email", "stress@flavor.invalid"], { stdio: "ignore", windowsHide: true });
+  execFileSync("git", ["-C", workspace, "config", "user.name", "Flavor Stress"], { stdio: "ignore", windowsHide: true });
+  execFileSync("git", ["-C", workspace, "add", "."], { stdio: "ignore", windowsHide: true });
+  execFileSync("git", ["-C", workspace, "commit", "-m", "stress fixture"], { stdio: "ignore", windowsHide: true });
+
+  const scenario = server.beginScenario({ name: "long-goal-segments", toolChainLength: 30, goalMode: true, highUsage: false });
+  const cli = await RpcCli.start({ workspace, probe, heapMb: HEAP_MB });
+  try {
+    await cli.prompt("/goal finish the long-running verification task without stopping at iteration, round, or token boundaries");
+    await cli.waitIdle();
+    cli.assertHealthy();
+    const stats = server.scenario(scenario);
+    assert.equal(stats.goalPlanRequests, 1, "goal planner did not complete exactly once");
+    assert.equal(stats.goalClassifierRequests, 3, "goal skeptic panel did not complete");
+    assert.ok(stats.mainRequests >= 80, `long goal made only ${stats.mainRequests} worker model requests`);
+    assert.ok(stats.readCalls >= 76, `long goal made only ${stats.readCalls} real Read calls`);
+
+    const goalRoot = join(workspace, ".flavor", "goals");
+    const [goalFile] = await readdir(goalRoot);
+    assert.ok(goalFile?.endsWith(".json"), "long goal did not persist state");
+    const state = JSON.parse(await readFile(join(goalRoot, goalFile), "utf8"));
+    assert.equal(state.status, "achieved", "long goal did not reach verified completion");
+    assert.equal(state.workerRounds, 4, "production goal still honored the configured one-round cap");
+    assert.equal(state.verifyRounds, 4, "long goal did not verify every worker round");
+    assert.ok(state.evidenceRounds.length <= 64, "goal evidence history is unbounded");
+
+    await cli.forceFullGc();
+    const memory = await cli.memorySummary();
+    assert.ok(memory.peakHeapRatio < 0.8, `long goal crossed the heap guard (${percent(memory.peakHeapRatio)})`);
+    assert.ok(memory.postGcHeapRatio < 0.5,
+      `long-goal retained heap is too high (${memory.postGcHeapMb.toFixed(1)}MB, ${percent(memory.postGcHeapRatio)})`);
+    return {
+      goalId: state.id,
+      workerRounds: state.workerRounds,
+      verifyRounds: state.verifyRounds,
+      mainRequests: stats.mainRequests,
+      readCalls: stats.readCalls,
+      plannerRequests: stats.goalPlanRequests,
+      classifierRequests: stats.goalClassifierRequests,
+      warnings: cli.eventCounts.warning ?? 0,
+      retainedEvidenceRounds: state.evidenceRounds.length,
+      memory,
+    };
+  } finally {
+    await cli.close();
   }
 }
 
@@ -379,6 +464,8 @@ class StressGateway {
       waitingForPostTaskSummary: false,
       taskToSummaryOrdering: false,
       afterSummary: false,
+      goalPlanRequests: 0,
+      goalClassifierRequests: 0,
     });
     this.active = id;
     return id;
@@ -410,6 +497,26 @@ class StressGateway {
     stats.maxRequestMessages = Math.max(stats.maxRequestMessages, messages.length);
     stats.maxRequestBytes = Math.max(stats.maxRequestBytes, Buffer.byteLength(raw));
 
+    const serializedMessages = JSON.stringify(messages);
+    if (stats.options.goalMode && serializedMessages.includes("You are a goal planner")) {
+      stats.goalPlanRequests += 1;
+      sendText(response, JSON.stringify({
+        kind: "code-change",
+        approach: "Complete the requested work and verify it with the project test command.",
+        checklist: ["execute worker segment", "run host verification"],
+        criteria: [{ id: 1, description: "project verification command passes", type: "gating" }],
+        verificationPlan: "Run the project test command and require exit code zero.",
+        nonGoals: [],
+        assumedScope: ["local stress workspace"],
+      }), 12_000);
+      return;
+    }
+    if (stats.options.goalMode && serializedMessages.includes("adversarial verifier")) {
+      stats.goalClassifierRequests += 1;
+      sendText(response, JSON.stringify({ refuted: false, gaps: [] }), 12_000);
+      return;
+    }
+
     if (tools.length === 0) {
       stats.summaryRequests += 1;
       stats.sinceSummary = 0;
@@ -421,7 +528,7 @@ class StressGateway {
       return;
     }
 
-    if (tools.includes("TaskOutput") && JSON.stringify(messages).includes("Complete task stress-node")) {
+    if (tools.includes("TaskOutput") && serializedMessages.includes("Complete task stress-node")) {
       stats.subagentRequests += 1;
       sendText(response, JSON.stringify(subagentResult(messages)), 12_000);
       return;

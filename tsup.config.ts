@@ -13,6 +13,13 @@ export default defineConfig({
   dts: false,
   clean: true,
   sourcemap: sourceMap,
+  // React 19's development reconciler emits one User Timing measure for
+  // every component commit. Node retains those measures until explicitly
+  // cleared, which made a long-lived Ink TUI retain gigabytes. Claude Code's
+  // Ink build relies on this production constant being folded at bundle time.
+  define: {
+    "process.env.NODE_ENV": JSON.stringify("production"),
+  },
   banner: {
     // Claude Code's Ink fork includes CommonJS React internals such as
     // react-reconciler and react/compiler-runtime. The application bundle is

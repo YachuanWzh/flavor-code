@@ -132,7 +132,10 @@ async function spawnAndWait(
   argv: readonly string[],
   heapProfile: HeapProfileTarget,
 ): Promise<number> {
-  const child = spawn(process.execPath, cliMainArguments(mainPath, argv, heapProfile), { stdio: "inherit" });
+  const child = spawn(process.execPath, cliMainArguments(mainPath, argv, heapProfile), {
+    stdio: "inherit",
+    env: { ...process.env, NODE_ENV: "production" },
+  });
 
   // Both processes share the Windows console. Let the real CLI own Ctrl+C;
   // otherwise the idle launcher can exit before its child restores the TUI.
