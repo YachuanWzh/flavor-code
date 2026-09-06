@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { inferVerificationPlan, runVerificationPlan } from "../../src/loop/verifier.js";
+import {
+  MAX_PERSISTED_VERIFICATION_STREAM_BYTES,
+  inferVerificationPlan,
+  runVerificationPlan,
+} from "../../src/loop/verifier.js";
 
 describe("loop verifier", () => {
   it("infers deterministic npm checks in stable priority order", async () => {
@@ -60,6 +64,20 @@ describe("loop verifier", () => {
     expect(evidence.commands[0]).toMatchObject({ exitCode: 0, stdout: "ok" });
     expect(evidence.commands[1]).toMatchObject({ exitCode: 3, stderr: "bad" });
     expect(evidence.summary).toContain("fail failed");
+  });
+
+  it("bounds retained verification output while preserving the diagnostic tail", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-verifier-bounded-"));
+    const evidence = await runVerificationPlan({ commands: [{
+      label: "large",
+      command: process.execPath,
+      args: ["-e", "process.stdout.write('x'.repeat(20000) + 'TAIL')"],
+    }] }, workspace, new AbortController().signal);
+
+    expect(Buffer.byteLength(evidence.commands[0]!.stdout, "utf8"))
+      .toBeLessThanOrEqual(MAX_PERSISTED_VERIFICATION_STREAM_BYTES);
+    expect(evidence.commands[0]!.stdout).toMatch(/TAIL$/);
+    expect(evidence.commands[0]!.truncated).toBe(true);
   });
 
   it("propagates cancellation", async () => {

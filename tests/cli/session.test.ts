@@ -811,6 +811,53 @@ describe("FlavorSession", () => {
     expect(outcomes).toEqual(["failed"]);
   });
 
+  it.each(["iteration_limit", "output_limit", "context_overflow"] as const)(
+    "continues an ordinary turn after a %s boundary",
+    async (code) => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const prompts: string[] = [];
+    base.run = async function* (prompt) {
+      prompts.push(prompt);
+      if (prompts.length === 1) {
+        yield { type: "error", error: { code, message: `${code} boundary` } };
+      } else {
+        yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
+      }
+    };
+
+    await new FlavorSession(base).submit("finish the large refactor");
+
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain(`automatic continuation after ${code} boundary; segment 1`);
+    expect(outputs.join("\n")).toContain("durable continuation 1 queued");
+    },
+  );
+
+  it("leaves an iteration continuation durable while a heap rotation is pending", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const admitted: unknown[] = [];
+    let sequence = 0;
+    base.rotationPending = () => true;
+    base.durableQueue = {
+      recover: () => [],
+      admit: (_kind, payload) => { admitted.push(structuredClone(payload)); return `queue-${++sequence}`; },
+      claim: () => {}, ack: () => {}, release: () => {},
+    };
+    base.run = async function* () {
+      yield { type: "error", error: { code: "iteration_limit", message: "Agent exceeded the 300 iteration limit" } };
+    };
+    const session = new FlavorSession(base);
+
+    await session.submit("finish the large refactor");
+    await session.whenIdle();
+
+    expect(admitted).toHaveLength(1);
+    expect(admitted[0]).toMatchObject({ iterationContinuation: 1 });
+    expect(session.queueSnapshot().followUp).toHaveLength(1);
+  });
+
   it("queues steering for an active run and follow-up work for after it", async () => {
     const events: string[] = []; const outputs: string[] = [];
     const base = services(events, outputs);

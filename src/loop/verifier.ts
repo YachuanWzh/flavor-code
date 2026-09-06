@@ -17,6 +17,8 @@ export interface VerificationPlan {
 }
 
 const SCRIPT_PRIORITY = ["test", "typecheck", "lint", "build", "smoke:install"] as const;
+/** Verification state is retained across dozens of rounds; keep each stream evidential, not archival. */
+export const MAX_PERSISTED_VERIFICATION_STREAM_BYTES = 1_024;
 
 export async function inferVerificationPlan(workspace: string): Promise<VerificationPlan> {
   const commands: VerificationCommand[] = [];
@@ -63,15 +65,26 @@ export async function runVerificationPlan(
       command: item.command,
       args: item.args,
       exitCode: result.exitCode,
-      stdout: result.stdout,
-      stderr: result.stderr,
-      truncated: result.truncated,
+      stdout: boundedEvidenceTail(result.stdout),
+      stderr: boundedEvidenceTail(result.stderr),
+      truncated: result.truncated
+        || Buffer.byteLength(result.stdout, "utf8") > MAX_PERSISTED_VERIFICATION_STREAM_BYTES
+        || Buffer.byteLength(result.stderr, "utf8") > MAX_PERSISTED_VERIFICATION_STREAM_BYTES,
     });
     if (result.exitCode !== 0) {
       return { passed: false, commands, summary: `${item.label} failed with exit code ${String(result.exitCode)}.` };
     }
   }
   return { passed: true, commands, summary: `Passed ${commands.length} deterministic verification command(s).` };
+}
+
+function boundedEvidenceTail(value: string): string {
+  const encoded = Buffer.from(value, "utf8");
+  if (encoded.byteLength <= MAX_PERSISTED_VERIFICATION_STREAM_BYTES) return value;
+  const prefix = Buffer.from("…\n", "utf8");
+  let start = encoded.byteLength - (MAX_PERSISTED_VERIFICATION_STREAM_BYTES - prefix.byteLength);
+  while (start < encoded.byteLength && (encoded[start]! & 0xc0) === 0x80) start += 1;
+  return `${prefix.toString("utf8")}${encoded.subarray(start).toString("utf8")}`;
 }
 
 function npmScript(name: string): VerificationCommand {

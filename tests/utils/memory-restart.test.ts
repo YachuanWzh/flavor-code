@@ -106,13 +106,14 @@ describe("memory restart protocol", () => {
     expect(parseMemoryRestartMarker(JSON.stringify({ ...marker(), continuation: { kind: "loop" } }))).toBeUndefined();
   });
 
-  it("only honours a continuation for the same session and shortly after it was written", () => {
+  it("honours a continuation for the same session across an unattended restart window", () => {
     const requestedAt = "2026-08-29T03:00:00.000Z";
     const loopMarker = marker({ requestedAt, continuation: { kind: "loop", id: "loop-9" } });
     expect(pendingContinuation(loopMarker, SESSION, new Date(requestedAt))).toEqual({ kind: "loop", id: "loop-9" });
     expect(pendingContinuation(loopMarker, "session-other", new Date(requestedAt))).toBeUndefined();
     expect(pendingContinuation(loopMarker, SESSION, new Date(new Date(requestedAt).getTime() + MEMORY_RESTART_CONTINUATION_TTL_MS + 1))).toBeUndefined();
     expect(pendingContinuation(marker({ requestedAt }), SESSION, new Date(requestedAt))).toBeUndefined();
+    expect(MEMORY_RESTART_CONTINUATION_TTL_MS).toBe(24 * 60 * 60 * 1_000);
   });
 
   it("blocks a rotation requested sooner than the minimum gap so a heavy fresh heap cannot spin", () => {

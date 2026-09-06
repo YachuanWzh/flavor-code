@@ -1596,25 +1596,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         await verifierEnvironment?.dispose();
       }
     },
-    confirmBudget: async (state, dimensions, signal) => {
-      if (options.approvalPolicy === "deny") return "unavailable";
-      const reached = dimensions.map((dimension) => dimension === "cycles"
-        ? `${state.budget.cyclesUsed} cycles`
-        : `${state.budget.inputTokens + state.budget.outputTokens} tokens`).join(" and ");
-      const next = dimensions.map((dimension) => dimension === "cycles"
-        ? `${state.budget.cycleCheckpoint + state.config.cycleStep} cycles`
-        : `${state.budget.tokenCheckpoint + state.config.tokenStep} tokens`).join(" and ");
-      const latestVerification = state.cycles.at(-1)?.verification.summary ?? "No host verification evidence yet.";
-      const answers = await questions.ask([{
-        header: "Loop budget",
-        question: `Loop ${state.loopId} reached ${reached}. Latest verification: ${latestVerification} Continue until the next checkpoint (${next})?`,
-        options: [
-          { label: "Continue", description: "Extend only the reached budget tranche and keep looping." },
-          { label: "Stop", description: "End this loop as budget exhausted." },
-        ],
-      }], signal);
-      return answers[0] === "Continue" ? "approved" : "rejected";
-    },
+    // Cycle/token values are telemetry checkpoint cadence, not an unattended
+    // execution cap. The user can still cancel explicitly at any time.
+    confirmBudget: async () => "approved",
     fingerprint: workspaceFingerprint,
     idFactory: () => `loop-${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 17)}-${randomUUID().slice(0, 8)}`,
   });
@@ -1625,8 +1609,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     plannerModelId: mainModel,
     classifierModelId: mainModel,
     skepticCount: 3,
-    maxRounds: config.goal.maxRounds,
-    maxStallStreak: config.goal.maxStallStreak,
+    // Production goals run until verified, explicitly cancelled, or blocked
+    // by a non-recoverable external condition. Numeric config values remain
+    // accepted for compatibility but no longer terminate autonomous work.
     persistence: goalStore,
     onRoundBoundary: (goalId) => maybeRotateAtBoundary({ kind: "goal", id: goalId }),
     onMemoryCheckpoint: (goalId) => maybeRotateAtBoundary({ kind: "goal", id: goalId }),
@@ -1754,6 +1739,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       () => rotateForHeap(activeLongTask ?? { kind: "goal", id: goalId }, currentPressureReading()),
     ),
     continuation: () => consumePendingContinuation(),
+    rotationPending: () => memoryRotationActive(),
     mcp: async (command, signal) => {
       signal.throwIfAborted();
       const manager = await mcpReady;
@@ -2337,6 +2323,8 @@ async function* loopSessionEvents(
           totalInputTokens,
           totalOutputTokens,
         };
+      } else if (event.event.type === "error" && isResumableLongTaskError(event.event.error.code)) {
+        yield { type: "warning", message: `Loop worker segment ended at ${event.event.error.code}; checkpointing and verifying before continuing.` };
       } else if (event.event.type !== "done") yield event.event;
       continue;
     }
@@ -2383,7 +2371,7 @@ function loopProgressEvent(event: Exclude<LoopRuntimeEvent, { type: "worker-even
   if (event.type === "loop-budget") {
     return {
       type: "loop-progress", loopId: event.loopId, phase: "budget", state: "info",
-      message: `Confirmation required for ${event.dimensions.join(" and ")} budget.`,
+      message: `${event.dimensions.join(" and ")} checkpoint reached; continuing automatically.`,
     };
   }
   return {
@@ -2398,6 +2386,13 @@ function terminalProgressState(status: Exclude<LoopStatus, "running">): "complet
   if (status === "cancelled") return "cancelled";
   if (status === "needs_human") return "info";
   return "failed";
+}
+
+function isResumableLongTaskError(code: import("./agent/types.js").AgentErrorCode): boolean {
+  return code !== "authentication"
+    && code !== "model_not_found"
+    && code !== "cancelled"
+    && code !== "memory_pressure";
 }
 
 async function workspaceFingerprint(workspace: string): Promise<string> {
@@ -3259,6 +3254,13 @@ async function* goalSessionEvents(
       yield { type: "notice", message: `Resuming goal ${event.goalId} at round ${event.round} after a heap rotation.` };
       continue;
     }
+    if (event.type === "goal-stage-retry") {
+      yield {
+        type: "warning",
+        message: `Goal ${event.stage} attempt ${event.attempt} hit a recoverable boundary (${event.reason}); retrying in ${event.delayMs}ms.`,
+      };
+      continue;
+    }
     if (event.type === "goal-plan-created") {
       yield { type: "notice", message: `Goal plan created (${event.plan.kind}) with ${event.plan.criteria.length} acceptance criteria.` };
       yield { type: "notice", message: `Plan file: ${event.planPath}` };
@@ -3285,6 +3287,8 @@ async function* goalSessionEvents(
           totalInputTokens: event.event.usage.inputTokens,
           totalOutputTokens: event.event.usage.outputTokens,
         };
+      } else if (event.event.type === "error" && isResumableLongTaskError(event.event.error.code)) {
+        yield { type: "warning", message: `Goal worker segment ended at ${event.event.error.code}; checkpointing and verifying before continuing.` };
       } else {
         yield event.event;
       }

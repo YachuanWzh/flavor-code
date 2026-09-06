@@ -11,7 +11,7 @@
  */
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { createInterface } from "node:readline";
 import {
@@ -19,6 +19,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -50,13 +51,15 @@ async function main() {
   try {
     const exact = await runExactTaskStateRegression(root, probePath, gateway);
     const soak = await runFreshSoak(root, probePath, gateway, ROUNDS);
+    const longLoop = await runLongLoopSegmentSoak(root, probePath, gateway);
     const report = {
-      version: "1.3.17",
+      version: "1.4.0-beta.5",
       durationMs: Date.now() - startedAt,
       heapLimitMb: HEAP_MB,
       payloadBytes: PAYLOAD_BYTES,
       exact,
       soak,
+      longLoop,
       gateway: gateway.snapshot(),
     };
     const reportPath = process.env.FLAVOR_STRESS_REPORT?.trim();
@@ -69,6 +72,73 @@ async function main() {
     await gateway.close();
     if (!KEEP_TEMP) await rm(root, { recursive: true, force: true });
     else process.stderr.write(`stress: retained ${root}\n`);
+  }
+}
+
+async function runLongLoopSegmentSoak(tempRoot, probe, server) {
+  const workspace = join(tempRoot, "long-loop-segments");
+  await prepareWorkspace(workspace, server.baseURL, { contextWindow: 200_000 });
+  const configPath = join(workspace, ".flavor", "flavor.json");
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  config.maxIterations = { main: 20, subagent: 20, softLimitFactor: 0.8, extendBy: 10 };
+  config.loop = { maxCycles: 1, maxTokens: 1_000, isolation: "auto" };
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  await writeFile(join(workspace, "large-tool-output.txt"), `${"long-loop-tool-output-".repeat(64)}\n`.repeat(800), "utf8");
+  await writeFile(join(workspace, "package.json"), JSON.stringify({
+    name: "long-loop-stress",
+    private: true,
+    scripts: {
+      test: "node -e \"const fs=require('node:fs');const f='.verify-count';const n=Number(fs.existsSync(f)?fs.readFileSync(f,'utf8'):0)+1;fs.writeFileSync(f,String(n));process.exit(n>=4?0:1)\"",
+    },
+  }), "utf8");
+  await writeFile(join(workspace, ".gitignore"), ".flavor/\n.flavor-code/\nheap-metrics.jsonl*\n.verify-count\n", "utf8");
+  execFileSync("git", ["-C", workspace, "init"], { stdio: "ignore", windowsHide: true });
+  execFileSync("git", ["-C", workspace, "config", "user.email", "stress@flavor.invalid"], { stdio: "ignore", windowsHide: true });
+  execFileSync("git", ["-C", workspace, "config", "user.name", "Flavor Stress"], { stdio: "ignore", windowsHide: true });
+  execFileSync("git", ["-C", workspace, "add", "."], { stdio: "ignore", windowsHide: true });
+  execFileSync("git", ["-C", workspace, "commit", "-m", "stress fixture"], { stdio: "ignore", windowsHide: true });
+
+  const scenario = server.beginScenario({ name: "long-loop-segments", toolChainLength: 30, highUsage: false });
+  const cli = await RpcCli.start({ workspace, probe, heapMb: HEAP_MB });
+  try {
+    await cli.prompt("/loop finish the long-running verification task without stopping at iteration or token boundaries");
+    await cli.waitIdle();
+    cli.assertHealthy();
+    const stats = server.scenario(scenario);
+    assert.ok(stats.mainRequests >= 80, `long loop made only ${stats.mainRequests} model requests`);
+    assert.ok(stats.readCalls >= 76, `long loop made only ${stats.readCalls} real Read calls`);
+    assert.ok((cli.eventCounts.warning ?? 0) >= 4, "iteration boundaries were not surfaced as resumable warnings");
+
+    const loopRoot = join(workspace, ".flavor", "loops");
+    const [loopId] = await readdir(loopRoot);
+    assert.ok(loopId, "long loop did not persist an id");
+    const state = JSON.parse(await readFile(join(loopRoot, loopId, "state.json"), "utf8"));
+    assert.equal(state.status, "succeeded", "long loop did not reach verified success");
+    assert.equal(state.budget.cyclesUsed, 4, "long loop did not cross four worker segments");
+    assert.ok(state.budget.inputTokens > state.config.tokenStep, "token checkpoint was not exceeded");
+    assert.ok(state.budget.approvals.length <= 64, "budget approval history is unbounded");
+    assert.ok(state.cycles.length <= 64, "cycle evidence history is unbounded");
+
+    await cli.forceFullGc();
+    const memory = await cli.memorySummary();
+    assert.ok(memory.peakHeapRatio < 0.8, `long loop crossed the heap guard (${percent(memory.peakHeapRatio)})`);
+    assert.ok(memory.postGcHeapRatio < 0.5,
+      `long-loop retained heap is too high (${memory.postGcHeapMb.toFixed(1)}MB, ${percent(memory.postGcHeapRatio)})`);
+    return {
+      loopId,
+      cycles: state.budget.cyclesUsed,
+      inputTokens: state.budget.inputTokens,
+      outputTokens: state.budget.outputTokens,
+      mainRequests: stats.mainRequests,
+      readCalls: stats.readCalls,
+      summaryRequests: stats.summaryRequests,
+      warnings: cli.eventCounts.warning ?? 0,
+      retainedCycles: state.cycles.length,
+      retainedApprovals: state.budget.approvals.length,
+      memory,
+    };
+  } finally {
+    await cli.close();
   }
 }
 
@@ -366,12 +436,30 @@ class StressGateway {
     const hasToolResult = lastMessageHasToolResult(messages);
     if (hasToolResult) {
       if (stats.waitingForPostTaskSummary) stats.taskToSummaryOrdering = false;
+      if (stats.options.toolChainLength && countToolResults(messages) < stats.options.toolChainLength) {
+        stats.readCalls += 1;
+        sendTool(response, "Read", `stress-chain-read-${stats.readCalls}`, {
+          path: "large-tool-output.txt",
+          maxBytes: 1_048_576,
+          force: true,
+        }, inputTokens(stats));
+        return;
+      }
       sendText(response, "ok", inputTokens(stats));
       return;
     }
 
     stats.logicalTurns += 1;
     const turn = stats.logicalTurns;
+    if (stats.options.toolChainLength) {
+      stats.readCalls += 1;
+      sendTool(response, "Read", `stress-chain-read-${stats.readCalls}`, {
+        path: "large-tool-output.txt",
+        maxBytes: 1_048_576,
+        force: true,
+      }, inputTokens(stats));
+      return;
+    }
     const forceTask = stats.options.forceTaskAt === turn;
     const periodicTask = stats.options.taskEvery && turn > 0 && turn % stats.options.taskEvery === 0;
     if (forceTask || periodicTask) {
@@ -409,10 +497,14 @@ class StressGateway {
 class RpcCli {
   static async start(options) {
     const metrics = join(options.workspace, "heap-metrics.jsonl");
-    const args = [CLI, "--mode", "rpc", "--workspace", options.workspace];
+    // Pass the heap cap through the launcher's argv contract. NODE_OPTIONS is
+    // not represented in process.execArgv on every Node build, so relying on
+    // it let the launcher silently replace the intended 384MB stress heap
+    // with its 8GB high-memory default.
+    const args = [CLI, `--max-old-space-size=${options.heapMb}`, "--mode", "rpc", "--workspace", options.workspace];
     if (options.resumeSession) args.push("--resume", options.resumeSession);
     const existingNodeOptions = process.env.NODE_OPTIONS?.trim();
-    const nodeOptions = [existingNodeOptions, `--max-old-space-size=${options.heapMb}`, `--require=${options.probe}`]
+    const nodeOptions = [existingNodeOptions, `--require=${options.probe}`]
       .filter(Boolean).join(" ");
     const child = spawn(process.execPath, args, {
       cwd: options.workspace,
@@ -624,6 +716,15 @@ function inputTokens(stats) {
 function lastMessageHasToolResult(messages) {
   const content = messages.at(-1)?.content;
   return Array.isArray(content) && content.some((block) => block?.type === "tool_result");
+}
+
+function countToolResults(messages) {
+  let count = 0;
+  for (const message of messages) {
+    if (!Array.isArray(message.content)) continue;
+    count += message.content.filter((block) => block?.type === "tool_result").length;
+  }
+  return count;
 }
 
 function countUserPrompts(messages) {

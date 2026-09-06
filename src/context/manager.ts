@@ -405,10 +405,6 @@ export class ContextManager {
       }
       return microcompact.changed;
     }
-    if (this.#consecutiveAutoCompactFailures >= 3) {
-      rollbackMicrocompact();
-      return false;
-    }
     try {
       const compacted = await this.#compactConversation(signal);
       if (compacted) {

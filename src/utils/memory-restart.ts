@@ -26,8 +26,12 @@ export const MEMORY_RESTART_MAX_ATTEMPTS = 24;
 export const MEMORY_RESTART_WINDOW_MS = 60 * 60 * 1_000;
 /** Two rotations closer together than this mean the fresh heap is born heavy; stop rotating and let the hard guard decide. */
 export const MEMORY_RESTART_MIN_GAP_MS = 5 * 60 * 1_000;
-/** A continuation is only honoured shortly after it was written. */
-export const MEMORY_RESTART_CONTINUATION_TTL_MS = 10 * 60 * 1_000;
+/**
+ * Leave enough time for a slow launcher, host reboot, or unattended machine
+ * wake-up to recover a persisted long task. Session/id validation still keeps
+ * an unrelated stale marker from resuming in the wrong process.
+ */
+export const MEMORY_RESTART_CONTINUATION_TTL_MS = 24 * 60 * 60 * 1_000;
 const SESSION_ID_PATTERN = /^session-[A-Za-z0-9_-]+$/u;
 
 export interface MemoryRestartContinuation {

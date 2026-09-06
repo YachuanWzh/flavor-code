@@ -434,7 +434,7 @@ describe("ContextManager", () => {
     expect(context.messagesForModel()).toEqual(before);
   });
 
-  it("trips automatic compaction after three failures but still permits manual compact", async () => {
+  it("keeps retrying automatic compaction after transient failures", async () => {
     let attempts = 0;
     const context = createContext({
       compactAtChars: 1,
@@ -450,12 +450,9 @@ describe("ContextManager", () => {
     await expect(context.prepareForModelCall()).resolves.toBe(false);
     await expect(context.prepareForModelCall()).resolves.toBe(false);
     await expect(context.prepareForModelCall()).resolves.toBe(false);
-    await expect(context.prepareForModelCall()).resolves.toBe(false);
-    expect(attempts).toBe(3);
-    expect(context.consecutiveAutoCompactFailures).toBe(3);
-
-    await expect(context.compact(undefined, "manual")).resolves.toBe(true);
+    await expect(context.prepareForModelCall()).resolves.toBe(true);
     expect(attempts).toBe(4);
+    expect(context.consecutiveAutoCompactFailures).toBe(0);
     expect(context.snapshot().compact?.summary).toBe("manual recovery");
   });
 

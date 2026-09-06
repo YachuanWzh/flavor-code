@@ -62,6 +62,7 @@ function fixture(overrides: Partial<ConstructorParameters<typeof LoopOrchestrato
     runVerifier: async () => verifierResults.shift() ?? verification(true),
     confirmBudget: async (_state, dimensions) => { confirmations.push(dimensions); return "approved"; },
     fingerprint: async () => "fingerprint",
+    maxNoProgressCycles: 3,
     ...overrides,
   });
   return { orchestrator, persistence, prompts, confirmations, verifierResults };
@@ -115,7 +116,7 @@ describe("LoopOrchestrator", () => {
     });
   });
 
-  it("uses deterministic blocking reasons when the guard fails", async () => {
+  it("keeps deterministic guard warnings advisory when host verification passes", async () => {
     const guard = {
       recordToolCall: vi.fn(),
       recordToolResult: vi.fn(),
@@ -136,8 +137,8 @@ describe("LoopOrchestrator", () => {
 
     expect(events.at(-1)).toMatchObject({
       type: "loop-terminal",
-      status: "failed",
-      reason: "Read failed repeatedly",
+      status: "succeeded",
+      reason: expect.stringContaining("Read failed repeatedly"),
     });
   });
 
@@ -180,7 +181,7 @@ describe("LoopOrchestrator", () => {
     const f = fixture({
       runWorker: () => worker([
         { type: "usage", inputTokens: 70, outputTokens: 30, totalInputTokens: 70, totalOutputTokens: 30 },
-        { type: "error", error: { code: "network", message: "worker failed" } },
+        { type: "error", error: { code: "authentication", message: "worker failed" } },
       ]),
     });
 
@@ -192,11 +193,72 @@ describe("LoopOrchestrator", () => {
     });
   });
 
-  it("stops after three identical failures without workspace progress", async () => {
+  it("treats the worker iteration limit as a verifiable cycle boundary", async () => {
+    let workerCalls = 0;
+    let verifierCalls = 0;
+    const f = fixture({
+      runWorker: () => {
+        workerCalls += 1;
+        return worker(workerCalls === 1 ? [
+          { type: "usage", inputTokens: 70, outputTokens: 30, totalInputTokens: 70, totalOutputTokens: 30 },
+          { type: "error", error: { code: "iteration_limit", message: "Agent exceeded the 300 iteration limit" } },
+        ] : [
+          { type: "usage", inputTokens: 20, outputTokens: 10, totalInputTokens: 20, totalOutputTokens: 10 },
+          { type: "done", usage: { inputTokens: 20, outputTokens: 10 } },
+        ]);
+      },
+      runVerifier: async () => ++verifierCalls === 1
+        ? verification(false, "work remains")
+        : verification(true),
+    });
+
+    const events = await collect(f.orchestrator.run({ goal: "fix tests", signal: new AbortController().signal }));
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "worker-event",
+      event: expect.objectContaining({ type: "error", error: expect.objectContaining({ code: "iteration_limit" }) }),
+    }));
+    expect(events.at(-1)).toMatchObject({ type: "loop-terminal", status: "succeeded" });
+    expect(workerCalls).toBe(2);
+    expect(f.persistence.states.at(-1)).toMatchObject({
+      status: "succeeded", budget: { cyclesUsed: 2, inputTokens: 90, outputTokens: 40 },
+    });
+  });
+
+  it.each(["output_limit", "context_overflow", "rate_limit", "network"] as const)(
+    "treats recoverable worker %s errors as cycle boundaries",
+    async (code) => {
+      const f = fixture({
+        runWorker: () => worker([{ type: "error", error: { code, message: `${code} boundary` } }]),
+        runVerifier: async () => verification(true),
+      });
+
+      const events = await collect(f.orchestrator.run({ goal: "fix tests", signal: new AbortController().signal }));
+
+      expect(events.at(-1)).toMatchObject({ type: "loop-terminal", status: "succeeded" });
+    },
+  );
+
+  it("optionally stops after a host-configured no-progress threshold", async () => {
     const f = fixture({ runVerifier: async () => verification(false, "same failure") });
     const events = await collect(f.orchestrator.run({ goal: "fix tests", signal: new AbortController().signal }));
     expect(f.prompts).toHaveLength(3);
     expect(events.at(-1)).toMatchObject({ type: "loop-terminal", status: "no_progress" });
+  });
+
+  it("bounds retained cycle history while cumulative counters keep advancing", async () => {
+    let verifies = 0;
+    const f = fixture({
+      maxNoProgressCycles: undefined,
+      runVerifier: async () => verification(++verifies >= 70, "long-running verification"),
+    });
+
+    const events = await collect(f.orchestrator.run({ goal: "finish eventually", signal: new AbortController().signal }));
+
+    expect(events.at(-1)).toMatchObject({ type: "loop-terminal", status: "succeeded" });
+    expect(f.persistence.states.at(-1)).toMatchObject({ budget: { cyclesUsed: 70 } });
+    expect(f.persistence.states.at(-1)?.cycles).toHaveLength(64);
+    expect(f.persistence.states.at(-1)?.cycles[0]?.cycle).toBe(7);
   });
 
   it("does not invoke a worker when isolation or verification needs a human", async () => {

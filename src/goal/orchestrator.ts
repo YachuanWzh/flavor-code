@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import { writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
-import type { AgentEvent } from "../agent/types.js";
+import type { AgentError, AgentEvent } from "../agent/types.js";
 import type { ModelRegistry } from "../models/registry.js";
+import { normalizeProviderError } from "../models/types.js";
 import { message } from "../utils/error.js";
 import { memoryRotationActive } from "../utils/memory-restart.js";
 import { runPlanner } from "./planner.js";
@@ -23,8 +24,11 @@ export interface GoalOrchestratorOptions {
   plannerModelId: string;
   classifierModelId: string;
   skepticCount: number;
-  maxRounds: number;
-  maxStallStreak: number;
+  /** Optional finite policies for embedded/test hosts. Production leaves these unset. */
+  maxRounds?: number;
+  maxStallStreak?: number;
+  /** Retry delay override for deterministic tests or an embedding host. */
+  stageRetryDelayMs?(attempt: number): number;
   runWorker(input: {
     goal: string;
     round: number;
@@ -134,28 +138,39 @@ export class GoalOrchestrator {
     let plan: Plan;
     let planPath: string;
     if (state.plan === null) {
-      try {
-        signal.throwIfAborted();
-        await memoryCheckpoint();
-        plan = await runPlanner({
-          registry: this.#options.registry,
-          modelId: this.#options.plannerModelId,
-          objective: state.objective,
-          signal,
-          onProgress: memoryCheckpoint,
-        });
-        planPath = await writePlanFile(workspace, plan);
-        await persistState({ phase: "executing", plan, planPath, contractHash: contractHash(state.objective, plan) });
-        yield { type: "goal-plan-created", plan, planPath };
-      } catch (error) {
-        // A heap rotation aborts planning while the session shuts down; the
-        // goal state must stay resumable so the relaunched process retries.
-        if (memoryRotationActive()) return;
-        const reason = `Goal planning failed: ${message(error)}`;
-        await persistState({ phase: "complete", status: "failed" });
-        yield { type: "goal-plan-failed", reason };
-        yield { type: "goal-failed", reason };
-        return;
+      let planningAttempt = 0;
+      while (true) {
+        try {
+          signal.throwIfAborted();
+          await memoryCheckpoint();
+          plan = await runPlanner({
+            registry: this.#options.registry,
+            modelId: this.#options.plannerModelId,
+            objective: state.objective,
+            signal,
+            onProgress: memoryCheckpoint,
+          });
+          planPath = await writePlanFile(workspace, plan);
+          await persistState({ phase: "executing", plan, planPath, contractHash: contractHash(state.objective, plan) });
+          yield { type: "goal-plan-created", plan, planPath };
+          break;
+        } catch (error) {
+          // A heap rotation aborts planning while the session shuts down; the
+          // goal state must stay resumable so the relaunched process retries.
+          if (memoryRotationActive()) return;
+          const normalized = normalizeProviderError(error);
+          if (!isResumableStageError(normalized)) {
+            const reason = `Goal planning failed: ${normalized.message}`;
+            await persistState({ phase: "complete", status: "failed" });
+            yield { type: "goal-plan-failed", reason };
+            yield { type: "goal-failed", reason };
+            return;
+          }
+          planningAttempt += 1;
+          const delayMs = stageRetryDelay(this.#options, planningAttempt);
+          yield { type: "goal-stage-retry", stage: "planning", attempt: planningAttempt, reason: normalized.message, delayMs };
+          await waitForStageRetry(delayMs, signal);
+        }
       }
     } else {
       plan = state.plan;
@@ -169,7 +184,7 @@ export class GoalOrchestrator {
     let stallStreak = state.stallStreak;
     const startRound = resumeStartRound(state);
 
-    for (let round = startRound; round <= this.#options.maxRounds; round++) {
+    for (let round = startRound; this.#options.maxRounds === undefined || round <= this.#options.maxRounds; round++) {
       signal.throwIfAborted();
       // Round boundary: the previous round is fully persisted, so a heap
       // rotation requested here loses nothing but the grown heap.
@@ -196,8 +211,9 @@ export class GoalOrchestrator {
         });
         yield { type: "goal-worker-start", round };
 
-        let workerError: string | undefined;
+        let workerError: AgentError | undefined;
         let workerMemoryPressure = false;
+        let workerIterationLimit = false;
         try {
           for await (const event of this.#options.runWorker({
             goal: state.objective,
@@ -210,20 +226,24 @@ export class GoalOrchestrator {
             yield { type: "goal-worker-event", round, event };
             if (event.type === "text") finalResponse = `${finalResponse}${event.text}`.slice(-16_000);
             if (event.type === "error") {
-              workerError = event.error.message;
+              workerError = event.error;
               // The worker hit the hard heap guard: the round is interrupted but
               // the goal itself survives on the relaunched process.
               if (event.error.code === "memory_pressure") workerMemoryPressure = true;
+              if (event.error.code === "iteration_limit") workerIterationLimit = true;
               break;
             }
           }
         } catch (error) {
           if (memoryRotationActive()) return;
-          workerError = message(error);
+          workerError = { code: "unknown", message: message(error) };
         }
         if (workerMemoryPressure) return;
-        if (workerError !== undefined) {
-          const reason = `Worker error in round ${round}: ${workerError}`;
+        // A worker's iteration budget deliberately bounds one execution
+        // segment; it must not terminalize the durable multi-round goal.
+        // Verify completed tool effects and open another round if gaps remain.
+        if (workerError !== undefined && !workerIterationLimit && !isResumableWorkerError(workerError)) {
+          const reason = `Worker error in round ${round}: ${workerError.message}`;
           await persistState({ phase: "complete", status: "failed" });
           yield { type: "goal-failed", reason };
           return;
@@ -256,7 +276,7 @@ export class GoalOrchestrator {
         round,
         workspaceDiffHash: evidence.workspaceDiffHash,
         ...(hostVerification === undefined ? {} : { hostVerification }),
-      }] });
+      }].slice(-64) });
 
       let outcome: AggregatedOutcome;
       if (plan.kind === "code-change" && hostVerification !== undefined && !hostVerification.passed) {
@@ -269,21 +289,32 @@ export class GoalOrchestrator {
             fingerprint: createHash("sha256").update(hostVerification.summary).digest("hex").slice(0, 16),
           };
         }
-      } else try {
-        outcome = await runClassifier(evidence, plan, {
-          registry: this.#options.registry,
-          modelId: this.#options.classifierModelId,
-          skepticCount: this.#options.skepticCount,
-          workspace,
-          signal,
-          onProgress: memoryCheckpoint,
-        });
-      } catch (error) {
-        if (memoryRotationActive()) return;
-        outcome = {
-          type: "blocked",
-          reason: `Classifier infrastructure error: ${message(error)}`,
-        };
+      } else {
+        let classifierAttempt = 0;
+        while (true) {
+          try {
+            outcome = await runClassifier(evidence, plan, {
+              registry: this.#options.registry,
+              modelId: this.#options.classifierModelId,
+              skepticCount: this.#options.skepticCount,
+              workspace,
+              signal,
+              onProgress: memoryCheckpoint,
+            });
+            break;
+          } catch (error) {
+            if (memoryRotationActive()) return;
+            const normalized = normalizeProviderError(error);
+            if (!isResumableStageError(normalized)) {
+              outcome = { type: "blocked", reason: `Classifier infrastructure error: ${normalized.message}` };
+              break;
+            }
+            classifierAttempt += 1;
+            const delayMs = stageRetryDelay(this.#options, classifierAttempt);
+            yield { type: "goal-stage-retry", stage: "classification", attempt: classifierAttempt, reason: normalized.message, delayMs };
+            await waitForStageRetry(delayMs, signal);
+          }
+        }
       }
 
       // verifyRounds means completed verification, never merely started. This
@@ -313,7 +344,7 @@ export class GoalOrchestrator {
       // Not achieved — check for stall
       if (outcome.fingerprint === priorFingerprint) {
         stallStreak++;
-        if (stallStreak >= this.#options.maxStallStreak) {
+        if (this.#options.maxStallStreak !== undefined && stallStreak >= this.#options.maxStallStreak) {
           await persistState({
             phase: "complete",
             status: "failed",
@@ -345,7 +376,7 @@ export class GoalOrchestrator {
       });
     }
 
-    // Max rounds reached
+    // A finite host policy reached its maximum rounds. Production has no such cap.
     await persistState({ phase: "complete", status: "failed" });
     yield {
       type: "goal-failed",
@@ -375,6 +406,42 @@ function resumeStartRound(state: GoalState): number {
   return state.verifyRounds >= state.workerRounds
     ? state.workerRounds + 1
     : Math.max(state.workerRounds, 1);
+}
+
+function isResumableWorkerError(error: AgentError): boolean {
+  return error.code !== "authentication"
+    && error.code !== "model_not_found"
+    && error.code !== "cancelled"
+    && error.code !== "memory_pressure";
+}
+
+function isResumableStageError(error: AgentError): boolean {
+  return error.code !== "authentication"
+    && error.code !== "model_not_found"
+    && error.code !== "cancelled"
+    && error.code !== "memory_pressure";
+}
+
+function stageRetryDelay(options: GoalOrchestratorOptions, attempt: number): number {
+  const delayMs = options.stageRetryDelayMs?.(attempt)
+    ?? Math.min(60_000, 1_000 * (2 ** Math.min(attempt - 1, 6)));
+  return Number.isSafeInteger(delayMs) && delayMs >= 0 ? delayMs : 1_000;
+}
+
+function waitForStageRetry(delayMs: number, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  if (delayMs === 0) return Promise.resolve();
+  return new Promise<void>((resolvePromise, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal.reason instanceof Error ? signal.reason : new Error("Goal cancelled"));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolvePromise();
+    }, delayMs);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 async function writePlanFile(workspace: string, plan: Plan): Promise<string> {

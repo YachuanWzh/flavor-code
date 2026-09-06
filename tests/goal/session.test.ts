@@ -59,4 +59,24 @@ describe("runGoalSession", () => {
     });
     expect(output.filter((event) => event.type === "done")).toHaveLength(1);
   });
+
+  it("renders a recoverable worker boundary as a warning instead of a terminal error", async () => {
+    const events: GoalRuntimeEvent[] = [{
+      type: "goal-worker-event",
+      round: 1,
+      event: { type: "error", error: { code: "iteration_limit", message: "segment ended" } },
+    }];
+
+    const output = [];
+    for await (const event of runGoalSession(
+      orchestrator(events) as never,
+      "fix it",
+      new AbortController().signal,
+    )) output.push(event);
+
+    expect(output).toContainEqual(expect.objectContaining({
+      type: "warning", message: expect.stringContaining("checkpointing and verifying"),
+    }));
+    expect(output.some((event) => event.type === "error")).toBe(false);
+  });
 });

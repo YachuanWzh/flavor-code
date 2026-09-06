@@ -1,4 +1,4 @@
-import type { AgentEvent } from "../agent/types.js";
+import type { AgentError, AgentEvent } from "../agent/types.js";
 import { message } from "../utils/error.js";
 import { memoryRotationActive } from "../utils/memory-restart.js";
 import { buildLoopCyclePrompt } from "../skills/builtin-loop.js";
@@ -46,6 +46,8 @@ export interface LoopOrchestratorOptions {
   onMemoryCheckpoint?(loopId: string): void | Promise<void>;
   /** Optional hallucination guard for confidence checks and retry monitoring. */
   hallucinationGuard?: HallucinationGuard;
+  /** Optional safety policy for hosts that want a finite no-progress stop. */
+  maxNoProgressCycles?: number | undefined;
   now?(): string;
   idFactory?(): string;
 }
@@ -167,8 +169,9 @@ export class LoopOrchestrator {
               verification: previousVerification,
             }),
           });
-          let workerError: string | undefined;
+          let workerError: AgentError | undefined;
           let workerMemoryPressure = false;
+          let workerIterationLimit = false;
           for await (const event of this.#options.runWorker({
             goal, cycle, workspace: executionWorkspace.root, prompt, signal,
           })) {
@@ -177,8 +180,9 @@ export class LoopOrchestrator {
               cycleOutputTokens += event.outputTokens;
             }
             if (event.type === "error") {
-              workerError = event.error.message;
+              workerError = event.error;
               if (event.error.code === "memory_pressure") workerMemoryPressure = true;
+              if (event.error.code === "iteration_limit") workerIterationLimit = true;
             }
             if (event.type === "text") workerText = `${workerText}${event.text}`.slice(-16_000);
             if (this.#options.hallucinationGuard !== undefined) {
@@ -191,7 +195,12 @@ export class LoopOrchestrator {
             yield { type: "worker-event", event };
           }
           if (workerMemoryPressure) return;
-          if (workerError !== undefined) {
+          // Reaching the per-agent iteration cap is a segment boundary, not a
+          // failed long-running loop. All completed tool effects are already
+          // durable, so checkpoint the segment and let host verification
+          // decide whether the next cycle needs to continue on a fresh budget.
+          if (workerError !== undefined && !workerIterationLimit && !isResumableWorkerError(workerError)) {
+            const status = workerError.code === "cancelled" ? "cancelled" : "failed";
             state = LoopStateSchema.parse({
               ...state,
               budget: {
@@ -201,8 +210,8 @@ export class LoopOrchestrator {
                 outputTokens: state.budget.outputTokens + cycleOutputTokens,
               },
             });
-            state = await this.#terminal(state, "failed", workerError, now());
-            yield { type: "loop-terminal", loopId, status: "failed", reason: workerError };
+            state = await this.#terminal(state, status, workerError.message, now());
+            yield { type: "loop-terminal", loopId, status, reason: workerError.message };
             return;
           }
           state = LoopStateSchema.parse({
@@ -247,14 +256,10 @@ export class LoopOrchestrator {
             const report = await this.#options.hallucinationGuard.evaluate(goal, workerText);
             await this.#options.onMemoryCheckpoint?.(loopId);
             if (memoryRotationActive()) return;
-            if (!report.passed) {
-              const guardReason = report.blockingReasons.join("; ")
-                || "Hallucination guard blocked completion.";
-              state = await this.#terminal(state, "failed", guardReason, now());
-              yield { type: "loop-terminal", loopId, status: "failed", reason: guardReason };
-              return;
-            }
-            guardWarnings = report.warnings;
+            // Deterministic host verification is authoritative. Retry/circuit
+            // heuristics remain visible but must not prevent a verified long
+            // task from completing after many execution segments.
+            guardWarnings = [...report.blockingReasons, ...report.warnings];
           } catch {
             // Guard evaluation failure is advisory; deterministic verification still decides success.
           }
@@ -272,7 +277,7 @@ export class LoopOrchestrator {
           cycles: [...state.cycles, {
             cycle, startedAt, completedAt, inputTokens: cycleInputTokens, outputTokens: cycleOutputTokens,
             workspaceFingerprint: fingerprint, verification: evidence,
-          }],
+          }].slice(-64),
           pendingCycle: null,
         });
         await this.#options.persistence.save(state);
@@ -299,8 +304,11 @@ export class LoopOrchestrator {
         repeatedFailures = failureSignature === previousFailureSignature ? repeatedFailures + 1 : 1;
         previousFailureSignature = failureSignature;
         previousVerification = evidence;
-        if (repeatedFailures >= 3) {
-          const reason = "The same verification failure repeated three times without material workspace progress.";
+        if (
+          this.#options.maxNoProgressCycles !== undefined
+          && repeatedFailures >= this.#options.maxNoProgressCycles
+        ) {
+          const reason = `The same verification failure repeated ${this.#options.maxNoProgressCycles} times without material workspace progress.`;
           state = await this.#terminal(state, "no_progress", reason, now());
           yield { type: "loop-terminal", loopId, status: "no_progress", reason };
           return;
@@ -359,6 +367,13 @@ export class LoopOrchestrator {
     });
     return state;
   }
+}
+
+function isResumableWorkerError(error: AgentError): boolean {
+  return error.code !== "authentication"
+    && error.code !== "model_not_found"
+    && error.code !== "cancelled"
+    && error.code !== "memory_pressure";
 }
 
 function countTrailingFailureSignature(cycles: LoopState["cycles"], signature: string): number {

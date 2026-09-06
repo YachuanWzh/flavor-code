@@ -773,12 +773,14 @@ describe("production runtime", () => {
     delete globalState.__flavorLoopRequests;
   });
 
-  it("asks again at each loop budget tranche", async () => {
+  it("automatically advances loop cycle and token telemetry checkpoints", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-budget-")); roots.push(workspace);
     const pluginRoot = join(workspace, ".flavor", "plugins", "budget-model");
     await mkdir(pluginRoot, { recursive: true });
     await writeFile(join(workspace, "package.json"), JSON.stringify({
-      name: "budget-fixture", private: true, scripts: { test: "node -e \"process.exit(1)\"" },
+      name: "budget-fixture", private: true, scripts: {
+        test: "node -e \"const fs=require('node:fs');const f='.verify-count';const n=Number(fs.existsSync(f)?fs.readFileSync(f,'utf8'):0)+1;fs.writeFileSync(f,String(n));process.exit(n>=3?0:1)\"",
+      },
     }));
     await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
       providers: { capture: { type: "plugin", defaultModel: "main", cheapModel: "child" } },
@@ -801,17 +803,11 @@ describe("production runtime", () => {
       output: (event) => outputs.push(event as typeof outputs[number]),
     });
 
-    const submission = runtime.session.submit("/loop analyze the current project");
-    await vi.waitFor(() => expect(runtime.services.questions.pending?.[0]?.question).toContain("1 cycles"), { timeout: 5_000 });
-    expect(runtime.services.questions.pending?.[0]?.question).toContain("2 cycles");
-    expect(runtime.services.questions.pending?.[0]?.question).toContain("test failed with exit code 1");
-    runtime.services.questions.answer({ 0: "Continue" });
-    await vi.waitFor(() => expect(runtime.services.questions.pending?.[0]?.question).toContain("2 cycles"), { timeout: 5_000 });
-    expect(runtime.services.questions.pending?.[0]?.question).toContain("3 cycles");
-    runtime.services.questions.answer({ 0: "Stop" });
-    await submission;
+    await runtime.session.submit("/loop analyze the current project");
 
-    expect(outputs.find((event) => event.phase === "terminal")?.message).toContain("budget_exhausted");
+    expect(runtime.services.questions.pending).toBeUndefined();
+    expect(outputs.filter((event) => event.phase === "budget")).toHaveLength(2);
+    expect(outputs.find((event) => event.phase === "terminal")?.message).toContain("succeeded");
     await runtime.dispose();
   });
 

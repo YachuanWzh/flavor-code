@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { realpathSync, readFileSync } from "node:fs";
+import { mkdirSync, realpathSync, readFileSync, rmSync } from "node:fs";
 import { totalmem } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -14,10 +15,16 @@ export interface LauncherRuntime {
   execArgv: readonly string[];
 }
 
+export interface HeapProfileTarget {
+  directory: string;
+  name: string;
+}
+
 /** Relaunching is required whenever node flags must be applied to the CLI. */
 export function needsRelaunch(runtime: LauncherRuntime): boolean {
   if (!runtime.execArgv.some((argument) => argument === "--report-on-fatalerror")) return true;
   if (!runtime.execArgv.some((argument) => argument.startsWith("--heapsnapshot-near-heap-limit"))) return true;
+  if (!runtime.execArgv.some((argument) => argument === "--heap-prof")) return true;
   return !runtime.execArgv.some((argument) => argument === "--expose-gc");
 }
 
@@ -25,7 +32,11 @@ export function needsRelaunch(runtime: LauncherRuntime): boolean {
 const HEAP_HEADROOM_MB = 8192;
 const HEAP_HEADROOM_MIN_TOTALMEM = 12 * 1024 * 1024 * 1024;
 
-export function cliMainArguments(mainPath: string, argv: readonly string[]): string[] {
+export function cliMainArguments(
+  mainPath: string,
+  argv: readonly string[],
+  heapProfile?: HeapProfileTarget,
+): string[] {
   const flags = [
     // Fatal V8 errors (heap OOM, native crashes) bypass crash-guard.ts and
     // leave only an unusable native stack. Ask Node to dump a diagnostic
@@ -36,11 +47,20 @@ export function cliMainArguments(mainPath: string, argv: readonly string[]): str
     // Capture one heap snapshot as the heap nears its limit so the next
     // crash leaves a .heapsnapshot retainer trail next to the report.
     "--heapsnapshot-near-heap-limit=1",
+    // A full snapshot is intentionally reserved for a hard OOM. Sparse
+    // allocation sampling has much lower overhead and still records the
+    // allocating call stacks responsible for a controlled watermark
+    // restart, where --heapsnapshot-near-heap-limit never fires.
+    "--heap-prof",
+    "--heap-prof-interval=1048576",
     // The heap watermarks are GC-verified: heapUsed counts uncollected
     // garbage, and stopping turns or rotating on garbage alone would waste
     // work. Exposing gc lets the watermark measure the live set instead.
     "--expose-gc",
   ];
+  if (heapProfile !== undefined) {
+    flags.push(`--heap-prof-dir=${heapProfile.directory}`, `--heap-prof-name=${heapProfile.name}`);
+  }
   const processHeapFlag = process.execArgv.find((argument) => argument.startsWith("--max-old-space-size"));
   const argvHeapFlag = argv.find((argument) => argument.startsWith("--max-old-space-size"));
   const userHeapFlag = processHeapFlag ?? argvHeapFlag;
@@ -72,8 +92,19 @@ export async function launchCli(): Promise<void> {
 
   const mainPath = fileURLToPath(mainUrl);
   let argv = process.argv.slice(2);
+  let childSequence = 0;
   for (;;) {
-    const code = await spawnAndWait(mainPath, argv);
+    const profileDirectory = join(process.cwd(), ".flavor", "tmp");
+    mkdirSync(profileDirectory, { recursive: true });
+    const profileName = `heap-profile-${Date.now()}-${process.pid}-${childSequence++}.heapprofile`;
+    const profilePath = join(profileDirectory, profileName);
+    const code = await spawnAndWait(mainPath, argv, { directory: profileDirectory, name: profileName });
+    if (code === 0) {
+      // Successful short-lived sessions do not need a diagnostic artifact.
+      rmSync(profilePath, { force: true });
+    } else {
+      process.stderr.write(`flavor launcher: retained allocation profile ${profilePath}\n`);
+    }
     if (code === MEMORY_RESTART_EXIT_CODE) {
       // The child hit the heap watermark, saved its session and asked for a
       // fresh heap. Relaunch restores the same session; the marker's
@@ -96,8 +127,12 @@ export async function launchCli(): Promise<void> {
   }
 }
 
-async function spawnAndWait(mainPath: string, argv: readonly string[]): Promise<number> {
-  const child = spawn(process.execPath, cliMainArguments(mainPath, argv), { stdio: "inherit" });
+async function spawnAndWait(
+  mainPath: string,
+  argv: readonly string[],
+  heapProfile: HeapProfileTarget,
+): Promise<number> {
+  const child = spawn(process.execPath, cliMainArguments(mainPath, argv, heapProfile), { stdio: "inherit" });
 
   // Both processes share the Windows console. Let the real CLI own Ctrl+C;
   // otherwise the idle launcher can exit before its child restores the TUI.

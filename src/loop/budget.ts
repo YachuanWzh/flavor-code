@@ -42,7 +42,7 @@ export function extendBudget(
   return LoopStateSchema.parse({
     ...state,
     updatedAt: approvedAt,
-    budget: { ...state.budget, cycleCheckpoint, tokenCheckpoint, approvals },
+    budget: { ...state.budget, cycleCheckpoint, tokenCheckpoint, approvals: approvals.slice(-64) },
   });
 }
 

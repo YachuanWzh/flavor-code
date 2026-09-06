@@ -13,10 +13,14 @@ export interface ModelSummarizerOptions {
 }
 
 export async function summarizeWithModel(options: ModelSummarizerOptions): Promise<string> {
-  const maxAttempts = options.maxPromptTooLongAttempts ?? 3;
-  if (!Number.isInteger(maxAttempts) || maxAttempts <= 0) throw new Error("maxPromptTooLongAttempts must be positive");
   options.signal?.throwIfAborted();
   let groups = groupMessagesByApiRound(options.messages);
+  // Default to enough logarithmic reductions to reach one API round. This
+  // removes the arbitrary three-attempt ceiling without retrying once per
+  // historical round when a large context must be reduced substantially.
+  const maxAttempts = options.maxPromptTooLongAttempts
+    ?? Math.max(1, Math.ceil(Math.log2(Math.max(1, groups.length))) + 1);
+  if (!Number.isInteger(maxAttempts) || maxAttempts <= 0) throw new Error("maxPromptTooLongAttempts must be positive");
   let lastOverflow: ProviderError | undefined;
   let progress = 20;
   reportProgress(options.onProgress, progress);
@@ -54,7 +58,7 @@ export async function summarizeWithModel(options: ModelSummarizerOptions): Promi
     if (terminalError.code !== "context_overflow") throw terminalError;
     lastOverflow = terminalError;
     if (attempt >= maxAttempts || groups.length <= 1) throw terminalError;
-    groups = groups.slice(1);
+    groups = groups.slice(Math.max(1, Math.floor(groups.length / 2)));
   }
 
   throw lastOverflow ?? new Error("Compact summary failed");

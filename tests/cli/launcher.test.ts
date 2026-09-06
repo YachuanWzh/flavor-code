@@ -18,16 +18,34 @@ describe("CLI runtime launcher", () => {
     };
     expect(needsRelaunch(runtime)).toBe(true);
     expect(cliMainArguments("/opt/flavor/cli-main.js", []))
-      .toEqual(["--report-on-fatalerror", "--heapsnapshot-near-heap-limit=1", "--expose-gc", "/opt/flavor/cli-main.js"]);
+      .toEqual([
+        "--report-on-fatalerror", "--heapsnapshot-near-heap-limit=1",
+        "--heap-prof", "--heap-prof-interval=1048576", "--expose-gc",
+        "/opt/flavor/cli-main.js",
+      ]);
     expect(needsRelaunch({ ...runtime, execArgv: ["--report-on-fatalerror"] })).toBe(true);
     // The heap watermarks are GC-verified, so a runtime without --expose-gc still needs a relaunch.
     expect(needsRelaunch({ ...runtime, execArgv: ["--report-on-fatalerror", "--heapsnapshot-near-heap-limit=1"] })).toBe(true);
-    expect(needsRelaunch({ ...runtime, execArgv: ["--report-on-fatalerror", "--heapsnapshot-near-heap-limit=1", "--expose-gc"] })).toBe(false);
+    expect(needsRelaunch({ ...runtime, execArgv: [
+      "--report-on-fatalerror", "--heapsnapshot-near-heap-limit=1", "--heap-prof", "--expose-gc",
+    ] })).toBe(false);
   });
 
   it("does not disable Maglev for a heap-OOM report signature", () => {
     expect(cliMainArguments("C:\\flavor\\cli-main.js", ["--resume", "session-1"]))
-      .toEqual(["--report-on-fatalerror", "--heapsnapshot-near-heap-limit=1", "--expose-gc", "C:\\flavor\\cli-main.js", "--resume", "session-1"]);
+      .toEqual([
+        "--report-on-fatalerror", "--heapsnapshot-near-heap-limit=1",
+        "--heap-prof", "--heap-prof-interval=1048576", "--expose-gc",
+        "C:\\flavor\\cli-main.js", "--resume", "session-1",
+      ]);
+  });
+
+  it("writes sparse allocation profiles to an explicit diagnostic target", () => {
+    expect(cliMainArguments("/opt/flavor/cli-main.js", [], { directory: "/work/.flavor/tmp", name: "rotation.heapprofile" }))
+      .toEqual(expect.arrayContaining([
+        "--heap-prof-dir=/work/.flavor/tmp",
+        "--heap-prof-name=rotation.heapprofile",
+      ]));
   });
 
   it("gives a larger heap only on machines with room to spare and no user-pinned heap", () => {

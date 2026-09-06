@@ -131,6 +131,7 @@ export type GoalState = z.infer<typeof GoalStateSchema>;
 
 export type GoalRuntimeEvent =
   | { type: "goal-resumed"; goalId: string; round: number }
+  | { type: "goal-stage-retry"; stage: "planning" | "classification"; attempt: number; reason: string; delayMs: number }
   | { type: "goal-plan-created"; plan: Plan; planPath: string }
   | { type: "goal-plan-failed"; reason: string }
   | { type: "goal-worker-start"; round: number }

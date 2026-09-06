@@ -107,6 +107,60 @@ function seededNotAchieved(): GoalState {
 }
 
 describe("GoalOrchestrator runtime events", () => {
+  it("retries recoverable planning and classification failures without ending the goal", async () => {
+    const root = await workspace();
+    let plannerCalls = 0;
+    let classifierCalls = 0;
+    const adapter: ModelAdapter = {
+      async *stream(request) {
+        const prompt = modelContentText(request.messages.at(-1)?.content ?? "");
+        if (prompt.includes("goal planner")) {
+          plannerCalls += 1;
+          if (plannerCalls === 1) {
+            yield { type: "error", error: { code: "network", message: "planner connection reset" } };
+            return;
+          }
+          yield { type: "text", text: JSON.stringify({
+            kind: "code-change",
+            criteria: [{ id: 1, description: "The requested behavior works", type: "gating" }],
+            verificationPlan: "Run focused tests.", nonGoals: [], assumedScope: [],
+          }) };
+        } else {
+          classifierCalls += 1;
+          if (classifierCalls === 1) {
+            yield { type: "error", error: { code: "rate_limit", message: "classifier overloaded" } };
+            return;
+          }
+          yield { type: "text", text: JSON.stringify({ refuted: false, gaps: [] }) };
+        }
+        yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    };
+    const orchestrator = new GoalOrchestrator({
+      workspace: root,
+      registry: new ModelRegistry().register("retry", adapter),
+      plannerModelId: "retry:main",
+      classifierModelId: "retry:main",
+      skepticCount: 1,
+      stageRetryDelayMs: () => 0,
+      runWorker: async function* () {
+        yield { type: "text", text: "Implemented." };
+        yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    });
+
+    const events = [];
+    for await (const event of orchestrator.run({ goal: "fix it", signal: new AbortController().signal })) events.push(event);
+
+    expect(events.filter((event) => event.type === "goal-stage-retry")).toEqual([
+      expect.objectContaining({ type: "goal-stage-retry", stage: "planning", attempt: 1, delayMs: 0 }),
+      expect.objectContaining({ type: "goal-stage-retry", stage: "classification", attempt: 1, delayMs: 0 }),
+    ]);
+    expect(events.at(-1)).toMatchObject({ type: "goal-complete" });
+    expect(plannerCalls).toBe(2);
+    expect(classifierCalls).toBe(2);
+  });
+
   it("forwards detailed worker events and persists every goal phase", async () => {
     const root = await workspace();
     const states: GoalState[] = [];
@@ -167,7 +221,7 @@ describe("GoalOrchestrator runtime events", () => {
       maxRounds: 1,
       maxStallStreak: 1,
       runWorker: async function* () {
-        yield { type: "error", error: { code: "network", message: "worker disconnected" } };
+        yield { type: "error", error: { code: "authentication", message: "worker disconnected" } };
       },
     });
 
@@ -187,6 +241,60 @@ describe("GoalOrchestrator runtime events", () => {
     });
     expect(events.some((event) => event.type === "goal-verification-start")).toBe(false);
   });
+
+  it("treats the worker iteration limit as a verifiable round boundary", async () => {
+    const root = await workspace();
+    const store = new GoalMemoryStore();
+    const orchestrator = makeOrchestrator(root, store, {
+      idFactory: () => "goal-test",
+      verifyHost: async () => ({
+        passed: true,
+        summary: "all checks passed",
+        commands: [{ command: "npm", args: ["test"], exitCode: 0 }],
+      }),
+      runWorker: async function* () {
+        yield { type: "text", text: "Implemented most of the work." };
+        yield { type: "error", error: { code: "iteration_limit", message: "Agent exceeded the 300 iteration limit" } };
+      },
+    });
+
+    const events = [];
+    for await (const event of orchestrator.run({ goal: "fix it", signal: new AbortController().signal })) events.push(event);
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "goal-worker-event",
+      event: expect.objectContaining({ type: "error", error: expect.objectContaining({ code: "iteration_limit" }) }),
+    }));
+    expect(events.some((event) => event.type === "goal-verification-start")).toBe(true);
+    expect(events.at(-1)).toMatchObject({ type: "goal-complete" });
+    expect(store.states.at(-1)).toMatchObject({
+      status: "achieved", phase: "complete", verifyRounds: 1, pendingVerification: null,
+    });
+  });
+
+  it.each(["output_limit", "context_overflow", "rate_limit", "network"] as const)(
+    "treats recoverable worker %s errors as round boundaries",
+    async (code) => {
+      const root = await workspace();
+      const store = new GoalMemoryStore();
+      const orchestrator = makeOrchestrator(root, store, {
+        idFactory: () => "goal-test",
+        verifyHost: async () => ({
+          passed: true,
+          summary: "all checks passed",
+          commands: [{ command: "npm", args: ["test"], exitCode: 0 }],
+        }),
+        runWorker: async function* () {
+          yield { type: "error", error: { code, message: `${code} boundary` } };
+        },
+      });
+
+      const events = [];
+      for await (const event of orchestrator.run({ goal: "fix it", signal: new AbortController().signal })) events.push(event);
+
+      expect(events.at(-1)).toMatchObject({ type: "goal-complete" });
+    },
+  );
 
   it("cannot complete a code goal when deterministic host verification fails", async () => {
     const root = await workspace();
@@ -217,6 +325,30 @@ describe("GoalOrchestrator runtime events", () => {
     }));
     expect(events.some((event) => event.type === "goal-complete")).toBe(false);
   });
+
+  it("bounds retained verification history across many goal rounds", async () => {
+    const root = await workspace();
+    const store = new GoalMemoryStore();
+    let verifies = 0;
+    const orchestrator = makeOrchestrator(root, store, {
+      idFactory: () => "goal-test",
+      maxRounds: 100,
+      maxStallStreak: Number.MAX_SAFE_INTEGER,
+      verifyHost: async () => ({
+        passed: ++verifies >= 70,
+        summary: verifies >= 70 ? "all checks passed" : "work remains",
+        commands: [{ command: "npm", args: ["test"], exitCode: verifies >= 70 ? 0 : 1 }],
+      }),
+    });
+
+    const events = [];
+    for await (const event of orchestrator.run({ goal: "fix it", signal: new AbortController().signal })) events.push(event);
+
+    expect(events.at(-1)).toMatchObject({ type: "goal-complete" });
+    expect(store.states.at(-1)).toMatchObject({ workerRounds: 70, verifyRounds: 70 });
+    expect(store.states.at(-1)?.evidenceRounds).toHaveLength(64);
+    expect(store.states.at(-1)?.evidenceRounds[0]?.round).toBe(7);
+  }, 60_000);
 
   it("leaves the goal resumable when the worker trips the hard heap guard", async () => {
     const root = await workspace();

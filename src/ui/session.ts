@@ -1,4 +1,4 @@
-import type { AgentEvent } from "../agent/types.js";
+import type { AgentErrorCode, AgentEvent } from "../agent/types.js";
 import { redactConfig } from "../config/load.js";
 import type { HookBus } from "../hooks/bus.js";
 import type { PermissionMode } from "../permissions/engine.js";
@@ -103,6 +103,8 @@ export interface SessionServices {
   resumeGoal?(goalId: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
   /** The loop/goal a relaunched process should resume after a rotation, consumed once. */
   continuation?(): MemoryRestartContinuation | undefined;
+  /** True after the runtime has committed to replacing the current heap. */
+  rotationPending?(): boolean;
   mcp(command: McpSlashCommand, signal: AbortSignal): Promise<string>;
   ide?(): Promise<string>;
   ideContext?(): Promise<IdeEditorContext | undefined>;
@@ -175,6 +177,8 @@ type NormalizedSubmission = {
   durableId?: string;
   /** Set when this submission resumes a /loop or /goal after a heap rotation. */
   continuation?: MemoryRestartContinuation;
+  /** Bounded fallback for ordinary turns that exhaust their agent segment. */
+  iterationContinuation?: number;
 };
 
 type CoWorkFlow = { epoch: number; status: "planning" | "started" | "terminal" };
@@ -206,6 +210,11 @@ const HELP = [
 // prompts per user-initiated chain, so guards like verify-gate can enforce
 // "prove it works before you stop" without risking an infinite loop.
 const MAX_STOP_DENIALS = 2;
+const RESUMABLE_TURN_BOUNDARIES = new Set<AgentErrorCode>([
+  "iteration_limit",
+  "output_limit",
+  "context_overflow",
+]);
 
 export class FlavorSession {
   readonly #services: SessionServices;
@@ -438,6 +447,9 @@ export class FlavorSession {
       if (!initial) this.#outputQueuedSubmission(submission);
       initial = false;
       await this.#runSubmission(submission);
+      // The auto-continuation is already in the durable journal. Leave it
+      // unclaimed while this process exits so the fresh process recovers it.
+      if (this.#services.rotationPending?.() === true) return;
       pending.push(...this.#drainMessages("steer"), ...this.#drainMessages("followUp"));
     }
   }
@@ -456,6 +468,7 @@ export class FlavorSession {
     this.#activeSubmission = submission;
     this.#interrupted = false;
     let outcome = "completed";
+    let resumableBoundary: string | undefined;
     let assistantSummary = "";
     let deliverables: readonly import("../agent/types.js").TurnDeliverable[] = [];
     try {
@@ -492,7 +505,10 @@ export class FlavorSession {
         this.#services.output(event);
         if (event.type === "text") assistantSummary = `${assistantSummary}${event.text}`.slice(-2_000);
         if (event.type === "deliverables") deliverables = event.files.slice(0, 100);
-        if (event.type === "error") outcome = "failed";
+        if (event.type === "error") {
+          outcome = "failed";
+          if (RESUMABLE_TURN_BOUNDARIES.has(event.error.code)) resumableBoundary = event.error.code;
+        }
       }
       if (controller.signal.aborted) outcome = "cancelled";
     } catch (error) {
@@ -531,6 +547,15 @@ export class FlavorSession {
           catch { /* Never let cleanup failures escape. */ }
         }
         try {
+          if (resumableBoundary !== undefined && !this.#closed && !controller.signal.aborted) {
+            const attempt = (submission.iterationContinuation ?? 0) + 1;
+            const text =
+              `[automatic continuation after ${resumableBoundary} boundary; segment ${attempt}]\n` +
+              "Continue the unfinished task from the current conversation and workspace state. " +
+              "Do not repeat completed operations. Inspect existing results, finish the remaining work, and verify it before stopping.";
+            this.#enqueueMessage("followUp", { text, displayText: text, iterationContinuation: attempt });
+            this.#notice(`Agent ${resumableBoundary} boundary reached; durable continuation ${attempt} queued.`);
+          }
           if (
             stopDecision?.decision === "deny" && typeof stopDecision.reason === "string" && stopDecision.reason.length > 0
             && !this.#closed && outcome !== "cancelled" && outcome !== "denied"
@@ -737,7 +762,10 @@ export class FlavorSession {
   }
 
   #resumeDurableQueue(): void {
-    if (this.#durableResumeStarted || this.#closed || this.active || this.#pendingSubmissions > 0) return;
+    if (
+      this.#durableResumeStarted || this.#closed || this.active || this.#pendingSubmissions > 0
+      || this.#services.rotationPending?.() === true
+    ) return;
     if (!this.#queue.hasPending) return;
     this.#durableResumeStarted = true;
     const submissions = [...this.#drainMessages("steer"), ...this.#drainMessages("followUp")];
@@ -910,6 +938,9 @@ function recoveredSubmission(value: unknown): NormalizedSubmission | undefined {
   if (typeof input.text !== "string" || input.text.trim().length === 0) return undefined;
   if (typeof input.displayText !== "string") return undefined;
   if (input.controlOnly !== undefined && typeof input.controlOnly !== "boolean") return undefined;
+  if (input.iterationContinuation !== undefined && (
+    !Number.isSafeInteger(input.iterationContinuation) || input.iterationContinuation < 1
+  )) return undefined;
   if (input.coWorkPlanningKey !== undefined && typeof input.coWorkPlanningKey !== "string") return undefined;
   if (input.remoteOrigin !== undefined) {
     const origin = input.remoteOrigin;
