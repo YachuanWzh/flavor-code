@@ -2,7 +2,18 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.0-beta.8 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.0-beta.9 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.0-beta.9] - 2026-09-08
+
+### 修复
+- 完整修复 OpenAI 端点拒绝 `RegisterTool` schema 的问题：严格 schema 转换现在也会关闭没有 `properties` 的对象，避免 `z.record(..., z.unknown())` 留下缺少 `type` 的 `additionalProperties: {}`。`RegisterTool` 本身因必须接收任意 JSON Schema，改用合法的非严格 provider schema（`additionalProperties: true`），运行时仍由原始 Zod schema 和 JSON Schema 校验器完整验证。
+- 修复 OpenAI 的 schema 400 被误判为 `context_overflow` 后触发自动续跑的问题：上下文溢出识别改为匹配明确的 `context_length` / `context_window` / token 超限措辞，不再把错误路径中的 `In context=(...)` 当成上下文长度错误。
+
+### 验证与配置
+- 验证 flavor.json 的 `thinkingEffort` 会在普通 API Key 和 OAuth `llm_config` 覆盖两条运行时路径中传给 OpenAI Responses 请求的 `reasoning.effort`；未配置时不发送该字段。最终思考档位是否可用仍取决于所选模型及兼容端点对该参数的支持。
+- 新增严格对象 schema、`RegisterTool` 非严格自由格式 schema、schema 400 错误分类和 OAuth OpenAI 请求体回归测试。
+- `package.json` 与 `package-lock.json` 的项目版本统一为 `1.4.0-beta.9`。
 
 ## [1.4.0-beta.8] - 2026-09-08
 
@@ -794,6 +805,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.4.0-beta.9 | 2026-09-08 | 完整修复 `RegisterTool` 的 OpenAI schema 400（严格对象不再残留 `additionalProperties: {}`，自由格式注册参数改用合法非严格 schema）；schema 路径中的 `In context=` 不再误判为上下文溢出并触发无限续跑；验证 `thinkingEffort` 正确下发到 `reasoning.effort` |
 | 1.4.0-beta.8 | 2026-09-08 | 修复 OpenAI 端点因 `RegisterTool` schema 含 `propertyNames` 被 400 拒绝的问题（严格 schema 转换递归剔除不支持关键字）；修复 OAuth `llm_config` 替换 provider 后丢失 flavor.json 思考控制项的问题，OpenAI `thinkingEffort` 增加 `minimal` / `xhigh` 档 |
 | 1.4.0-beta.7 | 2026-09-08 | CLI 任务进度支持宽终端主任务/子 Agent 左右双轨、单轨满宽与窄终端回落；长正文输出持续显示 `Writing response` 动作；LSP 按目标文件选择最近嵌套项目根并支持 JavaScript/CommonJS |
 | 1.4.0-beta.6 | 2026-09-06 | 根据真实 OOM allocation profile 定位并修复 React/Ink TUI 主泄漏：发行 CLI 固定使用 production reconciler，launcher 强制生产环境并清理 User Timing；构建扫描禁止 development reconciler 回归，新增 10 万次 Ink commit 与长程 RPC 压测 |

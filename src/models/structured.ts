@@ -476,12 +476,23 @@ function ensureStrictSchema(schema: Record<string, unknown>): Record<string, unk
       ]));
     }
   }
-  if (schema.type !== "object" || typeof schema.properties !== "object" || schema.properties === null) {
+  if (schema.type !== "object") {
     return output;
   }
+  // Strict OpenAI function schemas cannot keep an open-ended
+  // additionalProperties schema. In particular, z.record(..., z.unknown())
+  // produces additionalProperties: {}, which OpenAI rejects because the empty
+  // subschema has no type. Close property-less objects as well as ordinary
+  // objects; tools that intentionally need a free-form map must opt out of
+  // strict mode and provide a separate provider-facing schema.
+  const sourceProperties = typeof schema.properties === "object"
+    && schema.properties !== null
+    && !Array.isArray(schema.properties)
+    ? schema.properties as Record<string, unknown>
+    : {};
   const requiredSet = new Set(Array.isArray(schema.required) ? schema.required as string[] : []);
   const properties: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(schema.properties)) {
+  for (const [key, value] of Object.entries(sourceProperties)) {
     const child = typeof value === "object" && value !== null
       ? ensureStrictSchema(value as Record<string, unknown>)
       : value;

@@ -164,7 +164,10 @@ export function normalizeProviderError(error: unknown): ProviderError {
     code = "authentication";
   } else if (status === 429 || /rate.?limit|overloaded/.test(searchable)) {
     code = "rate_limit";
-  } else if (/context|too many tokens|prompt.*long/.test(searchable)) {
+  } else if (
+    /context[_\s-]?(?:length|window|overflow)(?:[_\s-]?(?:exceeded|limit))?/.test(searchable)
+    || /maximum context length|too many tokens|prompt.*(?:too )?long/.test(searchable)
+  ) {
     code = "context_overflow";
   } else if (status === 404 || /model.*not.?found|not.?found.*model/.test(searchable)) {
     code = "model_not_found";

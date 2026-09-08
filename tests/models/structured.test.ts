@@ -350,6 +350,12 @@ describe("strictJsonSchema", () => {
       additionalProperties: false,
       required: ["name", "inputSchema"],
     });
+    expect((schema.properties as Record<string, Record<string, unknown>>).inputSchema).toEqual({
+      type: "object",
+      additionalProperties: false,
+      properties: {},
+      required: [],
+    });
     // Local validation still sees the key constraint via the original schema.
     expect(z.object({
       name: z.string(),
@@ -366,9 +372,13 @@ describe("strictJsonSchema", () => {
       },
     });
     const properties = schema.properties as Record<string, Record<string, unknown>>;
+    const freeformObject = (properties.freeform!.anyOf as Record<string, unknown>[])[0];
+    const mappedObject = (properties.mapped!.anyOf as Record<string, unknown>[])[0];
 
     expect(properties.freeform).not.toHaveProperty("propertyNames");
     expect(properties.mapped).not.toHaveProperty("patternProperties");
+    expect(freeformObject).toMatchObject({ additionalProperties: false, properties: {}, required: [] });
+    expect(mappedObject).toMatchObject({ additionalProperties: false, properties: {}, required: [] });
     const json = JSON.stringify(schema);
     expect(json).not.toContain("propertyNames");
     expect(json).not.toContain("patternProperties");

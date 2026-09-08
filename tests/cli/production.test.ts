@@ -543,7 +543,7 @@ describe("production runtime", () => {
     }
   }, 15_000);
 
-  it("keeps flavor.json thinkingEffort after OAuth llm_config replaces the provider", async () => {
+  it("forwards flavor.json thinkingEffort through API-key and OAuth OpenAI runtimes", async () => {
     const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
     const gateway = createServer((request, response) => {
       let raw = "";
@@ -564,6 +564,34 @@ describe("production runtime", () => {
     });
     await new Promise<void>((resolve) => gateway.listen(0, "127.0.0.1", resolve));
     const port = (gateway.address() as AddressInfo).port;
+
+    const directWorkspace = await mkdtemp(join(tmpdir(), "flavor-production-api-key-effort-")); roots.push(directWorkspace);
+    await mkdir(join(directWorkspace, ".flavor"), { recursive: true });
+    await writeFile(join(directWorkspace, ".flavor", "flavor.json"), JSON.stringify({
+      providers: { openai: {
+        type: "openai", baseURL: `http://127.0.0.1:${port}/v1`, apiKey: "test-key", thinkingEffort: "low",
+      } },
+      agents: { main: { model: "openai:gpt-reasoner" }, subagent: { model: "openai:gpt-mini" } },
+      memory: { enabled: false }, hallucination: { showWarnings: false }, sleep: false,
+    }));
+    const directRuntime = await createProductionRuntime({
+      workspace: directWorkspace, home: directWorkspace, environment: {}, approvalPolicy: "deny", output: () => {},
+    });
+    try {
+      await directRuntime.session.submit("answer briefly");
+    } finally {
+      await directRuntime.dispose();
+    }
+    expect(requests[0]?.url).toBe("/v1/responses");
+    expect(requests[0]?.body.reasoning).toEqual({ effort: "low" });
+    const directTools = requests[0]?.body.tools as Array<Record<string, unknown>>;
+    const registerTool = directTools.find((tool) => tool.name === "RegisterTool");
+    const registerParameters = registerTool?.parameters as Record<string, unknown>;
+    const registerProperties = registerParameters.properties as Record<string, Record<string, unknown>>;
+    expect(registerTool?.strict).toBe(false);
+    expect(registerProperties.inputSchema).toMatchObject({ type: "object", additionalProperties: true });
+    expect(JSON.stringify(registerTool)).not.toContain("propertyNames");
+
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pkce-effort-")); roots.push(workspace);
     await mkdir(join(workspace, ".flavor"), { recursive: true });
     const tokenUrl = "https://auth.example.test/token";
@@ -588,9 +616,9 @@ describe("production runtime", () => {
     const runtime = await createProductionRuntime({ workspace, home: workspace, environment: {}, approvalPolicy: "deny", output: () => {} });
     try {
       await runtime.session.submit("answer briefly");
-      expect(requests.length).toBeGreaterThan(0);
-      expect(requests[0]?.url).toBe("/v1/responses");
-      expect(requests[0]?.body.reasoning).toEqual({ effort: "high" });
+      expect(requests).toHaveLength(2);
+      expect(requests[1]?.url).toBe("/v1/responses");
+      expect(requests[1]?.body.reasoning).toEqual({ effort: "high" });
     } finally {
       await runtime.dispose();
       await new Promise<void>((resolve) => gateway.close(() => resolve()));

@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 
 import type { ToolDefinition } from "./types.js";
-import { strictJsonSchemaObject } from "../models/structured.js";
+import { jsonSchemaFromZod, strictJsonSchemaObject } from "../models/structured.js";
 import { message } from "../utils/error.js";
 
 const MANAGED_TOOL_VERSION = 1;
@@ -30,6 +30,20 @@ export const RegisterManagedToolInputSchema = z.object({
     "Agent roles allowed to call the generated tool; omit to allow both",
   ),
 }).strict();
+
+// RegisterTool must accept an arbitrary JSON Schema object. OpenAI strict
+// function schemas cannot express a free-form object, so expose this one tool
+// as non-strict with a valid boolean additionalProperties value while keeping
+// the original Zod schema for complete local validation.
+const RegisterManagedToolModelInputSchema = (() => {
+  const schema = jsonSchemaFromZod(RegisterManagedToolInputSchema);
+  const properties = schema.properties as Record<string, unknown>;
+  const inputSchema = { ...(properties.inputSchema as Record<string, unknown>) };
+  delete inputSchema.propertyNames;
+  delete inputSchema.patternProperties;
+  inputSchema.additionalProperties = true;
+  return { ...schema, properties: { ...properties, inputSchema } };
+})();
 
 export const RemoveManagedToolInputSchema = z.object({
   name: z.string().regex(TOOL_NAME).describe("Managed tool name to remove"),
@@ -245,6 +259,8 @@ export function createManagedToolManagementTools(
     name: "RegisterTool",
     description: "Create a durable custom tool from JSON Schema and async JavaScript, then expose it immediately",
     inputSchema: RegisterManagedToolInputSchema,
+    modelInputSchema: RegisterManagedToolModelInputSchema,
+    modelStrict: false,
     agents: mainOnly,
     paths: (rawInput) => {
       const parsed = RegisterManagedToolInputSchema.safeParse(rawInput);

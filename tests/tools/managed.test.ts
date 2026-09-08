@@ -164,6 +164,21 @@ describe("managed tool management definitions", () => {
     expect(RegisterManagedToolInputSchema.parse(normalized).agents).toEqual(["main"]);
   });
 
+  it("exposes RegisterTool as a valid non-strict schema while preserving its free-form inputSchema", async () => {
+    const f = await fixture();
+    const register = createManagedToolManagementTools({
+      store: f.store,
+      conflict: () => undefined,
+      onChanged: () => {},
+    }).find((tool) => tool.name === "RegisterTool")!;
+    const properties = register.modelInputSchema?.properties as Record<string, Record<string, unknown>>;
+
+    expect(register.modelStrict).toBe(false);
+    expect(properties.inputSchema).toMatchObject({ type: "object", additionalProperties: true });
+    expect(JSON.stringify(register.modelInputSchema)).not.toContain("propertyNames");
+    expect(RegisterManagedToolInputSchema.parse(echoInput()).inputSchema).toEqual(echoInput().inputSchema);
+  });
+
   it("registers and removes tools through a hot-replacement callback", async () => {
     const f = await fixture();
     const changed = vi.fn();

@@ -1458,6 +1458,8 @@ describe("normalizeProviderError", () => {
     [{ status: 502, message: "Upstream provider unreachable" }, "network"],
     [{ status: 404, message: "model not found" }, "model_not_found"],
     [{ code: "context_length_exceeded", message: "too long" }, "context_overflow"],
+    [{ status: 400, message: "maximum context length exceeded" }, "context_overflow"],
+    [{ status: 400, message: "Invalid schema for function 'RegisterTool': In context=('properties', 'inputSchema', 'additionalProperties'), schema must have a 'type' key." }, "unknown"],
     [{ name: "AbortError", message: "aborted" }, "cancelled"],
     [{ code: "ECONNRESET", message: "socket" }, "network"],
     [{ message: "surprise" }, "unknown"],
