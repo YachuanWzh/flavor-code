@@ -288,14 +288,18 @@ describe("transcriptReducer", () => {
     }]);
   });
 
-  it("removes model activity as soon as visible text arrives", () => {
+  it("keeps a writing activity after visible text and moves it behind the latest output", () => {
     let state = transcriptReducer(createTranscriptState(), { type: "submit", prompt: "wait" });
     state = transcriptReducer(state, { type: "session", event: { type: "model-start", id: "1" } });
 
     state = transcriptReducer(state, { type: "session", event: { type: "text", text: "answer" } });
+    state = transcriptReducer(state, { type: "session", event: { type: "text", text: " continues" } });
 
-    expect(state.active?.blocks).toEqual([{ kind: "text", text: "answer" }]);
-    expect(state.active?.statusLines).toEqual([]);
+    expect(state.active?.blocks).toEqual([
+      { kind: "text", text: "answer continues" },
+      expect.objectContaining({ id: "model:1", text: "Writing response", activity: "model", state: "running" }),
+    ]);
+    expect(state.active?.statusLines).toEqual(["Writing response"]);
   });
 
   it("accumulates thinking deltas on the running model activity block", () => {
@@ -311,9 +315,14 @@ describe("transcriptReducer", () => {
       thinkingText: "First part",
     })]);
 
-    // Visible text removes the activity card along with the thinking line.
+    // Visible text changes the phase, clears the stale reasoning preview, and
+    // keeps the activity at the bottom where it remains visible during a long response.
     state = transcriptReducer(state, { type: "session", event: { type: "text", text: "answer" } });
-    expect(state.active?.blocks).toEqual([{ kind: "text", text: "answer" }]);
+    expect(state.active?.blocks).toEqual([
+      { kind: "text", text: "answer" },
+      expect.objectContaining({ id: "model:1", text: "Writing response" }),
+    ]);
+    expect(state.active?.blocks[1]).not.toHaveProperty("thinkingText");
   });
 
   it("drops thinking deltas that arrive without a running model activity", () => {

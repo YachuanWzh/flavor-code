@@ -834,6 +834,40 @@ describe("TerminalLayout", () => {
     expect(output).toContain("Esc edit pending");
   });
 
+  it("places task planning and subagent exploration side by side in a wide terminal", () => {
+    const blocks: TaskBlock[] = [
+      { kind: "status", id: "task:main", state: "running", text: "Main",
+        task: { subject: "Main", activeForm: "Implementing feature", role: "main" } },
+      { kind: "status", id: "subagent:a", state: "info", text: "Worker A · pending",
+        task: { subject: "Worker A", activeForm: "Exploring API", role: "subagent" } },
+    ];
+    const output = renderToString(<TaskProgressPanel
+      blocks={blocks} interactive={false} maxHeight={8} columns={100}
+    />, { columns: 100 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+    const lines = output.split("\n");
+
+    expect(lines.some((line) => line.includes("task plan") && line.includes("subagent exploration"))).toBe(true);
+    expect(lines.some((line) => line.includes("Implementing feature") && line.includes("subagent: Worker A"))).toBe(true);
+  });
+
+  it("uses a full-width single track and stacks both tracks on narrow terminals", () => {
+    const main: TaskBlock = { kind: "status", id: "task:main", state: "info", text: "Main · pending",
+      task: { subject: "Main", activeForm: "Implementing feature", role: "main" } };
+    const worker: TaskBlock = { kind: "status", id: "subagent:a", state: "info", text: "Worker A · pending",
+      task: { subject: "Worker A", activeForm: "Exploring API", role: "subagent" } };
+    const single = renderToString(<TaskProgressPanel
+      blocks={[worker]} interactive={false} maxHeight={8} columns={100}
+    />, { columns: 100 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+    const narrow = renderToString(<TaskProgressPanel
+      blocks={[main, worker]} interactive={false} maxHeight={8} columns={60}
+    />, { columns: 60 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+    expect(single).toContain("subagent exploration");
+    expect(single).not.toContain("task plan");
+    expect(narrow.indexOf("task plan")).toBeLessThan(narrow.indexOf("subagent exploration"));
+    expect(narrow.split("\n").some((line) => line.includes("Main") && line.includes("Worker A"))).toBe(false);
+  });
+
   it("keeps every task available instead of slicing the list to six rows", () => {
     const active: TranscriptTurn = {
       id: 1,

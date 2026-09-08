@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { ModelRegistry } from "../../src/models/registry.js";
-import { withStructuredOutput } from "../../src/models/structured.js";
+import { strictJsonSchema, strictJsonSchemaObject, withStructuredOutput } from "../../src/models/structured.js";
 import type { ModelAdapter, ModelEvent, ModelRequest } from "../../src/models/types.js";
 
 afterEach(() => vi.useRealTimers());
@@ -333,6 +333,45 @@ describe("withStructuredOutput", () => {
 
     await expect(run).rejects.toThrow("stop repair");
     expect(requests).toHaveLength(1);
+  });
+});
+
+describe("strictJsonSchema", () => {
+  it("drops propertyNames that OpenAI function tools reject (RegisterTool inputSchema)", () => {
+    const schema = strictJsonSchema(z.object({
+      name: z.string(),
+      inputSchema: z.record(z.string(), z.unknown()),
+    }).strict());
+    const json = JSON.stringify(schema);
+
+    expect(json).not.toContain("propertyNames");
+    expect(schema).toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: ["name", "inputSchema"],
+    });
+    // Local validation still sees the key constraint via the original schema.
+    expect(z.object({
+      name: z.string(),
+      inputSchema: z.record(z.string(), z.unknown()),
+    }).strict().parse({ name: "t", inputSchema: { a: 1 } })).toBeDefined();
+  });
+
+  it("drops propertyNames and patternProperties recursively from raw schema objects", () => {
+    const schema = strictJsonSchemaObject({
+      type: "object",
+      properties: {
+        freeform: { type: "object", propertyNames: { type: "string" }, additionalProperties: true },
+        mapped: { type: "object", patternProperties: { "^x": { type: "number" } } },
+      },
+    });
+    const properties = schema.properties as Record<string, Record<string, unknown>>;
+
+    expect(properties.freeform).not.toHaveProperty("propertyNames");
+    expect(properties.mapped).not.toHaveProperty("patternProperties");
+    const json = JSON.stringify(schema);
+    expect(json).not.toContain("propertyNames");
+    expect(json).not.toContain("patternProperties");
   });
 });
 

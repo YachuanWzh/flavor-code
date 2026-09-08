@@ -134,6 +134,17 @@ it.each([
   expect(FlavorConfigSchema.parse({ permissionMode: legacy }).permissionMode).toBe(canonical);
 });
 
+it("validates provider thinkingEffort tiers", () => {
+  for (const thinkingEffort of ["minimal", "low", "medium", "high", "xhigh"] as const) {
+    expect(FlavorConfigSchema.parse({
+      providers: { openai: { type: "openai", thinkingEffort } },
+    }).providers.openai?.thinkingEffort).toBe(thinkingEffort);
+  }
+  expect(() => FlavorConfigSchema.parse({
+    providers: { openai: { type: "openai", thinkingEffort: "ultra" } },
+  })).toThrow();
+});
+
 it("uses the hallucination evaluation timeout default and validates overrides", () => {
   expect(FlavorConfigSchema.parse({}).hallucination).toEqual({
     showWarnings: false,

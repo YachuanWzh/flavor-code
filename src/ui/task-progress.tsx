@@ -58,7 +58,7 @@ export function TaskStatusLine({ block, interactive }: TaskStatusLineProps): Rea
     return state.text;
   })() : undefined;
 
-  return <Box flexDirection="column">
+  return <Box flexDirection="column" width="100%">
     <Box ref={ref} flexDirection="row">
       <Text {...(presentation.color === undefined ? {} : { color: presentation.color })}>
         {presentation.glyph}{" "}
@@ -101,35 +101,86 @@ export interface TaskProgressPanelProps {
   blocks: TaskBlock[];
   interactive: boolean;
   maxHeight?: number;
+  columns?: number;
   scrollRef?: Ref<ScrollBoxHandle>;
   onHoverChange?: (hovered: boolean) => void;
 }
+
+const SPLIT_TRACK_MIN_COLUMNS = 72;
 
 export function TaskProgressPanel({
   blocks,
   interactive,
   maxHeight = 8,
+  columns = 80,
   scrollRef,
   onHoverChange,
 }: TaskProgressPanelProps): React.JSX.Element | null {
   if (blocks.length === 0 || maxHeight <= 0) return null;
+  const taskBlocks = blocks.filter((block) => block.task?.role === "main");
+  const subagentBlocks = blocks.filter((block) => block.task?.role === "subagent");
+  const hasTasks = taskBlocks.length > 0;
+  const hasSubagents = subagentBlocks.length > 0;
+  const split = hasTasks && hasSubagents && columns >= SPLIT_TRACK_MIN_COLUMNS;
+
   return <Box
     flexDirection="column"
     flexShrink={0}
+    width="100%"
     maxHeight={maxHeight}
     onMouseEnter={() => onHoverChange?.(true)}
     onMouseLeave={() => onHoverChange?.(false)}
   >
-    <Text dimColor>── task progress ──</Text>
-    {maxHeight > 1 ? <ScrollBox
-      {...(scrollRef === undefined ? {} : { ref: scrollRef })}
-      flexDirection="column"
-      flexShrink={1}
-      maxHeight={maxHeight - 1}
-    >
-      {blocks.map((block) => (
-        <TaskStatusLine key={block.id} block={block} interactive={interactive} />
-      ))}
-    </ScrollBox> : null}
+    {split ? <SplitTrackHeaders /> : <TrackHeader role={hasTasks ? "main" : "subagent"} />}
+    {maxHeight > 1 ? (
+      <ScrollBox
+        {...(scrollRef === undefined ? {} : { ref: scrollRef })}
+        flexDirection="column"
+        flexShrink={1}
+        width="100%"
+        maxHeight={maxHeight - 1}
+      >
+        {split
+          ? pairedTrackRows(taskBlocks, subagentBlocks).map(([task, subagent], index) => (
+            <Box key={`${task?.id ?? "task"}:${subagent?.id ?? "subagent"}:${index}`} flexDirection="row" width="100%" columnGap={2}>
+              <Box flexBasis={0} flexGrow={1} minWidth={0} flexDirection="column">
+                {task === undefined ? null : <TaskStatusLine block={task} interactive={interactive} />}
+              </Box>
+              <Box flexBasis={0} flexGrow={1} minWidth={0} flexDirection="column">
+                {subagent === undefined ? null : <TaskStatusLine block={subagent} interactive={interactive} />}
+              </Box>
+            </Box>
+          ))
+          : hasTasks && hasSubagents ? <>
+            {taskBlocks.map((block) => (
+              <TaskStatusLine key={block.id} block={block} interactive={interactive} />
+            ))}
+            <TrackHeader role="subagent" />
+            {subagentBlocks.map((block) => (
+              <TaskStatusLine key={block.id} block={block} interactive={interactive} />
+            ))}
+          </> : (hasTasks ? taskBlocks : subagentBlocks).map((block) => (
+            <TaskStatusLine key={block.id} block={block} interactive={interactive} />
+          ))}
+      </ScrollBox>
+    ) : null}
   </Box>;
+}
+
+function TrackHeader({ role }: { role: "main" | "subagent" }): React.JSX.Element {
+  return <Text dimColor>── {role === "main" ? "task plan" : "subagent exploration"} ──</Text>;
+}
+
+function SplitTrackHeaders(): React.JSX.Element {
+  return <Box flexDirection="row" width="100%" columnGap={2}>
+    <Box flexBasis={0} flexGrow={1} minWidth={0}><TrackHeader role="main" /></Box>
+    <Box flexBasis={0} flexGrow={1} minWidth={0}><TrackHeader role="subagent" /></Box>
+  </Box>;
+}
+
+function pairedTrackRows(
+  tasks: readonly TaskBlock[],
+  subagents: readonly TaskBlock[],
+): Array<[TaskBlock | undefined, TaskBlock | undefined]> {
+  return Array.from({ length: Math.max(tasks.length, subagents.length) }, (_, index) => [tasks[index], subagents[index]]);
 }

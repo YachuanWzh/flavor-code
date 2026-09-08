@@ -182,10 +182,12 @@ class LspConnection {
     // Dispose must also work for a server that never completed initialization.
     this.#rejectAll(new Error("LSP connection disposed"));
     this.#shutdownPromise = (async () => {
+      const closed = waitForProcessClose(this.#process);
       await terminateProcessTree(this.#process.pid);
       this.#process.stdin!.destroy();
       this.#process.stdout!.destroy();
       this.#process.stderr!.destroy();
+      await closed;
     })();
     return this.#shutdownPromise;
   }
@@ -308,6 +310,16 @@ class LspConnection {
   }
 }
 
+function waitForProcessClose(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolveClose) => {
+    const finish = () => { clearTimeout(timer); resolveClose(); };
+    const timer = setTimeout(finish, 2_000);
+    timer.unref();
+    child.once("close", finish);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // LSP message framing (Content-Length: <N>\r\n\r\n<body>)
 // ---------------------------------------------------------------------------
@@ -357,7 +369,7 @@ const TYPESCRIPT_CLI = resolve(
 const KNOWN_SERVERS: LanguageServerConfig[] = [
   {
     language: "typescript",
-    extensions: [".ts", ".tsx", ".mts", ".cts"],
+    extensions: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
     command: process.execPath,
     args: [TYPESCRIPT_CLI, "--lsp", "--stdio"],
     rootFiles: ["tsconfig.json", "jsconfig.json"],
@@ -455,37 +467,38 @@ export class RealLspManager implements LspManager {
     if (this.#disposed) throw new Error("LSP manager is disposed");
     const language = this.#languageForUri(uri);
     if (language === undefined) throw new Error(`No language server configured for ${uri}; use Read/Grep or the project compiler`);
-    const existing = this.#connections.get(language);
-    if (existing !== undefined) return existing;
-    const pending = this.#pendingStarts.get(language);
-    if (pending !== undefined) return pending;
-
     const config = this.#serverConfigs.find((c) => c.language === language);
     if (config === undefined) throw new Error(`No language server configured for ${language}`);
+    const filePath = uriToPath(uri);
+    const projectRoot = findLanguageServerRoot(filePath, this.#workspace, config.rootFiles);
+    if (projectRoot === undefined) {
+      throw new Error(`Cannot start ${language} language server: no ${config.rootFiles.join(" or ")} found from ${dirname(filePath)} up to workspace ${this.#workspace}`);
+    }
+    const connectionKey = `${language}:${projectRoot}`;
+    const existing = this.#connections.get(connectionKey);
+    if (existing !== undefined) return existing;
+    const pending = this.#pendingStarts.get(connectionKey);
+    if (pending !== undefined) return pending;
 
-    // Only start if the project has the root file for this language
-    const hasRoot = config.rootFiles.some((file) => existsSync(resolve(this.#workspace, file)));
-    if (!hasRoot) throw new Error(`Cannot start ${language} language server: workspace needs ${config.rootFiles.join(" or ")}`);
-
-    const startPromise = this.#startServer(config);
-    this.#pendingStarts.set(language, startPromise);
+    const startPromise = this.#startServer(config, projectRoot);
+    this.#pendingStarts.set(connectionKey, startPromise);
     try {
       const connection = await startPromise;
       if (this.#disposed) { await connection.shutdown(); throw new Error("LSP manager is disposed"); }
-      this.#connections.set(language, connection);
+      this.#connections.set(connectionKey, connection);
       return connection;
     } finally {
-      this.#pendingStarts.delete(language);
+      this.#pendingStarts.delete(connectionKey);
     }
   }
 
-  async #startServer(config: LanguageServerConfig): Promise<LspConnection> {
+  async #startServer(config: LanguageServerConfig, projectRoot: string): Promise<LspConnection> {
     // Verify the server binary exists (best-effort)
     try { await access(config.command, constants.X_OK); }
     catch { /* PATH resolution will happen in spawn; if it fails, spawn errors surface */ }
 
-    const connection = new LspConnection(config.command, config.args, this.#workspace);
-    const rootUri = pathToFileURL(this.#workspace).href;
+    const connection = new LspConnection(config.command, config.args, projectRoot);
+    const rootUri = pathToFileURL(projectRoot).href;
     try {
       await connection.initialize(rootUri);
       this.#onStatus?.(`${config.language} Language Server ready (${config.command})`);
@@ -537,7 +550,11 @@ export function createLspTools(workspace: string, options: LspToolOptions = {}):
 
   const langTag = (file: string): string => {
     const ext = file.slice(file.lastIndexOf('.')).toLowerCase();
-    const map: Record<string, string> = { '.ts':'ts','.tsx':'tsx','.mts':'ts','.cts':'ts','.py':'py','.pyi':'py','.pyx':'py','.rs':'rs','.go':'go' };
+    const map: Record<string, string> = {
+      '.ts':'ts','.tsx':'tsx','.mts':'ts','.cts':'ts',
+      '.js':'js','.jsx':'jsx','.mjs':'js','.cjs':'js',
+      '.py':'py','.pyi':'py','.pyx':'py','.rs':'rs','.go':'go',
+    };
     const tag = map[ext];
     return tag === undefined ? '' : ' [' + tag + ']';
   };
@@ -611,10 +628,32 @@ function languageIdForPath(filePath: string): string {
     case ".tsx": return "typescriptreact";
     case ".mts": return "typescript";
     case ".cts": return "typescript";
+    case ".jsx": return "javascriptreact";
+    case ".js": case ".mjs": case ".cjs": return "javascript";
     case ".py": case ".pyi": case ".pyx": return "python";
     case ".rs": return "rust";
     case ".go": return "go";
     default: return "typescript";
+  }
+}
+
+/** Find the nearest language project marker without escaping the Flavor workspace. */
+export function findLanguageServerRoot(
+  filePath: string,
+  workspace: string,
+  rootFiles: readonly string[],
+): string | undefined {
+  const root = resolve(workspace);
+  const target = resolve(filePath);
+  if (!isWithin(root, target)) return undefined;
+
+  let current = dirname(target);
+  while (true) {
+    if (rootFiles.some((file) => existsSync(resolve(current, file)))) return current;
+    if (current === root) return undefined;
+    const parent = dirname(current);
+    if (parent === current || !isWithin(root, parent)) return undefined;
+    current = parent;
   }
 }
 

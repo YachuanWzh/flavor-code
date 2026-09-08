@@ -542,6 +542,60 @@ describe("production runtime", () => {
       await new Promise<void>((resolve) => gateway.close(() => resolve()));
     }
   }, 15_000);
+
+  it("keeps flavor.json thinkingEffort after OAuth llm_config replaces the provider", async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const gateway = createServer((request, response) => {
+      let raw = "";
+      request.on("data", (chunk: Buffer) => { raw += chunk.toString("utf8"); });
+      request.on("end", () => {
+        requests.push({ url: request.url ?? "", body: JSON.parse(raw) as Record<string, unknown> });
+        response.writeHead(200, { "Content-Type": "text/event-stream" });
+        const messageItem = { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text", text: "ok", annotations: [] }] };
+        response.end([
+          'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_1","object":"response","created_at":1,"status":"in_progress","model":"gpt-reasoner","output":[]}}\n\n',
+          'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","status":"in_progress","content":[]}}\n\n',
+          'event: response.content_part.added\ndata: {"type":"response.content_part.added","item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}\n\n',
+          'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"ok"}\n\n',
+          `event: response.output_item.done\ndata: ${JSON.stringify({ type: "response.output_item.done", output_index: 0, item: messageItem })}\n\n`,
+          `event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: "resp_1", object: "response", created_at: 1, status: "completed", model: "gpt-reasoner", output: [messageItem], usage: { input_tokens: 1, output_tokens: 1 } } })}\n\n`,
+        ].join(""));
+      });
+    });
+    await new Promise<void>((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+    const port = (gateway.address() as AddressInfo).port;
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pkce-effort-")); roots.push(workspace);
+    await mkdir(join(workspace, ".flavor"), { recursive: true });
+    const tokenUrl = "https://auth.example.test/token";
+    await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
+      providers: { company: {
+        type: "oauth-callback", authorizationUrl: "https://auth.example.test/authorize", tokenUrl,
+        clientId: "flavor-code-cli", thinkingEffort: "high",
+      } },
+      agents: { main: { model: "company:stale" }, subagent: { model: "company:stale-child" } },
+      memory: { enabled: false }, hallucination: { showWarnings: false }, sleep: false,
+    }));
+    await createFileTokenStore(join(workspace, ".flavor-code", "auth.json")).save({
+      [oauthCredentialId(tokenUrl, "flavor-code-cli")]: {
+        accessToken: "signed-gateway-jwt", expiresAt: new Date(Date.now() + 3600_000).toISOString(), configVersion: 3,
+        llmConfig: {
+          providerId: "gateway", serviceName: "Enterprise Gateway", apiType: "openai",
+          baseURL: `http://127.0.0.1:${port}/v1`, defaultModel: "gpt-reasoner", cheapModel: "gpt-mini",
+          models: ["gpt-reasoner", "gpt-mini"], maxOutputTokens: 2048,
+        },
+      },
+    });
+    const runtime = await createProductionRuntime({ workspace, home: workspace, environment: {}, approvalPolicy: "deny", output: () => {} });
+    try {
+      await runtime.session.submit("answer briefly");
+      expect(requests.length).toBeGreaterThan(0);
+      expect(requests[0]?.url).toBe("/v1/responses");
+      expect(requests[0]?.body.reasoning).toEqual({ effort: "high" });
+    } finally {
+      await runtime.dispose();
+      await new Promise<void>((resolve) => gateway.close(() => resolve()));
+    }
+  }, 15_000);
   it("creates deterministic prompt environment data with explicit fallbacks", () => {
     expect(createPromptEnvironment({
       now: new Date(2026, 6, 13, 23, 59),

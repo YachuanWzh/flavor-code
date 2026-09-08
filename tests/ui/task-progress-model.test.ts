@@ -41,6 +41,16 @@ describe("task progress presentation", () => {
     });
   });
 
+  it("uses the current model action instead of hard-coding Flavoring", () => {
+    expect(statusPresentation({
+      kind: "status",
+      id: "model:1",
+      state: "running",
+      text: "Writing response",
+      activity: "model",
+    }, 2_000, true)).toMatchObject({ text: "Writing response", metaLabel: "2s" });
+  });
+
   it("uses activeForm for an interactive running task", () => {
     expect(statusPresentation(runningTask, 4_900, true)).toEqual({
       glyph: activityFrame(4_900),

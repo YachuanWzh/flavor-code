@@ -193,7 +193,7 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
     return finishActive(withUsage);
   }
   if (event.type === "text") {
-    return { ...state, active: addText(withoutModelActivity(state.active), event.text) };
+    return { ...state, active: addStreamingText(state.active, event.text) };
   }
   if (event.type === "thinking") {
     return { ...state, active: attachThinking(state.active, event.text) };
@@ -730,6 +730,21 @@ function addText(turn: TranscriptTurn, text: string, onNewLine = false): Transcr
     blocks.push({ kind: "text", text: tailText(text, MAX_TRANSCRIPT_BLOCK_TEXT_CHARS) });
   }
   return withBlocks({ ...turn, assistantText }, blocks);
+}
+
+/** Keep the active model pulse visible below a long streaming response. */
+function addStreamingText(turn: TranscriptTurn, text: string): TranscriptTurn {
+  const activity = turn.blocks.find((block): block is Extract<TranscriptBlock, { kind: "status" }> =>
+    block.kind === "status" && block.activity === "model" && block.state === "running");
+  if (activity === undefined) return addText(turn, text);
+
+  const withoutActivity = withBlocks(turn, turn.blocks.filter((block) => block !== activity));
+  const withText = addText(withoutActivity, text);
+  const { thinkingText: _thinkingText, ...writingActivity } = activity;
+  return withBlocks(withText, [...withText.blocks, {
+    ...writingActivity,
+    text: "Writing response",
+  }]);
 }
 
 function boundedTranscriptBlock(block: Extract<TranscriptBlock, { kind: "status" }>): Extract<TranscriptBlock, { kind: "status" }> {

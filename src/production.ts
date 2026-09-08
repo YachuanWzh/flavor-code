@@ -2830,7 +2830,15 @@ async function registerConfiguredAdapters(
           if (result.llmConfig !== undefined) {
             apiProtocol = result.llmConfig.apiType;
             runtimeName = result.llmConfig.providerId;
-            runtimeProvider = providerFromOAuthConfig(result.llmConfig);
+            // OAuth runtime metadata replaces endpoint/model info, but the local
+            // thinking-control knobs from the flavor.json provider entry stay
+            // authoritative (matching the /login reload path).
+            runtimeProvider = {
+              ...providerFromOAuthConfig(result.llmConfig),
+              ...(provider.thinkingEffort === undefined ? {} : { thinkingEffort: provider.thinkingEffort }),
+              ...(provider.thinkingBudget === undefined ? {} : { thinkingBudget: provider.thinkingBudget }),
+              ...(provider.claudeClient === undefined ? {} : { claudeClient: provider.claudeClient }),
+            };
             effectiveLlm ??= effectiveRuntime(result, credentialId);
           }
         }
@@ -2909,7 +2917,7 @@ interface ProviderRuntimeConfig {
   /** Extended-thinking budget (Anthropic protocol); unset uses the adapter default. */
   thinkingBudget?: number | undefined;
   /** Reasoning effort (OpenAI Responses protocol); unset means never requested. */
-  thinkingEffort?: "low" | "medium" | "high" | undefined;
+  thinkingEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | undefined;
   models?: string[] | undefined;
   claudeClient?: boolean | undefined;
   // OAuth PKCE fields — all have built-in defaults when type=oauth-callback

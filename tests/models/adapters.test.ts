@@ -228,6 +228,20 @@ describe("OpenAIModelAdapter", () => {
     expect(stream.mock.calls[0]?.[0]).not.toHaveProperty("reasoning");
   });
 
+  it("forwards the xhigh effort tier to the Responses API", async () => {
+    const stream = vi.fn((_body?: unknown, _options?: unknown) => events());
+    const client = { responses: { stream } };
+
+    await collect(
+      new OpenAIModelAdapter({ client: asOpenAIClient(client), thinkingEffort: "xhigh" }).stream(request),
+    );
+
+    expect(stream).toHaveBeenCalledWith(
+      expect.objectContaining({ reasoning: { effort: "xhigh" } }),
+      { signal },
+    );
+  });
+
   it("emits a tool call from a completed output item when the arguments-done event is omitted", async () => {
     const client = {
       responses: {

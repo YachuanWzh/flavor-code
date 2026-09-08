@@ -36,7 +36,7 @@ export interface OpenAIModelAdapterOptions {
   /** Mirror the per-request cache breakdown to stderr. Defaults to FLAVOR_DEBUG_USAGE=1. File logging to usage.jsonl is always on. */
   debugUsage?: boolean;
   /** Reasoning effort requested from the Responses API; omitted when undefined. */
-  thinkingEffort?: "low" | "medium" | "high";
+  thinkingEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
 }
 
 async function toInput(message: ModelMessage): Promise<ResponseInputItem[]> {
@@ -129,7 +129,7 @@ function formatOpenAIUsage(model: string, breakdown: OpenAIUsageBreakdown): stri
 export class OpenAIModelAdapter implements ModelAdapter {
   private readonly client: OpenAIClient;
   private readonly debugUsage: boolean;
-  private readonly thinkingEffort: "low" | "medium" | "high" | undefined;
+  private readonly thinkingEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | undefined;
 
   constructor(options: OpenAIModelAdapterOptions) {
     this.client =

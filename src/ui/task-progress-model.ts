@@ -53,13 +53,13 @@ export function statusPresentation(
   if (block.state === "running" && block.activity === "model") {
     return interactive ? {
       glyph: activityFrame(elapsedMs),
-      text: "Flavoring",
+      text: block.text,
       color: "#81c8f2",
       metaLabel: formatElapsed(elapsedMs),
       metaColor: "ansi:blackBright",
     } : {
       glyph: "·",
-      text: "Flavoring",
+      text: block.text,
       color: "#81c8f2",
     };
   }

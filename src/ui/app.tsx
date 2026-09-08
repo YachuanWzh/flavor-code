@@ -1114,6 +1114,7 @@ export function TerminalLayout({
       blocks={activeTaskBlocks}
       interactive={activeSession}
       maxHeight={taskPanelRows}
+      columns={columns}
       {...(taskScrollRef === undefined ? {} : { scrollRef: taskScrollRef })}
       {...(onTaskPanelHoverChange === undefined ? {} : { onHoverChange: onTaskPanelHoverChange })}
     />

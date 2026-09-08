@@ -449,6 +449,11 @@ export function modelToolFromZod(
 
 function ensureStrictSchema(schema: Record<string, unknown>): Record<string, unknown> {
   const output: Record<string, unknown> = { ...schema };
+  // OpenAI function tools reject JSON Schema outside its supported subset (e.g. a
+  // z.record() key constraint surfaces as propertyNames and returns 400). Model-side
+  // hints only: tool input is still validated locally against the original schema.
+  delete output.propertyNames;
+  delete output.patternProperties;
   for (const keyword of ["anyOf", "oneOf", "allOf", "prefixItems"] as const) {
     const branches = schema[keyword];
     if (Array.isArray(branches)) {

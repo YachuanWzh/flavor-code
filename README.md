@@ -178,6 +178,8 @@ Common commands:
 
 You can submit steering or queue follow-ups while a run is in progress; once the current model response finishes, the task picks up new instructions at safe boundaries.
 
+During planned work, a wide CLI shows the main task plan and sub-agent exploration side by side; if only one track exists it uses the full row, and narrow terminals stack both tracks. Long streamed responses keep a live `Writing response` activity below the latest output. LSP tools locate the nearest nested project configuration for each target file, so monorepos and sandbox/worktree projects do not need a `tsconfig.json` or `jsconfig.json` at the Flavor workspace root; JavaScript and CommonJS files are supported by the bundled TypeScript server as well.
+
 `/commit` and `/review` use the cheap sub-agent model and degrade gracefully when it is unavailable. Session checkpoints are tagged with the current git state (`branch@sha`), so `/tree` shows what the workspace looked like at each node. `/explain <symbol>` runs on the same cheap model: it assembles call relations from the code graph, the symbol's real source slice, and recent commits touching the file, then generates a five-part newcomer walkthrough (what it does / key implementation points / call flow / why it is written this way / gotchas); an interactive picker disambiguates multiple matches, and a missing graph degrades to a `/ast init` hint instead of an error.
 
 #### CLI pals and cross-project work

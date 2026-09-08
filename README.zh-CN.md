@@ -178,6 +178,8 @@ OAuth PKCE 的运行时行为与配置约定见 [PKCE 规范](./docs/specs/pkce-
 
 运行中可以提交 steering 或排队 follow-up；当前模型响应结束后，任务会在安全边界处接收新指令。
 
+有任务规划时，宽终端会把主任务计划与子 Agent 探索左右并排展示；只有一类工作时占满整行，窄终端则自动纵向排列。长内容流式输出期间，最新内容下方会持续显示 `Writing response` 动作。LSP 工具会从目标文件向上寻找最近的嵌套项目配置，因此 monorepo、sandbox 或 worktree 项目无需在 Flavor 工作区根部额外放置 `tsconfig.json` / `jsconfig.json`；内置 TypeScript 服务也支持 JavaScript 与 CommonJS 文件。
+
 `/commit` 与 `/review` 使用廉价子 Agent 模型，模型不可用时优雅降级。会话 checkpoint 会标记当前 git 状态（`branch@sha`），`/tree` 可以看到每个节点对应的工作区现场。`/explain <符号>` 同样走廉价模型：它把代码图中的调用关系、符号的真实源码切片和该文件的近期提交历史组装成证据，生成面向新人的五段式讲解（做什么 / 关键实现点 / 调用关系 / 为什么这样写 / 注意事项）；多个符号命中时弹出选择卡片，可方向键选择或直接输入更精确的名字；代码图未建立时提示 `/ast init`，不会抛错。
 
 #### CLI Pals 与跨项目协作

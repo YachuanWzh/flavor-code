@@ -1,10 +1,10 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createLspTools, RealLspManager, type LspManager } from "../../src/tools/lsp.js";
+import { createLspTools, findLanguageServerRoot, RealLspManager, type LspManager } from "../../src/tools/lsp.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -156,6 +156,47 @@ describe("LSP tools", () => {
 });
 
 describe("RealLspManager", () => {
+  it("selects the nearest nested project root without walking outside the workspace", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-lsp-monorepo-")); roots.push(workspace);
+    const project = join(workspace, ".sandboxes", "feature", "app");
+    const source = join(project, "src", "index.tsx");
+    await mkdir(join(project, "src"), { recursive: true });
+    await writeFile(join(workspace, "tsconfig.json"), "{}");
+    await writeFile(join(project, "tsconfig.json"), "{}");
+    await writeFile(source, "export const view = 1;\n");
+
+    expect(findLanguageServerRoot(source, workspace, ["tsconfig.json", "jsconfig.json"])).toBe(project);
+    expect(findLanguageServerRoot(join(workspace, "outside", "index.ts"), project, ["tsconfig.json"])).toBeUndefined();
+  });
+
+  it("queries TypeScript LSP from a nested project root", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-lsp-nested-")); roots.push(workspace);
+    const project = join(workspace, ".sandboxes", "feature", "app");
+    await mkdir(project, { recursive: true });
+    await writeFile(join(project, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true }, include: ["*.ts"] }));
+    const file = join(project, "index.ts");
+    await writeFile(file, 'const answer: number = "wrong";\n');
+    const manager = new RealLspManager({ workspace });
+    try {
+      const diagnostics = await manager.diagnostics(pathToFileURL(file).href, AbortSignal.timeout(10_000));
+      expect(diagnostics.some((item) => item.message.includes("not assignable"))).toBe(true);
+    } finally { await manager.dispose(); }
+  });
+
+  it("supports CommonJS files through a nested jsconfig project", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-lsp-cjs-")); roots.push(workspace);
+    const project = join(workspace, "packages", "legacy");
+    await mkdir(project, { recursive: true });
+    await writeFile(join(project, "jsconfig.json"), JSON.stringify({ compilerOptions: { allowJs: true, checkJs: true, noEmit: true }, include: ["*.cjs"] }));
+    const file = join(project, "discountId.source.test.cjs");
+    await writeFile(file, '/** @type {number} */ const answer = "wrong";\n');
+    const manager = new RealLspManager({ workspace });
+    try {
+      const diagnostics = await manager.diagnostics(pathToFileURL(file).href, AbortSignal.timeout(10_000));
+      expect(diagnostics.some((item) => item.message.includes("not assignable"))).toBe(true);
+    } finally { await manager.dispose(); }
+  });
+
   it("queries the bundled TypeScript server against a real workspace", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-lsp-real-")); roots.push(workspace);
     await writeFile(join(workspace, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true }, include: ["*.ts"] }));

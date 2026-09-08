@@ -2,7 +2,35 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.0-beta.6 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.0-beta.8 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.0-beta.8] - 2026-09-08
+
+### 修复
+- 修复使用 OpenAI 端点时模型请求被 `400 Invalid schema for function 'RegisterTool': ... 'propertyNames' is not permitted` 拒绝的问题：`RegisterTool` 的自由格式 `inputSchema` 参数经 `z.record()` 转换后带有 OpenAI function 工具不支持的 `propertyNames` 关键字，而 Anthropic 接受完整 JSON Schema 所以不报错。现在严格 schema 转换会递归剔除 `propertyNames` 与 `patternProperties`；这只是移除发给模型的关键字提示，工具入参仍按原始 schema 在本地完整校验，Anthropic 端行为不变。
+- 修复经 `/login`（OAuth PKCE）接入的 OpenAI 端点无法控制思考强度的问题：启动注册时 OAuth 服务端 `llm_config` 会整体替换 flavor.json 的 provider 配置，把用户配置的 `thinkingEffort` / `thinkingBudget` / `claudeClient` 一并丢弃，导致 `reasoning.effort` 永远不发、端点退回服务端默认（medium）。现在这些本地思考控制项在替换后仍然保留，与 `/login` 重载路径行为一致。
+
+### 改进
+- OpenAI Responses 协议的 `thinkingEffort` 可选值扩展为 `minimal` / `low` / `medium` / `high` / `xhigh`；不配置时依旧不发送 `reasoning` 参数，兼容严格的网关。
+
+### 测试与维护
+- 新增 `propertyNames` 剔除的回归测试，覆盖 `RegisterTool` 形状与嵌套属性、原始 schema 对象的递归清理。
+- 新增 OAuth `llm_config` 替换后保留 flavor.json `thinkingEffort` 的端到端回归：本地假网关断言 `/v1/responses` 请求携带 `reasoning: { effort: "high" }`。
+- `package.json` 与 `package-lock.json` 的项目版本统一为 `1.4.0-beta.8`。
+
+## [1.4.0-beta.7] - 2026-09-08
+
+### 改进
+- CLI 任务进度改为自适应双轨工作台：宽终端左侧显示主任务计划、右侧显示子 Agent 探索，两类状态从首项开始同步可见；只有一类工作时占满整行，窄终端则纵向回落，并继续使用原有的有界滚动视口。
+- 长内容流式输出期间不再提前移除模型活动提示；动作行会移动到最新正文下方并从 `Flavoring` 切换为 `Writing response`，持续显示 spinner 与耗时，工具开始或模型结束时按原生命周期收起。
+
+### 修复
+- 修复 macOS、monorepo 与 sandbox/worktree 场景下 LSP 只检查 Flavor 工作区根目录、因而误报缺少 `tsconfig.json` / `jsconfig.json` 的问题：现在从目标文件向上选择最近的项目根，并按“语言 + 项目根”隔离复用连接，避免多个嵌套项目串用服务；销毁时等待服务进程真正关闭，避免 Windows 短暂锁住嵌套项目目录。
+- TypeScript LSP 新增 `.js`、`.jsx`、`.mjs`、`.cjs` 文件支持并发送正确的 JavaScript 文档类型，截图中的 CommonJS 测试文件不再误报“未配置语言服务”。
+
+### 测试与维护
+- 按 SDD + TDD 补充双轨/单轨/窄终端布局、持续写作动作、最近项目根边界、嵌套 TypeScript 真实诊断与 CommonJS 真实诊断回归，规格见 [CLI 双轨进度、持续动作与嵌套项目 LSP](./docs/specs/2026-09-08-cli-progress-motion-and-nested-lsp.md)。
+- `package.json` 与 `package-lock.json` 的项目版本统一为 `1.4.0-beta.7`。
 
 ## [1.4.0-beta.6] - 2026-09-06
 
@@ -766,6 +794,9 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.4.0-beta.8 | 2026-09-08 | 修复 OpenAI 端点因 `RegisterTool` schema 含 `propertyNames` 被 400 拒绝的问题（严格 schema 转换递归剔除不支持关键字）；修复 OAuth `llm_config` 替换 provider 后丢失 flavor.json 思考控制项的问题，OpenAI `thinkingEffort` 增加 `minimal` / `xhigh` 档 |
+| 1.4.0-beta.7 | 2026-09-08 | CLI 任务进度支持宽终端主任务/子 Agent 左右双轨、单轨满宽与窄终端回落；长正文输出持续显示 `Writing response` 动作；LSP 按目标文件选择最近嵌套项目根并支持 JavaScript/CommonJS |
+| 1.4.0-beta.6 | 2026-09-06 | 根据真实 OOM allocation profile 定位并修复 React/Ink TUI 主泄漏：发行 CLI 固定使用 production reconciler，launcher 强制生产环境并清理 User Timing；构建扫描禁止 development reconciler 回归，新增 10 万次 Ink commit 与长程 RPC 压测 |
 | 1.4.0-beta.5 | 2026-09-06 | 修复长 turn 的模型请求级内存泄漏（每次 SDK 请求改用可释放的派生信号）；单个展示 turn 严格有界（最近 160 个展示块、64K assistant 文本，裁掉超大工具输入/结果/diff），不影响模型上下文与落盘证据；补长 turn 取消监听与展示内存上限回归测试 |
 | 1.4.0-beta.4 | 2026-09-05 | 长程任务内存保护改为跨进程无缝堆轮换（turn/`/loop` 周期/`/goal` 轮次边界，软水位退出码 75 由 launcher `--resume` 重启续跑）；`/loop` 与 `/goal` 跨轮换自动续跑并持久化待验证检查点；水位判定 GC 核实并覆盖 RSS，轮换自动取证；修复 `resume()` 脱离 receiver 导致续跑必然失败等问题 |
 | 1.4.0-beta.3 | 2026-09-05 | 全面修复内置工具与共享执行链路可靠性（Shell/Grep/Edit/Terminal/LSP/Web/GitHistory/TaskPlan 等）；扩大多轮长程任务默认上限（主 Agent 300 轮、子 Agent 100 轮、`extendBy` 50、loop `maxCycles` 100），并修复 `softLimitFactor`/`extendBy` 配置未生效问题 |
