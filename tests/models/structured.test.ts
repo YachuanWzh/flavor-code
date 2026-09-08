@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { ModelRegistry } from "../../src/models/registry.js";
-import { strictJsonSchema, strictJsonSchemaObject, withStructuredOutput } from "../../src/models/structured.js";
+import {
+  openAIJsonSchemaObject,
+  strictJsonSchema,
+  strictJsonSchemaObject,
+  withStructuredOutput,
+} from "../../src/models/structured.js";
 import type { ModelAdapter, ModelEvent, ModelRequest } from "../../src/models/types.js";
 
 afterEach(() => vi.useRealTimers());
@@ -337,6 +342,16 @@ describe("withStructuredOutput", () => {
 });
 
 describe("strictJsonSchema", () => {
+  it("drops unsupported string formats while preserving local URL validation", () => {
+    const validationSchema = z.object({ url: z.string().url() }).strict();
+    const schema = strictJsonSchema(validationSchema);
+    const url = (schema.properties as Record<string, Record<string, unknown>>).url;
+
+    expect(url).toMatchObject({ type: "string" });
+    expect(url).not.toHaveProperty("format");
+    expect(validationSchema.safeParse({ url: "not a URL" }).success).toBe(false);
+  });
+
   it("drops propertyNames that OpenAI function tools reject (RegisterTool inputSchema)", () => {
     const schema = strictJsonSchema(z.object({
       name: z.string(),
@@ -382,6 +397,55 @@ describe("strictJsonSchema", () => {
     const json = JSON.stringify(schema);
     expect(json).not.toContain("propertyNames");
     expect(json).not.toContain("patternProperties");
+  });
+
+  it("flattens object allOf intersections into one strict object", () => {
+    const schema = strictJsonSchema(z.intersection(
+      z.object({ name: z.string() }),
+      z.object({ count: z.number().int().optional() }),
+    ));
+    const properties = schema.properties as Record<string, Record<string, unknown>>;
+
+    expect(schema).toMatchObject({
+      type: "object",
+      required: ["name", "count"],
+      additionalProperties: false,
+    });
+    expect(properties.name).toEqual({ type: "string" });
+    expect(properties.count).toMatchObject({ anyOf: [{ type: "integer" }, { type: "null" }] });
+    expect(JSON.stringify(schema)).not.toContain("allOf");
+  });
+
+  it("rewrites unsupported unions, tuples, defaults, and legacy definitions recursively", () => {
+    const schema = strictJsonSchemaObject({
+      type: "object",
+      definitions: { label: { type: "string", format: "uri", default: "x" } },
+      properties: {
+        choice: { oneOf: [{ $ref: "#/definitions/label" }, { type: "number" }] },
+        tuple: { type: "array", prefixItems: [{ type: "string" }, { type: "integer" }] },
+      },
+    });
+    const json = JSON.stringify(schema);
+    const properties = schema.properties as Record<string, Record<string, unknown>>;
+
+    expect(schema).toHaveProperty("$defs.label", { type: "string" });
+    expect(properties.choice).toHaveProperty("anyOf");
+    expect(properties.tuple).toHaveProperty("anyOf.0.items.anyOf");
+    expect(json).toContain("#/$defs/label");
+    expect(json).not.toMatch(/"(?:allOf|oneOf|prefixItems|definitions|format|default)"/);
+  });
+
+  it("keeps free-form maps open only in non-strict OpenAI schemas", () => {
+    const schema = openAIJsonSchemaObject({
+      type: "object",
+      properties: { payload: {} },
+      additionalProperties: {},
+    }, false);
+    const properties = schema.properties as Record<string, Record<string, unknown>>;
+
+    expect(schema.additionalProperties).toBe(true);
+    expect(properties.payload).toHaveProperty("anyOf");
+    expect(JSON.stringify(schema)).not.toContain("\"additionalProperties\":{}");
   });
 });
 

@@ -278,7 +278,20 @@ export function jsonSchemaFromZod(schema: z.ZodType<unknown>): Record<string, un
 
 /** Recursively adapts an existing JSON Schema for providers that require strict function tools. */
 export function strictJsonSchemaObject(schema: Record<string, unknown>): Record<string, unknown> {
-  return ensureStrictSchema(schema);
+  return normalizeOpenAIJsonSchemaObject(schema, true);
+}
+
+/**
+ * Normalize a function-tool schema to the JSON Schema subset accepted by the
+ * OpenAI Responses API and strict OpenAI-compatible gateways. Non-strict mode
+ * keeps open objects, but still removes unsupported annotations and keywords
+ * that providers validate before the model call starts.
+ */
+export function openAIJsonSchemaObject(
+  schema: Record<string, unknown>,
+  strict: boolean,
+): Record<string, unknown> {
+  return normalizeOpenAIJsonSchemaObject(schema, strict);
 }
 
 /**
@@ -447,60 +460,209 @@ export function modelToolFromZod(
   return { name, description, inputSchema: strictJsonSchema(schema) };
 }
 
-function ensureStrictSchema(schema: Record<string, unknown>): Record<string, unknown> {
+const JSON_SCHEMA_TYPES = new Set(["null", "boolean", "object", "array", "number", "string", "integer"]);
+const OPENAI_UNSUPPORTED_SCHEMA_KEYWORDS = [
+  "$schema", "$id", "$anchor", "$dynamicAnchor", "$dynamicRef", "$comment",
+  "default", "examples", "example", "deprecated", "readOnly", "writeOnly",
+  "format", "propertyNames", "patternProperties", "unevaluatedProperties",
+  "unevaluatedItems", "additionalItems", "contains", "minContains", "maxContains",
+  "uniqueItems", "minProperties", "maxProperties", "contentEncoding", "contentMediaType",
+  "not", "if", "then", "else", "dependentRequired", "dependentSchemas", "dependencies",
+] as const;
+
+function normalizeOpenAIJsonSchemaObject(
+  schema: Record<string, unknown>,
+  strict: boolean,
+): Record<string, unknown> {
+  const normalized = normalizeOpenAIJsonSchemaNode(schema, strict);
+  if (normalized.type === "object") return normalized;
+  // Function arguments are always objects. A malformed third-party root must
+  // not poison the registration of every other tool in the same API request.
+  return strict
+    ? { type: "object", properties: {}, required: [], additionalProperties: false }
+    : { type: "object", properties: {}, additionalProperties: true };
+}
+
+function normalizeOpenAIJsonSchemaNode(
+  rawSchema: Record<string, unknown>,
+  strict: boolean,
+): Record<string, unknown> {
+  const schema = mergeObjectAllOf(rawSchema);
   const output: Record<string, unknown> = { ...schema };
-  // OpenAI function tools reject JSON Schema outside its supported subset (e.g. a
-  // z.record() key constraint surfaces as propertyNames and returns 400). Model-side
-  // hints only: tool input is still validated locally against the original schema.
-  delete output.propertyNames;
-  delete output.patternProperties;
-  for (const keyword of ["anyOf", "oneOf", "allOf", "prefixItems"] as const) {
-    const branches = schema[keyword];
-    if (Array.isArray(branches)) {
-      output[keyword] = branches.map((branch) => typeof branch === "object" && branch !== null
-        ? ensureStrictSchema(branch as Record<string, unknown>)
-        : branch);
+  for (const keyword of OPENAI_UNSUPPORTED_SCHEMA_KEYWORDS) delete output[keyword];
+  delete output.oneOf;
+  delete output.allOf;
+  delete output.prefixItems;
+  delete output.nullable;
+  delete output.definitions;
+  if (typeof output.$ref === "string" && output.$ref.startsWith("#/definitions/")) {
+    output.$ref = output.$ref.replace("#/definitions/", "#/$defs/");
+  }
+
+  const compositionBranches = [
+    ...(Array.isArray(schema.anyOf) ? schema.anyOf : []),
+    ...(Array.isArray(schema.oneOf) ? schema.oneOf : []),
+    ...(Array.isArray(schema.allOf) ? schema.allOf : []),
+  ];
+  if (compositionBranches.length > 0) {
+    output.anyOf = compositionBranches.map((branch) => normalizeOpenAISchemaValue(branch, strict));
+  } else {
+    delete output.anyOf;
+  }
+
+  const definitions = {
+    ...(isSchemaRecord(schema.definitions) ? schema.definitions : {}),
+    ...(isSchemaRecord(schema.$defs) ? schema.$defs : {}),
+  };
+  if (Object.keys(definitions).length > 0) {
+    output.$defs = Object.fromEntries(Object.entries(definitions)
+      .map(([key, definition]) => [key, normalizeOpenAISchemaValue(definition, strict)]));
+  }
+
+  const prefixItems = Array.isArray(schema.prefixItems) ? schema.prefixItems : undefined;
+  if (prefixItems !== undefined && prefixItems.length > 0) {
+    const tupleItems = prefixItems.map((item) => normalizeOpenAISchemaValue(item, strict));
+    output.items = tupleItems.length === 1 ? tupleItems[0] : { anyOf: tupleItems };
+  } else if (Array.isArray(schema.items)) {
+    const tupleItems = schema.items.map((item) => normalizeOpenAISchemaValue(item, strict));
+    output.items = tupleItems.length === 1 ? tupleItems[0] : { anyOf: tupleItems };
+  } else if (isSchemaRecord(schema.items)) {
+    output.items = normalizeOpenAIJsonSchemaNode(schema.items, strict);
+  } else if (schema.items === true || schema.items === false) {
+    output.items = universalJsonValueSchema(strict);
+  }
+
+  let type = schema.type;
+  if (type === undefined && isSchemaRecord(schema.properties)) type = "object";
+  if (type === undefined && output.items !== undefined) type = "array";
+  if (type === undefined && Array.isArray(schema.enum)) type = inferJsonTypes(schema.enum);
+  if (type === undefined && Object.hasOwn(schema, "const")) type = inferJsonTypes([schema.const]);
+  if (typeof type === "string" && !JSON_SCHEMA_TYPES.has(type)) type = undefined;
+  if (Array.isArray(type)) {
+    const types = type.filter((candidate) => typeof candidate === "string" && JSON_SCHEMA_TYPES.has(candidate));
+    type = types.length === 0 ? undefined : types;
+  }
+  delete output.type;
+  if (type !== undefined) output.type = type;
+  if (schemaTypeIncludes(type, "array") && output.items === undefined) {
+    output.items = universalJsonValueSchema(strict);
+  }
+
+  if (schemaTypeIncludes(type, "object")) {
+    const sourceProperties = isSchemaRecord(schema.properties) ? schema.properties : {};
+    const sourceRequired = new Set(Array.isArray(schema.required)
+      ? schema.required.filter((key): key is string => typeof key === "string")
+      : []);
+    const properties: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(sourceProperties)) {
+      const child = normalizeOpenAISchemaValue(value, strict);
+      if (!strict || sourceRequired.has(key) || jsonSchemaAllowsNull(child)) properties[key] = child;
+      else properties[key] = { anyOf: [child, { type: "null" }] };
+      if (strict) sourceRequired.add(key);
+    }
+    output.properties = properties;
+    const required = strict
+      ? Object.keys(properties)
+      : [...sourceRequired].filter((key) => Object.hasOwn(properties, key));
+    if (strict || required.length > 0 || Array.isArray(schema.required)) output.required = required;
+    else delete output.required;
+    if (strict) {
+      output.additionalProperties = false;
+    } else if (schema.additionalProperties === true || schema.additionalProperties === false) {
+      output.additionalProperties = schema.additionalProperties;
+    } else if (isSchemaRecord(schema.additionalProperties)) {
+      output.additionalProperties = Object.keys(schema.additionalProperties).length === 0
+        ? true
+        : normalizeOpenAIJsonSchemaNode(schema.additionalProperties, false);
+    } else {
+      delete output.additionalProperties;
     }
   }
-  if (typeof schema.items === "object" && schema.items !== null) {
-    output.items = ensureStrictSchema(schema.items as Record<string, unknown>);
+
+  if (schema.nullable === true && !jsonSchemaAllowsNull(output)) {
+    const description = typeof output.description === "string" ? output.description : undefined;
+    const branch = { ...output };
+    delete branch.description;
+    return {
+      ...(description === undefined ? {} : { description }),
+      anyOf: [branch, { type: "null" }],
+    };
   }
-  for (const keyword of ["$defs", "definitions"] as const) {
-    const definitions = schema[keyword];
-    if (typeof definitions === "object" && definitions !== null && !Array.isArray(definitions)) {
-      output[keyword] = Object.fromEntries(Object.entries(definitions).map(([key, definition]) => [
-        key,
-        typeof definition === "object" && definition !== null
-          ? ensureStrictSchema(definition as Record<string, unknown>)
-          : definition,
-      ]));
+
+  if (isTypedOrComposedSchema(output)) return output;
+  return universalJsonValueSchema(strict);
+}
+
+function mergeObjectAllOf(schema: Record<string, unknown>): Record<string, unknown> {
+  const branches = Array.isArray(schema.allOf) ? schema.allOf.filter(isSchemaRecord) : [];
+  if (branches.length === 0 || !branches.every(isObjectSchema)) return schema;
+
+  const base: Record<string, unknown> = { ...schema };
+  delete base.allOf;
+  const properties: Record<string, unknown> = isSchemaRecord(base.properties) ? { ...base.properties } : {};
+  const required = new Set(Array.isArray(base.required)
+    ? base.required.filter((key): key is string => typeof key === "string")
+    : []);
+  for (const branch of branches) {
+    if (isSchemaRecord(branch.properties)) {
+      for (const [key, value] of Object.entries(branch.properties)) {
+        const existing = properties[key];
+        properties[key] = existing === undefined ? value : { anyOf: [existing, value] };
+      }
+    }
+    if (Array.isArray(branch.required)) {
+      for (const key of branch.required) if (typeof key === "string") required.add(key);
     }
   }
-  if (schema.type !== "object") {
-    return output;
-  }
-  // Strict OpenAI function schemas cannot keep an open-ended
-  // additionalProperties schema. In particular, z.record(..., z.unknown())
-  // produces additionalProperties: {}, which OpenAI rejects because the empty
-  // subschema has no type. Close property-less objects as well as ordinary
-  // objects; tools that intentionally need a free-form map must opt out of
-  // strict mode and provide a separate provider-facing schema.
-  const sourceProperties = typeof schema.properties === "object"
-    && schema.properties !== null
-    && !Array.isArray(schema.properties)
-    ? schema.properties as Record<string, unknown>
-    : {};
-  const requiredSet = new Set(Array.isArray(schema.required) ? schema.required as string[] : []);
-  const properties: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(sourceProperties)) {
-    const child = typeof value === "object" && value !== null
-      ? ensureStrictSchema(value as Record<string, unknown>)
-      : value;
-    if (requiredSet.has(key) || jsonSchemaAllowsNull(child)) properties[key] = child;
-    else properties[key] = { anyOf: [child, { type: "null" }] };
-    requiredSet.add(key);
-  }
-  return { ...output, additionalProperties: false, required: [...requiredSet], properties };
+  return { ...base, type: "object", properties, required: [...required] };
+}
+
+function normalizeOpenAISchemaValue(value: unknown, strict: boolean): Record<string, unknown> {
+  if (isSchemaRecord(value)) return normalizeOpenAIJsonSchemaNode(value, strict);
+  return universalJsonValueSchema(strict);
+}
+
+function universalJsonValueSchema(strict: boolean): Record<string, unknown> {
+  const scalar = [{ type: "string" }, { type: "number" }, { type: "boolean" }, { type: "null" }];
+  return {
+    anyOf: [
+      ...scalar,
+      strict
+        ? { type: "object", properties: {}, required: [], additionalProperties: false }
+        : { type: "object", properties: {}, additionalProperties: true },
+      { type: "array", items: { anyOf: scalar } },
+    ],
+  };
+}
+
+function inferJsonTypes(values: unknown[]): string | string[] | undefined {
+  const types = [...new Set(values.map((value) => {
+    if (value === null) return "null";
+    if (Array.isArray(value)) return "array";
+    if (typeof value === "number") return Number.isInteger(value) ? "integer" : "number";
+    if (typeof value === "object") return "object";
+    return typeof value;
+  }).filter((type) => ["null", "array", "object", "integer", "number", "string", "boolean"].includes(type)))];
+  return types.length === 0 ? undefined : (types.length === 1 ? types[0] : types);
+}
+
+function isSchemaRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isObjectSchema(schema: Record<string, unknown>): boolean {
+  return schema.type === "object" || isSchemaRecord(schema.properties);
+}
+
+function isTypedOrComposedSchema(schema: Record<string, unknown>): boolean {
+  return typeof schema.type === "string"
+    || Array.isArray(schema.type)
+    || typeof schema.$ref === "string"
+    || Array.isArray(schema.anyOf);
+}
+
+function schemaTypeIncludes(type: unknown, expected: string): boolean {
+  return type === expected || (Array.isArray(type) && type.includes(expected));
 }
 
 function repairMessages(

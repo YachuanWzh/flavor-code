@@ -17,6 +17,7 @@ import { normalizeToolCallInput } from "../utils/json.js";
 import { isEnvTruthy } from "../utils/envUtils.js";
 import { appendUsageLog, currentUsageSession } from "../utils/log.js";
 import { createScopedAbortSignal } from "../utils/abort.js";
+import { openAIJsonSchemaObject } from "./structured.js";
 
 type OpenAIStreamRequest = Parameters<OpenAI["responses"]["stream"]>[0];
 
@@ -170,7 +171,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
           type: "function",
           name: tool.name,
           description: tool.description,
-          parameters: tool.inputSchema,
+          parameters: openAIJsonSchemaObject(tool.inputSchema, tool.strict ?? true),
           strict: tool.strict ?? true,
         })),
       };

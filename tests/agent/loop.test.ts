@@ -815,6 +815,12 @@ describe("AgentLoop", () => {
     ]], authRequests), fallbackAdapter: fakeAdapter([]), fallbackModelId: "cheap:small" });
     const authEvents = await collect(auth.loop.run({ prompt: "authenticate" }));
 
+    const invalidRequests: ModelRequest[] = [];
+    const invalid = createLoop({ adapter: fakeAdapter([[
+      { type: "error", error: { code: "invalid_request", message: "invalid tool schema" } },
+    ]], invalidRequests), fallbackAdapter: fakeAdapter([]), fallbackModelId: "cheap:small" });
+    const invalidEvents = await collect(invalid.loop.run({ prompt: "validate schema" }));
+
     const partialRequests: ModelRequest[] = [];
     const partial = createLoop({ adapter: fakeAdapter([[
       { type: "text", text: "partial" },
@@ -825,6 +831,9 @@ describe("AgentLoop", () => {
     expect(authRequests).toHaveLength(1);
     expect(authEvents.filter((event) => event.type === "model-retry")).toHaveLength(0);
     expect(authEvents.at(-1)).toEqual({ type: "error", error: { code: "authentication", message: "bad key" } });
+    expect(invalidRequests).toHaveLength(1);
+    expect(invalidEvents.filter((event) => event.type === "model-retry")).toHaveLength(0);
+    expect(invalidEvents.at(-1)).toEqual({ type: "error", error: { code: "invalid_request", message: "invalid tool schema" } });
     expect(partialRequests).toHaveLength(1);
     expect(partialEvents.filter((event) => event.type === "model-retry")).toHaveLength(0);
     expect(partialEvents.at(-1)).toEqual({ type: "error", error: { code: "network", message: "stream broke" } });

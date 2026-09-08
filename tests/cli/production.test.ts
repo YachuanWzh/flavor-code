@@ -18,6 +18,79 @@ const createProductionRuntime = (options: ProductionRuntimeOptions) => createRun
 const PAL_A = "10000000-0000-4000-8000-000000000001";
 const PAL_B = "10000000-0000-4000-8000-000000000002";
 
+const OPENAI_FORBIDDEN_SCHEMA_KEYS = new Set([
+  "$schema", "$id", "$anchor", "$dynamicAnchor", "$dynamicRef", "$comment", "definitions", "nullable",
+  "allOf", "oneOf", "prefixItems", "format", "default", "examples", "example",
+  "deprecated", "readOnly", "writeOnly", "propertyNames", "patternProperties",
+  "not", "if", "then", "else", "dependentRequired", "dependentSchemas", "dependencies",
+  "unevaluatedProperties", "unevaluatedItems", "additionalItems", "contains",
+  "minContains", "maxContains", "uniqueItems", "minProperties", "maxProperties",
+  "contentEncoding", "contentMediaType",
+]);
+const JSON_SCHEMA_TYPES = new Set(["null", "boolean", "object", "array", "number", "string", "integer"]);
+
+function expectPortableOpenAIToolSchemas(tools: Array<Record<string, unknown>>): void {
+  expect(tools.length).toBeGreaterThan(0);
+  for (const tool of tools) {
+    const strict = tool.strict !== false;
+    const parameters = tool.parameters;
+    expect(parameters, `${String(tool.name)} parameters`).toEqual(expect.any(Object));
+    expect((parameters as Record<string, unknown>).type, `${String(tool.name)} root type`).toBe("object");
+    expectPortableOpenAISchema(parameters as Record<string, unknown>, strict, String(tool.name));
+  }
+}
+
+function expectPortableOpenAISchema(
+  schema: Record<string, unknown>,
+  strict: boolean,
+  path: string,
+): void {
+  for (const key of OPENAI_FORBIDDEN_SCHEMA_KEYS) {
+    expect(Object.hasOwn(schema, key), `${path} contains unsupported ${key}`).toBe(false);
+  }
+  expect(
+    typeof schema.type === "string" || Array.isArray(schema.type)
+      || typeof schema.$ref === "string" || Array.isArray(schema.anyOf),
+    `${path} lacks type, $ref, or anyOf`,
+  ).toBe(true);
+  const types = typeof schema.type === "string" ? [schema.type] : (Array.isArray(schema.type) ? schema.type : []);
+  expect(types.every((type) => JSON_SCHEMA_TYPES.has(type)), `${path}.type`).toBe(true);
+
+  if (schema.type === "object" || (Array.isArray(schema.type) && schema.type.includes("object"))) {
+    const properties = schema.properties as Record<string, unknown> | undefined;
+    expect(properties, `${path}.properties`).toEqual(expect.any(Object));
+    if (strict) {
+      expect(schema.additionalProperties, `${path}.additionalProperties`).toBe(false);
+      expect(new Set(schema.required as string[]), `${path}.required`)
+        .toEqual(new Set(Object.keys(properties ?? {})));
+    }
+    for (const [key, child] of Object.entries(properties ?? {})) {
+      expectPortableOpenAISchema(child as Record<string, unknown>, strict, `${path}.properties.${key}`);
+    }
+    if (typeof schema.additionalProperties === "object" && schema.additionalProperties !== null) {
+      expectPortableOpenAISchema(
+        schema.additionalProperties as Record<string, unknown>, false, `${path}.additionalProperties`,
+      );
+    }
+  }
+  if (schema.type === "array" || (Array.isArray(schema.type) && schema.type.includes("array"))) {
+    expect(schema.items, `${path}.items`).toEqual(expect.any(Object));
+    expectPortableOpenAISchema(schema.items as Record<string, unknown>, strict, `${path}.items`);
+  }
+  if (Array.isArray(schema.anyOf)) {
+    expect(schema.anyOf.length, `${path}.anyOf`).toBeGreaterThan(0);
+    schema.anyOf.forEach((branch, index) => {
+      expect(branch, `${path}.anyOf.${index}`).toEqual(expect.any(Object));
+      expectPortableOpenAISchema(branch as Record<string, unknown>, strict, `${path}.anyOf.${index}`);
+    });
+  }
+  if (typeof schema.$defs === "object" && schema.$defs !== null) {
+    for (const [key, definition] of Object.entries(schema.$defs)) {
+      expectPortableOpenAISchema(definition as Record<string, unknown>, strict, `${path}.$defs.${key}`);
+    }
+  }
+}
+
 class FakeProductionPalClient implements PalClientLike {
   readonly order: string[] = [];
   readonly listeners = new Set<(event: BrokerEvent) => void>();
@@ -575,7 +648,7 @@ describe("production runtime", () => {
       memory: { enabled: false }, hallucination: { showWarnings: false }, sleep: false,
     }));
     const directRuntime = await createProductionRuntime({
-      workspace: directWorkspace, home: directWorkspace, environment: {}, approvalPolicy: "deny", output: () => {},
+      workspace: directWorkspace, home: directWorkspace, environment: {}, approvalPolicy: "prompt", output: () => {},
     });
     try {
       await directRuntime.session.submit("answer briefly");
@@ -585,12 +658,21 @@ describe("production runtime", () => {
     expect(requests[0]?.url).toBe("/v1/responses");
     expect(requests[0]?.body.reasoning).toEqual({ effort: "low" });
     const directTools = requests[0]?.body.tools as Array<Record<string, unknown>>;
+    expectPortableOpenAIToolSchemas(directTools);
+    expect(directTools.map((tool) => tool.name)).toEqual(expect.arrayContaining([
+      "AskUserQuestion", "RegisterTool", "WebFetch",
+    ]));
     const registerTool = directTools.find((tool) => tool.name === "RegisterTool");
     const registerParameters = registerTool?.parameters as Record<string, unknown>;
     const registerProperties = registerParameters.properties as Record<string, Record<string, unknown>>;
     expect(registerTool?.strict).toBe(false);
     expect(registerProperties.inputSchema).toMatchObject({ type: "object", additionalProperties: true });
     expect(JSON.stringify(registerTool)).not.toContain("propertyNames");
+    const webFetch = directTools.find((tool) => tool.name === "WebFetch");
+    const webFetchParameters = webFetch?.parameters as Record<string, unknown>;
+    const webFetchProperties = webFetchParameters.properties as Record<string, Record<string, unknown>>;
+    expect(webFetchProperties.url).toMatchObject({ type: "string" });
+    expect(webFetchProperties.url).not.toHaveProperty("format");
 
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-pkce-effort-")); roots.push(workspace);
     await mkdir(join(workspace, ".flavor"), { recursive: true });

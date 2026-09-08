@@ -2397,6 +2397,7 @@ function terminalProgressState(status: Exclude<LoopStatus, "running">): "complet
 function isResumableLongTaskError(code: import("./agent/types.js").AgentErrorCode): boolean {
   return code !== "authentication"
     && code !== "model_not_found"
+    && code !== "invalid_request"
     && code !== "cancelled"
     && code !== "memory_pressure";
 }

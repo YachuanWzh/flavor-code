@@ -382,10 +382,44 @@ describe("OpenAIModelAdapter", () => {
 
     expect(stream).toHaveBeenCalledWith(
       expect.objectContaining({
-        tools: [expect.objectContaining({ name: "weather", strict: false })],
+        tools: [expect.objectContaining({
+          name: "weather",
+          strict: false,
+          parameters: expect.objectContaining({ type: "object" }),
+        })],
       }),
       { signal },
     );
+  });
+
+  it("sanitizes unsupported schemas from non-strict MCP and plugin tools", async () => {
+    const stream = vi.fn((_body?: unknown, _options?: unknown) => events());
+    const client = { responses: { stream } };
+
+    await collect(new OpenAIModelAdapter({ client: asOpenAIClient(client) }).stream({
+      ...request,
+      tools: [{
+        name: "external",
+        description: "External tool",
+        strict: false,
+        inputSchema: {
+          type: "object",
+          properties: {
+            url: { type: "string", format: "uri", default: "https://example.com" },
+            metadata: {},
+          },
+          additionalProperties: {},
+        },
+      }],
+    }));
+
+    const body = stream.mock.calls[0]?.[0] as { tools: Array<{ parameters: Record<string, unknown> }> };
+    const parameters = body.tools[0]!.parameters;
+    const properties = parameters.properties as Record<string, Record<string, unknown>>;
+    expect(properties.url).toEqual({ type: "string" });
+    expect(properties.metadata).toHaveProperty("anyOf");
+    expect(parameters.additionalProperties).toBe(true);
+    expect(JSON.stringify(parameters)).not.toMatch(/"(?:format|default|allOf|oneOf|prefixItems)"/);
   });
 
   it("keeps OpenAI automatic caching input free of provider-neutral metadata", async () => {
@@ -490,7 +524,14 @@ describe("OpenAIModelAdapter", () => {
             type: "function",
             name: "weather",
             description: "Get weather",
-            parameters: request.tools[0]?.inputSchema,
+            parameters: {
+              type: "object",
+              properties: {
+                city: { anyOf: [{ type: "string" }, { type: "null" }] },
+              },
+              required: ["city"],
+              additionalProperties: false,
+            },
             strict: true,
           },
         ],
@@ -1457,9 +1498,13 @@ describe("normalizeProviderError", () => {
     [{ status: 429, message: "slow" }, "rate_limit"],
     [{ status: 502, message: "Upstream provider unreachable" }, "network"],
     [{ status: 404, message: "model not found" }, "model_not_found"],
+    [{ status: 400, message: "The requested model was not found" }, "model_not_found"],
     [{ code: "context_length_exceeded", message: "too long" }, "context_overflow"],
     [{ status: 400, message: "maximum context length exceeded" }, "context_overflow"],
-    [{ status: 400, message: "Invalid schema for function 'RegisterTool': In context=('properties', 'inputSchema', 'additionalProperties'), schema must have a 'type' key." }, "unknown"],
+    [{ status: 400, message: "Invalid schema for function 'RegisterTool': In context=('properties', 'inputSchema', 'additionalProperties'), schema must have a 'type' key." }, "invalid_request"],
+    [{ status: 400, message: "Invalid schema for function 'WebFetch': In context=('properties', 'url'), 'uri' is not a valid format." }, "invalid_request"],
+    [{ status: 400, message: "Unsupported parameter: reasoning.effort" }, "invalid_request"],
+    [{ status: 422, message: "Request validation failed" }, "invalid_request"],
     [{ name: "AbortError", message: "aborted" }, "cancelled"],
     [{ code: "ECONNRESET", message: "socket" }, "network"],
     [{ message: "surprise" }, "unknown"],

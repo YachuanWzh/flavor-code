@@ -89,6 +89,7 @@ export type ProviderErrorCode =
   | "model_not_found"
   | "network"
   | "cancelled"
+  | "invalid_request"
   | "invalid_tool_arguments"
   | "structured_output_error"
   | "unknown";
@@ -171,6 +172,14 @@ export function normalizeProviderError(error: unknown): ProviderError {
     code = "context_overflow";
   } else if (status === 404 || /model.*not.?found|not.?found.*model/.test(searchable)) {
     code = "model_not_found";
+  } else if (
+    status === 400 || status === 422
+    || /invalid schema|schema.*(?:invalid|not (?:a )?valid)/.test(searchable)
+  ) {
+    // Deterministic request/schema failures cannot recover by replaying the
+    // identical request. This also prevents unsupported reasoning parameters
+    // on compatible gateways from entering the generic five-attempt retry.
+    code = "invalid_request";
   } else if (status !== undefined && status >= 500 && status <= 599) {
     code = "network";
   } else if (

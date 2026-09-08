@@ -2,7 +2,19 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.0-beta.9 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.0-beta.10 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.0-beta.10] - 2026-09-08
+
+### 修复
+- 修复 OpenAI 端点拒绝 `WebFetch.url` 的 `format: "uri"`：OpenAI 出站层现在递归清除 `format`、`default`、`propertyNames`、`patternProperties`、条件 schema 等不兼容关键字，并把 `oneOf`、对象 `allOf`、tuple `prefixItems` 与旧版 `definitions` 转换为兼容表示；原始 Zod / JSON Schema 仍负责本地精确校验。
+- schema 兼容处理覆盖所有来源，不再只覆盖内置 Zod 工具：严格工具、`RegisterTool`、持久化动态工具、MCP 工具和插件工具都会在 `/v1/responses` 请求发出前经过最终归一化。非严格自由格式对象保留开放属性，严格对象则保证完整 `required`、`properties` 和 `additionalProperties: false`。
+- 所有 HTTP 400 / 422 确定性请求错误统一归类为不可重试的 `invalid_request`；普通会话、自动续跑、`/loop` 与 `/goal` 不再对同一无效 schema 或不受支持参数重复请求。
+
+### 验证与配置
+- 新增实际生产运行时全工具 schema 守门测试，逐层检查每个 OpenAI 工具的根对象、类型、数组 items、组合分支、严格必填字段、开放属性和禁用关键字；另覆盖交叉对象、联合、tuple、自由格式值、MCP/插件非严格 schema 与 WebFetch URL。
+- 再次验证 `thinkingEffort`：API Key 与 OAuth `llm_config` 两条路径都会把 `minimal` / `low` / `medium` / `high` / `xhigh` 原样发送为 Responses API 的 `reasoning.effort`，未配置时不发送。该配置确实控制请求的思考强度；具体档位是否被接受及如何执行取决于模型和兼容端点。
+- `package.json` 与 `package-lock.json` 的项目版本统一为 `1.4.0-beta.10`。
 
 ## [1.4.0-beta.9] - 2026-09-08
 
@@ -805,6 +817,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.4.0-beta.10 | 2026-09-08 | 系统化修复 OpenAI 工具 schema 兼容：统一清洗内置、动态、MCP 与插件工具，转换不支持的组合结构，新增全工具递归守门；400/422 请求错误不再重试；复核 `thinkingEffort` 出站行为 |
 | 1.4.0-beta.9 | 2026-09-08 | 完整修复 `RegisterTool` 的 OpenAI schema 400（严格对象不再残留 `additionalProperties: {}`，自由格式注册参数改用合法非严格 schema）；schema 路径中的 `In context=` 不再误判为上下文溢出并触发无限续跑；验证 `thinkingEffort` 正确下发到 `reasoning.effort` |
 | 1.4.0-beta.8 | 2026-09-08 | 修复 OpenAI 端点因 `RegisterTool` schema 含 `propertyNames` 被 400 拒绝的问题（严格 schema 转换递归剔除不支持关键字）；修复 OAuth `llm_config` 替换 provider 后丢失 flavor.json 思考控制项的问题，OpenAI `thinkingEffort` 增加 `minimal` / `xhigh` 档 |
 | 1.4.0-beta.7 | 2026-09-08 | CLI 任务进度支持宽终端主任务/子 Agent 左右双轨、单轨满宽与窄终端回落；长正文输出持续显示 `Writing response` 动作；LSP 按目标文件选择最近嵌套项目根并支持 JavaScript/CommonJS |

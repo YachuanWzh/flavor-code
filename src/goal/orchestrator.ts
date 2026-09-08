@@ -411,6 +411,7 @@ function resumeStartRound(state: GoalState): number {
 function isResumableWorkerError(error: AgentError): boolean {
   return error.code !== "authentication"
     && error.code !== "model_not_found"
+    && error.code !== "invalid_request"
     && error.code !== "cancelled"
     && error.code !== "memory_pressure";
 }
@@ -418,6 +419,7 @@ function isResumableWorkerError(error: AgentError): boolean {
 function isResumableStageError(error: AgentError): boolean {
   return error.code !== "authentication"
     && error.code !== "model_not_found"
+    && error.code !== "invalid_request"
     && error.code !== "cancelled"
     && error.code !== "memory_pressure";
 }
