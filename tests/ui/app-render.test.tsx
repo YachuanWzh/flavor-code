@@ -11,7 +11,7 @@ import {
 import type { SlashCompletion } from "../../src/ui/slash-completion.js";
 import type { MentionCompletion } from "../../src/ui/mention-completion.js";
 import { createTranscriptState, transcriptReducer, type TranscriptTurn } from "../../src/ui/transcript.js";
-import { TaskProgressPanel, type TaskBlock } from "../../src/ui/task-progress.js";
+import { limitTaskTextSegments, TaskProgressPanel, type TaskBlock } from "../../src/ui/task-progress.js";
 import { WelcomeCard } from "../../src/ui/welcome.js";
 import { packageVersion } from "../../src/utils/version.js";
 
@@ -848,6 +848,53 @@ describe("TerminalLayout", () => {
 
     expect(lines.some((line) => line.includes("task plan") && line.includes("subagent exploration"))).toBe(true);
     expect(lines.some((line) => line.includes("Implementing feature") && line.includes("subagent: Worker A"))).toBe(true);
+    expect(lines[0]).toContain("┬");
+    expect(lines.slice(1).some((line) => line.includes("│"))).toBe(true);
+
+    const mainRef = React.createRef<import("../../src/claude-ink/index.js").ScrollBoxHandle>();
+    const subagentRef = React.createRef<import("../../src/claude-ink/index.js").ScrollBoxHandle>();
+    const panel = TaskProgressPanel({
+      blocks, interactive: false, maxHeight: 8, columns: 100,
+      mainScrollRef: mainRef, subagentScrollRef: subagentRef,
+    });
+    const splitTrack = React.Children.only(panel?.props.children) as React.ReactElement<{
+      mainScrollRef?: React.Ref<unknown>;
+      subagentScrollRef?: React.Ref<unknown>;
+    }>;
+    expect(splitTrack.props.mainScrollRef).toBe(mainRef);
+    expect(splitTrack.props.subagentScrollRef).toBe(subagentRef);
+    expect(splitTrack.props.mainScrollRef).not.toBe(splitTrack.props.subagentScrollRef);
+  });
+
+  it("does not let wrapped rows in one track change the other track's row heights", () => {
+    const blocks: TaskBlock[] = [
+      { kind: "status", id: "task:long", state: "info", text: "Main · pending",
+        task: { subject: "Main", activeForm: "Long main task description ".repeat(6), role: "main" } },
+      { kind: "status", id: "subagent:a", state: "info", text: "Worker A · pending",
+        task: { subject: "Worker A", activeForm: "Worker A", role: "subagent" } },
+      { kind: "status", id: "subagent:b", state: "info", text: "Worker B · pending",
+        task: { subject: "Worker B", activeForm: "Worker B", role: "subagent" } },
+    ];
+    const lines = stripAnsi(renderToString(<TaskProgressPanel
+      blocks={blocks} interactive={false} maxHeight={8} columns={100}
+    />, { columns: 100 })).split("\n");
+    const workerA = lines.findIndex((line) => line.includes("Worker A"));
+    const workerB = lines.findIndex((line) => line.includes("Worker B"));
+
+    expect(workerA).toBeGreaterThan(0);
+    expect(workerB).toBe(workerA + 1);
+  });
+
+  it("wraps task text to at most three rows and marks overflow with three dots", () => {
+    const exact = limitTaskTextSegments([{ text: "x".repeat(30) }], 10, 3);
+    const overflow = limitTaskTextSegments([{ text: "任务😀".repeat(20) }], 10, 3);
+    const visible = overflow.segments.map((segment) => segment.text).join("");
+
+    expect(exact.truncated).toBe(false);
+    expect(exact.segments.map((segment) => segment.text).join("").split("\n")).toHaveLength(3);
+    expect(overflow.truncated).toBe(true);
+    expect(visible.split("\n")).toHaveLength(3);
+    expect(visible).toMatch(/\.\.\.$/u);
   });
 
   it("uses a full-width single track and stacks both tracks on narrow terminals", () => {
@@ -891,8 +938,8 @@ describe("TerminalLayout", () => {
     expect(output).not.toContain("Worker 8");
     expect(output).not.toContain("... and 2 more");
     const panel = TaskProgressPanel({ blocks: active.blocks as TaskBlock[], interactive: true, maxHeight: 8 });
-    const scroll = React.Children.toArray(panel?.props.children)[1] as React.ReactElement<{ children?: React.ReactNode }>;
-    expect(React.Children.count(scroll.props.children)).toBe(8);
+    const track = React.Children.only(panel?.props.children) as React.ReactElement<{ blocks?: TaskBlock[] }>;
+    expect(track.props.blocks).toHaveLength(8);
   });
 
   it("bounds wrapped task descriptions so the prompt stays inside a short viewport", () => {

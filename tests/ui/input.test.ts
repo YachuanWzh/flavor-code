@@ -135,13 +135,15 @@ it("routes selection keys only while a completion menu is open", () => {
   )).toBeNull();
 });
 
-it("routes wheel input to the hovered task panel and otherwise to the transcript", () => {
+it("routes wheel input to the independently hovered task track and otherwise to the transcript", () => {
   const transcript = { name: "transcript" } as unknown as ScrollBoxHandle;
-  const tasks = { name: "tasks" } as unknown as ScrollBoxHandle;
+  const mainTasks = { name: "main-tasks" } as unknown as ScrollBoxHandle;
+  const subagentTasks = { name: "subagent-tasks" } as unknown as ScrollBoxHandle;
 
-  expect(selectWheelScrollTarget(transcript, tasks, true)).toBe(tasks);
-  expect(selectWheelScrollTarget(transcript, tasks, false)).toBe(transcript);
-  expect(selectWheelScrollTarget(transcript, null, true)).toBe(transcript);
+  expect(selectWheelScrollTarget(transcript, mainTasks, subagentTasks, "main")).toBe(mainTasks);
+  expect(selectWheelScrollTarget(transcript, mainTasks, subagentTasks, "subagent")).toBe(subagentTasks);
+  expect(selectWheelScrollTarget(transcript, mainTasks, subagentTasks, null)).toBe(transcript);
+  expect(selectWheelScrollTarget(transcript, null, subagentTasks, "main")).toBe(transcript);
 });
 
 it("caps task progress at one third of the terminal while reserving prompt rows", () => {

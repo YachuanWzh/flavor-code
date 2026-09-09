@@ -2,7 +2,22 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.0-beta.10 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.0-beta.11 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.0-beta.11] - 2026-09-09
+
+### 修复
+- CLI 宽屏任务工作台的主任务与子 Agent 两栏改用完全独立的滚动容器；滚轮会按鼠标所在栏滚动，左栏不再带动右栏，右栏也不再影响左栏。
+- 移除左右任务按索引配对的共享行布局；任一侧的长描述换行或内容增减都不会再撑高、挤压或重排另一侧内容。
+
+### 改进
+- 双栏表头改为贯穿整行的白色横线，并通过交点与内容区中央竖线连通，使任务面板与子 Agent 面板的边界更清晰。
+- 单条任务文字按所在栏宽度自动换行，最多展示 3 行；超出部分在第三行末尾以 `...` 标记，并按终端字符宽度正确处理中文与 emoji。
+- 窄终端纵向回落时也为主任务与子 Agent 保留各自的滚动视口与滚动状态。
+
+### 测试与维护
+- 新增双栏独立滚动目标、独立引用、连续分割线、跨栏高度隔离及三行文字截断回归测试。
+- `package.json` 与 `package-lock.json` 的项目版本统一为 `1.4.0-beta.11`。
 
 ## [1.4.0-beta.10] - 2026-09-08
 
@@ -817,6 +832,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.4.0-beta.11 | 2026-09-09 | CLI 主任务/子 Agent 双栏改为独立滚动与独立内容高度，新增连通的白色表头横线和中央分割线 |
 | 1.4.0-beta.10 | 2026-09-08 | 系统化修复 OpenAI 工具 schema 兼容：统一清洗内置、动态、MCP 与插件工具，转换不支持的组合结构，新增全工具递归守门；400/422 请求错误不再重试；复核 `thinkingEffort` 出站行为 |
 | 1.4.0-beta.9 | 2026-09-08 | 完整修复 `RegisterTool` 的 OpenAI schema 400（严格对象不再残留 `additionalProperties: {}`，自由格式注册参数改用合法非严格 schema）；schema 路径中的 `In context=` 不再误判为上下文溢出并触发无限续跑；验证 `thinkingEffort` 正确下发到 `reasoning.effort` |
 | 1.4.0-beta.8 | 2026-09-08 | 修复 OpenAI 端点因 `RegisterTool` schema 含 `propertyNames` 被 400 拒绝的问题（严格 schema 转换递归剔除不支持关键字）；修复 OAuth `llm_config` 替换 provider 后丢失 flavor.json 思考控制项的问题，OpenAI `thinkingEffort` 增加 `minimal` / `xhigh` 档 |

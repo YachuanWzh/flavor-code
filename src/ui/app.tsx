@@ -30,7 +30,7 @@ import {
 } from "./transcript.js";
 import { wrapPromptInput } from "./wrap-prompt.js";
 import { charWidth } from "./char-width.js";
-import { TaskProgressPanel, TaskStatusLine } from "./task-progress.js";
+import { TaskProgressPanel, TaskStatusLine, type TaskPanelTrack } from "./task-progress.js";
 import type { FileChangePresentation, FileDiffLine, ToolPresentation } from "../tools/types.js";
 import { fileDiffLineStyle } from "./file-diff-style.js";
 import { COMMAND_DESCRIPTIONS, MVP_COMMANDS } from "./commands.js";
@@ -306,8 +306,9 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
   const [updateTo, setUpdateTo] = useState<string>();
   const [transcript, dispatch] = useReducer(transcriptReducer, undefined, createTranscriptState);
   const scrollRef = useRef<ScrollBoxHandle>(null);
-  const taskScrollRef = useRef<ScrollBoxHandle>(null);
-  const taskPanelHovered = useRef(false);
+  const mainTaskScrollRef = useRef<ScrollBoxHandle>(null);
+  const subagentTaskScrollRef = useRef<ScrollBoxHandle>(null);
+  const hoveredTaskTrack = useRef<TaskPanelTrack | null>(null);
   const runtimeRef = useRef<ProductionRuntime | undefined>(undefined);
   const pendingPromptRef = useRef<SinglePendingPrompt | undefined>(undefined);
   pendingPromptRef.current ??= new SinglePendingPrompt();
@@ -625,7 +626,12 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
   useInput((character, key, event) => {
     const terminalAction = classifyTerminalInput(key);
     if (terminalAction?.type === "scroll") {
-      const scroll = selectWheelScrollTarget(scrollRef.current, taskScrollRef.current, taskPanelHovered.current);
+      const scroll = selectWheelScrollTarget(
+        scrollRef.current,
+        mainTaskScrollRef.current,
+        subagentTaskScrollRef.current,
+        hoveredTaskTrack.current,
+      );
       if (scroll !== null) {
         if (terminalAction.rows < 0) scrollUp(scroll, -terminalAction.rows);
         else scrollDown(scroll, terminalAction.rows);
@@ -898,8 +904,9 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
     {...(ideContext === undefined ? {} : { ideContext })}
     completedSlashTokenLength={completedTokenLength}
     scrollRef={scrollRef}
-    taskScrollRef={taskScrollRef}
-    onTaskPanelHoverChange={(hovered) => { taskPanelHovered.current = hovered; }}
+    mainTaskScrollRef={mainTaskScrollRef}
+    subagentTaskScrollRef={subagentTaskScrollRef}
+    onTaskPanelHoverChange={(track) => { hoveredTaskTrack.current = track; }}
     {...(slashCompletion === null ? {} : { completion: slashCompletion })}
     {...(mentionCompletion === null ? {} : { mentionCompletion, onMentionSelect: selectMention })}
     {...(approval === undefined ? {} : { approval })}
@@ -961,8 +968,9 @@ export interface TerminalLayoutProps {
   questionAnswers?: Readonly<Record<number, string>>;
   customQuestionActive?: boolean;
   scrollRef?: React.Ref<ScrollBoxHandle>;
-  taskScrollRef?: React.Ref<ScrollBoxHandle>;
-  onTaskPanelHoverChange?: (hovered: boolean) => void;
+  mainTaskScrollRef?: React.Ref<ScrollBoxHandle>;
+  subagentTaskScrollRef?: React.Ref<ScrollBoxHandle>;
+  onTaskPanelHoverChange?: (track: TaskPanelTrack | null) => void;
 }
 
 export const CLI_VISIBLE_TURN_LIMIT = 40;
@@ -1055,7 +1063,7 @@ export function TerminalLayout({
   promptCursor, columns, rows = 24, activeSession, pendingPrompt, approval,
   questions, memoryReviews = [], memoryAutoDismissSeconds = 0, questionIndex = 0, questionAnswers = {}, customQuestionActive = false,
   completion, mentionCompletion, onMentionSelect, completedSlashTokenLength: tokenLength = 0, scrollRef,
-  taskScrollRef, onTaskPanelHoverChange, onPromptCursorChange, ideContext,
+  mainTaskScrollRef, subagentTaskScrollRef, onTaskPanelHoverChange, onPromptCursorChange, ideContext,
 }: TerminalLayoutProps): React.JSX.Element {
   const dividerWidth = Math.max(1, columns - 1);
   const showWelcome = completed.length === 0 && active === undefined;
@@ -1115,7 +1123,8 @@ export function TerminalLayout({
       interactive={activeSession}
       maxHeight={taskPanelRows}
       columns={columns}
-      {...(taskScrollRef === undefined ? {} : { scrollRef: taskScrollRef })}
+      {...(mainTaskScrollRef === undefined ? {} : { mainScrollRef: mainTaskScrollRef })}
+      {...(subagentTaskScrollRef === undefined ? {} : { subagentScrollRef: subagentTaskScrollRef })}
       {...(onTaskPanelHoverChange === undefined ? {} : { onHoverChange: onTaskPanelHoverChange })}
     />
     <Box flexDirection="column" flexShrink={0} maxHeight={bottomMaxRows} width="100%" overflowY="hidden">
@@ -1331,10 +1340,13 @@ function jumpScroll(scroll: ScrollBoxHandle, delta: number): void {
 
 export function selectWheelScrollTarget(
   transcript: ScrollBoxHandle | null,
-  tasks: ScrollBoxHandle | null,
-  taskPanelHovered: boolean,
+  mainTasks: ScrollBoxHandle | null,
+  subagentTasks: ScrollBoxHandle | null,
+  hoveredTrack: TaskPanelTrack | null,
 ): ScrollBoxHandle | null {
-  return taskPanelHovered && tasks !== null ? tasks : transcript;
+  if (hoveredTrack === "main" && mainTasks !== null) return mainTasks;
+  if (hoveredTrack === "subagent" && subagentTasks !== null) return subagentTasks;
+  return transcript;
 }
 
 export function taskPanelViewportRows(rows: number, reservedBottomRows: number, hasTasks: boolean): number {
