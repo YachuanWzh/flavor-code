@@ -23,6 +23,8 @@ export interface SessionApprovalRequest {
   agent: "main" | "subagent";
   tool: string;
   reason?: string;
+  input?: unknown;
+  allowAlways?: false;
   paths?: readonly string[];
   command?: string;
   args?: readonly string[];

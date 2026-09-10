@@ -2,7 +2,22 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.0-beta.12 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.1 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.1] - 2026-09-11
+
+### 修复
+- 运行中的回合现在可直接用 `Esc` 中断；若存在 pending prompt，仍优先逐条取回最近一条，队列为空后再按 `Esc` 即停止当前回合。
+- 使用 `↑` 浏览历史前会暂存当前完整草稿，回到历史末端时恢复文字、光标、粘贴块与图片附件，不再覆盖未提交输入。
+
+### 改进
+- CLI prompt 历史按工作区私密持久化到用户状态目录，保留最近 200 条；新增反向匹配，Windows/Linux 使用 `Ctrl+R`，macOS 同时支持 `Command+R` 与传统的 `Ctrl+R`，连续按键可继续查找更早结果。
+- 审批卡片新增 `v` 展开/收起具体工具参数，展示命令、参数、工作目录、目标路径与工具输入；新增 `e` 快捷入口切换到 `acceptEdits`，当前请求仍需用户明确允许或拒绝。
+- 新增完整输出模式：Windows/Linux 使用 `Ctrl+O`，macOS 同时支持 `Command+O` 与 `Ctrl+O`；可展开被压缩的早期回合、命令输出、changeset 文件、后台任务日志/列表和 Web 搜索结果，再按一次恢复紧凑视图。
+
+### 测试与维护
+- 新增 Esc 中断决策、历史草稿恢复与反向搜索、历史持久化、审批参数展示及完整输出模式的回归测试。
+- `package.json` 与 `package-lock.json` 的项目版本统一为正式版 `1.4.1`。
 
 ## [1.4.0-beta.12] - 2026-09-11
 
@@ -850,6 +865,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.4.1 | 2026-09-11 | Esc 中断、历史草稿恢复/持久化与跨平台反向搜索、可审阅审批参数及 acceptEdits 入口、跨平台完整输出模式 |
 | 1.4.0-beta.12 | 2026-09-11 | 彻底隔离任务双栏滚动并优化为更疏朗的非对称布局；pending 支持多条队列与逐条回退；补齐跨平台复制、撤销/重做；思考强度默认 high、支持 ultra 并由子 Agent 继承；初始化 PKCE 地址改用 127.0.0.1 |
 | 1.4.0-beta.11 | 2026-09-09 | CLI 主任务/子 Agent 双栏改为独立滚动与独立内容高度，新增连通的白色表头横线和中央分割线 |
 | 1.4.0-beta.10 | 2026-09-08 | 系统化修复 OpenAI 工具 schema 兼容：统一清洗内置、动态、MCP 与插件工具，转换不支持的组合结构，新增全工具递归守门；400/422 请求错误不再重试；复核 `thinkingEffort` 出站行为 |

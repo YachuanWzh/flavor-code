@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { HookBus } from "../../src/hooks/bus.js";
-import { PermissionEngine } from "../../src/permissions/engine.js";
+import { PermissionEngine, type PermissionRequest } from "../../src/permissions/engine.js";
 import { DEFAULT_TOOL_OUTPUT_LIMITS, ToolRuntime } from "../../src/tools/runtime.js";
 import { withToolPresentation, type ToolDefinition } from "../../src/tools/types.js";
 import { createShellTool } from "../../src/tools/shell.js";
@@ -19,6 +19,16 @@ class RecordingPermissions extends PermissionEngine {
   override decide() {
     this.calls.push("permission");
     return this.result === "allow" ? { decision: "allow" as const } : { decision: this.result, reason: "policy" };
+  }
+}
+
+class CapturingPermissions extends PermissionEngine {
+  readonly requests: PermissionRequest[] = [];
+  constructor(workspace: string, private readonly result: "allow" | "ask" = "allow") { super({ workspace }); }
+
+  override decide(request: PermissionRequest) {
+    this.requests.push(request);
+    return this.result === "ask" ? { decision: "ask" as const, reason: "policy" } : { decision: "allow" as const };
   }
 }
 
@@ -502,6 +512,38 @@ describe("ToolRuntime", () => {
     await expect(subRuntime.execute({ name: "Test", input: { path: join(sub.workspace, "x") } }, { agent: "subagent" }))
       .resolves.toMatchObject({ ok: false, error: { code: "approval_required" } });
     expect(approvals).toBe(1);
+  });
+
+  it("carries review-safe tool input into permission requests and approval prompts", async () => {
+    const f = fixture();
+    const tool: ToolDefinition<{ value: string }> = {
+      name: "Secret",
+      description: "tool whose approval input is redacted",
+      inputSchema: z.object({ value: z.string() }),
+      paths: () => [],
+      permissionInput: (input) => ({ sharedBytes: input.value.length }),
+      execute: async () => "done",
+    };
+    const permissions = new CapturingPermissions(f.workspace, "ask");
+    let approvedInput: unknown;
+    const runtime = new ToolRuntime({
+      tools: [tool], hooks: f.hooks, permissions,
+      approve: async (request) => { approvedInput = request.input; return "once" as const; },
+    });
+    const result = await runtime.execute({ name: "Secret", input: { value: "top-secret-payload" } }, { agent: "main" });
+    expect(result.ok).toBe(true);
+    expect(permissions.requests[0]?.input).toEqual({ sharedBytes: 18 });
+    expect(approvedInput).toEqual({ sharedBytes: 18 });
+    expect(JSON.stringify(permissions.requests)).not.toContain("top-secret-payload");
+  });
+
+  it("falls back to the validated tool input when a tool declares no permissionInput", async () => {
+    const f = fixture();
+    const permissions = new CapturingPermissions(f.workspace, "allow");
+    const runtime = new ToolRuntime({ tools: [f.tool], hooks: f.hooks, permissions });
+    await expect(runtime.execute({ name: "Test", input: { path: "x" } }, { agent: "main" }))
+      .resolves.toMatchObject({ ok: true });
+    expect(permissions.requests[0]).toMatchObject({ agent: "main", tool: "Test", input: { path: "x" } });
   });
 
   it("passes cancellation into approval and completes without executing", async () => {

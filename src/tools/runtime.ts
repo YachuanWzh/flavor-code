@@ -245,9 +245,11 @@ export class ToolRuntime {
         return this.#fail(toolCallId, tool.name, input, context.agent, "hook_denied", pre.reason ?? "Tool use denied by hook");
       }
 
+      const approvalInput = tool.permissionInput?.(input) ?? input;
       const request: PermissionRequest = {
         agent: context.agent,
         tool: tool.name,
+        input: approvalInput,
         ...(tool.permissions?.(input) ?? { paths: tool.paths(input) }),
         ...(tool.readOnly === true ? { readOnly: true } : {}),
       };
@@ -290,7 +292,7 @@ export class ToolRuntime {
           payload: {
             toolCallId,
             tool: tool.name,
-            input: tool.permissionInput?.(input) ?? input,
+            input: approvalInput,
             agent: context.agent,
             reason,
             toolCategory: getToolCategory(tool.name),

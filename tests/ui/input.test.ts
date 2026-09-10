@@ -6,13 +6,17 @@ import {
   editPrompt,
   editPromptWithPastedBlocks,
   isCopyShortcut,
+  isPlatformShortcut,
   navigateHistory,
+  navigatePromptHistory,
   prepareCliSubmission,
   promptHistoryAction,
   selectWheelScrollTarget,
   slashKeyAction,
   taskPanelViewportRows,
   removeLastCliImageOnBackspace,
+  reverseSearchHistory,
+  runningEscapeAction,
 } from "../../src/ui/app.js";
 import type { ScrollBoxHandle } from "../../src/claude-ink/index.js";
 import type { SlashCompletion } from "../../src/ui/slash-completion.js";
@@ -44,6 +48,33 @@ it("uses only up and down navigation to recall submitted queries", () => {
 
   const cleared = navigateHistory({ history, cursor: older.cursor }, "down");
   expect(cleared).toEqual({ cursor: 1, input: "two", promptCursor: 3 });
+});
+
+it("stashes the complete draft while browsing history and restores it at the end", () => {
+  const image = { type: "image" as const, source: { type: "file" as const, path: "draft.png" }, mediaType: "image/png" as const, sha256: "a".repeat(64), bytes: 8 };
+  const current = { text: "unfinished draft", cursor: 4, pastedBlocks: [{ id: 1, text: "draft" }], imageAttachments: [image] };
+  const recalled = navigatePromptHistory({ history: ["one", "two"], cursor: 2, current }, "up");
+  expect(recalled.draft).toMatchObject({ text: "two", cursor: 3, pastedBlocks: [], imageAttachments: [] });
+  expect(recalled.stashed).toEqual(current);
+
+  const restored = navigatePromptHistory({ history: ["one", "two"], cursor: recalled.cursor, current: recalled.draft, stashed: recalled.stashed! }, "down");
+  expect(restored.cursor).toBe(2);
+  expect(restored.draft).toEqual(current);
+  expect(restored.draft).not.toBe(current);
+});
+
+it("searches history backwards and repeats from the previous match", () => {
+  const history = ["fix login", "add tests", "fix logout", "ship release"];
+  const latest = reverseSearchHistory(history, "FIX");
+  expect(latest).toEqual({ cursor: 2, input: "fix logout", promptCursor: 10 });
+  expect(reverseSearchHistory(history, "fix", latest!.cursor)).toEqual({ cursor: 0, input: "fix login", promptCursor: 9 });
+  expect(reverseSearchHistory(history, "missing")).toBeUndefined();
+});
+
+it("uses Escape to recover a queued prompt first and interrupt otherwise", () => {
+  expect(runningEscapeAction(true, 2)).toBe("restore-pending");
+  expect(runningEscapeAction(true, 0)).toBe("interrupt");
+  expect(runningEscapeAction(false, 0)).toBeNull();
 });
 
 it("backspace removes the latest pasted block when the cursor is directly after it", () => {
@@ -81,6 +112,16 @@ it("uses Command+C for copy on macOS and Ctrl+C elsewhere", () => {
   expect(isCopyShortcut("c", { ctrl: true, super: false }, "win32")).toBe(true);
   expect(isCopyShortcut("c", { ctrl: true, super: false }, "darwin")).toBe(false);
   expect(isCopyShortcut("c", { ctrl: false, super: true }, "darwin")).toBe(true);
+});
+
+it("supports platform-native history and output shortcuts on macOS, Windows, and Linux", () => {
+  expect(isPlatformShortcut("o", { ctrl: true, super: false }, "o", "win32")).toBe(true);
+  expect(isPlatformShortcut("r", { ctrl: true, super: false }, "r", "linux")).toBe(true);
+  expect(isPlatformShortcut("O", { ctrl: false, super: true }, "o", "darwin")).toBe(true);
+  expect(isPlatformShortcut("r", { ctrl: false, super: true }, "r", "darwin")).toBe(true);
+  expect(isPlatformShortcut("o", { ctrl: true, super: false }, "o", "darwin")).toBe(true);
+  expect(isPlatformShortcut("x", { ctrl: false, super: true }, "o", "darwin")).toBe(false);
+  expect(isPlatformShortcut("o", { ctrl: false, super: true }, "o", "win32")).toBe(false);
 });
 
 it("maps platform-native undo and redo shortcuts", () => {

@@ -2,7 +2,7 @@ import React from "react";
 import { renderToString } from "ink";
 import { describe, expect, it, vi } from "vitest";
 
-import { appRuntimeOptions, boundedCliTurn, cliTranscriptWindow, ideFooterPresentation, MentionMenu, TerminalLayout, statusLineColor } from "../../src/ui/app.js";
+import { approvalDetailLines, appRuntimeOptions, boundedCliTurn, cliTranscriptWindow, ideFooterPresentation, MentionMenu, TerminalLayout, statusLineColor } from "../../src/ui/app.js";
 import {
   COMPACT_PROGRESS_COMPLETE,
   COMPACT_PROGRESS_REMAINING,
@@ -190,6 +190,64 @@ describe("TerminalLayout", () => {
     expect(output).toContain("1. A");
     expect(output).toContain("2. B");
     expect(output).toContain("3. Custom input");
+  });
+
+  it("shows reviewable approval parameters and a session permission-mode shortcut", () => {
+    const approval = {
+      id: "approval-1",
+      agent: "main" as const,
+      tool: "Shell",
+      reason: "Shell command requires approval",
+      command: "npm",
+      args: ["run", "test:unit"],
+      cwd: "C:\\work\\flavor-code",
+      paths: ["C:\\work\\flavor-code"],
+      input: { command: "npm", args: ["run", "test:unit"], timeoutMs: 30_000 },
+    };
+    expect(approvalDetailLines(approval)).toContain("Command: npm run test:unit");
+
+    const output = stripAnsi(renderToString(<TerminalLayout
+      model="model" workspaceName="flavor-code" completed={[]}
+      input="" promptCursor={0} columns={100} rows={30} activeSession
+      approval={approval} approvalExpanded
+    />, { columns: 100 }));
+
+    expect(output).toContain("Command: npm run test:unit");
+    expect(output).toContain("Working directory: C:\\work\\flavor-code");
+    expect(output).toContain("timeoutMs: 30000");
+    expect(output).toContain("v=details");
+    expect(output).toContain("e=accept edits");
+  });
+
+  it("covers every approval detail branch", () => {
+    expect(approvalDetailLines({ id: "a1", agent: "main", tool: "Test" })).toEqual(["No additional parameters were supplied."]);
+
+    expect(approvalDetailLines({
+      id: "a2", agent: "subagent", tool: "Shell",
+      args: ["-c", "say hi"], cwd: "/tmp/work", paths: ["/tmp/work/a.txt", "/tmp/work/b.txt"],
+    })).toEqual([
+      "Agent: subagent",
+      "Arguments: -c \"say hi\"",
+      "Working directory: /tmp/work",
+      "Path 1: /tmp/work/a.txt",
+      "Path 2: /tmp/work/b.txt",
+    ]);
+
+    expect(approvalDetailLines({ id: "a3", agent: "main", tool: "Edit", paths: ["/tmp/only.txt"] })).toEqual([
+      "Path: /tmp/only.txt",
+    ]);
+
+    expect(approvalDetailLines({ id: "a4", agent: "main", tool: "Write", input: { patch: "line1\r\nline2" } })).toEqual([
+      "Tool input:",
+      "  patch: |",
+      "    line1",
+      "    line2",
+    ]);
+
+    expect(approvalDetailLines({ id: "a5", agent: "main", tool: "PalSend", input: ["top", { n: 1 }] })).toEqual([
+      "Tool input:",
+      "  [\"top\",{\"n\":1}]",
+    ]);
   });
 
   it("renders the pending count and latest CLI query directly above the prompt", () => {
@@ -845,7 +903,7 @@ describe("TerminalLayout", () => {
     expect(output).toContain("Worker B");
     expect(output.match(/⠋/gu)).toHaveLength(1);
     expect(output).toContain("Enter queue");
-    expect(output).toContain("Esc edit latest");
+    expect(output).toContain("Esc stop");
   });
 
   it("places task planning and subagents in a breathable asymmetric split", () => {
@@ -1365,5 +1423,38 @@ describe("TerminalLayout", () => {
     expect(plain).toContain("src/file-8.ts");
     expect(plain).not.toContain("src/file-9.ts");
     expect(plain).toContain("└─ +55 -0 · Showing 8 of 10");
+  });
+
+  it("expands complete command output, changesets, and earlier turns on demand", () => {
+    const outputLines = Array.from({ length: 24 }, (_, index) => `output line ${index + 1}`).join("\n");
+    const files = Array.from({ length: 10 }, (_, index) => ({
+      path: `C:\\work\\flavor-code\\src\\file-${index + 1}.ts`, operation: "update" as const, added: 1, removed: 0,
+    }));
+    const completed = Array.from({ length: 42 }, (_, index): TranscriptTurn => ({
+      id: index + 1,
+      prompt: `prompt ${index + 1}`,
+      assistantText: "",
+      statusLines: [],
+      blocks: index === 0 ? [{
+        kind: "status", id: "command:first", state: "completed", text: "Shell",
+        presentation: { kind: "terminal", title: "command", command: "command", stdout: outputLines, stderr: "", exitCode: 0 },
+      }, {
+        kind: "status", id: "changes:first", state: "completed", text: "Changed 10 files",
+        presentation: { kind: "changeset", files },
+      }] : [],
+    }));
+
+    const plain = stripAnsi(renderToString(<TerminalLayout
+      model="model" workspaceName="flavor-code" completed={completed}
+      input="" promptCursor={0} columns={100} rows={80} activeSession={false} expandedOutput
+    />, { columns: 100 }));
+
+    expect(plain).toContain("prompt 1");
+    expect(plain).toContain("output line 12");
+    expect(plain).toContain("output line 24");
+    expect(plain).toContain("src/file-10.ts");
+    expect(plain).not.toContain("lines hidden");
+    expect(plain).not.toContain("outside the live render window");
+    expect(plain).toContain("Ctrl/Cmd+O collapse output");
   });
 });

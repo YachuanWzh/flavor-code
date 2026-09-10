@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import { homedir } from "node:os";
 import React, { useEffect, useReducer, useRef, useState } from "react";
 import {
   Box,
@@ -18,7 +19,7 @@ import type { ClickEvent } from "../claude-ink/events/click-event.js";
 import { createProductionRuntime, type ProductionRuntime, type ProductionRuntimeOptions } from "../production.js";
 import { isDestructiveTool } from "../permissions/engine.js";
 import { AssistantText } from "./assistant-text.js";
-import type { SessionOutput } from "./session.js";
+import type { SessionApprovalRequest, SessionOutput } from "./session.js";
 import type { Question } from "../tools/ask-user-question.js";
 import type { MemoryReviewItem } from "../memory/review.js";
 import { createSessionInterruptHandler, installSigintHandler } from "./signals.js";
@@ -77,6 +78,7 @@ import {
   shouldReadClipboardImage,
 } from "./clipboard-image.js";
 import type { IdeEditorContext } from "../ide/client.js";
+import { PromptHistoryStore } from "./prompt-history.js";
 
 export const HISTORY_CAP = 200;
 const BUILTIN_SLASH_CANDIDATES = MVP_COMMANDS.map((name) => ({ name, description: COMMAND_DESCRIPTIONS[name] }));
@@ -157,6 +159,16 @@ export function isCopyShortcut(
   return character.toLowerCase() === "c" && (platform === "darwin" ? key.super : key.ctrl);
 }
 
+export function isPlatformShortcut(
+  character: string,
+  key: Pick<Key, "ctrl" | "super">,
+  letter: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (character.toLowerCase() !== letter.toLowerCase()) return false;
+  return platform === "darwin" ? key.super || key.ctrl : key.ctrl;
+}
+
 export function removeLastCliImageOnBackspace(
   input: string,
   cursor: number,
@@ -204,6 +216,11 @@ export type TerminalInputAction =
   | { type: "history"; direction: "up" | "down" };
 
 export type PromptDelivery = "prompt" | "steer" | "followUp";
+
+export function runningEscapeAction(activeSession: boolean, pendingCount: number): "restore-pending" | "interrupt" | null {
+  if (!activeSession) return null;
+  return pendingCount > 0 ? "restore-pending" : "interrupt";
+}
 
 export function promptDelivery(
   activeSession: boolean,
@@ -423,6 +440,8 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
   const [clipboardNotice, setClipboardNotice] = useState<string>();
   const [history, setHistory] = useState<string[]>([]);
   const [historyCursor, setHistoryCursor] = useState(0);
+  const [approvalExpanded, setApprovalExpanded] = useState(false);
+  const [expandedOutput, setExpandedOutput] = useState(false);
   const [promptCursor, setPromptCursor] = useState(0);
   const [slashCandidates, setSlashCandidates] = useState<SlashCandidate[]>(
     () => buildSlashCandidates(BUILTIN_SLASH_CANDIDATES, [], []),
@@ -467,6 +486,12 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
     imageAttachments,
   });
   const promptEditHistory = useRef(new PromptEditHistory());
+  const historyRef = useRef<string[]>([]);
+  const historyCursorRef = useRef(0);
+  const historyDraftRef = useRef<PromptDraftState | undefined>(undefined);
+  const reverseSearchRef = useRef<{ query: string; cursor: number } | undefined>(undefined);
+  const promptHistoryStoreRef = useRef<PromptHistoryStore | undefined>(undefined);
+  promptHistoryStoreRef.current ??= new PromptHistoryStore({ home: home ?? homedir(), workspace, maxEntries: HISTORY_CAP });
   promptDraftRef.current = { text: input, cursor: promptCursor, pastedBlocks, imageAttachments };
 
   const commitPromptDraft = (next: {
@@ -491,6 +516,18 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
   };
 
   useTerminalTitle("Flavor Code");
+
+  useEffect(() => {
+    let disposed = false;
+    void promptHistoryStoreRef.current!.load().then((entries) => {
+      if (disposed) return;
+      historyRef.current = entries;
+      historyCursorRef.current = entries.length;
+      setHistory(entries);
+      setHistoryCursor(entries.length);
+    });
+    return () => { disposed = true; };
+  }, [workspace, home]);
 
   const flushText = (): void => {
     // Thinking must be attached to the model activity before text can remove it.
@@ -701,6 +738,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
     setQuestionAnswers({});
     setCustomQuestionActive(false);
   }, [questions]);
+  useEffect(() => setApprovalExpanded(false), [approval?.id]);
   const derivedSlashCompletion = deriveSlashCompletion(input, promptCursor, slashCandidates, slashSelection);
   const slashCompletion = canShowSlashCompletion(
     transcript.active !== undefined,
@@ -793,13 +831,25 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
       interrupt();
       return;
     }
+    if (isPlatformShortcut(character, key, "o")) {
+      setExpandedOutput((value) => !value);
+      scrollRef.current?.scrollToBottom();
+      return;
+    }
     if (shouldReadClipboardImage(character, key, event.keypress.isPasted)) {
       void pasteClipboardImage();
       return;
     }
     if (active?.approvals.pending !== undefined) {
+      if (character.toLowerCase() === "v") setApprovalExpanded((value) => !value);
       if (character.toLowerCase() === "y") active.approvals.resolve("once");
       if (character.toLowerCase() === "n" || key.escape) active.approvals.resolve("deny");
+      if (character.toLowerCase() === "e") {
+        void Promise.resolve(active.services.setPermissionMode("acceptEdits")).then(() => {
+          setRevision((value) => value + 1);
+          setClipboardNotice("Permission mode changed to acceptEdits; review the current request, then allow or deny it.");
+        }).catch((error) => dispatch({ type: "submit-error", message: safeUiError(error) }));
+      }
       if (character.toLowerCase() === "a") {
         if (isDestructiveTool(active.approvals.pending.tool)) {
           active.approvals.resolve("once");
@@ -871,6 +921,21 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
       setMentionSelection(0); setDismissedMentionInput(undefined);
       return;
     }
+    if (isPlatformShortcut(character, key, "r")) {
+      const draft = promptDraftRef.current;
+      if (historyCursorRef.current === historyRef.current.length) historyDraftRef.current = clonePromptDraft(draft);
+      const previous = reverseSearchRef.current;
+      const query = previous?.query ?? draft.text;
+      const match = reverseSearchHistory(historyRef.current, query, previous?.cursor ?? historyRef.current.length);
+      if (match !== undefined) {
+        reverseSearchRef.current = { query, cursor: match.cursor };
+        historyCursorRef.current = match.cursor;
+        setHistoryCursor(match.cursor);
+        commitPromptDraft({ text: match.input, cursor: match.promptCursor, pastedBlocks: [], imageAttachments: [] }, false);
+        setClipboardNotice(`reverse-i-search: ${query || "(latest)"} · Ctrl/Cmd+R for older match`);
+      } else setClipboardNotice(`No older history match for ${query || "(latest)"}.`);
+      return;
+    }
     const menuAction = slashKeyAction(key, slashCompletion);
     if (menuAction?.type === "select" && slashCompletion !== null) {
       setSlashSelection((value) => moveSlashSelection(value, menuAction.delta, slashCompletion.items.length));
@@ -904,8 +969,10 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
       return;
     }
     if (key.escape && transcript.active !== undefined) {
-      const restored = pendingPromptRef.current!.cancel();
-      if (restored !== undefined) {
+      const escapeAction = runningEscapeAction(true, pendingPromptRef.current!.size);
+      if (escapeAction === "restore-pending") {
+        const restored = pendingPromptRef.current!.cancel();
+        if (restored === undefined) return;
         setPendingPrompts([...pendingPromptRef.current!.values]);
         const restoredDraft = restoreQueuedPrompt(restored);
         promptEditHistory.current.reset();
@@ -919,6 +986,8 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
         setDismissedMentionInput(undefined);
         return;
       }
+      interrupt();
+      return;
     }
     if (key.return) {
       const images = [...imageAttachments];
@@ -940,8 +1009,14 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
         setPendingPrompts([...pendingPromptRef.current!.values]);
       }
       scrollRef.current?.scrollToBottom();
-      setHistory((current) => [...current, submittedText].slice(-HISTORY_CAP));
-      setHistoryCursor(history.length + 1);
+      const nextHistory = [...historyRef.current, submittedText].slice(-HISTORY_CAP);
+      historyRef.current = nextHistory;
+      historyCursorRef.current = nextHistory.length;
+      historyDraftRef.current = undefined;
+      reverseSearchRef.current = undefined;
+      setHistory(nextHistory);
+      setHistoryCursor(nextHistory.length);
+      void promptHistoryStoreRef.current!.append(submittedText).catch(() => undefined);
       setInput("");
       setPastedBlocks([]);
       setImageAttachments([]);
@@ -978,6 +1053,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
       return;
     }
     if (key.backspace) {
+      reverseSearchRef.current = undefined;
       const draft = promptDraftRef.current;
       const imageEdit = removeLastCliImageOnBackspace(draft.text, draft.cursor, draft.imageAttachments);
       if (imageEdit.handled) {
@@ -996,30 +1072,38 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
       setSlashSelection(0); setDismissedSlashInput(undefined);
       setMentionSelection(0); setDismissedMentionInput(undefined);
     } else if (key.delete) {
+      reverseSearchRef.current = undefined;
       const draft = promptDraftRef.current;
       commitPromptDraft({ ...editPrompt({ text: draft.text, cursor: draft.cursor }, { type: "delete" }), pastedBlocks: draft.pastedBlocks });
       setSlashSelection(0); setDismissedSlashInput(undefined);
       setMentionSelection(0); setDismissedMentionInput(undefined);
     }
     else if (key.leftArrow) {
+      reverseSearchRef.current = undefined;
       const draft = promptDraftRef.current;
       commitPromptDraft({ ...editPrompt({ text: draft.text, cursor: draft.cursor }, { type: "left" }), pastedBlocks: draft.pastedBlocks });
     }
     else if (key.rightArrow) {
+      reverseSearchRef.current = undefined;
       const draft = promptDraftRef.current;
       commitPromptDraft({ ...editPrompt({ text: draft.text, cursor: draft.cursor }, { type: "right" }), pastedBlocks: draft.pastedBlocks });
     }
-    else if (terminalAction?.type === "history" && terminalAction.direction === "up" && history.length) {
-      const next = navigateHistory({ history, cursor: historyCursor }, "up");
-      setHistoryCursor(next.cursor); commitPromptDraft({ text: next.input, cursor: next.promptCursor, pastedBlocks: [] });
-      setSlashSelection(0); setDismissedSlashInput(undefined);
-      setMentionSelection(0); setDismissedMentionInput(undefined);
-    } else if (terminalAction?.type === "history" && terminalAction.direction === "down" && history.length) {
-      const next = navigateHistory({ history, cursor: historyCursor }, "down");
-      setHistoryCursor(next.cursor); commitPromptDraft({ text: next.input, cursor: next.promptCursor, pastedBlocks: [] });
+    else if (terminalAction?.type === "history" && historyRef.current.length) {
+      const next = navigatePromptHistory({
+        history: historyRef.current,
+        cursor: historyCursorRef.current,
+        current: promptDraftRef.current,
+        ...(historyDraftRef.current === undefined ? {} : { stashed: historyDraftRef.current }),
+      }, terminalAction.direction);
+      historyCursorRef.current = next.cursor;
+      historyDraftRef.current = next.stashed;
+      reverseSearchRef.current = undefined;
+      setHistoryCursor(next.cursor);
+      commitPromptDraft(next.draft, false);
       setSlashSelection(0); setDismissedSlashInput(undefined);
       setMentionSelection(0); setDismissedMentionInput(undefined);
     } else if (!key.ctrl && !key.meta && !key.super && character) {
+      reverseSearchRef.current = undefined;
       const draft = promptDraftRef.current;
       const nextPastedBlocks = /[\r\n]/u.test(character)
         ? [...draft.pastedBlocks, { id: draft.pastedBlocks.length + 1, text: character }]
@@ -1067,6 +1151,8 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
     {...(slashCompletion === null ? {} : { completion: slashCompletion })}
     {...(mentionCompletion === null ? {} : { mentionCompletion, onMentionSelect: selectMention })}
     {...(approval === undefined ? {} : { approval })}
+    approvalExpanded={approvalExpanded}
+    expandedOutput={expandedOutput}
     {...(questions === undefined ? {} : { questions })}
     memoryReviews={memoryReviews}
     memoryAutoDismissSeconds={memoryAutoDismissSeconds}
@@ -1117,7 +1203,9 @@ export interface TerminalLayoutProps {
   completion?: SlashCompletion;
   mentionCompletion?: MentionCompletion;
   onMentionSelect?: (path: string) => void;
-  approval?: { tool: string; reason?: string };
+  approval?: SessionApprovalRequest;
+  approvalExpanded?: boolean;
+  expandedOutput?: boolean;
   questions?: readonly Question[];
   memoryReviews?: readonly MemoryReviewItem[];
   memoryAutoDismissSeconds?: number;
@@ -1139,6 +1227,47 @@ export interface CliTranscriptWindow {
   turns: TranscriptTurn[];
   hiddenTurns: number;
   hiddenBlocks: number;
+}
+
+export function approvalDetailLines(approval: SessionApprovalRequest): string[] {
+  const lines: string[] = [];
+  if (approval.agent !== "main") lines.push(`Agent: ${approval.agent}`);
+  if (approval.command !== undefined) {
+    const command = [approval.command, ...(approval.args ?? []).map(formatApprovalArgument)].join(" ");
+    lines.push(`Command: ${command}`);
+  } else if (approval.args !== undefined && approval.args.length > 0) {
+    lines.push(`Arguments: ${approval.args.map(formatApprovalArgument).join(" ")}`);
+  }
+  if (approval.cwd !== undefined) lines.push(`Working directory: ${approval.cwd}`);
+  for (const [index, path] of (approval.paths ?? []).entries()) {
+    lines.push(`${approval.paths!.length === 1 ? "Path" : `Path ${index + 1}`}: ${path}`);
+  }
+  const inputLines = approvalInputLines(approval.input);
+  if (inputLines.length > 0) lines.push("Tool input:", ...inputLines.map((line) => `  ${line}`));
+  if (lines.length === 0) lines.push("No additional parameters were supplied.");
+  return lines;
+}
+
+function formatApprovalArgument(value: string): string {
+  return /\s|["']/u.test(value) ? JSON.stringify(value) : value;
+}
+
+function approvalInputLines(input: unknown): string[] {
+  if (input === undefined) return [];
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return [formatApprovalValue(input)];
+  const lines: string[] = [];
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    if (typeof value === "string" && /[\r\n]/u.test(value)) {
+      lines.push(`${key}: |`, ...value.replace(/\r\n/gu, "\n").split("\n").map((line) => `  ${line}`));
+    } else lines.push(`${key}: ${formatApprovalValue(value)}`);
+  }
+  return lines;
+}
+
+function formatApprovalValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  try { return JSON.stringify(value); }
+  catch { return String(value); }
 }
 
 function boundedCliDisplayText(text: string, limit = CLI_VISIBLE_TEXT_CHARS): string {
@@ -1218,6 +1347,7 @@ export function cliTranscriptWindow(
 export function TerminalLayout({
   model, serviceName, workspaceName, updateTo, completed, active, input, pastedBlocks = [], imageAttachments = [], clipboardNotice,
   promptCursor, columns, rows = 24, activeSession, pendingPrompts = [], approval,
+  approvalExpanded = false, expandedOutput = false,
   questions, memoryReviews = [], memoryAutoDismissSeconds = 0, questionIndex = 0, questionAnswers = {}, customQuestionActive = false,
   completion, mentionCompletion, onMentionSelect, completedSlashTokenLength: tokenLength = 0, scrollRef,
   mainTaskScrollRef, subagentTaskScrollRef, onTaskPanelHoverChange, onPromptCursorChange, ideContext,
@@ -1239,14 +1369,17 @@ export function TerminalLayout({
   };
   const activeWithoutTasks = rawActiveWithoutTasks === undefined
     ? undefined
-    : boundedCliTurn(rawActiveWithoutTasks).turn;
-  const completedWindow = cliTranscriptWindow(completed);
+    : expandedOutput ? rawActiveWithoutTasks : boundedCliTurn(rawActiveWithoutTasks).turn;
+  const completedWindow = expandedOutput
+    ? { turns: completed, hiddenTurns: 0, hiddenBlocks: 0 }
+    : cliTranscriptWindow(completed);
 
   const questionRows = questions === undefined ? 0
     : 4 + (questions[questionIndex]?.options.length ?? 0) + questions.length * 2;
   const memoryReviewRows = memoryReviews.length === 0 ? 0 : 5;
 
-  const fixedBottomRows = (approval === undefined ? 0 : 3) + questionRows + memoryReviewRows + menuRows
+  const approvalRows = approval === undefined ? 0 : 3 + (approvalExpanded ? approvalDetailLines(approval).length : 0);
+  const fixedBottomRows = approvalRows + questionRows + memoryReviewRows + menuRows
     + (pendingPrompts.length === 0 ? 0 : 1) + imageAttachments.length
     + (clipboardNotice === undefined ? 0 : 1) + 2;
   const taskPanelRows = taskPanelViewportRows(rows, fixedBottomRows, activeTaskBlocks.length > 0);
@@ -1260,18 +1393,18 @@ export function TerminalLayout({
         : <Text dimColor>{"flavor · "}{model}{" · "}{workspaceName}</Text>}
       <Box height={1} />
       {completedWindow.hiddenTurns > 0 || completedWindow.hiddenBlocks > 0
-        ? <Text dimColor>… {completedWindow.hiddenTurns} earlier turns and {completedWindow.hiddenBlocks} output items are outside the live render window</Text>
+        ? <Text dimColor>… {completedWindow.hiddenTurns} earlier turns and {completedWindow.hiddenBlocks} output items hidden · Ctrl/Cmd+O expand all</Text>
         : null}
       {completedWindow.turns.map((turn, index) => (
         <Box key={turn.id} flexDirection="column">
           {index > 0 ? <TurnSeparator width={columns} /> : null}
-          <TurnView turn={turn} interactive={false} workspaceName={workspaceName} />
+          <TurnView turn={turn} interactive={false} workspaceName={workspaceName} expandedOutput={expandedOutput} />
         </Box>
       ))}
       {activeWithoutTasks === undefined ? null : (
         <Box flexDirection="column">
           {completedWindow.turns.length > 0 ? <TurnSeparator width={columns} /> : null}
-          <TurnView turn={activeWithoutTasks} interactive={activeSession} workspaceName={workspaceName} />
+          <TurnView turn={activeWithoutTasks} interactive={activeSession} workspaceName={workspaceName} expandedOutput={expandedOutput} />
         </Box>
       )}
     </ScrollBox>
@@ -1288,9 +1421,12 @@ export function TerminalLayout({
       {approval === undefined ? null : <Box flexDirection="column" marginBottom={1}>
         <Text color="magenta">┌─ approval · {approval.tool}</Text>
         <Text wrap="truncate-end" color="magentaBright">│ {approval.reason ?? "This action needs permission."}</Text>
-        {isDestructiveTool(approval.tool)
-                ? <Text bold color="magenta">└─ Allow? <Text color="green">y</Text>=once / <Text color="red">n</Text>=deny</Text>
-                : <Text bold color="magenta">└─ Allow? <Text color="green">y</Text>=once / <Text color="yellow">a</Text>=same-type / <Text color="red">n</Text>=deny</Text>
+        {approvalExpanded ? approvalDetailLines(approval).map((line, index) => (
+          <Text key={`${approval.id}:detail:${index}`} color="magentaBright" wrap="truncate-end">│ {line}</Text>
+        )) : null}
+        {isDestructiveTool(approval.tool) || approval.allowAlways === false
+                ? <Text bold color="magenta">└─ <Text color="cyan">v</Text>=details / <Text color="green">y</Text>=once / <Text color="cyan">e</Text>=accept edits / <Text color="red">n</Text>=deny</Text>
+                : <Text bold color="magenta">└─ <Text color="cyan">v</Text>=details / <Text color="green">y</Text>=once / <Text color="yellow">a</Text>=same-type / <Text color="cyan">e</Text>=accept edits / <Text color="red">n</Text>=deny</Text>
               }
       </Box>}
       {!questions || questions.length === 0 ? null : (
@@ -1326,12 +1462,12 @@ export function TerminalLayout({
       />
       <FooterStatus
         hint={activeSession
-          ? "Ctrl+C cancel · Enter queue · Esc edit latest · / menu · Ctrl/Cmd+V image"
+          ? `Esc ${pendingPrompts.length > 0 ? "edit latest" : "stop"} · Ctrl+C cancel · Enter queue · Ctrl/Cmd+R history · Ctrl/Cmd+O ${expandedOutput ? "collapse" : "expand"} output`
           : completion !== undefined
             ? "↑/↓ select · Tab complete · Esc close"
             : mentionCompletion !== undefined
               ? "↑/↓ select · Tab complete · click choose · Esc close"
-              : "Enter send · Ctrl/Cmd+V image · ↑↓ history · Ctrl+C exit"}
+              : `Enter send · ↑↓/Ctrl/Cmd+R history · Ctrl/Cmd+O ${expandedOutput ? "collapse" : "expand"} output · Ctrl+C exit`}
         {...(ideContext === undefined ? {} : { ideContext })}
       />
     </Box>
@@ -1538,16 +1674,18 @@ function TurnView({
   turn,
   interactive,
   workspaceName,
+  expandedOutput,
 }: {
   turn: TranscriptTurn;
   interactive: boolean;
   workspaceName: string;
+  expandedOutput: boolean;
 }): React.JSX.Element {
   if (turn.kind === "compaction") {
     return <Box flexDirection="column" marginBottom={1} borderStyle="round" borderColor="ansi:yellowBright" paddingX={1}>
       <Text color="ansi:yellowBright" bold>{turn.prompt}</Text>
       {turn.blocks.map((block, index) => block.kind === "status"
-        ? <StatusBlockView key={block.id} block={block} interactive={interactive} workspaceName={workspaceName} />
+        ? <StatusBlockView key={block.id} block={block} interactive={interactive} workspaceName={workspaceName} expandedOutput={expandedOutput} />
         : <Box key={`${turn.id}-text-${index}`}><AssistantText text={block.text} /></Box>)}
     </Box>;
   }
@@ -1562,7 +1700,7 @@ function TurnView({
       </Box>
       <Box flexDirection="column" paddingLeft={2} marginTop={1}>
         {turn.blocks.map((block, index) => block.kind === "status"
-          ? <StatusBlockView key={block.id} block={block} interactive={interactive} workspaceName={workspaceName} />
+          ? <StatusBlockView key={block.id} block={block} interactive={interactive} workspaceName={workspaceName} expandedOutput={expandedOutput} />
           : <Box key={`${turn.id}-text-${index}`} marginBottom={1}><AssistantText text={block.text} /></Box>)}
       </Box>
     </Box>;
@@ -1576,7 +1714,7 @@ function TurnView({
     {/* Model output: indented to create clear visual hierarchy */}
     <Box flexDirection="column" paddingLeft={2} marginTop={1}>
       {turn.blocks.map((block, index) => block.kind === "status"
-        ? <StatusBlockView key={block.id} block={block} interactive={interactive} workspaceName={workspaceName} />
+        ? <StatusBlockView key={block.id} block={block} interactive={interactive} workspaceName={workspaceName} expandedOutput={expandedOutput} />
         : <Box key={`${turn.id}-text-${index}`} marginBottom={1}><AssistantText text={block.text} /></Box>)}
     </Box>
   </Box>;
@@ -1750,17 +1888,19 @@ function StatusBlockView({
   block,
   interactive,
   workspaceName,
+  expandedOutput,
 }: {
   block: Extract<TranscriptBlock, { kind: "status" }>;
   interactive: boolean;
   workspaceName: string;
+  expandedOutput: boolean;
 }): React.JSX.Element {
   const visibleBlock = cliToolTitle(block);
   const outcome = cliToolOutcome(block);
   const primary = visibleBlock.activity === "model" || visibleBlock.task !== undefined
     ? <TaskStatusLine block={visibleBlock} interactive={interactive} />
     : visibleBlock.state === "completed" && visibleBlock.presentation !== undefined
-      ? <ToolPresentationView presentation={visibleBlock.presentation} workspaceName={workspaceName} />
+      ? <ToolPresentationView presentation={visibleBlock.presentation} workspaceName={workspaceName} expandedOutput={expandedOutput} />
       : <StatusLine block={visibleBlock} interactive={interactive} />;
   return <Box flexDirection="column">
     {primary}
@@ -1774,15 +1914,17 @@ function StatusBlockView({
 function ToolPresentationView({
   presentation,
   workspaceName,
+  expandedOutput,
 }: {
   presentation: ToolPresentation;
   workspaceName: string;
+  expandedOutput: boolean;
 }): React.JSX.Element {
-  if (presentation.kind === "changeset") return <ChangeSetPresentationView presentation={presentation} workspaceName={workspaceName} />;
+  if (presentation.kind === "changeset") return <ChangeSetPresentationView presentation={presentation} workspaceName={workspaceName} expanded={expandedOutput} />;
   if (presentation.kind === "file-change") return <FileDiffView presentation={presentation} />;
-  if (presentation.kind === "terminal") return <CommandPresentationView presentation={presentation} />;
-  if (presentation.kind === "web") return <WebPresentationView presentation={presentation} />;
-  if (presentation.kind === "job") return <JobPresentationView presentation={presentation} />;
+  if (presentation.kind === "terminal") return <CommandPresentationView presentation={presentation} expanded={expandedOutput} />;
+  if (presentation.kind === "web") return <WebPresentationView presentation={presentation} expanded={expandedOutput} />;
+  if (presentation.kind === "job") return <JobPresentationView presentation={presentation} expanded={expandedOutput} />;
   return <Box paddingLeft={2}><Text>{presentation.title}{presentation.summary ? ` · ${presentation.summary}` : ""}</Text></Box>;
 }
 
@@ -1792,11 +1934,13 @@ const CHANGESET_TONE = "#b99bf8";
 function ChangeSetPresentationView({
   presentation,
   workspaceName,
+  expanded,
 }: {
   presentation: Extract<ToolPresentation, { kind: "changeset" }>;
   workspaceName: string;
+  expanded: boolean;
 }): React.JSX.Element {
-  const visibleFiles = presentation.files.slice(0, CLI_CHANGESET_FILE_LIMIT);
+  const visibleFiles = expanded ? presentation.files : presentation.files.slice(0, CLI_CHANGESET_FILE_LIMIT);
   const added = presentation.files.reduce((total, file) => total + file.added, 0);
   const removed = presentation.files.reduce((total, file) => total + file.removed, 0);
   const fileLabel = presentation.files.length === 1 ? "FILE" : "FILES";
@@ -1845,15 +1989,19 @@ const CLI_COMMAND_OUTPUT_LINE_LIMIT = 16;
 
 function CommandPresentationView({
   presentation,
+  expanded,
 }: {
   presentation: Extract<ToolPresentation, { kind: "terminal" }>;
+  expanded: boolean;
 }): React.JSX.Element {
   const state = presentation.state ?? commandState(presentation.exitCode);
   const tone = jobStateColor(state);
   const label = presentation.variant === "terminal" ? "TERMINAL" : "COMMAND";
   const hasStdout = jobOutputLines(presentation.stdout ?? "").length > 0;
   const hasStderr = jobOutputLines(presentation.stderr ?? "").length > 0;
-  const perStreamLimit = hasStdout && hasStderr ? Math.floor(CLI_COMMAND_OUTPUT_LINE_LIMIT / 2) : CLI_COMMAND_OUTPUT_LINE_LIMIT;
+  const perStreamLimit = expanded
+    ? Number.POSITIVE_INFINITY
+    : hasStdout && hasStderr ? Math.floor(CLI_COMMAND_OUTPUT_LINE_LIMIT / 2) : CLI_COMMAND_OUTPUT_LINE_LIMIT;
   const stdout = boundedCommandLines(presentation.stdout ?? "", perStreamLimit);
   const stderr = boundedCommandLines(presentation.stderr ?? "", perStreamLimit);
   return <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
@@ -1951,8 +2099,10 @@ const CLI_WEB_RESULT_LIMIT = 5;
 
 function WebPresentationView({
   presentation,
+  expanded,
 }: {
   presentation: Extract<ToolPresentation, { kind: "web" }>;
+  expanded: boolean;
 }): React.JSX.Element {
   const items = presentation.items ?? [];
   if (presentation.items === undefined) return <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
@@ -1963,7 +2113,7 @@ function WebPresentationView({
     <Box><Text color="#5f87af">└─ </Text><Text dimColor>Page content added to context</Text></Box>
   </Box>;
 
-  const visibleItems = items.slice(0, CLI_WEB_RESULT_LIMIT);
+  const visibleItems = expanded ? items : items.slice(0, CLI_WEB_RESULT_LIMIT);
   const query = presentation.title.replace(/^Search:\s*/iu, "").trim();
   return <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
     <Box>
@@ -2007,14 +2157,16 @@ const CLI_JOB_LIST_LIMIT = 8;
 
 function JobPresentationView({
   presentation,
+  expanded,
 }: {
   presentation: Extract<ToolPresentation, { kind: "job" }>;
+  expanded: boolean;
 }): React.JSX.Element {
-  if (presentation.action === "list") return <JobListPresentationView presentation={presentation} />;
+  if (presentation.action === "list") return <JobListPresentationView presentation={presentation} expanded={expanded} />;
   const state = presentation.state ?? "running";
   const tone = jobStateColor(state);
   const lines = jobOutputLines(presentation.output ?? "");
-  const visibleLines = lines.slice(-CLI_JOB_LOG_LINE_LIMIT);
+  const visibleLines = expanded ? lines : lines.slice(-CLI_JOB_LOG_LINE_LIMIT);
   const hiddenLines = lines.length - visibleLines.length;
   const showLog = presentation.action === "read" || presentation.action === "kill" || lines.length > 0;
   return <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
@@ -2056,11 +2208,13 @@ function JobPresentationView({
 
 function JobListPresentationView({
   presentation,
+  expanded,
 }: {
   presentation: Extract<ToolPresentation, { kind: "job" }>;
+  expanded: boolean;
 }): React.JSX.Element {
   const jobs = presentation.jobs ?? [];
-  const visibleJobs = jobs.slice(0, CLI_JOB_LIST_LIMIT);
+  const visibleJobs = expanded ? jobs : jobs.slice(0, CLI_JOB_LIST_LIMIT);
   return <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
     <Box><Text color="#d7a657">┌─ </Text><Text color="#d7a657" bold>JOBS · {jobs.length}</Text></Box>
     {jobs.length === 0
@@ -2377,6 +2531,46 @@ export function navigateHistory(state: HistoryNavigationState, direction: "up" |
     : Math.min(state.history.length, state.cursor + 1);
   const input = state.history[cursor] ?? "";
   return { cursor, input, promptCursor: [...input].length };
+}
+
+export interface PromptHistoryNavigationState extends HistoryNavigationState {
+  current: PromptDraftState;
+  stashed?: PromptDraftState;
+}
+
+export interface PromptHistoryNavigationResult {
+  cursor: number;
+  draft: PromptDraftState;
+  stashed?: PromptDraftState;
+}
+
+export function navigatePromptHistory(
+  state: PromptHistoryNavigationState,
+  direction: "up" | "down",
+): PromptHistoryNavigationResult {
+  const stashed = direction === "up" && state.cursor === state.history.length
+    ? clonePromptDraft(state.current)
+    : state.stashed;
+  const next = navigateHistory(state, direction);
+  const draft = next.cursor === state.history.length && stashed !== undefined
+    ? clonePromptDraft(stashed)
+    : { text: next.input, cursor: next.promptCursor, pastedBlocks: [], imageAttachments: [] };
+  return { cursor: next.cursor, draft, ...(stashed === undefined ? {} : { stashed }) };
+}
+
+export function reverseSearchHistory(
+  history: readonly string[],
+  query: string,
+  before = history.length,
+): HistoryNavigationResult | undefined {
+  const needle = query.toLocaleLowerCase();
+  for (let cursor = Math.min(history.length, before) - 1; cursor >= 0; cursor -= 1) {
+    const input = history[cursor]!;
+    if (needle.length === 0 || input.toLocaleLowerCase().includes(needle)) {
+      return { cursor, input, promptCursor: [...input].length };
+    }
+  }
+  return undefined;
 }
 
 function updatePrompt(

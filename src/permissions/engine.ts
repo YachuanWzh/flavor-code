@@ -16,6 +16,8 @@ export type PermissionProfile = "standard" | "d2c";
 export interface PermissionRequest {
   agent: "main" | "subagent";
   tool: string;
+  /** Review-safe tool arguments shown to a human before approval. */
+  input?: unknown;
   paths?: readonly string[];
   command?: string;
   args?: readonly string[];
