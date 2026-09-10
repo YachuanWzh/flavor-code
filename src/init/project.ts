@@ -560,10 +560,11 @@ async function createExampleFlavorConfig(cwd: string): Promise<void> {
       pkce: {
         type: "oauth-callback",
         apiType: "anthropic",
-        authorizationUrl: "http://192.168.1.100:8091/authorize",
-        tokenUrl: "http://192.168.1.100:8091/token",
+        authorizationUrl: "http://127.0.0.1:8091/authorize",
+        tokenUrl: "http://127.0.0.1:8091/token",
         clientId: "flavor-code-cli",
         scope: "models:read models:use",
+        thinkingEffort: "high",
       },
     },
     agents: {

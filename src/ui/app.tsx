@@ -87,6 +87,76 @@ export interface PastedBlock {
   text: string;
 }
 
+export interface PromptDraftState {
+  text: string;
+  cursor: number;
+  pastedBlocks: PastedBlock[];
+  imageAttachments: ModelImageContentBlock[];
+}
+
+function clonePromptDraft(state: PromptDraftState): PromptDraftState {
+  return {
+    ...state,
+    pastedBlocks: [...state.pastedBlocks],
+    imageAttachments: [...state.imageAttachments],
+  };
+}
+
+export class PromptEditHistory {
+  readonly #undo: PromptDraftState[] = [];
+  readonly #redo: PromptDraftState[] = [];
+
+  constructor(readonly limit = 100) {}
+
+  record(previous: PromptDraftState, next: PromptDraftState): void {
+    if (previous.text === next.text
+      && previous.pastedBlocks === next.pastedBlocks
+      && previous.imageAttachments === next.imageAttachments) return;
+    this.#undo.push(clonePromptDraft(previous));
+    if (this.#undo.length > this.limit) this.#undo.shift();
+    this.#redo.length = 0;
+  }
+
+  undo(current: PromptDraftState): PromptDraftState | undefined {
+    const previous = this.#undo.pop();
+    if (previous === undefined) return undefined;
+    this.#redo.push(clonePromptDraft(current));
+    return clonePromptDraft(previous);
+  }
+
+  redo(current: PromptDraftState): PromptDraftState | undefined {
+    const next = this.#redo.pop();
+    if (next === undefined) return undefined;
+    this.#undo.push(clonePromptDraft(current));
+    return clonePromptDraft(next);
+  }
+
+  reset(): void {
+    this.#undo.length = 0;
+    this.#redo.length = 0;
+  }
+}
+
+export type PromptHistoryAction = "undo" | "redo";
+
+export function promptHistoryAction(
+  character: string,
+  key: Pick<Key, "ctrl" | "shift" | "super">,
+  platform: NodeJS.Platform = process.platform,
+): PromptHistoryAction | null {
+  const modifier = platform === "darwin" ? key.super : key.ctrl;
+  if (!modifier || character.toLowerCase() !== "z") return null;
+  return key.shift ? "redo" : "undo";
+}
+
+export function isCopyShortcut(
+  character: string,
+  key: Pick<Key, "ctrl" | "super">,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return character.toLowerCase() === "c" && (platform === "darwin" ? key.super : key.ctrl);
+}
+
 export function removeLastCliImageOnBackspace(
   input: string,
   cursor: number,
@@ -111,17 +181,12 @@ export type CliSubmissionPreparation =
 export function prepareCliSubmission(
   input: string,
   images: readonly ModelImageContentBlock[],
-  activeSession: boolean,
 ): CliSubmissionPreparation {
   const entered = input.trim();
   if (entered.length === 0 && images.length === 0) return { kind: "empty" };
   if (images.length > 0 && entered.startsWith("/")) {
     return { kind: "error", message: "Image attachments cannot be used with slash commands." };
   }
-  if (images.length > 0 && activeSession) {
-    return { kind: "error", message: "Images can only be attached to a new prompt." };
-  }
-
   const text = entered || "Analyze the attached image(s).";
   if (images.length === 0) return { kind: "ready", text, displayText: text };
   const content: ModelContentBlock[] = [{ type: "text", text }, ...images];
@@ -162,54 +227,116 @@ export function resolvePromptDelivery(
   return { delivery: promptDelivery(activeSession, key), prompt: input };
 }
 
-export class SinglePendingPrompt {
-  #value: string | undefined;
+export interface QueuedPrompt {
+  text: string;
+  displayText: string;
+  content?: ModelContentBlock[];
+}
 
-  get value(): string | undefined { return this.#value; }
+function cloneQueuedPrompt(prompt: QueuedPrompt): QueuedPrompt {
+  return {
+    text: prompt.text,
+    displayText: prompt.displayText,
+    ...(prompt.content === undefined ? {} : { content: [...prompt.content] }),
+  };
+}
 
-  queue(prompt: string): boolean {
-    const value = prompt.trim();
-    if (value.length === 0 || this.#value !== undefined) return false;
-    this.#value = value;
+function normalizeQueuedPrompt(prompt: string | QueuedPrompt): QueuedPrompt | undefined {
+  if (typeof prompt === "string") {
+    const text = prompt.trim();
+    return text.length === 0 ? undefined : { text, displayText: text };
+  }
+  const text = prompt.text.trim();
+  if (text.length === 0) return undefined;
+  const displayText = prompt.displayText.trim() || text;
+  return cloneQueuedPrompt({
+    text,
+    displayText,
+    ...(prompt.content === undefined ? {} : { content: prompt.content }),
+  });
+}
+
+export function queuedPromptLabel(prompt: QueuedPrompt): string {
+  const imageCount = prompt.content?.filter((block) => block.type === "image").length ?? 0;
+  const text = prompt.text.replace(/\s+/gu, " ").trim();
+  if (imageCount === 0) return text;
+  return `${text} · ${imageCount} ${imageCount === 1 ? "image" : "images"}`;
+}
+
+export function restoreQueuedPrompt(prompt: QueuedPrompt): PromptDraftState {
+  const imageAttachments = prompt.content?.filter(
+    (block): block is ModelImageContentBlock => block.type === "image",
+  ) ?? [];
+  return {
+    text: prompt.text,
+    cursor: [...prompt.text].length,
+    pastedBlocks: [],
+    imageAttachments,
+  };
+}
+
+export class PendingPromptQueue {
+  readonly #values: QueuedPrompt[] = [];
+
+  get value(): QueuedPrompt | undefined {
+    const value = this.#values.at(-1);
+    return value === undefined ? undefined : cloneQueuedPrompt(value);
+  }
+  get values(): readonly QueuedPrompt[] { return this.#values.map(cloneQueuedPrompt); }
+  get size(): number { return this.#values.length; }
+
+  queue(prompt: string | QueuedPrompt): boolean {
+    const value = normalizeQueuedPrompt(prompt);
+    if (value === undefined) return false;
+    this.#values.push(value);
     return true;
   }
 
-  cancel(): string | undefined {
-    const value = this.#value;
-    this.#value = undefined;
-    return value;
+  cancel(): QueuedPrompt | undefined {
+    const value = this.#values.pop();
+    return value === undefined ? undefined : cloneQueuedPrompt(value);
   }
 
-  take(): string | undefined { return this.cancel(); }
+  take(): QueuedPrompt | undefined {
+    const value = this.#values.shift();
+    return value === undefined ? undefined : cloneQueuedPrompt(value);
+  }
 }
 
 export async function runTerminalSubmissionChain(options: {
   session: { submit(prompt: string): Promise<void> };
   initialPrompt: string;
   initialDisplayPrompt?: string;
-  initialSubmit?(prompt: string): Promise<void>;
-  pending: SinglePendingPrompt;
+  initialContent?: ModelContentBlock[];
+  pending: PendingPromptQueue;
   onStart(prompt: string): void;
   onFinish(): void;
-  onPendingConsumed(): void;
+  onPendingConsumed(remaining: readonly QueuedPrompt[]): void;
   report(message: string): void;
   shouldContinue?(): boolean;
 }): Promise<void> {
-  let prompt: string | undefined = options.initialPrompt;
-  let initial = true;
+  let prompt: QueuedPrompt | undefined = normalizeQueuedPrompt({
+    text: options.initialPrompt,
+    displayText: options.initialDisplayPrompt ?? options.initialPrompt,
+    ...(options.initialContent === undefined ? {} : { content: options.initialContent }),
+  });
   while (prompt !== undefined) {
-    options.onStart(initial ? options.initialDisplayPrompt ?? prompt : prompt);
-    if (initial && options.initialSubmit !== undefined) {
-      try { await options.initialSubmit(prompt); }
-      catch (error) { safeReport(options.report, safeUiError(error)); }
-    } else {
-      await submitSafely(options.session, prompt, options.report);
+    options.onStart(prompt.displayText);
+    if (prompt.content === undefined) await submitSafely(options.session, prompt.text, options.report);
+    else {
+      try {
+        await (options.session.submit as unknown as (input: {
+          text: string;
+          content: ModelContentBlock[];
+        }) => Promise<void>)({ text: prompt.text, content: prompt.content });
+      } catch (error) {
+        safeReport(options.report, safeUiError(error));
+      }
     }
     options.onFinish();
     if (options.shouldContinue?.() === false) return;
     prompt = options.pending.take();
-    if (prompt !== undefined) options.onPendingConsumed();
-    initial = false;
+    if (prompt !== undefined) options.onPendingConsumed(options.pending.values);
   }
 }
 
@@ -247,6 +374,16 @@ export function slashKeyAction(
   completion: SlashCompletion | null,
 ): SlashKeyAction | null {
   return completionKeyAction(key, completion !== null);
+}
+
+/** Active model output is intentionally not a reason to hide slash completion. */
+export function canShowSlashCompletion(
+  _activeSession: boolean,
+  input: string,
+  dismissedInput: string | undefined,
+  blockedByModal: boolean,
+): boolean {
+  return dismissedInput !== input && !blockedByModal;
 }
 
 export interface FlavorAppProps {
@@ -295,7 +432,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
   const [mentionCandidates, setMentionCandidates] = useState<string[]>([]);
   const [mentionSelection, setMentionSelection] = useState(0);
   const [dismissedMentionInput, setDismissedMentionInput] = useState<string>();
-  const [pendingPrompt, setPendingPrompt] = useState<string>();
+  const [pendingPrompts, setPendingPrompts] = useState<QueuedPrompt[]>([]);
   const [revision, setRevision] = useState(0);
   const [ideContext, setIdeContext] = useState<IdeEditorContext>();
   const [questionIndex, setQuestionIndex] = useState(0);
@@ -310,8 +447,8 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
   const subagentTaskScrollRef = useRef<ScrollBoxHandle>(null);
   const hoveredTaskTrack = useRef<TaskPanelTrack | null>(null);
   const runtimeRef = useRef<ProductionRuntime | undefined>(undefined);
-  const pendingPromptRef = useRef<SinglePendingPrompt | undefined>(undefined);
-  pendingPromptRef.current ??= new SinglePendingPrompt();
+  const pendingPromptRef = useRef<PendingPromptQueue | undefined>(undefined);
+  pendingPromptRef.current ??= new PendingPromptQueue();
   const closing = useRef(false);
   const clipboardBusy = useRef(false);
   const textBuf = useRef<{ pending: string; timer: ReturnType<typeof setTimeout> | null }>({ pending: "", timer: null });
@@ -329,6 +466,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
     pastedBlocks,
     imageAttachments,
   });
+  const promptEditHistory = useRef(new PromptEditHistory());
   promptDraftRef.current = { text: input, cursor: promptCursor, pastedBlocks, imageAttachments };
 
   const commitPromptDraft = (next: {
@@ -336,7 +474,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
     cursor: number;
     pastedBlocks?: PastedBlock[];
     imageAttachments?: ModelImageContentBlock[];
-  }): void => {
+  }, recordHistory = true): void => {
     const current = promptDraftRef.current;
     const resolved = {
       text: next.text,
@@ -344,6 +482,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
       pastedBlocks: next.pastedBlocks ?? current.pastedBlocks,
       imageAttachments: next.imageAttachments ?? current.imageAttachments,
     };
+    if (recordHistory) promptEditHistory.current.record(current, resolved);
     promptDraftRef.current = resolved;
     setInput(resolved.text);
     setPromptCursor(resolved.cursor);
@@ -563,9 +702,12 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
     setCustomQuestionActive(false);
   }, [questions]);
   const derivedSlashCompletion = deriveSlashCompletion(input, promptCursor, slashCandidates, slashSelection);
-  const slashCompletion = dismissedSlashInput === input || transcript.active !== undefined || approval !== undefined || questions !== undefined
-    ? null
-    : derivedSlashCompletion;
+  const slashCompletion = canShowSlashCompletion(
+    transcript.active !== undefined,
+    input,
+    dismissedSlashInput,
+    approval !== undefined || questions !== undefined,
+  ) ? derivedSlashCompletion : null;
   const derivedMentionCompletion = slashCompletion === null
     ? deriveMentionCompletion(input, promptCursor, mentionCandidates, mentionSelection)
     : null;
@@ -589,11 +731,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
       setClipboardNotice("Flavor is still starting; try pasting the image again.");
       return;
     }
-    if (transcript.active !== undefined) {
-      setClipboardNotice("Images can only be attached to a new prompt.");
-      return;
-    }
-    if (imageAttachments.length >= DEFAULT_MAX_IMAGES) {
+    if (promptDraftRef.current.imageAttachments.length >= DEFAULT_MAX_IMAGES) {
       setClipboardNotice(`A prompt can contain at most ${DEFAULT_MAX_IMAGES} images.`);
       return;
     }
@@ -608,14 +746,15 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
         return;
       }
       const incomingBytes = Buffer.byteLength(attachment.dataBase64, "base64");
-      const currentBytes = imageAttachments.reduce((sum, image) => sum + image.bytes, 0);
+      const currentDraft = promptDraftRef.current;
+      const currentBytes = currentDraft.imageAttachments.reduce((sum, image) => sum + image.bytes, 0);
       if (currentBytes + incomingBytes > DEFAULT_MAX_TOTAL_IMAGE_BYTES) {
         throw new Error(`Image attachments exceed the maximum total size of ${DEFAULT_MAX_TOTAL_IMAGE_BYTES} bytes`);
       }
       const [stored] = await new SessionAssetStore({ workspace }).store(active.sessionId, [attachment]);
       if (stored === undefined) throw new Error("Clipboard image could not be stored");
-      setImageAttachments((current) => [...current, stored]);
-      setClipboardNotice(`Added [Image #${imageAttachments.length + 1}] ${stored.name ?? basename(stored.source.path)}`);
+      commitPromptDraft({ ...currentDraft, imageAttachments: [...currentDraft.imageAttachments, stored] });
+      setClipboardNotice(`Added [Image #${currentDraft.imageAttachments.length + 1}] ${stored.name ?? basename(stored.source.path)}`);
     } catch (error) {
       setClipboardNotice(safeUiError(error));
     } finally {
@@ -645,9 +784,13 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
     }
 
     const active = runtimeRef.current;
-    if (key.ctrl && character === "c") {
-      if (selection.hasSelection()) { selection.copySelection(); }
-      else { interrupt(); }
+    if (isCopyShortcut(character, key)) {
+      if (selection.hasSelection()) selection.copySelection();
+      else if (process.platform !== "darwin") interrupt();
+      return;
+    }
+    if (key.ctrl && character.toLowerCase() === "c") {
+      interrupt();
       return;
     }
     if (shouldReadClipboardImage(character, key, event.keypress.isPasted)) {
@@ -713,23 +856,20 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
           setCustomQuestionActive(true); setInput(""); setPromptCursor(0);
           return;
         }
-        if (!key.ctrl && !key.meta && character) setCustomQuestionActive(true);
+        if (!key.ctrl && !key.meta && !key.super && character) setCustomQuestionActive(true);
         else return;
       }
     }
-    if (key.escape && transcript.active !== undefined) {
-      const restored = pendingPromptRef.current!.cancel();
-      if (restored !== undefined) {
-        setPendingPrompt(undefined);
-        setInput(restored);
-        setPastedBlocks([]);
-        setPromptCursor([...restored].length);
-        setSlashSelection(0);
-        setDismissedSlashInput(undefined);
-        setMentionSelection(0);
-        setDismissedMentionInput(undefined);
-        return;
-      }
+    const historyAction = promptHistoryAction(character, key);
+    if (historyAction !== null) {
+      const draft = promptDraftRef.current;
+      const restored = historyAction === "undo"
+        ? promptEditHistory.current.undo(draft)
+        : promptEditHistory.current.redo(draft);
+      if (restored !== undefined) commitPromptDraft(restored, false);
+      setSlashSelection(0); setDismissedSlashInput(undefined);
+      setMentionSelection(0); setDismissedMentionInput(undefined);
+      return;
     }
     const menuAction = slashKeyAction(key, slashCompletion);
     if (menuAction?.type === "select" && slashCompletion !== null) {
@@ -740,8 +880,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
       const selected = slashCompletion.items[slashCompletion.selectedIndex];
       if (selected !== undefined) {
         const next = completeSlashSelection(input, promptCursor, selected.name);
-        setInput(next.text);
-        setPromptCursor(next.cursor);
+        commitPromptDraft(next);
         setDismissedSlashInput(next.text);
       }
       return;
@@ -764,9 +903,26 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
       setDismissedMentionInput(input);
       return;
     }
+    if (key.escape && transcript.active !== undefined) {
+      const restored = pendingPromptRef.current!.cancel();
+      if (restored !== undefined) {
+        setPendingPrompts([...pendingPromptRef.current!.values]);
+        const restoredDraft = restoreQueuedPrompt(restored);
+        promptEditHistory.current.reset();
+        commitPromptDraft(restoredDraft, false);
+        setClipboardNotice(restoredDraft.imageAttachments.length === 0
+          ? undefined
+          : `Restored ${restoredDraft.imageAttachments.length} pending ${restoredDraft.imageAttachments.length === 1 ? "image" : "images"}.`);
+        setSlashSelection(0);
+        setDismissedSlashInput(undefined);
+        setMentionSelection(0);
+        setDismissedMentionInput(undefined);
+        return;
+      }
+    }
     if (key.return) {
       const images = [...imageAttachments];
-      const prepared = prepareCliSubmission(input, images, transcript.active !== undefined);
+      const prepared = prepareCliSubmission(input, images);
       if (prepared.kind === "empty" || active === undefined) return;
       if (prepared.kind === "error") {
         setClipboardNotice(prepared.message);
@@ -776,8 +932,12 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
       const { delivery, prompt } = resolvePromptDelivery(transcript.active !== undefined, key, submittedText);
       if (!prompt) return;
       if (delivery === "followUp" && transcript.active !== undefined) {
-        if (!pendingPromptRef.current!.queue(prompt)) return;
-        setPendingPrompt(prompt);
+        if (!pendingPromptRef.current!.queue({
+          text: prompt,
+          displayText: prepared.content === undefined ? prompt : prepared.displayText,
+          ...(prepared.content === undefined ? {} : { content: prepared.content }),
+        })) return;
+        setPendingPrompts([...pendingPromptRef.current!.values]);
       }
       scrollRef.current?.scrollToBottom();
       setHistory((current) => [...current, submittedText].slice(-HISTORY_CAP));
@@ -786,6 +946,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
       setPastedBlocks([]);
       setImageAttachments([]);
       promptDraftRef.current = { text: "", cursor: 0, pastedBlocks: [], imageAttachments: [] };
+      promptEditHistory.current.reset();
       setClipboardNotice(undefined);
       setPromptCursor(0);
       setSlashSelection(0);
@@ -798,15 +959,12 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
           initialPrompt: prompt,
           ...(prepared.content === undefined ? {} : {
             initialDisplayPrompt: prepared.displayText,
-            initialSubmit: (text: string) => active.session.submit({
-              text,
-              content: prepared.content!,
-            }),
+            initialContent: prepared.content,
           }),
           pending: pendingPromptRef.current!,
           onStart: (next) => dispatch({ type: "submit", prompt: next }),
           onFinish: () => dispatch({ type: "finish" }),
-          onPendingConsumed: () => setPendingPrompt(undefined),
+          onPendingConsumed: (remaining) => setPendingPrompts([...remaining]),
           report: (error) => dispatch({ type: "submit-error", message: error }),
           shouldContinue: () => !closing.current,
         });
@@ -823,8 +981,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
       const draft = promptDraftRef.current;
       const imageEdit = removeLastCliImageOnBackspace(draft.text, draft.cursor, draft.imageAttachments);
       if (imageEdit.handled) {
-        setImageAttachments(imageEdit.images);
-        promptDraftRef.current = { ...draft, imageAttachments: imageEdit.images };
+        commitPromptDraft({ ...draft, imageAttachments: imageEdit.images });
         setClipboardNotice(imageEdit.images.length === 0
           ? "Removed image attachment."
           : `Removed image attachment; ${imageEdit.images.length} remaining.`);
@@ -862,7 +1019,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
       setHistoryCursor(next.cursor); commitPromptDraft({ text: next.input, cursor: next.promptCursor, pastedBlocks: [] });
       setSlashSelection(0); setDismissedSlashInput(undefined);
       setMentionSelection(0); setDismissedMentionInput(undefined);
-    } else if (!key.ctrl && !key.meta && character) {
+    } else if (!key.ctrl && !key.meta && !key.super && character) {
       const draft = promptDraftRef.current;
       const nextPastedBlocks = /[\r\n]/u.test(character)
         ? [...draft.pastedBlocks, { id: draft.pastedBlocks.length + 1, text: character }]
@@ -913,7 +1070,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
     {...(questions === undefined ? {} : { questions })}
     memoryReviews={memoryReviews}
     memoryAutoDismissSeconds={memoryAutoDismissSeconds}
-    {...(pendingPrompt === undefined ? {} : { pendingPrompt })}
+    pendingPrompts={pendingPrompts}
     questionIndex={questionIndex}
     questionAnswers={questionAnswers}
     customQuestionActive={customQuestionActive}
@@ -955,7 +1112,7 @@ export interface TerminalLayoutProps {
   rows?: number;
   activeSession: boolean;
   ideContext?: IdeEditorContext;
-  pendingPrompt?: string;
+  pendingPrompts?: readonly QueuedPrompt[];
   completedSlashTokenLength?: number;
   completion?: SlashCompletion;
   mentionCompletion?: MentionCompletion;
@@ -1060,7 +1217,7 @@ export function cliTranscriptWindow(
 
 export function TerminalLayout({
   model, serviceName, workspaceName, updateTo, completed, active, input, pastedBlocks = [], imageAttachments = [], clipboardNotice,
-  promptCursor, columns, rows = 24, activeSession, pendingPrompt, approval,
+  promptCursor, columns, rows = 24, activeSession, pendingPrompts = [], approval,
   questions, memoryReviews = [], memoryAutoDismissSeconds = 0, questionIndex = 0, questionAnswers = {}, customQuestionActive = false,
   completion, mentionCompletion, onMentionSelect, completedSlashTokenLength: tokenLength = 0, scrollRef,
   mainTaskScrollRef, subagentTaskScrollRef, onTaskPanelHoverChange, onPromptCursorChange, ideContext,
@@ -1090,7 +1247,7 @@ export function TerminalLayout({
   const memoryReviewRows = memoryReviews.length === 0 ? 0 : 5;
 
   const fixedBottomRows = (approval === undefined ? 0 : 3) + questionRows + memoryReviewRows + menuRows
-    + (pendingPrompt === undefined ? 0 : 1) + imageAttachments.length
+    + (pendingPrompts.length === 0 ? 0 : 1) + imageAttachments.length
     + (clipboardNotice === undefined ? 0 : 1) + 2;
   const taskPanelRows = taskPanelViewportRows(rows, fixedBottomRows, activeTaskBlocks.length > 0);
   const availableBottomRows = Math.max(1, rows - taskPanelRows - 1);
@@ -1144,8 +1301,10 @@ export function TerminalLayout({
       {mentionCompletion === undefined ? null : (
         <MentionMenu completion={mentionCompletion} {...(onMentionSelect === undefined ? {} : { onSelect: onMentionSelect })} />
       )}
-      {pendingPrompt === undefined ? null : (
-        <Text color="yellow" wrap="truncate-end">Pending · {pendingPrompt} · Esc edit</Text>
+      {pendingPrompts.length === 0 ? null : (
+        <Text color="yellow" wrap="truncate-end">
+          Pending ({pendingPrompts.length}) · {queuedPromptLabel(pendingPrompts.at(-1)!)} · Esc edit latest
+        </Text>
       )}
       <Text dimColor>{"─".repeat(dividerWidth)}</Text>
       {imageAttachments.map((image, index) => (
@@ -1167,7 +1326,7 @@ export function TerminalLayout({
       />
       <FooterStatus
         hint={activeSession
-          ? "Ctrl+C cancel · Enter queue · Esc edit pending · /steer sends now"
+          ? "Ctrl+C cancel · Enter queue · Esc edit latest · / menu · Ctrl/Cmd+V image"
           : completion !== undefined
             ? "↑/↓ select · Tab complete · Esc close"
             : mentionCompletion !== undefined
@@ -1271,6 +1430,9 @@ function SlashMenu({ completion }: { completion: SlashCompletion }): React.JSX.E
       return <Text key={`${candidate.kind}:${candidate.name}`} {...presentation.rowStyle} wrap="truncate-end">
         {presentation.marker}
         <HighlightedName name={candidate.name} query={completion.query} matchStyle={presentation.matchStyle} />
+        {candidate.kind === "skill" || candidate.kind === "plugin"
+          ? <Text color={candidate.kind === "skill" ? "magentaBright" : "cyanBright"}>{`  ${candidate.kind}`}</Text>
+          : null}
         {candidate.description === undefined ? null : <Text dimColor>{`  ${candidate.description}`}</Text>}
       </Text>;
     })}

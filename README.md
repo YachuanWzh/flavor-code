@@ -111,7 +111,8 @@ Example project configuration:
       "type": "openai",
       "apiKey": "${OPENAI_API_KEY}",
       "defaultModel": "gpt-5",
-      "cheapModel": "gpt-5-mini"
+      "cheapModel": "gpt-5-mini",
+      "thinkingEffort": "high"
     }
   },
   "agents": {
@@ -136,6 +137,8 @@ Commonly supported provider types:
 - `openai`: OpenAI's official API
 - `anthropic`: Anthropic's official API
 - `openai-compatible`: Services compatible with the OpenAI protocol
+
+OpenAI-protocol providers default `thinkingEffort` to `high`. Supported values are `minimal`, `low`, `medium`, `high`, `xhigh`, and `ultra`; the same provider setting applies to both main-agent and subagent requests.
 
 </details>
 

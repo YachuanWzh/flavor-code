@@ -1,11 +1,14 @@
 import { expect, it } from "vitest";
 import { EventEmitter } from "node:events";
 import {
+  canShowSlashCompletion,
   completionKeyAction,
   editPrompt,
   editPromptWithPastedBlocks,
+  isCopyShortcut,
   navigateHistory,
   prepareCliSubmission,
+  promptHistoryAction,
   selectWheelScrollTarget,
   slashKeyAction,
   taskPanelViewportRows,
@@ -74,23 +77,39 @@ it("backspace on an empty CLI prompt removes the most recent image", () => {
   });
 });
 
-it("prepares image-only CLI prompts and rejects unsupported image deliveries", () => {
+it("uses Command+C for copy on macOS and Ctrl+C elsewhere", () => {
+  expect(isCopyShortcut("c", { ctrl: true, super: false }, "win32")).toBe(true);
+  expect(isCopyShortcut("c", { ctrl: true, super: false }, "darwin")).toBe(false);
+  expect(isCopyShortcut("c", { ctrl: false, super: true }, "darwin")).toBe(true);
+});
+
+it("maps platform-native undo and redo shortcuts", () => {
+  expect(promptHistoryAction("z", { ctrl: true, shift: false, super: false }, "win32")).toBe("undo");
+  expect(promptHistoryAction("Z", { ctrl: true, shift: true, super: false }, "linux")).toBe("redo");
+  expect(promptHistoryAction("z", { ctrl: false, shift: false, super: true }, "darwin")).toBe("undo");
+  expect(promptHistoryAction("z", { ctrl: false, shift: true, super: true }, "darwin")).toBe("redo");
+  expect(promptHistoryAction("z", { ctrl: true, shift: false, super: false }, "darwin")).toBeNull();
+});
+
+it("prepares images for new and pending prompts while rejecting slash-command attachments", () => {
   const images = [
     { type: "image" as const, source: { type: "file" as const, path: "one.png" }, mediaType: "image/png" as const, sha256: "a".repeat(64), bytes: 8 },
   ];
-  expect(prepareCliSubmission("", images, false)).toEqual({
+  expect(prepareCliSubmission("", images)).toEqual({
     kind: "ready",
     text: "Analyze the attached image(s).",
     displayText: "Analyze the attached image(s).\n[Image #1]",
     content: [{ type: "text", text: "Analyze the attached image(s)." }, images[0]],
   });
-  expect(prepareCliSubmission("/help", images, false)).toEqual({
+  expect(prepareCliSubmission("/help", images)).toEqual({
     kind: "error",
     message: "Image attachments cannot be used with slash commands.",
   });
-  expect(prepareCliSubmission("inspect", images, true)).toEqual({
-    kind: "error",
-    message: "Images can only be attached to a new prompt.",
+  expect(prepareCliSubmission("inspect", images)).toEqual({
+    kind: "ready",
+    text: "inspect",
+    displayText: "inspect\n[Image #1]",
+    content: [{ type: "text", text: "inspect" }, images[0]],
   });
 });
 
@@ -110,6 +129,13 @@ it("routes selection keys to an open slash menu only", () => {
   expect(slashKeyAction({ upArrow: false, downArrow: false, tab: false, escape: true }, completion))
     .toEqual({ type: "dismiss" });
   expect(slashKeyAction({ upArrow: true, downArrow: false, tab: false, escape: false }, null)).toBeNull();
+});
+
+it("keeps slash completion available while an agent is producing output", () => {
+  expect(canShowSlashCompletion(true, "/", undefined, false)).toBe(true);
+  expect(canShowSlashCompletion(false, "/", undefined, false)).toBe(true);
+  expect(canShowSlashCompletion(true, "/", "/", false)).toBe(false);
+  expect(canShowSlashCompletion(true, "/", undefined, true)).toBe(false);
 });
 
 it("routes selection keys only while a completion menu is open", () => {

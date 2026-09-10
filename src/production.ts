@@ -38,7 +38,7 @@ import type { LoopStatus, LoopVerificationEvidence } from "./loop/types.js";
 import { inferVerificationPlan, runVerificationPlan } from "./loop/verifier.js";
 import { AnthropicModelAdapter, CLAUDE_CLIENT_HEADERS } from "./models/anthropic.js";
 import { isDashScopeBaseURL, resolveCacheProfile, type CacheStrategy } from "./models/cache-profile.js";
-import { OpenAIModelAdapter } from "./models/openai.js";
+import { OpenAIModelAdapter, type ThinkingEffort } from "./models/openai.js";
 import { ModelRegistry, parseModelId } from "./models/registry.js";
 import { modelContentText, type ModelAdapter, type ModelMessage } from "./models/types.js";
 import { connectMcpServers, McpManager, type McpClientFactory, type McpServerSummary } from "./mcp/client.js";
@@ -2917,8 +2917,8 @@ interface ProviderRuntimeConfig {
   maxOutputTokens?: number | undefined;
   /** Extended-thinking budget (Anthropic protocol); unset uses the adapter default. */
   thinkingBudget?: number | undefined;
-  /** Reasoning effort (OpenAI Responses protocol); unset means never requested. */
-  thinkingEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | undefined;
+  /** Reasoning effort (OpenAI Responses protocol); unset defaults to high in the adapter. */
+  thinkingEffort?: ThinkingEffort | undefined;
   models?: string[] | undefined;
   claudeClient?: boolean | undefined;
   // OAuth PKCE fields — all have built-in defaults when type=oauth-callback

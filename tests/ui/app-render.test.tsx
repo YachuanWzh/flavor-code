@@ -192,7 +192,7 @@ describe("TerminalLayout", () => {
     expect(output).toContain("3. Custom input");
   });
 
-  it("renders the single pending CLI query directly above the prompt", () => {
+  it("renders the pending count and latest CLI query directly above the prompt", () => {
     const output = stripAnsi(renderToString(<TerminalLayout
       model="model"
       workspaceName="workspace"
@@ -202,12 +202,23 @@ describe("TerminalLayout", () => {
       columns={90}
       rows={24}
       activeSession
-      pendingPrompt="then add tests"
+      pendingPrompts={[
+        { text: "then add tests", displayText: "then add tests" },
+        {
+          text: "then add docs",
+          displayText: "then add docs\n[Image #1]",
+          content: [
+            { type: "text", text: "then add docs" },
+            { type: "image", source: { type: "file", path: "one.png" }, mediaType: "image/png",
+              sha256: "a".repeat(64), bytes: 8 },
+          ],
+        },
+      ]}
     />, { columns: 90 }));
 
-    expect(output).toContain("Pending · then add tests");
-    expect(output.indexOf("Pending · then add tests")).toBeLessThan(output.lastIndexOf("❯"));
-    expect(output).toContain("Esc edit");
+    expect(output).toContain("Pending (2) · then add docs · 1 image");
+    expect(output.indexOf("Pending (2)")).toBeLessThan(output.lastIndexOf("❯"));
+    expect(output).toContain("Esc edit latest");
   });
 
   it("renders model-generated memory as pending confirmation instead of stored state", () => {
@@ -614,9 +625,10 @@ describe("TerminalLayout", () => {
       query: "de",
       items: [
         { name: "deploy", kind: "command" },
+        { name: "doctor", kind: "plugin", description: "Run plugin diagnostics" },
         { name: "frontend-design", kind: "skill", description: "Design interfaces", source: "project" },
       ],
-      selectedIndex: 1,
+      selectedIndex: 2,
       windowStart: 0,
     };
     const raw = renderToString(<TerminalLayout
@@ -633,9 +645,10 @@ describe("TerminalLayout", () => {
 
     expect(output).toContain("deploy");
     expect(output).toContain("frontend-design");
+    expect(output).toContain("doctor  plugin");
     expect(output).toContain("Design interfaces");
     expect(output).not.toContain("  command");
-    expect(output).not.toContain("  skill");
+    expect(output).toContain("  skill");
     expect(output).toContain("↑/↓ select · Tab complete · Esc close");
     expect(output).toContain("› frontend-design");
   });
@@ -827,14 +840,15 @@ describe("TerminalLayout", () => {
     />, { columns: 80 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
 
     expect(output).toContain("Implementing feature");
-    expect(output).toContain("subagent: Worker A");
+    expect(output).toContain("Worker A");
+    expect(output).not.toContain("subagent: Worker A");
     expect(output).toContain("Worker B");
     expect(output.match(/⠋/gu)).toHaveLength(1);
     expect(output).toContain("Enter queue");
-    expect(output).toContain("Esc edit pending");
+    expect(output).toContain("Esc edit latest");
   });
 
-  it("places task planning and subagent exploration side by side in a wide terminal", () => {
+  it("places task planning and subagents in a breathable asymmetric split", () => {
     const blocks: TaskBlock[] = [
       { kind: "status", id: "task:main", state: "running", text: "Main",
         task: { subject: "Main", activeForm: "Implementing feature", role: "main" } },
@@ -846,9 +860,11 @@ describe("TerminalLayout", () => {
     />, { columns: 100 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
     const lines = output.split("\n");
 
-    expect(lines.some((line) => line.includes("task plan") && line.includes("subagent exploration"))).toBe(true);
-    expect(lines.some((line) => line.includes("Implementing feature") && line.includes("subagent: Worker A"))).toBe(true);
+    expect(lines.some((line) => line.includes("task plan (1)") && line.includes("subagents (1)"))).toBe(true);
+    expect(lines.some((line) => line.includes("Implementing feature") && line.includes("Worker A"))).toBe(true);
+    expect(output).not.toContain("subagent:");
     expect(lines[0]).toContain("┬");
+    expect(lines[0]!.indexOf("┬")).toBeLessThan(50);
     expect(lines.slice(1).some((line) => line.includes("│"))).toBe(true);
 
     const mainRef = React.createRef<import("../../src/claude-ink/index.js").ScrollBoxHandle>();
@@ -885,6 +901,25 @@ describe("TerminalLayout", () => {
     expect(workerB).toBe(workerA + 1);
   });
 
+  it("limits split-track items to two rows and stacks before the columns become cramped", () => {
+    const blocks: TaskBlock[] = [
+      { kind: "status", id: "task:long", state: "info", text: `${"x".repeat(180)} · pending`,
+        task: { subject: "Long", activeForm: "Long", role: "main" } },
+      { kind: "status", id: "subagent:a", state: "info", text: "Worker A · pending",
+        task: { subject: "Worker A", activeForm: "Worker A", role: "subagent" } },
+    ];
+    const splitLines = stripAnsi(renderToString(<TaskProgressPanel
+      blocks={blocks} interactive={false} maxHeight={8} columns={100}
+    />, { columns: 100 })).split("\n");
+    const compactLines = stripAnsi(renderToString(<TaskProgressPanel
+      blocks={blocks} interactive={false} maxHeight={8} columns={95}
+    />, { columns: 95 })).split("\n");
+
+    expect(splitLines.filter((line) => line.includes("x"))).toHaveLength(2);
+    expect(splitLines.join("\n")).toContain("...");
+    expect(compactLines.some((line) => line.includes("task plan") && line.includes("subagents"))).toBe(false);
+  });
+
   it("wraps task text to at most three rows and marks overflow with three dots", () => {
     const exact = limitTaskTextSegments([{ text: "x".repeat(30) }], 10, 3);
     const overflow = limitTaskTextSegments([{ text: "任务😀".repeat(20) }], 10, 3);
@@ -909,9 +944,10 @@ describe("TerminalLayout", () => {
       blocks={[main, worker]} interactive={false} maxHeight={8} columns={60}
     />, { columns: 60 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
 
-    expect(single).toContain("subagent exploration");
+    expect(single).toContain("subagents (1)");
     expect(single).not.toContain("task plan");
-    expect(narrow.indexOf("task plan")).toBeLessThan(narrow.indexOf("subagent exploration"));
+    expect(single).not.toContain("subagent:");
+    expect(narrow.indexOf("task plan")).toBeLessThan(narrow.indexOf("subagents"));
     expect(narrow.split("\n").some((line) => line.includes("Main") && line.includes("Worker A"))).toBe(false);
   });
 

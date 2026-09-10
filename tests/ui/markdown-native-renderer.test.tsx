@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import ScrollBox, { type ScrollBoxHandle } from "../../src/claude-ink/components/ScrollBox.js";
 import { AlternateScreen } from "../../src/claude-ink/components/AlternateScreen.js";
+import Box from "../../src/claude-ink/components/Box.js";
+import Text from "../../src/claude-ink/components/Text.js";
 import type { Frame } from "../../src/claude-ink/frame.js";
 import Ink from "../../src/claude-ink/ink.js";
 import { cellAt, CellWidth, type Screen } from "../../src/claude-ink/screen.js";
@@ -142,5 +144,33 @@ describe("native CLI markdown renderer", () => {
       const visible = screenLines(ink.frontFrame.screen).join("\n");
       expect(visible).toContain(`value-${index}`);
     }
+  });
+
+  it("keeps side-by-side ScrollBoxes visually independent when only one scrolls", () => {
+    const { ink } = createInk(40, 8);
+    const leftRef = createRef<ScrollBoxHandle>();
+    const rightRef = createRef<ScrollBoxHandle>();
+    ink.render(
+      <Box flexDirection="row" width={40} height={4}>
+        <ScrollBox ref={leftRef} width={20} height={4} flexDirection="column">
+          {Array.from({ length: 8 }, (_, index) => <Text key={index}>left-{index}</Text>)}
+        </ScrollBox>
+        <ScrollBox ref={rightRef} width={20} height={4} flexDirection="column">
+          {Array.from({ length: 8 }, (_, index) => <Text key={index}>right-{index}</Text>)}
+        </ScrollBox>
+      </Box>,
+    );
+
+    leftRef.current?.scrollTo(2);
+    ink.onRender();
+    let lines = screenLines(ink.frontFrame.screen);
+    expect(lines[0]).toContain("left-2");
+    expect(lines[0]).toContain("right-0");
+
+    rightRef.current?.scrollTo(3);
+    ink.onRender();
+    lines = screenLines(ink.frontFrame.screen);
+    expect(lines[0]).toContain("left-2");
+    expect(lines[0]).toContain("right-3");
   });
 });

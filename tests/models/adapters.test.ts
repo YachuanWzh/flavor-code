@@ -219,13 +219,13 @@ describe("OpenAIModelAdapter", () => {
     );
   });
 
-  it("omits the reasoning parameter when no effort is configured", async () => {
+  it("defaults reasoning effort to high when no effort is configured", async () => {
     const stream = vi.fn((_body?: unknown, _options?: unknown) => events());
     const client = { responses: { stream } };
 
     await collect(new OpenAIModelAdapter({ client: asOpenAIClient(client) }).stream(request));
 
-    expect(stream.mock.calls[0]?.[0]).not.toHaveProperty("reasoning");
+    expect(stream.mock.calls[0]?.[0]).toMatchObject({ reasoning: { effort: "high" } });
   });
 
   it("forwards the xhigh effort tier to the Responses API", async () => {
@@ -238,6 +238,20 @@ describe("OpenAIModelAdapter", () => {
 
     expect(stream).toHaveBeenCalledWith(
       expect.objectContaining({ reasoning: { effort: "xhigh" } }),
+      { signal },
+    );
+  });
+
+  it("forwards the ultra effort tier to the Responses API", async () => {
+    const stream = vi.fn((_body?: unknown, _options?: unknown) => events());
+    const client = { responses: { stream } };
+
+    await collect(
+      new OpenAIModelAdapter({ client: asOpenAIClient(client), thinkingEffort: "ultra" }).stream(request),
+    );
+
+    expect(stream).toHaveBeenCalledWith(
+      expect.objectContaining({ reasoning: { effort: "ultra" } }),
       { signal },
     );
   });
@@ -519,6 +533,7 @@ describe("OpenAIModelAdapter", () => {
           { type: "function_call", call_id: "call_7", name: "weather", arguments: "{\"city\":\"Paris\"}" },
           { type: "function_call_output", call_id: "call_7", output: "sunny" },
         ],
+        reasoning: { effort: "high" },
         tools: [
           {
             type: "function",

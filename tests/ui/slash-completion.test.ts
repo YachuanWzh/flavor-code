@@ -43,6 +43,14 @@ describe("slash completion", () => {
     expect(deriveSlashCompletion("/deploy now", 11, candidates, 0)).toBeNull();
   });
 
+  it("promotes plugin and skill entries when the slash query is broad", () => {
+    const items = deriveSlashCompletion("/", 1, candidates, 0)?.items ?? [];
+    expect(items.slice(0, 2).map(({ name, kind }) => [name, kind])).toEqual([
+      ["doctor", "plugin"],
+      ["frontend-design", "skill"],
+    ]);
+  });
+
   it("wraps selection and completes the leading token", () => {
     expect(moveSlashSelection(0, -1, 3)).toBe(2);
     expect(moveSlashSelection(2, 1, 3)).toBe(0);

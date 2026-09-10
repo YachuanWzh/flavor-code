@@ -20,6 +20,13 @@ export interface SlashCandidatePresentation {
   matchStyle: { color: "ansi:cyan"; bold: true };
 }
 
+const CANDIDATE_KIND_PRIORITY: Record<SlashCandidateKind, number> = {
+  skill: 0,
+  plugin: 0,
+  command: 1,
+  tool: 2,
+};
+
 export function slashCandidatePresentation(selected: boolean): SlashCandidatePresentation {
   return {
     marker: selected ? "› " : "  ",
@@ -106,6 +113,8 @@ export function deriveSlashCompletion(
       const leftPrefix = left.name.toLowerCase().startsWith(normalized);
       const rightPrefix = right.name.toLowerCase().startsWith(normalized);
       if (leftPrefix !== rightPrefix) return leftPrefix ? -1 : 1;
+      const kindPriority = CANDIDATE_KIND_PRIORITY[left.kind] - CANDIDATE_KIND_PRIORITY[right.kind];
+      if (kindPriority !== 0) return kindPriority;
       return left.name.localeCompare(right.name);
     });
   if (items.length === 0) return null;

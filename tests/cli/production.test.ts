@@ -706,6 +706,110 @@ describe("production runtime", () => {
       await new Promise<void>((resolve) => gateway.close(() => resolve()));
     }
   }, 15_000);
+
+  it("applies the configured thinkingEffort to subagent model requests", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const outputs: unknown[] = [];
+    let mainCalls = 0;
+    const sendEvents = (response: import("node:http").ServerResponse, events: readonly Record<string, unknown>[]): void => {
+      response.writeHead(200, { "Content-Type": "text/event-stream" });
+      response.end(events.map((event) => `event: ${String(event.type)}\ndata: ${JSON.stringify(event)}\n\n`).join(""));
+    };
+    const gateway = createServer((request, response) => {
+      let raw = "";
+      request.on("data", (chunk: Buffer) => { raw += chunk.toString("utf8"); });
+      request.on("end", () => {
+        const body = JSON.parse(raw) as Record<string, unknown>;
+        requests.push(body);
+        if (body.model === "gpt-main" && mainCalls++ === 0) {
+          const graph = { nodes: [{
+            id: "child", description: "Inspect without changing files", dependencies: [],
+            expectedOutputs: ["summary"], verification: ["report result"], files: [],
+          }] };
+          const startedCall = {
+            type: "function_call", id: "fc_task", call_id: "call_task", name: "Task",
+            status: "in_progress", arguments: "",
+          };
+          const completedCall = { ...startedCall, status: "completed", arguments: JSON.stringify(graph) };
+          sendEvents(response, [
+            { type: "response.created", response: {
+              id: "resp_task", object: "response", created_at: 1, status: "in_progress",
+              model: "gpt-main", output: [],
+            } },
+            { type: "response.output_item.added", output_index: 0,
+              item: startedCall },
+            { type: "response.function_call_arguments.done", item_id: "item_task", output_index: 0,
+              name: "Task", arguments: JSON.stringify(graph) },
+            { type: "response.output_item.done", output_index: 0, item: completedCall },
+            { type: "response.completed", response: {
+              id: "resp_task", object: "response", created_at: 1, status: "completed",
+              model: "gpt-main", output: [completedCall], usage: { input_tokens: 1, output_tokens: 1 },
+            } },
+          ]);
+          return;
+        }
+        const text = body.model === "gpt-child" ? JSON.stringify({
+          taskId: "child", status: "completed", summary: "checked", filesChanged: [], commandsRun: [],
+          verification: [], artifacts: [], risks: [], suggestedNextSteps: [],
+        }) : "done";
+        const model = String(body.model);
+        const messageItem = {
+          type: "message", id: `msg_${requests.length}`, role: "assistant", status: "completed",
+          content: [{ type: "output_text", text, annotations: [] }],
+        };
+        sendEvents(response, [
+          { type: "response.created", response: {
+            id: `resp_${requests.length}`, object: "response", created_at: 1,
+            status: "in_progress", model, output: [],
+          } },
+          { type: "response.output_item.added", output_index: 0, item: {
+            type: "message", id: messageItem.id, role: "assistant", status: "in_progress", content: [],
+          } },
+          { type: "response.content_part.added", item_id: messageItem.id, output_index: 0,
+            content_index: 0, part: { type: "output_text", text: "", annotations: [] } },
+          { type: "response.output_text.delta", item_id: messageItem.id, output_index: 0, content_index: 0, delta: text },
+          { type: "response.output_item.done", output_index: 0, item: messageItem },
+          { type: "response.completed", response: {
+            id: `resp_${requests.length}`, object: "response", created_at: 1,
+            status: "completed", model, output: [messageItem], usage: { input_tokens: 1, output_tokens: 1 },
+          } },
+        ]);
+      });
+    });
+    await new Promise<void>((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+    const port = (gateway.address() as AddressInfo).port;
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-subagent-effort-")); roots.push(workspace);
+    await mkdir(join(workspace, ".flavor"), { recursive: true });
+    await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
+      providers: { openai: {
+        type: "openai", baseURL: `http://127.0.0.1:${port}/v1`, apiKey: "test-key", thinkingEffort: "low",
+      } },
+      agents: { main: { model: "openai:gpt-main" }, subagent: { model: "openai:gpt-child" } },
+      memory: { enabled: false }, hallucination: { showWarnings: false }, sleep: false,
+    }));
+
+    const runtime = await createProductionRuntime({
+      workspace, home: workspace, environment: {}, approvalPolicy: "deny", output: (event) => outputs.push(event),
+    });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        runtime.session.submit("delegate this check"),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(new Error(
+            `models=${requests.map((body) => body.model).join(",")} outputs=${JSON.stringify(outputs)}`,
+          )), 5_000);
+        }),
+      ]);
+      const childRequest = requests.find((body) => body.model === "gpt-child");
+      expect(childRequest?.reasoning).toEqual({ effort: "low" });
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+      await runtime.dispose();
+      gateway.closeAllConnections();
+      await new Promise<void>((resolve) => gateway.close(() => resolve()));
+    }
+  }, 15_000);
   it("creates deterministic prompt environment data with explicit fallbacks", () => {
     expect(createPromptEnvironment({
       now: new Date(2026, 6, 13, 23, 59),

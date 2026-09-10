@@ -2,7 +2,25 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.0-beta.11 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.0-beta.12 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.0-beta.12] - 2026-09-11
+
+### 修复
+- 修复宽屏任务面板仍会出现左右联动滚动的问题：终端整行硬件滚动优化现在只允许全宽容器使用，半宽任务栏改为局部重绘；滚动左栏不会再移动或置顶右栏，反之亦然，两栏高度和换行也继续保持相互隔离。
+- macOS CLI 的复制快捷键改为 `Command+C`；`Ctrl+C` 保留中断语义。Windows/Linux 继续用 `Ctrl+C`，有选区时复制、无选区时中断。
+- 输入框新增编辑撤销与重做：Windows/Linux 使用 `Ctrl+Z` / `Ctrl+Shift+Z`，macOS 使用 `Command+Z` / `Command+Shift+Z`。
+
+### 改进
+- 运行中的 pending 输入从单条槽位升级为完整的多模态队列，可连续暂存文字、图片、Skill 与插件命令并按先进先出顺序提交；运行中也可继续粘贴图片，每按一次 `Esc` 会取回最近加入的一条及其附件，方便逐条修改。
+- Agent 输出期间继续开放 `/` 补全；Skill 与插件候选会优先显示并带有类型标记，选中后随普通输入进入 pending 队列，不会打断当前任务。
+- 双栏任务面板改为更舒展的 44:56 非对称布局，为说明通常更长的子 Agent 栏预留更多宽度；中央栏沟增加留白，标题缩短并显示条目数，栏内移除重复的 `subagent:` 前缀。分栏条目最多显示两行，较窄终端会更早回落为上下布局。
+- OpenAI provider 的 `thinkingEffort` 现在明确同时作用于主 Agent 与子 Agent；未配置时统一默认为 `high`，并新增最高档 `ultra`，完整支持 `minimal` / `low` / `medium` / `high` / `xhigh` / `ultra`。
+- `flavor init` 生成的 PKCE 默认授权与令牌地址改为 `127.0.0.1:8091`，端口保持不变，并在初始 provider 配置中写入 `thinkingEffort: "high"`。
+
+### 测试与维护
+- 新增半宽相邻滚动容器、pending 多条及多模态队列与附件回退、运行中斜杠补全、Skill/插件排序、跨平台复制/撤销/重做、默认及 `ultra` 思考强度、子 Agent 实际请求继承配置、初始化默认值等回归测试。
+- `package.json` 与 `package-lock.json` 的项目版本统一为 `1.4.0-beta.12`。
 
 ## [1.4.0-beta.11] - 2026-09-09
 
@@ -832,6 +850,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.4.0-beta.12 | 2026-09-11 | 彻底隔离任务双栏滚动并优化为更疏朗的非对称布局；pending 支持多条队列与逐条回退；补齐跨平台复制、撤销/重做；思考强度默认 high、支持 ultra 并由子 Agent 继承；初始化 PKCE 地址改用 127.0.0.1 |
 | 1.4.0-beta.11 | 2026-09-09 | CLI 主任务/子 Agent 双栏改为独立滚动与独立内容高度，新增连通的白色表头横线和中央分割线 |
 | 1.4.0-beta.10 | 2026-09-08 | 系统化修复 OpenAI 工具 schema 兼容：统一清洗内置、动态、MCP 与插件工具，转换不支持的组合结构，新增全工具递归守门；400/422 请求错误不再重试；复核 `thinkingEffort` 出站行为 |
 | 1.4.0-beta.9 | 2026-09-08 | 完整修复 `RegisterTool` 的 OpenAI schema 400（严格对象不再残留 `additionalProperties: {}`，自由格式注册参数改用合法非严格 schema）；schema 路径中的 `In context=` 不再误判为上下文溢出并触发无限续跑；验证 `thinkingEffort` 正确下发到 `reasoning.effort` |

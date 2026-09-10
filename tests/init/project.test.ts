@@ -214,6 +214,14 @@ it("generates deterministic concise instructions without reading environment fil
   expect(first.path).toBe(join(cwd, "FLAVOR.md"));
   expect(firstContent).toBe(secondContent);
   expect(second.content).toBe(secondContent);
+  const flavorConfig = JSON.parse(await readFile(join(cwd, ".flavor", "flavor.json"), "utf8")) as {
+    providers: { pkce: { authorizationUrl: string; tokenUrl: string; thinkingEffort: string } };
+  };
+  expect(flavorConfig.providers.pkce).toMatchObject({
+    authorizationUrl: "http://127.0.0.1:8091/authorize",
+    tokenUrl: "http://127.0.0.1:8091/token",
+    thinkingEffort: "high",
+  });
   expect(secondContent).toContain("<!-- flavor-code:start -->");
   expect(secondContent).toContain("## Overview");
   expect(secondContent).toContain("## Layout");

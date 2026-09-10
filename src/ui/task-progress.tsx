@@ -14,10 +14,11 @@ export interface TaskStatusLineProps {
   interactive: boolean;
   textWidth?: number;
   maxTextLines?: number;
+  showRoleBadge?: boolean;
 }
 
 export function TaskStatusLine({
-  block, interactive, textWidth, maxTextLines,
+  block, interactive, textWidth, maxTextLines, showRoleBadge = true,
 }: TaskStatusLineProps): React.JSX.Element {
   const running = block.state === "running";
   const { stdout } = useStdout();
@@ -35,6 +36,8 @@ export function TaskStatusLine({
 
   // Split the text so the status word can be colorized independently.
   const { metaColor, metaLabel, statusLabel, statusColor, text } = presentation;
+  const badge = showRoleBadge ? presentation.badge : undefined;
+  const badgeColor = presentation.badgeColor;
   let before = text;
   let after = "";
   if (statusLabel !== undefined) {
@@ -67,7 +70,7 @@ export function TaskStatusLine({
 
   const textSegments: TaskTextSegment[] = [
     { text: `${presentation.glyph} `, color: presentation.color },
-    ...(presentation.badge ? [{ text: `${presentation.badge} `, color: presentation.badgeColor }] : []),
+    ...(badge ? [{ text: `${badge} `, color: badgeColor }] : []),
     { text: before, color: presentation.color },
     ...(statusLabel === undefined ? [] : [
       { text: " · ", color: presentation.color },
@@ -86,7 +89,7 @@ export function TaskStatusLine({
         <Text {...(presentation.color === undefined ? {} : { color: presentation.color })}>
           {presentation.glyph}{" "}
         </Text>
-        {presentation.badge ? <Text color={presentation.badgeColor}>{presentation.badge} </Text> : null}
+        {badge ? <Text color={badgeColor}>{badge} </Text> : null}
         <Text {...(presentation.color === undefined ? {} : { color: presentation.color })}>
           {before}
         </Text>
@@ -209,7 +212,9 @@ export interface TaskProgressPanelProps {
 
 export type TaskPanelTrack = "main" | "subagent";
 
-const SPLIT_TRACK_MIN_COLUMNS = 72;
+const SPLIT_TRACK_MIN_COLUMNS = 96;
+const SPLIT_TRACK_GUTTER_COLUMNS = 3;
+const SPLIT_TRACK_MAIN_RATIO = 0.44;
 
 export function TaskProgressPanel({
   blocks,
@@ -284,23 +289,28 @@ function SplitTracks({
   mainScrollRef, subagentScrollRef, hoverProps,
 }: TrackProps): React.JSX.Element {
   const contentHeight = Math.max(0, height - 1);
-  const leftWidth = Math.max(1, Math.floor((columns - 1) / 2));
-  const rightWidth = Math.max(1, columns - leftWidth - 1);
+  const availableWidth = columns - SPLIT_TRACK_GUTTER_COLUMNS;
+  const leftWidth = Math.max(1, Math.floor(availableWidth * SPLIT_TRACK_MAIN_RATIO));
+  const rightWidth = Math.max(1, availableWidth - leftWidth);
   return <>
     <Box flexDirection="row" width="100%">
-      <Box width={leftWidth} {...hoverProps("main")}><TrackHeader role="main" width={leftWidth} /></Box>
-      <Text color="ansi:white">┬</Text>
-      <Box width={rightWidth} {...hoverProps("subagent")}><TrackHeader role="subagent" width={rightWidth} /></Box>
+      <Box width={leftWidth} {...hoverProps("main")}>
+        <TrackHeader role="main" count={taskBlocks.length} width={leftWidth} />
+      </Box>
+      <Text color="ansi:white">─┬─</Text>
+      <Box width={rightWidth} {...hoverProps("subagent")}>
+        <TrackHeader role="subagent" count={subagentBlocks.length} width={rightWidth} />
+      </Box>
     </Box>
     {contentHeight <= 0 ? null : <Box flexDirection="row" width="100%" height={contentHeight}>
       <Box width={leftWidth} minWidth={0} flexDirection="column" {...hoverProps("main")}>
         <TrackScrollBox ref={mainScrollRef} blocks={taskBlocks} interactive={interactive}
-          height={contentHeight} width={leftWidth} />
+          height={contentHeight} width={leftWidth} maxTextLines={2} />
       </Box>
       <TrackDivider height={contentHeight} />
       <Box width={rightWidth} minWidth={0} flexDirection="column" {...hoverProps("subagent")}>
         <TrackScrollBox ref={subagentScrollRef} blocks={subagentBlocks} interactive={interactive}
-          height={contentHeight} width={rightWidth} />
+          height={contentHeight} width={rightWidth} maxTextLines={2} />
       </Box>
     </Box>}
   </>;
@@ -311,7 +321,7 @@ function StackedTracks({
   mainScrollRef, subagentScrollRef, hoverProps,
 }: TrackProps): React.JSX.Element {
   if (height <= 1) {
-    return <Box {...hoverProps("main")}><TrackHeader role="main" width={columns} /></Box>;
+    return <Box {...hoverProps("main")}><TrackHeader role="main" count={taskBlocks.length} width={columns} /></Box>;
   }
   const mainHeight = Math.ceil(height / 2);
   const subagentHeight = Math.floor(height / 2);
@@ -336,20 +346,21 @@ function SingleTrack({
 }): React.JSX.Element {
   const contentHeight = Math.max(0, height - 1);
   return <Box flexDirection="column" width="100%" height={height} {...hoverProps(role)}>
-    <TrackHeader role={role} width={width} />
+    <TrackHeader role={role} count={blocks.length} width={width} />
     {contentHeight <= 0 ? null : <TrackScrollBox ref={scrollRef} blocks={blocks}
-      interactive={interactive} height={contentHeight} width={width} />}
+      interactive={interactive} height={contentHeight} width={width} maxTextLines={3} />}
   </Box>;
 }
 
 function TrackScrollBox({
-  ref, blocks, interactive, height, width,
+  ref, blocks, interactive, height, width, maxTextLines,
 }: {
   ref?: Ref<ScrollBoxHandle> | undefined;
   blocks: TaskBlock[];
   interactive: boolean;
   height: number;
   width: number;
+  maxTextLines: number;
 }): React.JSX.Element {
   return <ScrollBox
     {...(ref === undefined ? {} : { ref })}
@@ -358,21 +369,26 @@ function TrackScrollBox({
     width="100%"
     height={height}
     maxHeight={height}
+    paddingX={1}
   >
     {blocks.map((block) => <TaskStatusLine key={block.id} block={block} interactive={interactive}
-      textWidth={width} maxTextLines={3} />)}
+      textWidth={Math.max(3, width - 2)} maxTextLines={maxTextLines} showRoleBadge={false} />)}
   </ScrollBox>;
 }
 
-function TrackHeader({ role, width }: { role: TaskPanelTrack; width: number }): React.JSX.Element {
-  const label = role === "main" ? "task plan" : "subagent exploration";
+function TrackHeader({ role, count, width }: {
+  role: TaskPanelTrack;
+  count: number;
+  width: number;
+}): React.JSX.Element {
+  const label = role === "main" ? `task plan (${count})` : `subagents (${count})`;
   const prefix = `── ${label} `;
   const line = prefix.length >= width ? prefix.slice(0, Math.max(0, width)) : `${prefix}${"─".repeat(width - prefix.length)}`;
   return <Text color="ansi:white" wrap="truncate-end">{line}</Text>;
 }
 
 function TrackDivider({ height }: { height: number }): React.JSX.Element {
-  return <Box flexDirection="column" width={1} flexShrink={0}>
-    {Array.from({ length: height }, (_, index) => <Text key={index} color="ansi:white">│</Text>)}
+  return <Box flexDirection="column" width={SPLIT_TRACK_GUTTER_COLUMNS} flexShrink={0}>
+    {Array.from({ length: height }, (_, index) => <Text key={index} color="ansi:white"> │ </Text>)}
   </Box>;
 }

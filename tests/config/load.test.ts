@@ -135,13 +135,13 @@ it.each([
 });
 
 it("validates provider thinkingEffort tiers", () => {
-  for (const thinkingEffort of ["minimal", "low", "medium", "high", "xhigh"] as const) {
+  for (const thinkingEffort of ["minimal", "low", "medium", "high", "xhigh", "ultra"] as const) {
     expect(FlavorConfigSchema.parse({
       providers: { openai: { type: "openai", thinkingEffort } },
     }).providers.openai?.thinkingEffort).toBe(thinkingEffort);
   }
   expect(() => FlavorConfigSchema.parse({
-    providers: { openai: { type: "openai", thinkingEffort: "ultra" } },
+    providers: { openai: { type: "openai", thinkingEffort: "extreme" } },
   })).toThrow();
 });
 

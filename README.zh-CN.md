@@ -111,7 +111,8 @@ $env:OPENAI_API_KEY = "sk-..."
       "type": "openai",
       "apiKey": "${OPENAI_API_KEY}",
       "defaultModel": "gpt-5",
-      "cheapModel": "gpt-5-mini"
+      "cheapModel": "gpt-5-mini",
+      "thinkingEffort": "high"
     }
   },
   "agents": {
@@ -136,6 +137,8 @@ $env:OPENAI_API_KEY = "sk-..."
 - `openai`：OpenAI 官方接口
 - `anthropic`：Anthropic 官方接口
 - `openai-compatible`：兼容 OpenAI 协议的服务
+
+OpenAI 协议 Provider 的 `thinkingEffort` 默认值为 `high`，支持 `minimal`、`low`、`medium`、`high`、`xhigh` 和 `ultra`；主 Agent 与子 Agent 请求共用各自 Provider 的该项配置。
 
 </details>
 

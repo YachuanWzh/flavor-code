@@ -20,6 +20,8 @@ import { createScopedAbortSignal } from "../utils/abort.js";
 import { openAIJsonSchemaObject } from "./structured.js";
 
 type OpenAIStreamRequest = Parameters<OpenAI["responses"]["stream"]>[0];
+export const DEFAULT_THINKING_EFFORT = "high" as const;
+export type ThinkingEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "ultra";
 
 export interface OpenAIClient {
   responses: {
@@ -36,8 +38,8 @@ export interface OpenAIModelAdapterOptions {
   client?: OpenAIClient;
   /** Mirror the per-request cache breakdown to stderr. Defaults to FLAVOR_DEBUG_USAGE=1. File logging to usage.jsonl is always on. */
   debugUsage?: boolean;
-  /** Reasoning effort requested from the Responses API; omitted when undefined. */
-  thinkingEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
+  /** Reasoning effort requested from the Responses API; defaults to high. */
+  thinkingEffort?: ThinkingEffort;
 }
 
 async function toInput(message: ModelMessage): Promise<ResponseInputItem[]> {
@@ -130,7 +132,7 @@ function formatOpenAIUsage(model: string, breakdown: OpenAIUsageBreakdown): stri
 export class OpenAIModelAdapter implements ModelAdapter {
   private readonly client: OpenAIClient;
   private readonly debugUsage: boolean;
-  private readonly thinkingEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | undefined;
+  private readonly thinkingEffort: ThinkingEffort;
 
   constructor(options: OpenAIModelAdapterOptions) {
     this.client =
@@ -140,7 +142,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
         ...(options.baseURL === undefined ? {} : { baseURL: options.baseURL }),
       });
     this.debugUsage = options.debugUsage ?? isEnvTruthy(process.env.FLAVOR_DEBUG_USAGE);
-    this.thinkingEffort = options.thinkingEffort;
+    this.thinkingEffort = options.thinkingEffort ?? DEFAULT_THINKING_EFFORT;
   }
 
   #logUsage(model: string, breakdown: OpenAIUsageBreakdown | undefined): void {
@@ -163,10 +165,10 @@ export class OpenAIModelAdapter implements ModelAdapter {
     const pendingCalls = new Map<number, { name: string; arguments: string }>();
     const emittedCalls = new Set<number>();
     try {
-      const body: OpenAIStreamRequest = {
+      const body = {
         model: request.model,
         input: (await Promise.all(request.messages.map(toInput))).flat(),
-        ...(this.thinkingEffort === undefined ? {} : { reasoning: { effort: this.thinkingEffort } }),
+        reasoning: { effort: this.thinkingEffort },
         tools: [...request.tools].sort((a, b) => a.name.localeCompare(b.name)).map((tool) => ({
           type: "function",
           name: tool.name,
@@ -174,7 +176,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
           parameters: openAIJsonSchemaObject(tool.inputSchema, tool.strict ?? true),
           strict: tool.strict ?? true,
         })),
-      };
+      } as unknown as OpenAIStreamRequest;
       const stream = this.client.responses.stream(body, { signal: requestAbort.signal });
 
       for await (const event of stream) {

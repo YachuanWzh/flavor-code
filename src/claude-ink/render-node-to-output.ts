@@ -875,6 +875,8 @@ function renderNodeToOutput(
               cached?.y === y &&
               cached.height === height &&
               innerHeight > 0 &&
+              Math.floor(x) === 0 &&
+              Math.floor(width) >= output.width &&
               Math.abs(delta) < innerHeight
             ) {
               hint = { top: regionTop, bottom: regionBottom, delta }
