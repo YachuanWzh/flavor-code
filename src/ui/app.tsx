@@ -1,6 +1,6 @@
 import { basename } from "node:path";
 import { homedir } from "node:os";
-import React, { useEffect, useReducer, useRef, useState } from "react";
+import React, { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   Box,
   ScrollBox,
@@ -43,6 +43,7 @@ import {
   deriveSlashCompletion,
   matchRanges,
   moveSlashSelection,
+  normalizeSlashDescription,
   slashCandidatePresentation,
   type SlashCandidate,
   type SlashCompletion,
@@ -752,7 +753,10 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
     setCustomQuestionActive(false);
   }, [questions]);
   useEffect(() => setApprovalExpanded(false), [approval?.id]);
-  const derivedSlashCompletion = deriveSlashCompletion(input, promptCursor, slashCandidates, slashSelection);
+  const derivedSlashCompletion = useMemo(
+    () => deriveSlashCompletion(input, promptCursor, slashCandidates, slashSelection),
+    [input, promptCursor, slashCandidates, slashSelection],
+  );
   const slashCompletion = canShowSlashCompletion(
     transcript.active !== undefined,
     input,
@@ -1244,6 +1248,37 @@ export const CLI_VISIBLE_BLOCK_LIMIT = 320;
 export const CLI_VISIBLE_BLOCKS_PER_TURN = 80;
 export const CLI_VISIBLE_TEXT_CHARS = 32_000;
 
+export interface CliRenderBudget {
+  turns: number;
+  blocks: number;
+  blocksPerTurn: number;
+  textChars: number;
+}
+
+/** Keep Yoga/Markdown work proportional to the visible terminal, not session age. */
+export function cliRenderBudget(rows: number, columns: number, expanded: boolean): CliRenderBudget {
+  const viewportRows = Math.max(8, Math.floor(rows));
+  const viewportColumns = Math.max(20, Math.floor(columns));
+  const screenMultiplier = expanded ? 12 : 4;
+  const blockMultiplier = expanded ? 6 : 2;
+  const maxTextChars = expanded ? CLI_VISIBLE_TEXT_CHARS : 12_000;
+  const blocks = Math.min(
+    CLI_VISIBLE_BLOCK_LIMIT,
+    Math.max(24, viewportRows * blockMultiplier),
+  );
+  return {
+    turns: expanded
+      ? CLI_VISIBLE_TURN_LIMIT
+      : Math.min(16, Math.max(4, Math.ceil(viewportRows / 4))),
+    blocks,
+    blocksPerTurn: Math.min(CLI_VISIBLE_BLOCKS_PER_TURN, blocks),
+    textChars: Math.min(
+      maxTextChars,
+      Math.max(4_000, viewportRows * viewportColumns * screenMultiplier),
+    ),
+  };
+}
+
 export interface CliTranscriptWindow {
   turns: TranscriptTurn[];
   hiddenTurns: number;
@@ -1297,31 +1332,38 @@ function boundedCliDisplayText(text: string, limit = CLI_VISIBLE_TEXT_CHARS): st
   return `${text.slice(0, half)}\n\n… ${text.length - half * 2} characters hidden to keep the terminal responsive …\n\n${text.slice(-half)}`;
 }
 
-function boundedCliPresentation(presentation: ToolPresentation): ToolPresentation {
+function boundedCliPresentation(
+  presentation: ToolPresentation,
+  maxTextChars = CLI_VISIBLE_TEXT_CHARS,
+): ToolPresentation {
   if (presentation.kind === "terminal") return {
     ...presentation,
-    ...(presentation.stdout === undefined ? {} : { stdout: boundedCliDisplayText(presentation.stdout) }),
-    ...(presentation.stderr === undefined ? {} : { stderr: boundedCliDisplayText(presentation.stderr) }),
+    ...(presentation.stdout === undefined ? {} : { stdout: boundedCliDisplayText(presentation.stdout, maxTextChars) }),
+    ...(presentation.stderr === undefined ? {} : { stderr: boundedCliDisplayText(presentation.stderr, maxTextChars) }),
   };
   if (presentation.kind === "job" && presentation.output !== undefined) return {
     ...presentation,
-    output: boundedCliDisplayText(presentation.output),
+    output: boundedCliDisplayText(presentation.output, maxTextChars),
   };
   return presentation;
 }
 
-export function boundedCliTurn(turn: TranscriptTurn, maxBlocks = CLI_VISIBLE_BLOCKS_PER_TURN): {
+export function boundedCliTurn(
+  turn: TranscriptTurn,
+  maxBlocks = CLI_VISIBLE_BLOCKS_PER_TURN,
+  maxTextChars = CLI_VISIBLE_TEXT_CHARS,
+): {
   turn: TranscriptTurn;
   hiddenBlocks: number;
 } {
   const blockLimit = Math.max(1, Math.floor(maxBlocks));
   const hiddenBlocks = Math.max(0, turn.blocks.length - blockLimit);
   const visible = turn.blocks.slice(-blockLimit).map((block): TranscriptBlock => block.kind === "text"
-    ? { ...block, text: boundedCliDisplayText(block.text) }
+    ? { ...block, text: boundedCliDisplayText(block.text, maxTextChars) }
     : {
       ...block,
-      ...(block.details === undefined ? {} : { details: boundedCliDisplayText(block.details) }),
-      ...(block.presentation === undefined ? {} : { presentation: boundedCliPresentation(block.presentation) }),
+      ...(block.details === undefined ? {} : { details: boundedCliDisplayText(block.details, maxTextChars) }),
+      ...(block.presentation === undefined ? {} : { presentation: boundedCliPresentation(block.presentation, maxTextChars) }),
     });
   const blocks: TranscriptBlock[] = hiddenBlocks === 0 ? visible : [{
     kind: "status",
@@ -1346,6 +1388,7 @@ export function cliTranscriptWindow(
   completed: readonly TranscriptTurn[],
   maxTurns = CLI_VISIBLE_TURN_LIMIT,
   maxBlocks = CLI_VISIBLE_BLOCK_LIMIT,
+  maxTextChars = CLI_VISIBLE_TEXT_CHARS,
 ): CliTranscriptWindow {
   const turns: TranscriptTurn[] = [];
   let remainingBlocks = Math.max(1, Math.floor(maxBlocks));
@@ -1354,7 +1397,7 @@ export function cliTranscriptWindow(
     const source = completed[index]!;
     if (remainingBlocks <= 0) break;
     const allowance = Math.min(CLI_VISIBLE_BLOCKS_PER_TURN, remainingBlocks);
-    const bounded = boundedCliTurn(source, allowance);
+    const bounded = boundedCliTurn(source, allowance, maxTextChars);
     turns.push(bounded.turn);
     hiddenBlocks += bounded.hiddenBlocks;
     remainingBlocks -= Math.min(source.blocks.length, allowance);
@@ -1379,22 +1422,27 @@ export function TerminalLayout({
   const activeCompletion = completion ?? mentionCompletion;
   const menuRows = activeCompletion === undefined ? 0 : Math.min(6, activeCompletion.items.length - activeCompletion.windowStart);
 
-  const activeTaskBlocks = active?.blocks.filter(
+  const budget = useMemo(
+    () => cliRenderBudget(rows, columns, expandedOutput),
+    [rows, columns, expandedOutput],
+  );
+  const activeTaskBlocks = useMemo(() => active?.blocks.filter(
     (block): block is Extract<TranscriptBlock, { kind: "status" }> =>
       block.kind === "status" && block.task !== undefined,
-  ) ?? [];
-  const rawActiveWithoutTasks = active === undefined ? undefined : {
-    ...active,
-    blocks: active.blocks.filter((block) =>
-      !(block.kind === "status" && block.task !== undefined),
-    ),
-  };
-  const activeWithoutTasks = rawActiveWithoutTasks === undefined
-    ? undefined
-    : expandedOutput ? rawActiveWithoutTasks : boundedCliTurn(rawActiveWithoutTasks).turn;
-  const completedWindow = expandedOutput
-    ? { turns: completed, hiddenTurns: 0, hiddenBlocks: 0 }
-    : cliTranscriptWindow(completed);
+  ) ?? [], [active]);
+  const activeWithoutTasks = useMemo(() => {
+    if (active === undefined) return undefined;
+    const raw = {
+      ...active,
+      blocks: active.blocks.filter((block) =>
+        !(block.kind === "status" && block.task !== undefined)),
+    };
+    return boundedCliTurn(raw, budget.blocksPerTurn, budget.textChars).turn;
+  }, [active, budget]);
+  const completedWindow = useMemo(
+    () => cliTranscriptWindow(completed, budget.turns, budget.blocks, budget.textChars),
+    [completed, budget],
+  );
 
   const questionRows = questions === undefined ? 0
     : 4 + (questions[questionIndex]?.options.length ?? 0) + questions.length * 2;
@@ -1415,7 +1463,7 @@ export function TerminalLayout({
         : <Text dimColor>{"flavor · "}{model}{" · "}{workspaceName}</Text>}
       <Box height={1} />
       {completedWindow.hiddenTurns > 0 || completedWindow.hiddenBlocks > 0
-        ? <Text dimColor>… {completedWindow.hiddenTurns} earlier turns and {completedWindow.hiddenBlocks} output items hidden · {outputShortcut} expand all</Text>
+        ? <Text dimColor>… {completedWindow.hiddenTurns} earlier turns and {completedWindow.hiddenBlocks} output items hidden to keep the terminal responsive{expandedOutput ? "" : ` · ${outputShortcut} show more`}</Text>
         : null}
       {completedWindow.turns.map((turn, index) => (
         <Box key={turn.id} flexDirection="column">
@@ -1483,12 +1531,12 @@ export function TerminalLayout({
         {...(onPromptCursorChange === undefined ? {} : { onCursorChange: onPromptCursorChange })}
       />
       <FooterStatus
-        hint={activeSession
-          ? `Esc ${pendingPrompts.length > 0 ? "edit latest" : "stop"} · Ctrl+C cancel · Enter queue · Ctrl/Cmd+R history · ${outputShortcut} ${expandedOutput ? "collapse" : "expand"} output`
-          : completion !== undefined
-            ? "↑/↓ select · Tab complete · Esc close"
-            : mentionCompletion !== undefined
-              ? "↑/↓ select · Tab complete · click choose · Esc close"
+        hint={completion !== undefined
+          ? "↑/↓ select · Tab complete · Esc close"
+          : mentionCompletion !== undefined
+            ? "↑/↓ select · Tab complete · click choose · Esc close"
+            : activeSession
+              ? `Esc ${pendingPrompts.length > 0 ? "edit latest" : "stop"} · Ctrl+C cancel · Enter queue · Ctrl/Cmd+R history · ${outputShortcut} ${expandedOutput ? "collapse" : "expand"} output`
               : `Enter send · ↑↓/Ctrl/Cmd+R history · ${outputShortcut} ${expandedOutput ? "collapse" : "expand"} output · Ctrl+C exit`}
         {...(ideContext === undefined ? {} : { ideContext })}
       />
@@ -1591,7 +1639,7 @@ function SlashMenu({ completion }: { completion: SlashCompletion }): React.JSX.E
         {candidate.kind === "skill" || candidate.kind === "plugin"
           ? <Text color={candidate.kind === "skill" ? "magentaBright" : "cyanBright"}>{`  ${candidate.kind}`}</Text>
           : null}
-        {candidate.description === undefined ? null : <Text dimColor>{`  ${candidate.description}`}</Text>}
+        {candidate.description === undefined ? null : <Text dimColor>{`  ${normalizeSlashDescription(candidate.description)}`}</Text>}
       </Text>;
     })}
   </Box>;
@@ -1692,7 +1740,7 @@ function TurnSeparator({ width }: { width: number }): React.JSX.Element {
   return <Text dimColor>{"─".repeat(Math.max(1, width - 1))}</Text>;
 }
 
-function TurnView({
+const TurnView = React.memo(function TurnView({
   turn,
   interactive,
   workspaceName,
@@ -1740,7 +1788,7 @@ function TurnView({
         : <Box key={`${turn.id}-text-${index}`} marginBottom={1}><AssistantText text={block.text} /></Box>)}
     </Box>
   </Box>;
-}
+});
 
 const DIFF_CONTENT = fileDiffLineStyle("context").contentColor;
 const DIFF_REMOVED_MARKER = fileDiffLineStyle("removed").markerColor;

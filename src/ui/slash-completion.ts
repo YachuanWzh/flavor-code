@@ -27,6 +27,27 @@ const CANDIDATE_KIND_PRIORITY: Record<SlashCandidateKind, number> = {
   tool: 2,
 };
 
+const SLASH_DESCRIPTION_CHAR_LIMIT = 240;
+
+/**
+ * Command metadata comes from plugins and Skill frontmatter, so it may contain
+ * paragraphs or very large usage guides. The terminal completion menu reserves
+ * exactly one row per candidate; keep that invariant before the text reaches
+ * Yoga, rather than relying on visual overflow clipping after layout.
+ */
+export function normalizeSlashDescription(description: string): string {
+  const singleLine = description.replace(/\s+/gu, " ").trim();
+  const points = [...singleLine];
+  if (points.length <= SLASH_DESCRIPTION_CHAR_LIMIT) return singleLine;
+  return `${points.slice(0, SLASH_DESCRIPTION_CHAR_LIMIT - 1).join("")}…`;
+}
+
+function optionalDescription(description: string | undefined): string | undefined {
+  if (description === undefined) return undefined;
+  const normalized = normalizeSlashDescription(description);
+  return normalized.length === 0 ? undefined : normalized;
+}
+
 export function slashCandidatePresentation(selected: boolean): SlashCandidatePresentation {
   return {
     marker: selected ? "› " : "  ",
@@ -43,20 +64,26 @@ export function buildSlashCandidates(
 ): SlashCandidate[] {
   const candidates = new Map<string, SlashCandidate>();
   for (const command of commands) {
-    candidates.set(command.name, { name: command.name, kind: "command", description: command.description });
+    candidates.set(command.name, {
+      name: command.name,
+      kind: "command",
+      description: normalizeSlashDescription(command.description),
+    });
   }
   for (const plugin of plugins) {
     if (!candidates.has(plugin.name)) {
-      candidates.set(plugin.name, plugin.description === undefined
+      const description = optionalDescription(plugin.description);
+      candidates.set(plugin.name, description === undefined
         ? { name: plugin.name, kind: "plugin" }
-        : { name: plugin.name, kind: "plugin", description: plugin.description });
+        : { name: plugin.name, kind: "plugin", description });
     }
   }
   for (const tool of tools) {
     if (!candidates.has(tool.name)) {
-      candidates.set(tool.name, tool.description === undefined
+      const description = optionalDescription(tool.description);
+      candidates.set(tool.name, description === undefined
         ? { name: tool.name, kind: "tool" }
-        : { name: tool.name, kind: "tool", description: tool.description });
+        : { name: tool.name, kind: "tool", description });
     }
   }
   for (const skill of skills) {
@@ -64,7 +91,7 @@ export function buildSlashCandidates(
       candidates.set(skill.name, {
         name: skill.name,
         kind: "skill",
-        description: skill.description,
+        description: normalizeSlashDescription(skill.description),
         source: skill.source,
       });
     }

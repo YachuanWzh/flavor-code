@@ -2,7 +2,7 @@ import React from "react";
 import { renderToString } from "ink";
 import { describe, expect, it, vi } from "vitest";
 
-import { approvalDetailLines, appRuntimeOptions, boundedCliTurn, cliTranscriptWindow, ideFooterPresentation, MentionMenu, outputToggleShortcut, TerminalLayout, statusLineColor } from "../../src/ui/app.js";
+import { approvalDetailLines, appRuntimeOptions, boundedCliTurn, cliRenderBudget, cliTranscriptWindow, ideFooterPresentation, MentionMenu, outputToggleShortcut, TerminalLayout, statusLineColor } from "../../src/ui/app.js";
 import {
   COMPACT_PROGRESS_COMPLETE,
   COMPACT_PROGRESS_REMAINING,
@@ -66,6 +66,23 @@ describe("TerminalLayout", () => {
     expect(bounded.turn.blocks[1]).toMatchObject({ kind: "text" });
     expect((bounded.turn.blocks[1] as { text: string }).text.length).toBeLessThan(33_000);
     expect(source.blocks).toHaveLength(3);
+  });
+
+  it("scales the live render window to the terminal instead of retaining a large fixed tree", () => {
+    const compact = cliRenderBudget(18, 80, false);
+    const expanded = cliRenderBudget(18, 80, true);
+
+    expect(compact.turns).toBeLessThan(40);
+    expect(compact.blocks).toBeLessThan(320);
+    expect(compact.textChars).toBeLessThan(16_000);
+    expect(expanded.turns).toBeGreaterThan(compact.turns);
+    expect(expanded.blocks).toBeGreaterThan(compact.blocks);
+    expect(expanded.textChars).toBeGreaterThan(compact.textChars);
+
+    const turns = Array.from({ length: 42 }, (_, index) => turn(index + 1, `prompt ${index + 1}`, ""));
+    const expandedWindow = cliTranscriptWindow(turns, expanded.turns, expanded.blocks, expanded.textChars);
+    expect(expandedWindow.hiddenTurns).toBe(2);
+    expect(expandedWindow.turns[0]?.id).toBe(3);
   });
 
   it("passes the CLI instance identity into the production runtime", () => {
@@ -709,6 +726,37 @@ describe("TerminalLayout", () => {
     expect(output).toContain("  skill");
     expect(output).toContain("↑/↓ select · Tab complete · Esc close");
     expect(output).toContain("› frontend-design");
+  });
+
+  it("keeps multiline skill metadata to one row so the active prompt is not clipped", () => {
+    const completion: SlashCompletion = {
+      query: "",
+      items: Array.from({ length: 6 }, (_, index) => ({
+        name: `skill-${index + 1}`,
+        kind: "skill" as const,
+        description: `Summary ${index + 1}\nSupports two modes:\n1. first\n2. second`,
+        source: "project",
+      })),
+      selectedIndex: 0,
+      windowStart: 0,
+    };
+    const output = stripAnsi(renderToString(<TerminalLayout
+      model="model"
+      workspaceName="workspace"
+      completed={[]}
+      active={turn(1, "working", "streaming")}
+      input="/"
+      promptCursor={1}
+      columns={80}
+      rows={12}
+      activeSession
+      completion={completion}
+    />, { columns: 80 }));
+
+    expect(output.split("\n").filter((line) => line.includes("Supports two modes:"))).toHaveLength(6);
+    expect(output).toContain("❯ /");
+    expect(output).toContain("↑/↓ select · Tab complete · Esc close");
+    expect(output.split("\n").length).toBeLessThanOrEqual(12);
   });
 
   it("renders a selected at-file candidate with mouse and keyboard hints", () => {
@@ -1425,17 +1473,17 @@ describe("TerminalLayout", () => {
     expect(plain).toContain("└─ +55 -0 · Showing 8 of 10");
   });
 
-  it("expands complete command output, changesets, and earlier turns on demand", () => {
+  it("expands complete recent output while keeping the oldest turns outside the live tree", () => {
     const outputLines = Array.from({ length: 24 }, (_, index) => `output line ${index + 1}`).join("\n");
     const files = Array.from({ length: 10 }, (_, index) => ({
       path: `C:\\work\\flavor-code\\src\\file-${index + 1}.ts`, operation: "update" as const, added: 1, removed: 0,
     }));
-    const completed = Array.from({ length: 42 }, (_, index): TranscriptTurn => ({
+    const completed = Array.from({ length: 3 }, (_, index): TranscriptTurn => ({
       id: index + 1,
       prompt: `prompt ${index + 1}`,
       assistantText: "",
       statusLines: [],
-      blocks: index === 0 ? [{
+      blocks: index === 2 ? [{
         kind: "status", id: "command:first", state: "completed", text: "Shell",
         presentation: { kind: "terminal", title: "command", command: "command", stdout: outputLines, stderr: "", exitCode: 0 },
       }, {
@@ -1450,11 +1498,12 @@ describe("TerminalLayout", () => {
     />, { columns: 100 }));
 
     expect(plain).toContain("prompt 1");
+    expect(plain).toContain("prompt 3");
     expect(plain).toContain("output line 12");
     expect(plain).toContain("output line 24");
     expect(plain).toContain("src/file-10.ts");
     expect(plain).not.toContain("lines hidden");
-    expect(plain).not.toContain("outside the live render window");
+    expect(plain).not.toContain("earlier turns");
     expect(plain).toContain(`${outputToggleShortcut()} collapse output`);
     expect(plain).toContain(`└─ exit 0 · ${outputToggleShortcut()} collapse`);
   });

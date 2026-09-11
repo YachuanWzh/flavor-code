@@ -2,7 +2,17 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.1-beta.1 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.1-beta.2 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.1-beta.2] - 2026-09-11
+
+### 修复
+- CLI 在长流式输出期间按终端尺寸限制实时渲染的回合、输出项与文本量，并复用未变化的补全和历史子树，避免 Markdown/Yoga 工作量随会话长度增长后阻塞滚动、输入和动画；完整输出模式也保留响应性硬上限。
+- 斜杠菜单会把来自 Skill、插件和托管工具的多行或超长描述归一化为有界单行，避免仅输入 `/` 时实际菜单高度超过预留空间、裁掉输入行；生成期间打开菜单时显示与实际按键行为一致的选择提示。
+
+### 测试与维护
+- 新增视口渲染预算及多行 Skill 描述布局回归覆盖。
+- `package.json` 与 `package-lock.json` 版本更新为 `1.4.1-beta.2`。
 
 ## [1.4.1-beta.1] - 2026-09-11
 

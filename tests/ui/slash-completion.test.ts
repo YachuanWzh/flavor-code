@@ -8,6 +8,7 @@ import {
   deriveSlashCompletion,
   matchRanges,
   moveSlashSelection,
+  normalizeSlashDescription,
   removeCompletedSlashSelection,
   slashCandidatePresentation,
 } from "../../src/ui/slash-completion.js";
@@ -49,6 +50,21 @@ describe("slash completion", () => {
       ["doctor", "plugin"],
       ["frontend-design", "skill"],
     ]);
+  });
+
+  it("normalizes untrusted multiline descriptions into a bounded menu row", () => {
+    const description = `First line\n\n1. ${"long detail ".repeat(40)}\n2. final detail`;
+    const normalized = normalizeSlashDescription(description);
+    const [candidate] = buildSlashCandidates([], [], [{
+      name: "multiline-skill",
+      description,
+      source: "project",
+    }]);
+
+    expect(normalized).not.toMatch(/[\r\n]/u);
+    expect([...normalized].length).toBeLessThanOrEqual(240);
+    expect(normalized.endsWith("…")).toBe(true);
+    expect(candidate?.description).toBe(normalized);
   });
 
   it("wraps selection and completes the leading token", () => {
