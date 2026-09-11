@@ -169,6 +169,10 @@ export function isPlatformShortcut(
   return platform === "darwin" ? key.super || key.ctrl : key.ctrl;
 }
 
+export function outputToggleShortcut(platform: NodeJS.Platform = process.platform): "Cmd+O" | "Ctrl+O" {
+  return platform === "darwin" ? "Cmd+O" : "Ctrl+O";
+}
+
 export function removeLastCliImageOnBackspace(
   input: string,
   cursor: number,
@@ -357,11 +361,20 @@ export async function runTerminalSubmissionChain(options: {
   }
 }
 
-export function classifyTerminalInput(key: Pick<Key, "wheelUp" | "wheelDown" | "pageUp" | "pageDown" | "upArrow" | "downArrow">): TerminalInputAction | null {
+export function classifyTerminalInput(
+  key: Pick<Key, "wheelUp" | "wheelDown" | "pageUp" | "pageDown" | "upArrow" | "downArrow">,
+  activeSession = false,
+): TerminalInputAction | null {
   if (key.wheelUp) return { type: "scroll", rows: -3 };
   if (key.wheelDown) return { type: "scroll", rows: 3 };
   if (key.pageUp) return { type: "page", fraction: -0.5 };
   if (key.pageDown) return { type: "page", fraction: 0.5 };
+  // Some terminals temporarily fall back to alternate-scroll arrow sequences
+  // when mouse tracking is interrupted by a busy render. While output is
+  // streaming, treat those arrows as transcript scrolling so a wheel gesture
+  // can never replace the prompt with an item from history.
+  if (activeSession && key.upArrow) return { type: "scroll", rows: -3 };
+  if (activeSession && key.downArrow) return { type: "scroll", rows: 3 };
   if (key.upArrow) return { type: "history", direction: "up" };
   if (key.downArrow) return { type: "history", direction: "down" };
   return null;
@@ -801,7 +814,13 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
   };
 
   useInput((character, key, event) => {
-    const terminalAction = classifyTerminalInput(key);
+    // Keep completion-menu arrows available while streaming. Outside an open
+    // menu, arrows during an active turn are a safe fallback for terminals
+    // that encode wheel input as alternate-scroll arrow sequences.
+    const terminalAction = classifyTerminalInput(
+      key,
+      transcript.active !== undefined && slashCompletion === null && mentionCompletion === null,
+    );
     if (terminalAction?.type === "scroll") {
       const scroll = selectWheelScrollTarget(
         scrollRef.current,
@@ -833,7 +852,9 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
     }
     if (isPlatformShortcut(character, key, "o")) {
       setExpandedOutput((value) => !value);
-      scrollRef.current?.scrollToBottom();
+      // Do not force sticky scrolling here. ScrollBox already follows the
+      // bottom when it is pinned; when the user is reading above, retaining
+      // the existing scrollTop avoids throwing them to the newest output.
       return;
     }
     if (shouldReadClipboardImage(character, key, event.keypress.isPasted)) {
@@ -1353,6 +1374,7 @@ export function TerminalLayout({
   mainTaskScrollRef, subagentTaskScrollRef, onTaskPanelHoverChange, onPromptCursorChange, ideContext,
 }: TerminalLayoutProps): React.JSX.Element {
   const dividerWidth = Math.max(1, columns - 1);
+  const outputShortcut = outputToggleShortcut();
   const showWelcome = completed.length === 0 && active === undefined;
   const activeCompletion = completion ?? mentionCompletion;
   const menuRows = activeCompletion === undefined ? 0 : Math.min(6, activeCompletion.items.length - activeCompletion.windowStart);
@@ -1393,7 +1415,7 @@ export function TerminalLayout({
         : <Text dimColor>{"flavor · "}{model}{" · "}{workspaceName}</Text>}
       <Box height={1} />
       {completedWindow.hiddenTurns > 0 || completedWindow.hiddenBlocks > 0
-        ? <Text dimColor>… {completedWindow.hiddenTurns} earlier turns and {completedWindow.hiddenBlocks} output items hidden · Ctrl/Cmd+O expand all</Text>
+        ? <Text dimColor>… {completedWindow.hiddenTurns} earlier turns and {completedWindow.hiddenBlocks} output items hidden · {outputShortcut} expand all</Text>
         : null}
       {completedWindow.turns.map((turn, index) => (
         <Box key={turn.id} flexDirection="column">
@@ -1462,12 +1484,12 @@ export function TerminalLayout({
       />
       <FooterStatus
         hint={activeSession
-          ? `Esc ${pendingPrompts.length > 0 ? "edit latest" : "stop"} · Ctrl+C cancel · Enter queue · Ctrl/Cmd+R history · Ctrl/Cmd+O ${expandedOutput ? "collapse" : "expand"} output`
+          ? `Esc ${pendingPrompts.length > 0 ? "edit latest" : "stop"} · Ctrl+C cancel · Enter queue · Ctrl/Cmd+R history · ${outputShortcut} ${expandedOutput ? "collapse" : "expand"} output`
           : completion !== undefined
             ? "↑/↓ select · Tab complete · Esc close"
             : mentionCompletion !== undefined
               ? "↑/↓ select · Tab complete · click choose · Esc close"
-              : `Enter send · ↑↓/Ctrl/Cmd+R history · Ctrl/Cmd+O ${expandedOutput ? "collapse" : "expand"} output · Ctrl+C exit`}
+              : `Enter send · ↑↓/Ctrl/Cmd+R history · ${outputShortcut} ${expandedOutput ? "collapse" : "expand"} output · Ctrl+C exit`}
         {...(ideContext === undefined ? {} : { ideContext })}
       />
     </Box>
@@ -1985,7 +2007,7 @@ function workspaceRelativePath(value: string, workspaceName: string): string {
   return normalized;
 }
 
-const CLI_COMMAND_OUTPUT_LINE_LIMIT = 16;
+const CLI_COMMAND_OUTPUT_LINE_LIMIT = 8;
 
 function CommandPresentationView({
   presentation,
@@ -1999,11 +2021,14 @@ function CommandPresentationView({
   const label = presentation.variant === "terminal" ? "TERMINAL" : "COMMAND";
   const hasStdout = jobOutputLines(presentation.stdout ?? "").length > 0;
   const hasStderr = jobOutputLines(presentation.stderr ?? "").length > 0;
-  const perStreamLimit = expanded
-    ? Number.POSITIVE_INFINITY
-    : hasStdout && hasStderr ? Math.floor(CLI_COMMAND_OUTPUT_LINE_LIMIT / 2) : CLI_COMMAND_OUTPUT_LINE_LIMIT;
+  const collapsedPerStreamLimit = hasStdout && hasStderr
+    ? Math.floor(CLI_COMMAND_OUTPUT_LINE_LIMIT / 2)
+    : CLI_COMMAND_OUTPUT_LINE_LIMIT;
+  const perStreamLimit = expanded ? Number.POSITIVE_INFINITY : collapsedPerStreamLimit;
   const stdout = boundedCommandLines(presentation.stdout ?? "", perStreamLimit);
   const stderr = boundedCommandLines(presentation.stderr ?? "", perStreamLimit);
+  const collapsible = stdout.total > collapsedPerStreamLimit || stderr.total > collapsedPerStreamLimit;
+  const shortcut = outputToggleShortcut();
   return <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
     <Box>
       <Text color={tone}>┌─ </Text>
@@ -2022,6 +2047,11 @@ function CommandPresentationView({
     <Box>
       <Text color={tone}>└─ </Text>
       <Text dimColor>{commandFooter(presentation, state)}</Text>
+      {collapsible ? <>
+        <Text dimColor> · </Text>
+        <Text color="ansi:cyanBright">{shortcut}</Text>
+        <Text dimColor> {expanded ? "collapse" : "expand"}</Text>
+      </> : null}
     </Box>
   </Box>;
 }
@@ -2049,6 +2079,7 @@ function CommandOutputSection({
       <Text color={tone}>├─ </Text>
       <Text color={error ? "#e06c50" : tone} bold>{label}</Text>
       <Text dimColor>{` · ${value.total} ${value.total === 1 ? "LINE" : "LINES"}`}</Text>
+      {value.hidden === 0 ? null : <Text dimColor>{` · ${value.head.length + value.tail.length} SHOWN`}</Text>}
     </Box>
     {value.head.map((line, index) => <CommandOutputLine key={`head:${index}`} line={line} tone={tone} error={error} />)}
     {value.hidden === 0 ? null : <Box>
@@ -2069,8 +2100,10 @@ function CommandOutputLine({ line, tone, error }: { line: string; tone: string; 
 function boundedCommandLines(output: string, limit: number): BoundedCommandLines {
   const lines = jobOutputLines(output);
   if (lines.length <= limit) return { total: lines.length, head: lines, tail: [], hidden: 0 };
-  const headCount = Math.ceil(limit / 2);
-  const tailCount = Math.floor(limit / 2);
+  // Give the beginning slightly more room: commands usually print their most
+  // useful context first, while a short tail still preserves summaries/errors.
+  const headCount = Math.ceil(limit * 0.625);
+  const tailCount = Math.max(0, limit - headCount);
   return {
     total: lines.length,
     head: lines.slice(0, headCount),

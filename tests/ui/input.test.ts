@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import { EventEmitter } from "node:events";
 import {
   canShowSlashCompletion,
+  classifyTerminalInput,
   completionKeyAction,
   editPrompt,
   editPromptWithPastedBlocks,
@@ -211,6 +212,22 @@ it("routes wheel input to the independently hovered task track and otherwise to 
   expect(selectWheelScrollTarget(transcript, mainTasks, subagentTasks, "subagent")).toBe(subagentTasks);
   expect(selectWheelScrollTarget(transcript, mainTasks, subagentTasks, null)).toBe(transcript);
   expect(selectWheelScrollTarget(transcript, null, subagentTasks, "main")).toBe(transcript);
+});
+
+it("treats alternate-scroll arrows as scrolling while output is active", () => {
+  const base = {
+    wheelUp: false,
+    wheelDown: false,
+    pageUp: false,
+    pageDown: false,
+    upArrow: false,
+    downArrow: false,
+  };
+
+  expect(classifyTerminalInput({ ...base, upArrow: true }, true)).toEqual({ type: "scroll", rows: -3 });
+  expect(classifyTerminalInput({ ...base, downArrow: true }, true)).toEqual({ type: "scroll", rows: 3 });
+  expect(classifyTerminalInput({ ...base, upArrow: true })).toEqual({ type: "history", direction: "up" });
+  expect(classifyTerminalInput({ ...base, downArrow: true })).toEqual({ type: "history", direction: "down" });
 });
 
 it("caps task progress at one third of the terminal while reserving prompt rows", () => {

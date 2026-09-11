@@ -2,7 +2,19 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.1 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.1-beta.1 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.1-beta.1] - 2026-09-11
+
+### 改进
+- CLI 命令回执的默认输出预览从 16 行收紧为 8 行，略向头部倾斜并保留结尾，长输出会显示已展示与已隐藏行数。
+- 可折叠的命令回执在底部直接提示展开/收起快捷键：Windows/Linux 显示 `Ctrl+O`，macOS 显示 `Cmd+O`；再次按下即恢复紧凑视图。
+- 模型输出期间，即使终端将滚轮降级为上下方向键序列，也只滚动内容，不再误触输入历史。
+- 在上方阅读时切换命令输出的展开/收起会保留阅读位置；只有原本贴底时才继续跟随最新输出。
+
+### 测试与维护
+- 新增命令输出的 8 行预览、展开/收起状态、macOS 快捷键与生成中滚轮路由回归覆盖。
+- `package.json` 与 `package-lock.json` 版本更新为 `1.4.1-beta.1`。
 
 ## [1.4.1] - 2026-09-11
 

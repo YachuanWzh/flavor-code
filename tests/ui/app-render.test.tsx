@@ -2,7 +2,7 @@ import React from "react";
 import { renderToString } from "ink";
 import { describe, expect, it, vi } from "vitest";
 
-import { approvalDetailLines, appRuntimeOptions, boundedCliTurn, cliTranscriptWindow, ideFooterPresentation, MentionMenu, TerminalLayout, statusLineColor } from "../../src/ui/app.js";
+import { approvalDetailLines, appRuntimeOptions, boundedCliTurn, cliTranscriptWindow, ideFooterPresentation, MentionMenu, outputToggleShortcut, TerminalLayout, statusLineColor } from "../../src/ui/app.js";
 import {
   COMPACT_PROGRESS_COMPLETE,
   COMPACT_PROGRESS_REMAINING,
@@ -1305,11 +1305,11 @@ describe("TerminalLayout", () => {
 
     expect(plain).toContain("┌─ COMMAND · COMPLETED");
     expect(plain).toContain("│  git show --stat --oneline 14adcc5");
-    expect(plain).toContain("├─ OUTPUT · 21 LINES");
+    expect(plain).toContain("├─ OUTPUT · 21 LINES · 8 SHOWN");
     expect(plain).toContain("│  14adcc5 feat(desktop): improve E2E");
-    expect(plain).toContain("│  … 5 lines hidden");
-    expect(plain).toContain("└─ exit 0");
-    expect(plain).toMatch(/exit 0\n\n\s+这个提交修改了多个文件/u);
+    expect(plain).toContain("│  … 13 lines hidden");
+    expect(plain).toContain(`└─ exit 0 · ${outputToggleShortcut()} expand`);
+    expect(plain).toMatch(/exit 0 · (?:Ctrl|Cmd)\+O expand\n\n\s+这个提交修改了多个文件/u);
     expect(raw).not.toBe(plain);
   });
 
@@ -1341,7 +1341,7 @@ describe("TerminalLayout", () => {
     expect(raw).not.toBe(plain);
   });
 
-  it("shares the 16-line command receipt budget between stdout and stderr", () => {
+  it("shares the compact eight-line command receipt budget between stdout and stderr", () => {
     const stream = (prefix: string) => Array.from({ length: 12 }, (_, index) => `${prefix} ${index + 1}`).join("\n");
     const turn: TranscriptTurn = {
       id: 1, prompt: "run", assistantText: "done", statusLines: [],
@@ -1360,7 +1360,7 @@ describe("TerminalLayout", () => {
 
     expect(plain).toContain("OUTPUT · 12 LINES");
     expect(plain).toContain("ERROR · 12 LINES");
-    expect(plain.match(/… 4 lines hidden/gu)).toHaveLength(2);
+    expect(plain.match(/… 8 lines hidden/gu)).toHaveLength(2);
     expect(plain).toContain("out 1");
     expect(plain).toContain("out 12");
     expect(plain).toContain("err 1");
@@ -1455,6 +1455,13 @@ describe("TerminalLayout", () => {
     expect(plain).toContain("src/file-10.ts");
     expect(plain).not.toContain("lines hidden");
     expect(plain).not.toContain("outside the live render window");
-    expect(plain).toContain("Ctrl/Cmd+O collapse output");
+    expect(plain).toContain(`${outputToggleShortcut()} collapse output`);
+    expect(plain).toContain(`└─ exit 0 · ${outputToggleShortcut()} collapse`);
+  });
+
+  it("presents the output toggle with the native platform shortcut", () => {
+    expect(outputToggleShortcut("win32")).toBe("Ctrl+O");
+    expect(outputToggleShortcut("linux")).toBe("Ctrl+O");
+    expect(outputToggleShortcut("darwin")).toBe("Cmd+O");
   });
 });
