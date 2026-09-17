@@ -305,7 +305,9 @@ function classifyShellFailure(
   if (code === "ENOENT" && (isAbsolute(command) || /[\\/]/u.test(command))) {
     return { kind: "path-not-found", message: `Executable path "${command}" does not exist.` };
   }
-  if (code === "ENOENT" || /(?:not recognized as (?:an internal|(?:a|the) name)|command not found|not found\s*$|无法将.+识别为|不是内部或外部命令)/imu.test(detail)) {
+  // zh-CN PowerShell 7 says “术语 'x' 不会被识别为 …”, while legacy Windows
+  // PowerShell 5 says “无法将 'x' 项识别为 …”; both are command-not-found.
+  if (code === "ENOENT" || /(?:not recognized as (?:an internal|(?:a|the) name)|command not found|not found\s*$|无法将.+识别为|术语.+不会被识别为|不会被识别为|不是内部或外部命令)/imu.test(detail)) {
     return {
       kind: "command-not-found",
       message: `Executable "${command}" was not found by the selected runtime shell.`,

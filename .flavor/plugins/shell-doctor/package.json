@@ -1,0 +1,20 @@
+{
+  "name": "@flavor-code/shell-doctor",
+  "version": "0.1.0",
+  "description": "诊断并纠正 Shell 命令的平台错配失败（如 Windows 下误用 bash 语法），自动提示重试。",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "**/*"
+  ],
+  "scripts": {},
+  "keywords": [
+    "flavor-code",
+    "flavor-plugin",
+    "shell"
+  ],
+  "author": "yachuanwzh",
+  "flavorPlugin": {
+    "apiVersion": "1"
+  }
+}
