@@ -193,6 +193,33 @@ export const BrowserActSchema = z.discriminatedUnion("action", [
 ]);
 export type BrowserActInput = z.infer<typeof BrowserActSchema>;
 
+/**
+ * Renderer-facing inputs. The space is resolved by the main process from the
+ * selected task; the UI never chooses a space id itself.
+ */
+export const BrowserUiNewTabInputSchema = z
+  .object({ url: BrowserUrlSchema.optional() })
+  .strict();
+export const BrowserUiTabTargetInputSchema = z
+  .object({ tabId: BrowserTabIdSchema })
+  .strict();
+export const BrowserUiNavigateInputSchema = z
+  .object({ tabId: BrowserTabIdSchema, url: BrowserUrlSchema })
+  .strict();
+export const BrowserUiHistoryInputSchema = z
+  .object({
+    tabId: BrowserTabIdSchema,
+    direction: z.enum(["back", "forward", "reload"]),
+  })
+  .strict();
+export const BrowserUiSetBoundsInputSchema = z
+  .object({ bounds: BrowserBoundsSchema })
+  .strict();
+export const BrowserUiSetVisibleInputSchema = z
+  .object({ visible: z.boolean() })
+  .strict();
+export const BrowserUiEmptyInputSchema = z.object({}).strict();
+
 export const BrowserSnapshotScopeSchema = z.enum(["viewport", "full_page", "subtree"]);
 
 export const BrowserSnapshotInputSchema = z

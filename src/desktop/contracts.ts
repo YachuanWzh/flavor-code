@@ -32,6 +32,9 @@ import {
   type ImageAttachmentInput,
 } from "../session/assets.js";
 export { DESKTOP_CHANNELS } from "./channels.js";
+export type { BrowserEvent } from "./browser/contracts.js";
+import type { BrowserEvent } from "./browser/contracts.js";
+import type { BrowserBounds, BrowserSpaceSummary, BrowserTabSummary } from "./browser/types.js";
 
 export const OpenWorkspaceInputSchema = z.object({ path: z.string().trim().min(1).max(32_768) }).strict();
 export const StartSessionInputSchema = z.object({
@@ -524,6 +527,18 @@ export interface FlavorDesktopApi {
   resizeTerminal(id: string, columns: number, rows: number): Promise<void>;
   closeTerminal(id: string): Promise<void>;
   readJob(id: string, cursor?: number): Promise<JobReadResult>;
+  /** Built-in browser (spec md_docs/todo.md). The space follows the selected task; the UI never picks a space id. */
+  browserListTabs(): Promise<BrowserSpaceSummary | undefined>;
+  browserNewTab(url?: string): Promise<BrowserTabSummary>;
+  browserActivateTab(tabId: string): Promise<void>;
+  browserCloseTab(tabId: string): Promise<void>;
+  browserNavigate(tabId: string, url: string): Promise<BrowserTabSummary>;
+  browserHistory(tabId: string, direction: "back" | "forward" | "reload"): Promise<void>;
+  browserSetBounds(bounds: BrowserBounds): Promise<void>;
+  browserSetVisible(visible: boolean): Promise<void>;
+  browserTakeControl(): Promise<void>;
+  browserHandOff(): Promise<void>;
+  onBrowserEvent(listener: (event: BrowserEvent) => void): () => void;
   validatePreviewUrl(url: string): Promise<string>;
   openPreviewUrl(url: string): Promise<void>;
   inspectWorkbench(): Promise<DesktopWorkbenchInspection>;

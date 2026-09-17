@@ -78,6 +78,17 @@ import { createEmbeddedD2cAutomation, type D2cEmbeddedHost } from "./d2c-embedde
 import { createD2cJudgeClient } from "./d2c-judge-client.js";
 import { createD2cJudgeConfigStore } from "./d2c-judge-config.js";
 import { createD2cTools } from "../d2c/tools.js";
+import {
+  BrowserUiHistoryInputSchema,
+  BrowserUiNavigateInputSchema,
+  BrowserUiNewTabInputSchema,
+  BrowserUiSetBoundsInputSchema,
+  BrowserUiSetVisibleInputSchema,
+  BrowserUiTabTargetInputSchema,
+} from "./browser/contracts.js";
+import type { BrowserHost, BrowserEventPayload } from "./browser/browser-host.js";
+import { createBrowserTools } from "./browser/browser-tools.js";
+import { createElectronBrowserHost } from "./browser/electron-browser.js";
 import { createProductionRuntime } from "../production.js";
 import { DesktopRuntimeController } from "./runtime-controller.js";
 import { isSafeExternalUrl, isTrustedNavigation, normalizePersistedDesktopProjects } from "./security.js";
@@ -98,6 +109,35 @@ const developmentUrl = process.env.FLAVOR_DESKTOP_DEV_URL;
 let mainWindow: BrowserWindow | undefined;
 let appMenu: Menu | undefined;
 let quitting = false;
+
+// The built-in browser host is global and unique; spaces follow task lifecycle
+// and are never torn down by UI tab switches (md_docs/todo.md section 5).
+let browserHost: BrowserHost | undefined;
+function requireBrowserHost(): BrowserHost {
+  browserHost ??= createElectronBrowserHost({
+    getWindow: () => mainWindow,
+    emit: (event: BrowserEventPayload) => {
+      if (mainWindow !== undefined && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(DESKTOP_CHANNELS.browserEvent, event);
+      }
+    },
+  });
+  return browserHost;
+}
+function currentBrowserSpaceId(): string {
+  if (activeWorkspace === undefined) throw new Error("请先打开项目");
+  const task = managedProjects.get(activeWorkspace)?.selectedTask;
+  if (task === undefined) throw new Error("请先启动一个任务");
+  return task.browserSpaceId;
+}
+/** Page-mutating UI actions require user ownership; the agent default blocks them until 我来操作. */
+function ensureBrowserUiWriteAllowed(spaceId: string): void {
+  const host = requireBrowserHost();
+  host.createSpace(spaceId);
+  if (host.listTabs(spaceId).ownership !== "user") {
+    throw new Error("Agent 正在操作浏览器；点击「我来操作」接管控制后再执行页面操作");
+  }
+}
 
 function logStartup(step: string, detail?: string): void {
   try {
@@ -144,6 +184,8 @@ function judgeImage(png: Buffer): Buffer {
 interface ManagedDesktopTask {
   controller: DesktopRuntimeController;
   snapshot: DesktopSnapshot;
+  /** Browser space owned by this task; agent tools and UI share exactly this id. */
+  browserSpaceId: string;
   sessionId?: string;
   payload?: SessionStartedPayload;
   terminal?: "completed" | "failed" | "interrupted";
@@ -348,13 +390,20 @@ function createDesktopController(workspace?: string, owner?: ManagedDesktopTask)
           });
         },
       },
-      ...(runtimeOptions.workspace === undefined ? {} : {
-        extraTools: createD2cTools(runtimeOptions.workspace, {
+      // extraTools must merge, never replace: D2C and browser tools coexist
+      // with any tools the runtime factory already provided (spec section 13).
+      extraTools: [
+        ...(runtimeOptions.extraTools ?? []),
+        ...(runtimeOptions.workspace === undefined ? [] : createD2cTools(runtimeOptions.workspace, {
           capture: d2cCapture,
           onProgress: (progress) => emitManagedDesktopEvent(workspace, owner, { type: "d2c-progress", payload: progress }),
           onReport: (report) => emitManagedDesktopEvent(workspace, owner, { type: "d2c-report", payload: report }),
-        }),
-      }),
+        })),
+        ...(owner === undefined ? [] : createBrowserTools({
+          host: requireBrowserHost(),
+          spaceId: owner.browserSpaceId,
+        })),
+      ],
     }),
   });
 }
@@ -424,7 +473,8 @@ async function openWorkspace(path: string) {
     for (const saved of workbench.taskCheckouts.filter((item) => resolve(item.workspace) === workspace)) {
       try {
         await assertDirectory(saved.workingDirectory);
-        const task = { environment: "worktree" as const, workingDirectory: resolve(saved.workingDirectory), worktreeId: saved.worktreeId } as ManagedDesktopTask;
+        const task = { environment: "worktree" as const, workingDirectory: resolve(saved.workingDirectory), worktreeId: saved.worktreeId, browserSpaceId: `bspace-${randomUUID()}` } as ManagedDesktopTask;
+        requireBrowserHost().createSpace(task.browserSpaceId);
         task.controller = createDesktopController(workspace, task);
         task.snapshot = await task.controller.openWorkspace(task.workingDirectory);
         task.sessionId = saved.sessionId;
@@ -487,7 +537,9 @@ async function startManagedSession(resumeSession?: string, environment: "local" 
   const task = {
     environment, workingDirectory: isolated?.path ?? activeWorkspace,
     ...(isolated === undefined ? {} : { worktreeId: isolated.id }),
+    browserSpaceId: `bspace-${randomUUID()}`,
   } as ManagedDesktopTask;
+  requireBrowserHost().createSpace(task.browserSpaceId);
   task.controller = createDesktopController(activeWorkspace, task);
   task.snapshot = task.controller.snapshot();
   project.tasks.add(task); project.selectedTask = task; controller = task.controller;
@@ -579,6 +631,7 @@ function installIpcHandlers(): void {
     if (task !== undefined) {
       if (task.snapshot.activeSession?.busy) throw new Error("请先停止正在运行的任务");
       await task.controller.dispose(); project.tasks.delete(task);
+      browserHost?.disposeSpace(task.browserSpaceId);
       if (project.selectedTask === task) { delete project.selectedTask; controller = project.controller; }
     }
     delete workbench.sessionMeta[sessionMetaKey(activeWorkspace, sessionId)];
@@ -613,6 +666,7 @@ function installIpcHandlers(): void {
     const project = managedProjects.get(workspace); if (project === undefined) return decorateSnapshot(controller.snapshot());
     if ([...project.tasks].some((task) => task.snapshot.activeSession?.busy) && !input.force) throw new Error("项目中仍有任务运行；确认后再关闭项目");
     await Promise.all([project.controller, ...[...project.tasks].map((task) => task.controller)].map((item) => item.dispose()));
+    for (const task of project.tasks) browserHost?.disposeSpace(task.browserSpaceId);
     managedProjects.delete(workspace); projectOrder.splice(projectOrder.indexOf(workspace), 1);
     if (activeWorkspace === workspace) {
       activeWorkspace = projectOrder[0];
@@ -646,7 +700,10 @@ function installIpcHandlers(): void {
     const input = WorktreeRemoveInputSchema.parse(value);
     const task = [...managedProjects.get(activeWorkspace)!.tasks].find((item) => item.worktreeId === input.id);
     if (task?.snapshot.activeSession?.busy) throw new Error("不能删除正在运行任务的工作树");
-    if (task !== undefined) { await task.controller.dispose(); managedProjects.get(activeWorkspace)!.tasks.delete(task); }
+    if (task !== undefined) {
+      await task.controller.dispose(); managedProjects.get(activeWorkspace)!.tasks.delete(task);
+      browserHost?.disposeSpace(task.browserSpaceId);
+    }
     await worktreeManager(activeWorkspace).remove(input.id, input.force);
     workbench.taskCheckouts = workbench.taskCheckouts.filter((item) => !(item.workspace === activeWorkspace && item.worktreeId === input.id));
     await savePersistedProjects();
@@ -667,6 +724,57 @@ function installIpcHandlers(): void {
   ipcMain.handle(DESKTOP_CHANNELS.terminalResize, async (_event, value) => { const input = TerminalResizeInputSchema.parse(value); controller.resizeTerminal(input.id, input.columns, input.rows); });
   ipcMain.handle(DESKTOP_CHANNELS.terminalClose, async (_event, value) => controller.closeTerminal(TerminalIdInputSchema.parse(value).id));
   ipcMain.handle(DESKTOP_CHANNELS.jobRead, async (_event, value) => { const input = JobReadInputSchema.parse(value); return controller.readJob(input.id, input.cursor); });
+  // Built-in browser: the space always follows the selected task, never a
+  // renderer-chosen id. Inputs are schema-validated before reaching the host.
+  ipcMain.handle(DESKTOP_CHANNELS.browserListTabs, async () => {
+    const project = activeWorkspace === undefined ? undefined : managedProjects.get(activeWorkspace);
+    const task = project?.selectedTask;
+    if (task === undefined) return undefined;
+    const host = requireBrowserHost();
+    host.createSpace(task.browserSpaceId, task.sessionId);
+    return host.listTabs(task.browserSpaceId);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.browserNewTab, async (_event, value) => {
+    const input = BrowserUiNewTabInputSchema.parse(value ?? {});
+    const spaceId = currentBrowserSpaceId();
+    const host = requireBrowserHost();
+    host.createSpace(spaceId);
+    return host.newTab(spaceId, input.url);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.browserActivateTab, async (_event, value) => {
+    const input = BrowserUiTabTargetInputSchema.parse(value);
+    requireBrowserHost().activateTab(currentBrowserSpaceId(), input.tabId);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.browserCloseTab, async (_event, value) => {
+    const input = BrowserUiTabTargetInputSchema.parse(value);
+    requireBrowserHost().closeTab(currentBrowserSpaceId(), input.tabId);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.browserNavigate, async (_event, value) => {
+    const input = BrowserUiNavigateInputSchema.parse(value);
+    const spaceId = currentBrowserSpaceId();
+    ensureBrowserUiWriteAllowed(spaceId);
+    return requireBrowserHost().navigate(spaceId, input.tabId, input.url);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.browserReload, async (_event, value) => {
+    const input = BrowserUiHistoryInputSchema.parse(value);
+    const spaceId = currentBrowserSpaceId();
+    ensureBrowserUiWriteAllowed(spaceId);
+    requireBrowserHost().history(spaceId, input.tabId, input.direction);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.browserSetBounds, async (_event, value) => {
+    const input = BrowserUiSetBoundsInputSchema.parse(value);
+    requireBrowserHost().setBounds(currentBrowserSpaceId(), input.bounds);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.browserSetVisible, async (_event, value) => {
+    const input = BrowserUiSetVisibleInputSchema.parse(value);
+    const spaceId = currentBrowserSpaceId();
+    const host = requireBrowserHost();
+    host.createSpace(spaceId);
+    host.setPanelVisible(spaceId, input.visible);
+    if (input.visible) host.ensureSpaceTab(spaceId);
+  });
+  ipcMain.handle(DESKTOP_CHANNELS.browserTakeControl, async () => requireBrowserHost().takeControl(currentBrowserSpaceId()));
+  ipcMain.handle(DESKTOP_CHANNELS.browserHandOff, async () => requireBrowserHost().handOff(currentBrowserSpaceId()));
   ipcMain.handle(DESKTOP_CHANNELS.previewValidate, async (_event, value) => DesktopWorkbenchService.normalizePreviewUrl(PreviewUrlInputSchema.parse(value).url));
   ipcMain.handle(DESKTOP_CHANNELS.previewOpen, async (_event, value) => shell.openExternal(DesktopWorkbenchService.normalizePreviewUrl(PreviewUrlInputSchema.parse(value).url)));
   ipcMain.handle(DESKTOP_CHANNELS.inspectWorkbench, async () => new DesktopWorkbenchService(activeWorkingDirectory()).inspect(controller.snapshot().activeSession?.sessionId));
@@ -974,6 +1082,11 @@ app.on("before-quit", (event) => {
   event.preventDefault(); quitting = true; workbench.cleanShutdown = true;
   const controllers = [detachedController, ...[...managedProjects.values()].flatMap((project) => [project.controller, ...[...project.tasks].map((task) => task.controller)])];
   void savePersistedProjects().catch(() => undefined).then(() => Promise.all(controllers.map((item) => item.dispose()))).finally(() => {
+    try {
+      browserHost?.disposeAll();
+    } catch {
+      // browser teardown must not block app quit
+    }
     mainWindow?.destroy(); app.quit();
   });
 });

@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 
 import { DESKTOP_CHANNELS } from "./channels.js";
 import type { DesktopEvent, FlavorDesktopApi } from "./contracts.js";
+import type { BrowserEvent } from "./browser/contracts.js";
 
 const api: FlavorDesktopApi = {
   bootstrap: () => ipcRenderer.invoke(DESKTOP_CHANNELS.bootstrap),
@@ -43,6 +44,21 @@ const api: FlavorDesktopApi = {
   resizeTerminal: (id, columns, rows) => ipcRenderer.invoke(DESKTOP_CHANNELS.terminalResize, { id, columns, rows }),
   closeTerminal: (id) => ipcRenderer.invoke(DESKTOP_CHANNELS.terminalClose, { id }),
   readJob: (id, cursor) => ipcRenderer.invoke(DESKTOP_CHANNELS.jobRead, { id, ...(cursor === undefined ? {} : { cursor }) }),
+  browserListTabs: () => ipcRenderer.invoke(DESKTOP_CHANNELS.browserListTabs),
+  browserNewTab: (url) => ipcRenderer.invoke(DESKTOP_CHANNELS.browserNewTab, url === undefined ? {} : { url }),
+  browserActivateTab: (tabId) => ipcRenderer.invoke(DESKTOP_CHANNELS.browserActivateTab, { tabId }),
+  browserCloseTab: (tabId) => ipcRenderer.invoke(DESKTOP_CHANNELS.browserCloseTab, { tabId }),
+  browserNavigate: (tabId, url) => ipcRenderer.invoke(DESKTOP_CHANNELS.browserNavigate, { tabId, url }),
+  browserHistory: (tabId, direction) => ipcRenderer.invoke(DESKTOP_CHANNELS.browserReload, { tabId, direction }),
+  browserSetBounds: (bounds) => ipcRenderer.invoke(DESKTOP_CHANNELS.browserSetBounds, { bounds }),
+  browserSetVisible: (visible) => ipcRenderer.invoke(DESKTOP_CHANNELS.browserSetVisible, { visible }),
+  browserTakeControl: () => ipcRenderer.invoke(DESKTOP_CHANNELS.browserTakeControl),
+  browserHandOff: () => ipcRenderer.invoke(DESKTOP_CHANNELS.browserHandOff),
+  onBrowserEvent: (listener) => {
+    const handler = (_event: unknown, payload: BrowserEvent): void => listener(payload);
+    ipcRenderer.on(DESKTOP_CHANNELS.browserEvent, handler);
+    return () => { ipcRenderer.removeListener(DESKTOP_CHANNELS.browserEvent, handler); };
+  },
   validatePreviewUrl: (url) => ipcRenderer.invoke(DESKTOP_CHANNELS.previewValidate, { url }),
   openPreviewUrl: (url) => ipcRenderer.invoke(DESKTOP_CHANNELS.previewOpen, { url }),
   inspectWorkbench: () => ipcRenderer.invoke(DESKTOP_CHANNELS.inspectWorkbench),
