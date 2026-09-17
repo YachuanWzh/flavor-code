@@ -1,14 +1,19 @@
 import { describe, expect, it } from "vitest";
 
 import { BrowserHost } from "../../src/desktop/browser/browser-host.js";
-import type { BrowserViewLike } from "../../src/desktop/browser/browser-tab.js";
 import { createBrowserTools } from "../../src/desktop/browser/browser-tools.js";
+import type { BrowserViewLike } from "../../src/desktop/browser/browser-tab.js";
 import { BrowserError } from "../../src/desktop/browser/types.js";
 import type { ToolContext } from "../../src/tools/types.js";
 
-function fakeView(): BrowserViewLike {
+interface ScriptedWebContentsState {
+  loading: boolean;
+}
+
+function fakeView(state?: ScriptedWebContentsState): BrowserViewLike {
   const wc = {
     url: "about:blank",
+    loading: state ? state.loading : false,
     loadURL(url: string): Promise<void> {
       this.url = url;
       return Promise.resolve();
@@ -20,7 +25,7 @@ function fakeView(): BrowserViewLike {
       return this.url === "about:blank" ? "" : `Page ${this.url}`;
     },
     isLoading(): boolean {
-      return false;
+      return this.loading;
     },
     canGoBack(): boolean {
       return false;
@@ -42,7 +47,23 @@ function fakeView(): BrowserViewLike {
       },
       on(): void {},
       removeListener(): void {},
-      sendCommand(): Promise<unknown> {
+      sendCommand(method: string, params?: Record<string, unknown>): Promise<unknown> {
+        if (method === "DOM.getDocument") return Promise.resolve({ root: { backendNodeId: 500 } });
+        if (method === "Accessibility.getFullAXTree") {
+          return Promise.resolve({
+            nodes: [
+              { nodeId: "1", role: { value: "heading" }, name: { value: "Docs" }, nodeInfo: { backendDOMNodeId: 60 } },
+              { nodeId: "2", role: { value: "button" }, name: { value: "Save" }, nodeInfo: { backendDOMNodeId: 61 } },
+            ],
+          });
+        }
+        if (method === "DOM.getContentQuads") {
+          return Promise.resolve({ quads: [[0, 0, 100, 0, 100, 40, 0, 40]] });
+        }
+        if (method === "Input.dispatchKeyEvent") {
+          return Promise.resolve({ handled: true });
+        }
+        lastCdp = { method, params };
         return Promise.resolve({});
       },
     },
@@ -58,9 +79,11 @@ function fakeView(): BrowserViewLike {
   };
 }
 
-function makeHost(): BrowserHost {
+let lastCdp: { method: string; params: Record<string, unknown> | undefined } | undefined;
+
+function makeHost(state?: ScriptedWebContentsState): BrowserHost {
   return new BrowserHost({
-    createView: fakeView,
+    createView: () => fakeView(state),
     attachView: () => undefined,
     detachView: () => undefined,
     emit: () => undefined,
@@ -83,12 +106,15 @@ type AnyTool = {
 };
 
 describe("browser tools", () => {
-  it("exposes only the three MVP tools to the main agent", () => {
+  it("exposes the MVP read/write surface to the main agent only", () => {
     const tools = createBrowserTools({ host: makeHost(), spaceId: "bspace-a" });
     expect(tools.map((tool) => tool.name).sort()).toEqual([
+      "BrowserAct",
       "BrowserControl",
       "BrowserNavigate",
+      "BrowserSnapshot",
       "BrowserTabs",
+      "BrowserWait",
     ]);
     for (const tool of tools) {
       expect(tool.agents).toEqual(["main"]);
@@ -128,6 +154,9 @@ describe("browser tools", () => {
       ownership: string;
     };
     expect(listed.ownership).toBe("user");
+    // Snapshot is also gated: it can reveal freshly typed content.
+    const snapshot = toolByName<AnyTool>(createBrowserTools({ host, spaceId: "bspace-a" }), "BrowserSnapshot");
+    await expect(snapshot.execute({} as never, new AbortController().signal, mainAgent)).rejects.toBeInstanceOf(BrowserError);
   });
 
   it("navigates, reports load state and refuses file urls", async () => {
@@ -162,5 +191,84 @@ describe("browser tools", () => {
     const tabs = toolByName<AnyTool>(createBrowserTools({ host: makeHost(), spaceId: "bspace-a" }), "BrowserTabs");
     expect(tabs.permissions({ operation: "list" } as never).readOnly).toBe(true);
     expect(tabs.permissions({ operation: "new" } as never).readOnly).toBe(false);
+  });
+});
+
+describe("browser snapshot/act tools", () => {
+  const signal = new AbortController().signal;
+
+  it("snapshots allocate refs and act drives the resolved backend node", async () => {
+    const host = makeHost();
+    host.createSpace("bspace-a");
+    const tools = createBrowserTools({ host, spaceId: "bspace-a" });
+    const navigate = toolByName<AnyTool>(tools, "BrowserNavigate");
+    await navigate.execute({ operation: "goto", url: "https://a.test/docs" } as never, signal, mainAgent);
+    const snapshot = toolByName<AnyTool>(tools, "BrowserSnapshot");
+    const result = (await snapshot.execute({} as never, signal, mainAgent)) as {
+      text: string;
+      label: string;
+      documentId: string;
+      truncated: boolean;
+    };
+    expect(result.label).toBe("p1");
+    expect(result.text).toContain('@1 heading "Docs"');
+    expect(result.text).toContain('@2 button "Save"');
+    expect(result.documentId).toBe("500");
+
+    const act = toolByName<AnyTool>(tools, "BrowserAct");
+    const acted = (await act.execute({ action: "click", target: "@2" } as never, signal, mainAgent)) as {
+      action: string;
+      ref: number;
+    };
+    expect(acted).toMatchObject({ action: "click", ref: 2 });
+    // The click focused backend node 61 (the live node behind @2), not stale data.
+    expect(lastCdp?.method).toBe("Input.dispatchMouseEvent");
+  });
+
+  it("rejects non-ref locators with a re-snapshot style error", async () => {
+    const host = makeHost();
+    host.createSpace("bspace-a");
+    const act = toolByName<AnyTool>(createBrowserTools({ host, spaceId: "bspace-a" }), "BrowserAct");
+    await expect(
+      act.execute({ action: "click", target: "button.primary" } as never, signal, mainAgent),
+    ).rejects.toThrow(/snapshot refs \(@N\)/);
+  });
+
+  it("stale refs after a new snapshot document surface as stale errors", async () => {
+    const host = makeHost();
+    host.createSpace("bspace-a");
+    const tools = createBrowserTools({ host, spaceId: "bspace-a" });
+    const snapshot = toolByName<AnyTool>(tools, "BrowserSnapshot");
+    const act = toolByName<AnyTool>(tools, "BrowserAct");
+    await snapshot.execute({} as never, signal, mainAgent);
+    // act on a ref beyond the 2 known nodes -> stale
+    await expect(act.execute({ action: "click", target: "@9" } as never, signal, mainAgent)).rejects.toThrow(/stale/i);
+  });
+
+  it("wait returns idle with the observed tab state", async () => {
+    const host = makeHost();
+    host.createSpace("bspace-a");
+    const tools = createBrowserTools({ host, spaceId: "bspace-a" });
+    const navigate = toolByName<AnyTool>(tools, "BrowserNavigate");
+    await navigate.execute({ operation: "goto", url: "https://a.test/" } as never, signal, mainAgent);
+    const wait = toolByName<AnyTool>(tools, "BrowserWait");
+    const started = Date.now();
+    const result = (await wait.execute({ mode: "idle" } as never, signal, mainAgent)) as { waited: string };
+    expect(result.waited).toBe("idle");
+    // idle requires the settle window, not a blind sleep past it
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("wait times out with a descriptive error while the tab keeps loading", async () => {
+    const state = { loading: true };
+    const host = makeHost(state);
+    host.createSpace("bspace-a");
+    const tools = createBrowserTools({ host, spaceId: "bspace-a" });
+    const navigate = toolByName<AnyTool>(tools, "BrowserNavigate");
+    await navigate.execute({ operation: "goto", url: "https://slow.test/" } as never, signal, mainAgent);
+    const wait = toolByName<AnyTool>(tools, "BrowserWait");
+    await expect(
+      wait.execute({ mode: "idle", timeoutMs: 300 } as never, signal, mainAgent),
+    ).rejects.toThrow(/timed out after 300ms/);
   });
 });

@@ -37,6 +37,11 @@ export interface BrowserTabEvents {
   onStateChange(tabId: string): void;
   onPopup(tabId: string, url: string): void;
   onCrashed(tabId: string): void;
+  /**
+   * Main-document generation changed (real navigation, not in-page routing).
+   * All snapshot refs bound to the previous document must die.
+   */
+  onDocumentChange(tabId: string): void;
 }
 
 export interface BrowserTabOptions {
@@ -62,6 +67,7 @@ export class BrowserTab {
     const wc = view.webContents;
     wc.on("did-start-navigation", this.onNavigationChanged);
     wc.on("did-navigate", this.onNavigationChanged);
+    wc.on("did-navigate", this.onDocumentChanged);
     wc.on("did-navigate-in-page", this.onNavigationChanged);
     wc.on("did-stop-loading", this.onNavigationChanged);
     wc.on("page-title-updated", this.onNavigationChanged);
@@ -152,6 +158,7 @@ export class BrowserTab {
     const bound: [string, (...args: unknown[]) => void][] = [
       ["did-start-navigation", this.onNavigationChanged],
       ["did-navigate", this.onNavigationChanged],
+      ["did-navigate", this.onDocumentChanged],
       ["did-navigate-in-page", this.onNavigationChanged],
       ["did-stop-loading", this.onNavigationChanged],
       ["page-title-updated", this.onNavigationChanged],
@@ -175,6 +182,10 @@ export class BrowserTab {
 
   private readonly onNavigationChanged = (): void => {
     if (!this.destroyed) this.events.onStateChange(this.id);
+  };
+
+  private readonly onDocumentChanged = (): void => {
+    if (!this.destroyed) this.events.onDocumentChange(this.id);
   };
 
   private readonly onRenderProcessGone = (): void => {

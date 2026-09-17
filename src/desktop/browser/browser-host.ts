@@ -6,9 +6,12 @@
  * See md_docs/todo.md sections 5, 6 and 8.
  */
 
+import { actViaRef, type ActCommandOptions, type ActRequest } from "./act-service.js";
 import { BrowserSpace } from "./browser-space.js";
 import { BrowserTab, type BrowserViewLike } from "./browser-tab.js";
 import { validateBrowserNavigationUrl, type UrlPolicyOptions } from "./browser-security.js";
+import { captureSnapshot, type CaptureSnapshotOptions } from "./snapshot-service.js";
+import { RefRegistry } from "./snapshot.js";
 import {
   BrowserError,
   type BrowserBounds,
@@ -32,6 +35,10 @@ export interface BrowserHostDeps {
   newTabId?(): string;
 }
 
+function registryKey(spaceId: string, tabId: string): string {
+  return `${spaceId}|${tabId}`;
+}
+
 interface SpaceState {
   space: BrowserSpace;
   tabs: Map<string, BrowserTab>;
@@ -44,6 +51,7 @@ interface SpaceState {
 export class BrowserHost {
   private readonly deps: BrowserHostDeps;
   private readonly spaces = new Map<string, SpaceState>();
+  private readonly registries = new Map<string, RefRegistry>();
   private activeSpaceId: string | undefined;
   private disposed = false;
 
@@ -65,6 +73,9 @@ export class BrowserHost {
     for (const tab of state.tabs.values()) {
       this.deps.detachView(tab.view);
       tab.destroy();
+    }
+    for (const key of [...this.registries.keys()]) {
+      if (key.startsWith(`${spaceId}|`)) this.registries.delete(key);
     }
     state.tabs.clear();
     this.spaces.delete(spaceId);
@@ -129,7 +140,11 @@ export class BrowserHost {
         },
         onCrashed: () => {
           state.space.updateTab(tabId, { crashed: true, loading: false });
+          this.registries.get(registryKey(spaceId, tabId))?.invalidateDocument();
           this.deps.emit({ kind: "tab-state", spaceId, tabId });
+        },
+        onDocumentChange: () => {
+          this.registries.get(registryKey(spaceId, tabId))?.invalidateDocument();
         },
       },
     );
@@ -155,6 +170,7 @@ export class BrowserHost {
     this.deps.detachView(tab.view);
     tab.destroy();
     state.tabs.delete(tabId);
+    this.registries.delete(registryKey(spaceId, tabId));
     state.space.closeTab(tabId);
     if (state.space.isEmpty) {
       // Recreate a blank p1 anchor so the tab bar never collapses.
@@ -196,6 +212,48 @@ export class BrowserHost {
 
   cdpFor(spaceId: string, tabId: string) {
     return this.tab(this.state(spaceId), tabId).cdp();
+  }
+
+  registryFor(spaceId: string, tabId: string): RefRegistry {
+    const key = registryKey(spaceId, tabId);
+    let registry = this.registries.get(key);
+    if (registry === undefined) {
+      this.tab(this.state(spaceId), tabId); // fails fast for dead tabs
+      registry = new RefRegistry(spaceId, tabId);
+      this.registries.set(key, registry);
+    }
+    return registry;
+  }
+
+  /** Takes a semantic snapshot; the tab's CDP transport supplies AX data. */
+  async capture(
+    spaceId: string,
+    tabId: string,
+    options: Omit<CaptureSnapshotOptions, "commander" | "registry" | "tabLabel" | "url" | "title">,
+  ): Promise<{ tab: BrowserTabSummary; snapshot: Awaited<ReturnType<typeof captureSnapshot>> }> {
+    const state = this.state(spaceId);
+    const tab = this.tab(state, tabId);
+    const summary = state.space.requireTab(tabId);
+    this.syncTabFromView(state, tabId);
+    const snapshot = await captureSnapshot({
+      commander: tab.cdp(),
+      registry: this.registryFor(spaceId, tabId),
+      tabLabel: summary.label,
+      url: summary.url,
+      title: summary.title,
+      ...options,
+    });
+    return { tab: this.state(spaceId).space.requireTab(tabId), snapshot };
+  }
+
+  async act(
+    spaceId: string,
+    tabId: string,
+    request: ActRequest,
+    options: ActCommandOptions = {},
+  ): Promise<{ action: ActRequest["action"]; ref: number }> {
+    const tab = this.tab(this.state(spaceId), tabId);
+    return actViaRef(tab.cdp(), this.registryFor(spaceId, tabId), request, options);
   }
 
   setBounds(spaceId: string, bounds: BrowserBounds): void {
