@@ -48,6 +48,7 @@ describe("desktop security helpers", () => {
       "desktop:job-read",
       "desktop:preview-open", "desktop:preview-validate", "desktop:remove-worktree", "desktop:rewind-history", "desktop:send-pal-message", "desktop:start-co-work",
       "desktop:terminal-close", "desktop:terminal-list", "desktop:terminal-open", "desktop:terminal-read", "desktop:terminal-resize", "desktop:terminal-write", "desktop:unrevert-history",
+      "browser:activate-tab", "browser:back", "browser:close-tab", "browser:event", "browser:forward", "browser:hand-off", "browser:list-tabs", "browser:navigate", "browser:new-tab", "browser:reload", "browser:set-bounds", "browser:set-visible", "browser:take-control",
     ].sort());
   });
 
