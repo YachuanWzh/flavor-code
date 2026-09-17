@@ -2,7 +2,7 @@ import React from "react";
 import { renderToString } from "ink";
 import { describe, expect, it, vi } from "vitest";
 
-import { approvalDetailLines, appRuntimeOptions, boundedCliTurn, cliRenderBudget, cliTranscriptWindow, ideFooterPresentation, MentionMenu, outputToggleShortcut, TerminalLayout, statusLineColor } from "../../src/ui/app.js";
+import { approvalDetailLines, appRuntimeOptions, boundedCliTurn, cliRenderBudget, cliTranscriptWindow, ideFooterPresentation, isOutputToggleShortcut, MentionMenu, outputToggleShortcut, TerminalLayout, statusLineColor } from "../../src/ui/app.js";
 import {
   COMPACT_PROGRESS_COMPLETE,
   COMPACT_PROGRESS_REMAINING,
@@ -68,21 +68,19 @@ describe("TerminalLayout", () => {
     expect(source.blocks).toHaveLength(3);
   });
 
-  it("scales the live render window to the terminal instead of retaining a large fixed tree", () => {
-    const compact = cliRenderBudget(18, 80, false);
-    const expanded = cliRenderBudget(18, 80, true);
+  it("keeps the conversation render window fixed when tool output is expanded", () => {
+    const compact = cliRenderBudget(18, 80);
+    const expanded = cliRenderBudget(18, 80);
 
     expect(compact.turns).toBeLessThan(40);
     expect(compact.blocks).toBeLessThan(320);
     expect(compact.textChars).toBeLessThan(16_000);
-    expect(expanded.turns).toBeGreaterThan(compact.turns);
-    expect(expanded.blocks).toBeGreaterThan(compact.blocks);
-    expect(expanded.textChars).toBeGreaterThan(compact.textChars);
+    expect(expanded).toEqual(compact);
 
     const turns = Array.from({ length: 42 }, (_, index) => turn(index + 1, `prompt ${index + 1}`, ""));
     const expandedWindow = cliTranscriptWindow(turns, expanded.turns, expanded.blocks, expanded.textChars);
-    expect(expandedWindow.hiddenTurns).toBe(2);
-    expect(expandedWindow.turns[0]?.id).toBe(3);
+    expect(expandedWindow.hiddenTurns).toBeGreaterThan(2);
+    expect(expandedWindow.turns[0]?.id).toBeGreaterThan(3);
   });
 
   it("passes the CLI instance identity into the production runtime", () => {
@@ -637,6 +635,7 @@ describe("TerminalLayout", () => {
       promptCursor={0}
       columns={80}
       activeSession={false}
+      expandedOutput
     />, { columns: 80 });
     const plain = raw.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
 
@@ -675,7 +674,8 @@ describe("TerminalLayout", () => {
 
     expect(output).toContain("● Create(new.txt)");
     expect(output).toContain("└ Added 1 line, removed 0 lines");
-    expect(output).toContain("1 +| hello");
+    expect(output).not.toContain("1 +| hello");
+    expect(output).not.toContain("expand tool output");
   });
 
   it("renders deletion as only its operation and file name", () => {
@@ -1238,10 +1238,10 @@ describe("TerminalLayout", () => {
 
     expect(plain).toContain("┌─ WEB SEARCH · 8 RESULTS");
     expect(plain).toContain("│  DeepSeek 最新版本 模型 2026");
-    expect(plain).toContain("│  01  DeepSeek result 1");
-    expect(plain).toContain("│      example1.com/articles/result-1");
-    expect(plain).toMatch(/└─ Showing 5 of 8\n\n\s+结论正文/u);
-    expect(plain).not.toContain("DeepSeek result 6");
+    expect(plain).not.toContain("DeepSeek result 1");
+    expect(plain).toContain("└─ Showing 0 of 8");
+    expect(plain).not.toContain("expand tool output");
+    expect(plain).toContain("结论正文");
     expect(raw).not.toBe(plain);
 
     const narrow = renderToString(<TerminalLayout
@@ -1255,7 +1255,7 @@ describe("TerminalLayout", () => {
     />, { columns: 44 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
     expect(narrow).toContain("WEB SEARCH · 8 RESULTS");
     expect(narrow).not.toContain("tracking=ignored");
-    expect(narrow).not.toContain("DeepSeek result 6");
+    expect(narrow).not.toContain("DeepSeek result 1");
   });
 
   it("renders job state and logs as a bounded receipt separated from assistant text", () => {
@@ -1284,7 +1284,7 @@ describe("TerminalLayout", () => {
     };
     const raw = renderToString(<TerminalLayout
       model="model" workspaceName="workspace" completed={[turn]}
-      input="" promptCursor={0} columns={90} activeSession={false}
+      input="" promptCursor={0} columns={90} activeSession={false} expandedOutput
     />, { columns: 90 });
     const plain = raw.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
 
@@ -1294,7 +1294,7 @@ describe("TerminalLayout", () => {
     expect(plain).toContain("├─ LOG · 6 LINES");
     expect(plain).toContain("│  ERR: fetch failed");
     expect(plain).toContain("└─ exit 1 · cursor 184");
-    expect(plain).toMatch(/cursor 184\n\n\s+后台任务失败/u);
+    expect(plain).toContain("后台任务失败，需要检查网络。");
     expect(raw).not.toBe(plain);
   });
 
@@ -1328,8 +1328,9 @@ describe("TerminalLayout", () => {
     expect(plain).toContain("└─ exit 1");
     expect(plain).not.toContain("LOG · NO NEW OUTPUT");
     expect(plain).toContain("JOBS · 10");
-    expect(plain).toContain("└─ Showing 8 of 10");
-    expect(plain).not.toContain("background command 8");
+    expect(plain).toContain("└─ Showing 0 of 10");
+    expect(plain).not.toContain("background command 1");
+    expect(plain).not.toContain("expand tool output");
   });
 
   it("renders successful command output as a bounded receipt separated from assistant text", () => {
@@ -1353,11 +1354,12 @@ describe("TerminalLayout", () => {
 
     expect(plain).toContain("┌─ COMMAND · COMPLETED");
     expect(plain).toContain("│  git show --stat --oneline 14adcc5");
-    expect(plain).toContain("├─ OUTPUT · 21 LINES · 8 SHOWN");
-    expect(plain).toContain("│  14adcc5 feat(desktop): improve E2E");
-    expect(plain).toContain("│  … 13 lines hidden");
-    expect(plain).toContain(`└─ exit 0 · ${outputToggleShortcut()} expand`);
-    expect(plain).toMatch(/exit 0 · (?:Ctrl|Cmd)\+O expand\n\n\s+这个提交修改了多个文件/u);
+    expect(plain).toContain("├─ OUTPUT · 21 LINES · 0 SHOWN");
+    expect(plain).not.toContain("14adcc5 feat(desktop): improve E2E");
+    expect(plain).toContain("│  … 21 lines hidden");
+    expect(plain).toContain("└─ exit 0");
+    expect(plain).not.toContain("expand tool output");
+    expect(plain).toContain("这个提交修改了多个文件。");
     expect(raw).not.toBe(plain);
   });
 
@@ -1375,7 +1377,7 @@ describe("TerminalLayout", () => {
     };
     const raw = renderToString(<TerminalLayout
       model="model" workspaceName="workspace" completed={[turn]}
-      input="" promptCursor={0} columns={46} rows={32} activeSession={false}
+      input="" promptCursor={0} columns={46} rows={32} activeSession={false} expandedOutput
     />, { columns: 46 });
     const plain = raw.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
 
@@ -1385,11 +1387,11 @@ describe("TerminalLayout", () => {
     expect(plain).toContain('Executable "git status" was not found by');
     expect(plain).toContain("the selected runtime shell.");
     expect(plain).toContain("exit 1");
-    expect(plain).toMatch(/exit 1\n\n\s+命令参数需要调整/u);
+    expect(plain).toContain("命令参数需要调整。");
     expect(raw).not.toBe(plain);
   });
 
-  it("shares the compact eight-line command receipt budget between stdout and stderr", () => {
+  it("collapses stdout and stderr together without folding assistant text", () => {
     const stream = (prefix: string) => Array.from({ length: 12 }, (_, index) => `${prefix} ${index + 1}`).join("\n");
     const turn: TranscriptTurn = {
       id: 1, prompt: "run", assistantText: "done", statusLines: [],
@@ -1399,7 +1401,7 @@ describe("TerminalLayout", () => {
           kind: "terminal", variant: "command", title: "mixed", command: "mixed",
           stdout: stream("out"), stderr: stream("err"), exitCode: 1, state: "failed",
         },
-      }],
+      }, { kind: "text", text: "done" }],
     };
     const plain = renderToString(<TerminalLayout
       model="model" workspaceName="workspace" completed={[turn]}
@@ -1408,11 +1410,10 @@ describe("TerminalLayout", () => {
 
     expect(plain).toContain("OUTPUT · 12 LINES");
     expect(plain).toContain("ERROR · 12 LINES");
-    expect(plain.match(/… 8 lines hidden/gu)).toHaveLength(2);
-    expect(plain).toContain("out 1");
-    expect(plain).toContain("out 12");
-    expect(plain).toContain("err 1");
-    expect(plain).toContain("err 12");
+    expect(plain.match(/… 12 lines hidden/gu)).toHaveLength(2);
+    expect(plain).not.toContain("out 1");
+    expect(plain).not.toContain("err 1");
+    expect(plain).toContain("done");
   });
 
   it("renders turn deliverables as a workspace-relative changeset receipt", () => {
@@ -1433,7 +1434,7 @@ describe("TerminalLayout", () => {
     };
     const raw = renderToString(<TerminalLayout
       model="model" workspaceName="flavor-code" completed={[turn]}
-      input="" promptCursor={0} columns={88} rows={32} activeSession={false}
+      input="" promptCursor={0} columns={88} rows={32} activeSession={false} expandedOutput
     />, { columns: 88 });
     const plain = raw.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
 
@@ -1444,7 +1445,7 @@ describe("TerminalLayout", () => {
     expect(plain).toContain("└─ +38 -5");
     expect(plain).not.toContain("C:\\Users\\wangzh");
     expect(plain).not.toContain("legacy fallback");
-    expect(plain).toMatch(/\+38 -5\n\n\s+变更日志已经更新/u);
+    expect(plain).toContain("变更日志已经更新。");
     expect(raw).not.toBe(plain);
   });
 
@@ -1468,9 +1469,9 @@ describe("TerminalLayout", () => {
     />, { columns: 60 }).replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
 
     expect(plain).toContain("CHANGESET · 10 FILES");
-    expect(plain).toContain("src/file-8.ts");
-    expect(plain).not.toContain("src/file-9.ts");
-    expect(plain).toContain("└─ +55 -0 · Showing 8 of 10");
+    expect(plain).not.toContain("src/file-1.ts");
+    expect(plain).toContain("└─ +55 -0 · Showing 0 of 10");
+    expect(plain).not.toContain("expand tool output");
   });
 
   it("expands complete recent output while keeping the oldest turns outside the live tree", () => {
@@ -1504,13 +1505,49 @@ describe("TerminalLayout", () => {
     expect(plain).toContain("src/file-10.ts");
     expect(plain).not.toContain("lines hidden");
     expect(plain).not.toContain("earlier turns");
-    expect(plain).toContain(`${outputToggleShortcut()} collapse output`);
-    expect(plain).toContain(`└─ exit 0 · ${outputToggleShortcut()} collapse`);
+    expect(plain).toContain(`${outputToggleShortcut()} collapse tools`);
+    expect(plain).not.toContain("collapse tool output");
   });
 
-  it("presents the output toggle with the native platform shortcut", () => {
+  it("folds generic tool details without ever folding assistant conversation", () => {
+    const completed: TranscriptTurn[] = [{
+      id: 1,
+      prompt: "inspect",
+      assistantText: "",
+      statusLines: [],
+      blocks: [{
+        kind: "status",
+        id: "tool:generic",
+        state: "completed",
+        text: "Inspect",
+        tool: { name: "Inspect", input: {} },
+        presentation: {
+          kind: "generic",
+          title: "INSPECT · COMPLETED",
+          summary: "1 result",
+          details: "private tool detail",
+        },
+      }, { kind: "text", text: "Assistant answer remains visible." }],
+    }];
+    const render = (expandedOutput: boolean) => stripAnsi(renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={completed}
+      input="" promptCursor={0} columns={90} rows={32} activeSession={false}
+      expandedOutput={expandedOutput}
+    />, { columns: 90 }));
+
+    const collapsed = render(false);
+    const expanded = render(true);
+    expect(collapsed).not.toContain("private tool detail");
+    expect(expanded).toContain("private tool detail");
+    expect(collapsed).toContain("Assistant answer remains visible.");
+    expect(expanded).toContain("Assistant answer remains visible.");
+  });
+
+  it("uses Ctrl+O for tool output on every platform and never claims Cmd+O", () => {
     expect(outputToggleShortcut("win32")).toBe("Ctrl+O");
     expect(outputToggleShortcut("linux")).toBe("Ctrl+O");
-    expect(outputToggleShortcut("darwin")).toBe("Cmd+O");
+    expect(outputToggleShortcut("darwin")).toBe("Ctrl+O");
+    expect(isOutputToggleShortcut("o", { ctrl: true, super: false })).toBe(true);
+    expect(isOutputToggleShortcut("o", { ctrl: false, super: true })).toBe(false);
   });
 });

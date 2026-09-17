@@ -33,7 +33,7 @@ import { applyPositionedHighlight, type MatchPosition, scanPositions } from './r
 import createRenderer, { type Renderer } from './renderer.js';
 import { CellWidth, CharPool, cellAt, createScreen, HyperlinkPool, isEmptyCellAt, migrateScreenPools, StylePool } from './screen.js';
 import { applySearchHighlight } from './searchHighlight.js';
-import { applySelectionOverlay, captureScrolledRows, clearSelection, createSelectionState, extendSelection, type FocusMove, findPlainTextUrlAt, getSelectedText, hasSelection, moveFocus, type SelectionState, selectLineAt, selectWordAt, shiftAnchor, shiftSelection, shiftSelectionForFollow, startSelection, updateSelection } from './selection.js';
+import { applySelectionOverlay, captureScrolledRows, clearSelection, createSelectionState, extendSelection, type FocusMove, findPlainTextUrlAt, getSelectedText, hasSelection, moveFocus, type SelectionState, selectLineAt, selectWordAt, shiftAnchor, shiftSelection, shiftSelectionForFollow, shouldCopySelectionOnRelease, startSelection, updateSelection } from './selection.js';
 import { SYNC_OUTPUT_SUPPORTED, supportsExtendedKeys, type Terminal, writeDiffToTerminal } from './terminal.js';
 import { CURSOR_HOME, cursorMove, cursorPosition, DISABLE_KITTY_KEYBOARD, DISABLE_MODIFY_OTHER_KEYS, ENABLE_KITTY_KEYBOARD, ENABLE_MODIFY_OTHER_KEYS, ERASE_SCREEN } from './termio/csi.js';
 import { DBP, DFE, DISABLE_MOUSE_TRACKING, ENABLE_MOUSE_TRACKING, ENTER_ALT_SCREEN, EXIT_ALT_SCREEN, SHOW_CURSOR } from './termio/dec.js';
@@ -122,6 +122,7 @@ export default class Ink {
   // pass in onRender can read it and App.tsx can update it from mouse
   // events. Public so instances.get() callers can access.
   readonly selection: SelectionState = createSelectionState();
+  private selectionWasDragging = false;
   // Search highlight query (alt-screen only). Setter below triggers
   // scheduleRender; applySearchHighlight in onRender inverts matching cells.
   private searchHighlightQuery = '';
@@ -1257,8 +1258,14 @@ export default class Ink {
     return () => this.selectionListeners.delete(cb);
   }
   private notifySelectionChange(): void {
+    const copyOnRelease = shouldCopySelectionOnRelease(
+      this.selectionWasDragging,
+      this.selection,
+    );
+    this.selectionWasDragging = this.selection.isDragging;
     this.onRender();
     for (const cb of this.selectionListeners) cb();
+    if (copyOnRelease) this.copySelectionNoClear();
   }
 
   /**

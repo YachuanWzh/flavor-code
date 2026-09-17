@@ -9,7 +9,9 @@ import Text from "../../src/claude-ink/components/Text.js";
 import type { Frame } from "../../src/claude-ink/frame.js";
 import Ink from "../../src/claude-ink/ink.js";
 import { cellAt, CellWidth, type Screen } from "../../src/claude-ink/screen.js";
+import { TerminalLayout } from "../../src/ui/app.js";
 import { AssistantText } from "../../src/ui/assistant-text.js";
+import type { SlashCompletion } from "../../src/ui/slash-completion.js";
 
 type MutableWriteStream = NodeJS.WriteStream & {
   columns: number;
@@ -172,5 +174,62 @@ describe("native CLI markdown renderer", () => {
     lines = screenLines(ink.frontFrame.screen);
     expect(lines[0]).toContain("left-2");
     expect(lines[0]).toContain("right-3");
+  });
+
+  it("keeps the transcript viewport height stable while slash completion opens during streaming", () => {
+    const { ink } = createInk(80, 16);
+    const scrollRef = createRef<ScrollBoxHandle>();
+    const completion: SlashCompletion = {
+      query: "",
+      items: Array.from({ length: 6 }, (_, index) => ({
+        name: `skill-${index + 1}`,
+        kind: "skill" as const,
+        description: `Description ${index + 1}`,
+        source: "project",
+      })),
+      selectedIndex: 0,
+      windowStart: 0,
+    };
+    const renderFrame = (tick: number, menuOpen: boolean): void => {
+      ink.render(
+        <AlternateScreen mouseTracking={false}>
+          <TerminalLayout
+            model="model"
+            workspaceName="workspace"
+            completed={[]}
+            active={{
+              id: 1,
+              prompt: "stream",
+              assistantText: `streaming-${tick}`,
+              statusLines: [],
+              blocks: [{ kind: "text", text: `streaming-${tick}` }],
+            }}
+            input={menuOpen ? "/" : ""}
+            promptCursor={menuOpen ? 1 : 0}
+            columns={80}
+            rows={16}
+            activeSession
+            scrollRef={scrollRef}
+            {...(menuOpen ? { completion } : {})}
+          />
+        </AlternateScreen>,
+      );
+      ink.onRender();
+    };
+
+    renderFrame(0, false);
+    const closedViewportHeight = scrollRef.current?.getViewportHeight();
+    expect(closedViewportHeight).toBeGreaterThan(0);
+
+    for (let tick = 1; tick <= 8; tick += 1) {
+      const menuOpen = tick % 2 === 1;
+      renderFrame(tick, menuOpen);
+      expect(scrollRef.current?.getViewportHeight()).toBe(closedViewportHeight);
+      const screen = screenLines(ink.frontFrame.screen).join("\n");
+      expect(screen).toContain(`streaming-${tick}`);
+      expect(screen).toContain("❯");
+      if (menuOpen) expect(screen).toContain("skill-1");
+      else expect(screen).not.toContain("skill-1");
+    }
   });
 });

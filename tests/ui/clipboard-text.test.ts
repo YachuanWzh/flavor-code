@@ -3,6 +3,15 @@ import { describe, expect, it, vi } from "vitest";
 import { copyNative } from "../../src/claude-ink/termio/osc.js";
 
 describe("CLI text clipboard", () => {
+  it("writes macOS clipboard text through pbcopy", () => {
+    const run = vi.fn(async () => ({ stdout: "", stderr: "", code: 0 }));
+    copyNative("selected text", { platform: "darwin", run });
+
+    expect(run).toHaveBeenCalledWith("pbcopy", [], expect.objectContaining({
+      input: "selected text", useCwd: false, timeout: 2000,
+    }));
+  });
+
   it("writes Windows clipboard text through a UTF-8 to Unicode adapter", () => {
     const run = vi.fn(async (
       _file: string,

@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 
 export interface ExecFileNoThrowOptions {
   timeout?: number;
+  maxBuffer?: number;
   useCwd?: boolean;
   env?: NodeJS.ProcessEnv;
   stdin?: "ignore" | "inherit" | "pipe";
@@ -17,6 +18,7 @@ export function execFileNoThrow(
   return new Promise((resolve) => {
     const child = execFile(file, args, {
       timeout: options.timeout,
+      maxBuffer: options.maxBuffer,
       cwd: options.useCwd === false ? undefined : process.cwd(),
       env: options.env,
       encoding: "utf8",

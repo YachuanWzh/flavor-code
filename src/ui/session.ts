@@ -193,7 +193,7 @@ const HELP = [
   "/init  /config  /skills  /plugins  /hooks  /tasks  /doctor",
   "/memory  /remember [type] <text>  /forget <text-or-id>  /forget-cold  /finish",
   "/checkpoint [label]  /tree  /rewind <node>  /unrevert  /fork <node>",
-  "/compact  /clear  /help  /exit",
+  "/compact  /clear  /paste-image  /help  /exit",
   "/loop <goal>                            run a verified autonomous loop",
   "/goal <objective>                       run a goal pipeline with adversarial verification",
   "/commit [hint]                          draft a commit message for staged changes and commit",
@@ -615,11 +615,7 @@ export class FlavorSession {
   }
 
   async #dispatch(command: SlashCommand, signal: AbortSignal): Promise<void> {
-    if (command.name === "unknown") {
-      this.#notice(command.suggestions.length
-        ? `Unknown command /${command.input}. Try ${command.suggestions.map((item) => `/${item}`).join(", ")}.`
-        : `Unknown command /${command.input}. Use /help to list commands.`);
-    } else if (command.name === "invalid") this.#notice(command.message);
+    if (command.name === "invalid") this.#notice(command.message);
     else if (command.name === "model") {
       await this.#services.setModel(command.role, command.modelId);
       this.#notice(`${command.role} model set to ${command.modelId}.`);
@@ -716,6 +712,7 @@ export class FlavorSession {
     else if (command.name === "logout") {
       this.#notice(await this.#services.logout());
     }
+    else if (command.name === "paste-image") this.#notice("Use /paste-image in the interactive CLI to attach the clipboard image.");
     else if (command.name === "help") this.#notice(HELP);
     else if (command.name === "exit") this.#services.output({ type: "exit" });
   }

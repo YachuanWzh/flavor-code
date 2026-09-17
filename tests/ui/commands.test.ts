@@ -24,6 +24,7 @@ describe("parseSlashCommand", () => {
     ["/mcp disable docs", { name: "mcp", action: "disable", target: "docs" }],
     ["/ide", { name: "ide" }],
     ["/config", { name: "config" }], ["/clear", { name: "clear" }],
+    ["/paste-image", { name: "paste-image" }],
     ["/memory", { name: "memory" }],
     ["/remember project Use pnpm for scripts", { name: "remember", type: "project", text: "Use pnpm for scripts" }],
     ["/remember Prefer Chinese responses", { name: "remember", type: "project", text: "Prefer Chinese responses" }],
@@ -48,15 +49,17 @@ describe("parseSlashCommand", () => {
 
   it("returns null for ordinary prompts", () => expect(parseSlashCommand("explain this")).toBeNull());
 
-  it("suggests the closest known command", () => {
-    expect(parseSlashCommand("/permisions")).toEqual({ name: "unknown", input: "permisions", suggestions: ["permissions"] });
+  it("treats an unregistered slash prefix as an ordinary prompt", () => {
+    expect(parseSlashCommand("/permisions")).toBeNull();
+    expect(parseSlashCommand("/write a regex /foo\/bar/")).toBeNull();
+    expect(parseSlashCommand("/")).toBeNull();
   });
 
   it("parses only explicitly registered dynamic plugin commands", () => {
     expect(parseSlashCommand("/taste saffron plum", ["taste"])).toEqual({
       name: "plugin", command: "taste", args: ["saffron", "plum"],
     });
-    expect(parseSlashCommand("/taste saffron")).toMatchObject({ name: "unknown" });
+    expect(parseSlashCommand("/taste saffron")).toBeNull();
     expect(parseSlashCommand("/ide", ["ide"])).toEqual({ name: "ide" });
   });
 

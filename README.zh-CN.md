@@ -154,7 +154,7 @@ OAuth PKCE 的运行时行为与配置约定见 [PKCE 规范](./docs/specs/pkce-
 
 ### CLI
 
-直接运行 `flavor` 后输入自然语言即可。输入 `/` 会显示内置命令、插件命令和 Skill。
+直接运行 `flavor` 后输入自然语言即可。输入 `/` 会显示内置命令、插件命令和 Skill。只有 `/名称` 命中已注册项时才会分派为命令，否则完整文本会作为普通 prompt 发送。在 macOS 上使用 `Command+C` / `Command+V` 复制和粘贴；`Ctrl+C` 始终用于停止当前回合或退出。
 
 常用命令：
 
@@ -166,6 +166,7 @@ OAuth PKCE 的运行时行为与配置约定见 [PKCE 规范](./docs/specs/pkce-
 | `/permissions` | 切换权限模式 |
 | `/tasks` | 查看任务计划和子 Agent 状态 |
 | `/compact` | 手动压缩长会话上下文 |
+| `/paste-image` | 忽略剪贴板文字，明确添加剪贴板图片 |
 | `/checkpoint`、`/tree` | 保存现场、查看会话树 |
 | `/rewind`、`/unrevert`、`/fork` | 恢复或分叉会话 |
 | `/memory`、`/remember`、`/forget`、`/forget-cold` | 管理长期记忆；`/forget-cold` 清空 cold 记忆及其文件 |
@@ -299,7 +300,9 @@ Skill 是带有 YAML 头信息的 `SKILL.md`，放在 `.flavor/skills/<name>/` �
 
 长期记忆会区分用户偏好、行为反馈、项目约定和外部引用。自动提取只保存高置信候选，并提供确认、忽略和删除入口；密钥、Token、原始工具输出和模型猜测会被拒绝。
 
-图片提示支持 PNG、JPEG 和 WebP，单图最大 5 MiB、每次最多 5 张。桌面端支持选择或拖放；CLI 剪贴板图片目前支持 Windows 和 macOS。
+图片提示支持 PNG、JPEG 和 WebP，单图最大 5 MiB、每次最多 5 张。桌面端支持选择或拖放；CLI 剪贴板图片目前支持 Windows 和 macOS。CLI 标准粘贴会优先使用剪贴板文字，只有没有可用文字时才把剪贴板图像添加为附件；剪贴板同时含有文字和图片但需要图片时，使用 `/paste-image`。
+
+CLI 工具回执默认折叠。在 Windows、Linux 和 macOS 上均使用 `Ctrl+O` 全局展开或收起工具输出；该快捷键只影响工具输出，用户输入和助手回复的对话窗口不会随之变化。macOS 的 `Command+O` 继续保留给终端或宿主应用。
 
 ## 权限与沙箱
 

@@ -48,6 +48,21 @@ function services(events: string[], outputs: string[]): SessionServices {
 }
 
 describe("FlavorSession", () => {
+  it("sends unmatched slash-prefixed input to the model as ordinary text", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const prompts: string[] = [];
+    base.run = async function* (prompt) {
+      prompts.push(prompt);
+      yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } };
+    };
+
+    await new FlavorSession(base).submit("/write a regex /foo\\/bar/");
+
+    expect(prompts).toEqual(["/write a regex /foo\\/bar/"]);
+    expect(outputs.join("\n")).not.toContain("Unknown command");
+  });
+
   it("runs /doctor locally without sending a model prompt", async () => {
     const events: string[] = []; const outputs: string[] = [];
     const base = services(events, outputs);

@@ -1,8 +1,21 @@
 import { execFileNoThrow } from "../utils/execFileNoThrow.js";
-import type { ImageAttachmentInput } from "../session/assets.js";
+import { DEFAULT_MAX_IMAGE_BYTES, type ImageAttachmentInput } from "../session/assets.js";
 
 const CLIPBOARD_TIMEOUT_MS = 10_000;
 const NO_IMAGE_EXIT_CODE = 3;
+const NO_TEXT_EXIT_CODE = 3;
+// Image adapters emit base64 (~4/3 of the PNG bytes). Node's 1 MiB
+// execFile default rejects ordinary screenshots before asset validation.
+const CLIPBOARD_IMAGE_MAX_BUFFER = Math.ceil(DEFAULT_MAX_IMAGE_BYTES / 3) * 4 + 64 * 1024;
+
+const READ_WINDOWS_CLIPBOARD_TEXT = String.raw`
+Add-Type -AssemblyName System.Windows.Forms
+if (-not [Windows.Forms.Clipboard]::ContainsText()) { exit 3 }
+$text = [Windows.Forms.Clipboard]::GetText()
+if ([string]::IsNullOrEmpty($text)) { exit 3 }
+$bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
+[Console]::Out.Write([Convert]::ToBase64String($bytes))
+`.trim();
 
 const READ_WINDOWS_CLIPBOARD_IMAGE = String.raw`
 Add-Type -AssemblyName System.Windows.Forms
@@ -83,13 +96,72 @@ export interface ClipboardImageReadOptions {
   now?: () => Date;
 }
 
-export function shouldReadClipboardImage(
+export type ClipboardPasteIntent = "immediate" | "deferred";
+
+/** Native fallback waits for terminal-delivered bracketed text first. */
+export function clipboardPasteIntent(
   input: string,
-  key: { ctrl: boolean; meta?: boolean },
+  key: { ctrl: boolean; super?: boolean },
   isPasted: boolean,
-): boolean {
-  return ((key.ctrl || key.meta === true) && input.toLowerCase() === "v")
-    || (isPasted && input.length === 0);
+  platform: NodeJS.Platform | string = process.platform,
+): ClipboardPasteIntent | undefined {
+  if (isPasted) return input.length === 0 ? "immediate" : undefined;
+  const pasteModifier = platform === "darwin" ? key.super === true : key.ctrl;
+  return pasteModifier && input.toLowerCase() === "v" ? "deferred" : undefined;
+}
+
+export type ClipboardContent =
+  | { kind: "text"; text: string }
+  | { kind: "image"; attachment: ImageAttachmentInput };
+
+/** Standard paste is text-first; an image is attached only when text is absent. */
+export async function readClipboardContent(
+  options: ClipboardImageReadOptions = {},
+): Promise<ClipboardContent | undefined> {
+  const text = await readClipboardText(options);
+  if (text !== undefined) return { kind: "text", text };
+  const attachment = await readClipboardImage(options);
+  return attachment === undefined ? undefined : { kind: "image", attachment };
+}
+
+export async function readClipboardText(
+  options: ClipboardImageReadOptions = {},
+): Promise<string | undefined> {
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32") return readWindowsClipboardText({ ...options, platform });
+  if (platform === "darwin") return readMacClipboardText({ ...options, platform });
+  throw new Error("Pasting native clipboard content is currently supported on Windows and macOS only");
+}
+
+export async function readWindowsClipboardText(
+  options: ClipboardImageReadOptions = {},
+): Promise<string | undefined> {
+  const platform = options.platform ?? process.platform;
+  if (platform !== "win32") throw new Error("Reading clipboard text this way is supported on Windows only");
+  const result = await (options.run ?? execFileNoThrow)(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-STA", "-Command", READ_WINDOWS_CLIPBOARD_TEXT],
+    { timeout: CLIPBOARD_TIMEOUT_MS, useCwd: false },
+  );
+  if (result.code === NO_TEXT_EXIT_CODE) return undefined;
+  if (result.code !== 0) throw clipboardReadError("text", result);
+  const encoded = result.stdout.trim();
+  if (encoded.length === 0) return undefined;
+  return Buffer.from(encoded, "base64").toString("utf8") || undefined;
+}
+
+export async function readMacClipboardText(
+  options: ClipboardImageReadOptions = {},
+): Promise<string | undefined> {
+  const platform = options.platform ?? process.platform;
+  if (platform !== "darwin") throw new Error("Reading clipboard text this way is supported on macOS only");
+  const result = await (options.run ?? execFileNoThrow)(
+    "pbpaste",
+    ["-Prefer", "txt"],
+    { timeout: CLIPBOARD_TIMEOUT_MS, useCwd: false },
+  );
+  if (result.code !== 0 || result.stdout.length === 0) return undefined;
+  return result.stdout;
 }
 
 export async function readClipboardImage(
@@ -112,7 +184,7 @@ export async function readWindowsClipboardImage(
   const result = await (options.run ?? execFileNoThrow)(
     "powershell.exe",
     ["-NoProfile", "-NonInteractive", "-STA", "-Command", READ_WINDOWS_CLIPBOARD_IMAGE],
-    { timeout: CLIPBOARD_TIMEOUT_MS, useCwd: false },
+    { timeout: CLIPBOARD_TIMEOUT_MS, useCwd: false, maxBuffer: CLIPBOARD_IMAGE_MAX_BUFFER },
   );
   return attachmentFromResult(result, options.now?.() ?? new Date());
 }
@@ -128,7 +200,7 @@ export async function readMacClipboardImage(
   const result = await (options.run ?? execFileNoThrow)(
     "osascript",
     ["-l", "JavaScript", "-e", READ_MAC_CLIPBOARD_IMAGE],
-    { timeout: CLIPBOARD_TIMEOUT_MS, useCwd: false },
+    { timeout: CLIPBOARD_TIMEOUT_MS, useCwd: false, maxBuffer: CLIPBOARD_IMAGE_MAX_BUFFER },
   );
   return attachmentFromResult(result, options.now?.() ?? new Date());
 }
@@ -139,10 +211,7 @@ function attachmentFromResult(
 ): ImageAttachmentInput | undefined {
   if (result.code === NO_IMAGE_EXIT_CODE) return undefined;
   if (result.code !== 0) {
-    const detail = result.stderr.trim() || result.error?.trim();
-    throw new Error(detail
-      ? `Could not read the clipboard image: ${detail}`
-      : "Could not read the clipboard image");
+    throw clipboardReadError("image", result);
   }
 
   const dataBase64 = result.stdout.trim();
@@ -152,6 +221,16 @@ function attachmentFromResult(
     mediaType: "image/png",
     dataBase64,
   };
+}
+
+function clipboardReadError(
+  kind: "text" | "image",
+  result: { stderr: string; error?: string },
+): Error {
+  const detail = result.stderr.trim() || result.error?.trim();
+  return new Error(detail
+    ? `Could not read the clipboard ${kind}: ${detail}`
+    : `Could not read the clipboard ${kind}`);
 }
 
 function timestamp(value: Date): string {

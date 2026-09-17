@@ -679,6 +679,23 @@ export function hasSelection(s: SelectionState): boolean {
 }
 
 /**
+ * macOS terminal emulators commonly consume Command+C themselves and never
+ * send it to a fullscreen TUI. Because mouse reporting also prevents those
+ * terminals from owning our selection, copy the completed in-app selection
+ * on release; a subsequent Command+C then leaves the correct text available.
+ */
+export function shouldCopySelectionOnRelease(
+  wasDragging: boolean,
+  selection: SelectionState,
+  platform: NodeJS.Platform | string = process.platform,
+): boolean {
+  return platform === 'darwin'
+    && wasDragging
+    && !selection.isDragging
+    && hasSelection(selection)
+}
+
+/**
  * Normalized selection bounds: start is always before end in reading order.
  * Returns null if no active selection.
  */

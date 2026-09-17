@@ -75,13 +75,15 @@ import {
   type ModelImageContentBlock,
 } from "../models/types.js";
 import {
+  clipboardPasteIntent,
+  readClipboardContent,
   readClipboardImage,
-  shouldReadClipboardImage,
 } from "./clipboard-image.js";
 import type { IdeEditorContext } from "../ide/client.js";
 import { PromptHistoryStore } from "./prompt-history.js";
 
 export const HISTORY_CAP = 200;
+const CLIPBOARD_SHORTCUT_FALLBACK_MS = 300;
 const BUILTIN_SLASH_CANDIDATES = MVP_COMMANDS.map((name) => ({ name, description: COMMAND_DESCRIPTIONS[name] }));
 const PROMPT_HORIZONTAL_PADDING = 1;
 
@@ -170,8 +172,15 @@ export function isPlatformShortcut(
   return platform === "darwin" ? key.super || key.ctrl : key.ctrl;
 }
 
-export function outputToggleShortcut(platform: NodeJS.Platform = process.platform): "Cmd+O" | "Ctrl+O" {
-  return platform === "darwin" ? "Cmd+O" : "Ctrl+O";
+export function isOutputToggleShortcut(
+  character: string,
+  key: Pick<Key, "ctrl" | "super">,
+): boolean {
+  return key.ctrl && character.toLowerCase() === "o";
+}
+
+export function outputToggleShortcut(_platform: NodeJS.Platform = process.platform): "Ctrl+O" {
+  return "Ctrl+O";
 }
 
 export function removeLastCliImageOnBackspace(
@@ -198,10 +207,14 @@ export type CliSubmissionPreparation =
 export function prepareCliSubmission(
   input: string,
   images: readonly ModelImageContentBlock[],
+  slashCommands: readonly string[] = MVP_COMMANDS,
 ): CliSubmissionPreparation {
   const entered = input.trim();
   if (entered.length === 0 && images.length === 0) return { kind: "empty" };
-  if (images.length > 0 && entered.startsWith("/")) {
+  const slashName = /^\/(\S+)/u.exec(entered)?.[1]?.toLowerCase();
+  const isSlashCommand = slashName !== undefined
+    && slashCommands.some((command) => command.toLowerCase() === slashName);
+  if (images.length > 0 && isSlashCommand) {
     return { kind: "error", message: "Image attachments cannot be used with slash commands." };
   }
   const text = entered || "Analyze the attached image(s).";
@@ -484,6 +497,8 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
   pendingPromptRef.current ??= new PendingPromptQueue();
   const closing = useRef(false);
   const clipboardBusy = useRef(false);
+  const clipboardFallbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const terminalTextPasteRevision = useRef(0);
   const textBuf = useRef<{ pending: string; timer: ReturnType<typeof setTimeout> | null }>({ pending: "", timer: null });
   // Thinking deltas arrive per token; batch them at the animation cadence so
   // each reducer pass covers everything streamed since the last flush.
@@ -507,6 +522,10 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
   const promptHistoryStoreRef = useRef<PromptHistoryStore | undefined>(undefined);
   promptHistoryStoreRef.current ??= new PromptHistoryStore({ home: home ?? homedir(), workspace, maxEntries: HISTORY_CAP });
   promptDraftRef.current = { text: input, cursor: promptCursor, pastedBlocks, imageAttachments };
+
+  useEffect(() => () => {
+    if (clipboardFallbackTimer.current !== null) clearTimeout(clipboardFallbackTimer.current);
+  }, []);
 
   const commitPromptDraft = (next: {
     text: string;
@@ -780,28 +799,54 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
     setDismissedMentionInput(next.text);
   };
 
-  const pasteClipboardImage = async (): Promise<void> => {
-    const active = runtimeRef.current;
-    if (active === undefined) {
-      setClipboardNotice("Flavor is still starting; try pasting the image again.");
-      return;
-    }
-    if (promptDraftRef.current.imageAttachments.length >= DEFAULT_MAX_IMAGES) {
-      setClipboardNotice(`A prompt can contain at most ${DEFAULT_MAX_IMAGES} images.`);
-      return;
-    }
+  const pasteClipboardContent = async (imageOnly = false): Promise<void> => {
     if (clipboardBusy.current) return;
 
     clipboardBusy.current = true;
-    setClipboardNotice("Reading image from clipboard...");
+    const pasteRevision = terminalTextPasteRevision.current;
+    setClipboardNotice(imageOnly ? "Reading clipboard image..." : "Reading clipboard...");
     try {
-      const attachment = await readClipboardImage();
-      if (attachment === undefined) {
-        setClipboardNotice("Clipboard does not contain an image.");
+      const content = imageOnly
+        ? await readClipboardImage().then((attachment) => attachment === undefined
+          ? undefined
+          : { kind: "image" as const, attachment })
+        : await readClipboardContent();
+      // A terminal-delivered bracketed text paste won the race. Ignore the
+      // slower native fallback so the same text is not inserted twice.
+      if (pasteRevision !== terminalTextPasteRevision.current) {
+        setClipboardNotice(undefined);
         return;
       }
-      const incomingBytes = Buffer.byteLength(attachment.dataBase64, "base64");
+      if (content === undefined) {
+        setClipboardNotice(imageOnly
+          ? "Clipboard does not contain an image."
+          : "Clipboard does not contain pasteable text or an image.");
+        return;
+      }
+      if (content.kind === "text") {
+        const currentDraft = promptDraftRef.current;
+        const nextPastedBlocks = /[\r\n]/u.test(content.text)
+          ? [...currentDraft.pastedBlocks, { id: currentDraft.pastedBlocks.length + 1, text: content.text }]
+          : currentDraft.pastedBlocks;
+        commitPromptDraft({
+          ...editPrompt({ text: currentDraft.text, cursor: currentDraft.cursor }, { type: "insert", value: content.text }),
+          pastedBlocks: nextPastedBlocks,
+        });
+        setClipboardNotice(undefined);
+        return;
+      }
+      const active = runtimeRef.current;
+      if (active === undefined) {
+        setClipboardNotice("Flavor is still starting; try pasting the image again.");
+        return;
+      }
       const currentDraft = promptDraftRef.current;
+      if (currentDraft.imageAttachments.length >= DEFAULT_MAX_IMAGES) {
+        setClipboardNotice(`A prompt can contain at most ${DEFAULT_MAX_IMAGES} images.`);
+        return;
+      }
+      const attachment = content.attachment;
+      const incomingBytes = Buffer.byteLength(attachment.dataBase64, "base64");
       const currentBytes = currentDraft.imageAttachments.reduce((sum, image) => sum + image.bytes, 0);
       if (currentBytes + incomingBytes > DEFAULT_MAX_TOTAL_IMAGE_BYTES) {
         throw new Error(`Image attachments exceed the maximum total size of ${DEFAULT_MAX_TOTAL_IMAGE_BYTES} bytes`);
@@ -846,7 +891,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
 
     const active = runtimeRef.current;
     if (isCopyShortcut(character, key)) {
-      if (selection.hasSelection()) selection.copySelection();
+      if (selection.hasSelection()) selection.copySelectionNoClear();
       else if (process.platform !== "darwin") interrupt();
       return;
     }
@@ -854,15 +899,33 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
       interrupt();
       return;
     }
-    if (isPlatformShortcut(character, key, "o")) {
+    if (isOutputToggleShortcut(character, key)) {
       setExpandedOutput((value) => !value);
       // Do not force sticky scrolling here. ScrollBox already follows the
       // bottom when it is pinned; when the user is reading above, retaining
       // the existing scrollTop avoids throwing them to the newest output.
       return;
     }
-    if (shouldReadClipboardImage(character, key, event.keypress.isPasted)) {
-      void pasteClipboardImage();
+    if (event.keypress.isPasted && character.length > 0) {
+      terminalTextPasteRevision.current += 1;
+      if (clipboardFallbackTimer.current !== null) {
+        clearTimeout(clipboardFallbackTimer.current);
+        clipboardFallbackTimer.current = null;
+      }
+    }
+    const pasteIntent = clipboardPasteIntent(character, key, event.keypress.isPasted);
+    if (pasteIntent === "immediate") {
+      if (clipboardFallbackTimer.current !== null) clearTimeout(clipboardFallbackTimer.current);
+      clipboardFallbackTimer.current = null;
+      void pasteClipboardContent();
+      return;
+    }
+    if (pasteIntent === "deferred") {
+      if (clipboardFallbackTimer.current !== null) clearTimeout(clipboardFallbackTimer.current);
+      clipboardFallbackTimer.current = setTimeout(() => {
+        clipboardFallbackTimer.current = null;
+        void pasteClipboardContent();
+      }, CLIPBOARD_SHORTCUT_FALLBACK_MS);
       return;
     }
     if (active?.approvals.pending !== undefined) {
@@ -1015,8 +1078,19 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
       return;
     }
     if (key.return) {
+      if (/^\/paste-image\s*$/iu.test(input)) {
+        setInput("");
+        setPromptCursor(0);
+        setPastedBlocks([]);
+        promptDraftRef.current = { text: "", cursor: 0, pastedBlocks: [], imageAttachments };
+        promptEditHistory.current.reset();
+        setSlashSelection(0);
+        setDismissedSlashInput(undefined);
+        void pasteClipboardContent(true);
+        return;
+      }
       const images = [...imageAttachments];
-      const prepared = prepareCliSubmission(input, images);
+      const prepared = prepareCliSubmission(input, images, slashCandidates.map(({ name }) => name));
       if (prepared.kind === "empty" || active === undefined) return;
       if (prepared.kind === "error") {
         setClipboardNotice(prepared.message);
@@ -1256,24 +1330,21 @@ export interface CliRenderBudget {
 }
 
 /** Keep Yoga/Markdown work proportional to the visible terminal, not session age. */
-export function cliRenderBudget(rows: number, columns: number, expanded: boolean): CliRenderBudget {
+export function cliRenderBudget(rows: number, columns: number): CliRenderBudget {
   const viewportRows = Math.max(8, Math.floor(rows));
   const viewportColumns = Math.max(20, Math.floor(columns));
-  const screenMultiplier = expanded ? 12 : 4;
-  const blockMultiplier = expanded ? 6 : 2;
-  const maxTextChars = expanded ? CLI_VISIBLE_TEXT_CHARS : 12_000;
+  const screenMultiplier = 4;
+  const blockMultiplier = 2;
   const blocks = Math.min(
     CLI_VISIBLE_BLOCK_LIMIT,
     Math.max(24, viewportRows * blockMultiplier),
   );
   return {
-    turns: expanded
-      ? CLI_VISIBLE_TURN_LIMIT
-      : Math.min(16, Math.max(4, Math.ceil(viewportRows / 4))),
+    turns: Math.min(16, Math.max(4, Math.ceil(viewportRows / 4))),
     blocks,
     blocksPerTurn: Math.min(CLI_VISIBLE_BLOCKS_PER_TURN, blocks),
     textChars: Math.min(
-      maxTextChars,
+      12_000,
       Math.max(4_000, viewportRows * viewportColumns * screenMultiplier),
     ),
   };
@@ -1362,8 +1433,15 @@ export function boundedCliTurn(
     ? { ...block, text: boundedCliDisplayText(block.text, maxTextChars) }
     : {
       ...block,
-      ...(block.details === undefined ? {} : { details: boundedCliDisplayText(block.details, maxTextChars) }),
-      ...(block.presentation === undefined ? {} : { presentation: boundedCliPresentation(block.presentation, maxTextChars) }),
+      ...(block.details === undefined ? {} : {
+        details: boundedCliDisplayText(
+          block.details,
+          block.tool !== undefined || block.presentation !== undefined ? CLI_VISIBLE_TEXT_CHARS : maxTextChars,
+        ),
+      }),
+      ...(block.presentation === undefined ? {} : {
+        presentation: boundedCliPresentation(block.presentation, CLI_VISIBLE_TEXT_CHARS),
+      }),
     });
   const blocks: TranscriptBlock[] = hiddenBlocks === 0 ? visible : [{
     kind: "status",
@@ -1419,12 +1497,10 @@ export function TerminalLayout({
   const dividerWidth = Math.max(1, columns - 1);
   const outputShortcut = outputToggleShortcut();
   const showWelcome = completed.length === 0 && active === undefined;
-  const activeCompletion = completion ?? mentionCompletion;
-  const menuRows = activeCompletion === undefined ? 0 : Math.min(6, activeCompletion.items.length - activeCompletion.windowStart);
 
   const budget = useMemo(
-    () => cliRenderBudget(rows, columns, expandedOutput),
-    [rows, columns, expandedOutput],
+    () => cliRenderBudget(rows, columns),
+    [rows, columns],
   );
   const activeTaskBlocks = useMemo(() => active?.blocks.filter(
     (block): block is Extract<TranscriptBlock, { kind: "status" }> =>
@@ -1449,7 +1525,7 @@ export function TerminalLayout({
   const memoryReviewRows = memoryReviews.length === 0 ? 0 : 5;
 
   const approvalRows = approval === undefined ? 0 : 3 + (approvalExpanded ? approvalDetailLines(approval).length : 0);
-  const fixedBottomRows = approvalRows + questionRows + memoryReviewRows + menuRows
+  const fixedBottomRows = approvalRows + questionRows + memoryReviewRows
     + (pendingPrompts.length === 0 ? 0 : 1) + imageAttachments.length
     + (clipboardNotice === undefined ? 0 : 1) + 2;
   const taskPanelRows = taskPanelViewportRows(rows, fixedBottomRows, activeTaskBlocks.length > 0);
@@ -1463,7 +1539,7 @@ export function TerminalLayout({
         : <Text dimColor>{"flavor · "}{model}{" · "}{workspaceName}</Text>}
       <Box height={1} />
       {completedWindow.hiddenTurns > 0 || completedWindow.hiddenBlocks > 0
-        ? <Text dimColor>… {completedWindow.hiddenTurns} earlier turns and {completedWindow.hiddenBlocks} output items hidden to keep the terminal responsive{expandedOutput ? "" : ` · ${outputShortcut} show more`}</Text>
+        ? <Text dimColor>… {completedWindow.hiddenTurns} earlier turns and {completedWindow.hiddenBlocks} output items hidden to keep the terminal responsive</Text>
         : null}
       {completedWindow.turns.map((turn, index) => (
         <Box key={turn.id} flexDirection="column">
@@ -1487,59 +1563,65 @@ export function TerminalLayout({
       {...(subagentTaskScrollRef === undefined ? {} : { subagentScrollRef: subagentTaskScrollRef })}
       {...(onTaskPanelHoverChange === undefined ? {} : { onHoverChange: onTaskPanelHoverChange })}
     />
-    <Box flexDirection="column" flexShrink={0} maxHeight={bottomMaxRows} width="100%" overflowY="hidden">
-      {approval === undefined ? null : <Box flexDirection="column" marginBottom={1}>
-        <Text color="magenta">┌─ approval · {approval.tool}</Text>
-        <Text wrap="truncate-end" color="magentaBright">│ {approval.reason ?? "This action needs permission."}</Text>
-        {approvalExpanded ? approvalDetailLines(approval).map((line, index) => (
-          <Text key={`${approval.id}:detail:${index}`} color="magentaBright" wrap="truncate-end">│ {line}</Text>
-        )) : null}
-        {isDestructiveTool(approval.tool) || approval.allowAlways === false
-                ? <Text bold color="magenta">└─ <Text color="cyan">v</Text>=details / <Text color="green">y</Text>=once / <Text color="cyan">e</Text>=accept edits / <Text color="red">n</Text>=deny</Text>
-                : <Text bold color="magenta">└─ <Text color="cyan">v</Text>=details / <Text color="green">y</Text>=once / <Text color="yellow">a</Text>=same-type / <Text color="cyan">e</Text>=accept edits / <Text color="red">n</Text>=deny</Text>
-              }
-      </Box>}
-      {!questions || questions.length === 0 ? null : (
-        <QuestionCards questions={questions} activeIndex={questionIndex} answers={questionAnswers} customActive={customQuestionActive} />
+    <Box position="relative" flexShrink={0} width="100%">
+      {completion === undefined && mentionCompletion === undefined ? null : (
+        <Box position="absolute" bottom="100%" left={0} right={0} flexDirection="column" opaque>
+          {completion === undefined ? null : <SlashMenu completion={completion} />}
+          {mentionCompletion === undefined ? null : (
+            <MentionMenu completion={mentionCompletion} {...(onMentionSelect === undefined ? {} : { onSelect: onMentionSelect })} />
+          )}
+        </Box>
       )}
-      {memoryReviews.length === 0 ? null : <MemoryReviewCards reviews={memoryReviews} autoDismissSeconds={memoryAutoDismissSeconds} />}
-      {completion === undefined ? null : <SlashMenu completion={completion} />}
-      {mentionCompletion === undefined ? null : (
-        <MentionMenu completion={mentionCompletion} {...(onMentionSelect === undefined ? {} : { onSelect: onMentionSelect })} />
-      )}
-      {pendingPrompts.length === 0 ? null : (
-        <Text color="yellow" wrap="truncate-end">
-          Pending ({pendingPrompts.length}) · {queuedPromptLabel(pendingPrompts.at(-1)!)} · Esc edit latest
-        </Text>
-      )}
-      <Text dimColor>{"─".repeat(dividerWidth)}</Text>
-      {imageAttachments.map((image, index) => (
-        <Text key={`${image.sha256}:${index}`} color="cyan" wrap="truncate-end">
-          [Image #{index + 1}] {image.name ?? basename(image.source.path)}
-        </Text>
-      ))}
-      {clipboardNotice === undefined ? null : (
-        <Text color="yellow" wrap="truncate-end">{clipboardNotice}</Text>
-      )}
-      <PromptLine
-        input={input}
-        pastedBlocks={pastedBlocks}
-        cursor={promptCursor}
-        columns={columns}
-        maxVisibleLines={promptMaxLines}
-        completedSlashTokenLength={tokenLength}
-        {...(onPromptCursorChange === undefined ? {} : { onCursorChange: onPromptCursorChange })}
-      />
-      <FooterStatus
-        hint={completion !== undefined
-          ? "↑/↓ select · Tab complete · Esc close"
-          : mentionCompletion !== undefined
-            ? "↑/↓ select · Tab complete · click choose · Esc close"
-            : activeSession
-              ? `Esc ${pendingPrompts.length > 0 ? "edit latest" : "stop"} · Ctrl+C cancel · Enter queue · Ctrl/Cmd+R history · ${outputShortcut} ${expandedOutput ? "collapse" : "expand"} output`
-              : `Enter send · ↑↓/Ctrl/Cmd+R history · ${outputShortcut} ${expandedOutput ? "collapse" : "expand"} output · Ctrl+C exit`}
-        {...(ideContext === undefined ? {} : { ideContext })}
-      />
+      <Box flexDirection="column" flexShrink={0} maxHeight={bottomMaxRows} width="100%" overflowY="hidden">
+        {approval === undefined ? null : <Box flexDirection="column" marginBottom={1}>
+          <Text color="magenta">┌─ approval · {approval.tool}</Text>
+          <Text wrap="truncate-end" color="magentaBright">│ {approval.reason ?? "This action needs permission."}</Text>
+          {approvalExpanded ? approvalDetailLines(approval).map((line, index) => (
+            <Text key={`${approval.id}:detail:${index}`} color="magentaBright" wrap="truncate-end">│ {line}</Text>
+          )) : null}
+          {isDestructiveTool(approval.tool) || approval.allowAlways === false
+                  ? <Text bold color="magenta">└─ <Text color="cyan">v</Text>=details / <Text color="green">y</Text>=once / <Text color="cyan">e</Text>=accept edits / <Text color="red">n</Text>=deny</Text>
+                  : <Text bold color="magenta">└─ <Text color="cyan">v</Text>=details / <Text color="green">y</Text>=once / <Text color="yellow">a</Text>=same-type / <Text color="cyan">e</Text>=accept edits / <Text color="red">n</Text>=deny</Text>
+                }
+        </Box>}
+        {!questions || questions.length === 0 ? null : (
+          <QuestionCards questions={questions} activeIndex={questionIndex} answers={questionAnswers} customActive={customQuestionActive} />
+        )}
+        {memoryReviews.length === 0 ? null : <MemoryReviewCards reviews={memoryReviews} autoDismissSeconds={memoryAutoDismissSeconds} />}
+        {pendingPrompts.length === 0 ? null : (
+          <Text color="yellow" wrap="truncate-end">
+            Pending ({pendingPrompts.length}) · {queuedPromptLabel(pendingPrompts.at(-1)!)} · Esc edit latest
+          </Text>
+        )}
+        <Text dimColor>{"─".repeat(dividerWidth)}</Text>
+        {imageAttachments.map((image, index) => (
+          <Text key={`${image.sha256}:${index}`} color="cyan" wrap="truncate-end">
+            [Image #{index + 1}] {image.name ?? basename(image.source.path)}
+          </Text>
+        ))}
+        {clipboardNotice === undefined ? null : (
+          <Text color="yellow" wrap="truncate-end">{clipboardNotice}</Text>
+        )}
+        <PromptLine
+          input={input}
+          pastedBlocks={pastedBlocks}
+          cursor={promptCursor}
+          columns={columns}
+          maxVisibleLines={promptMaxLines}
+          completedSlashTokenLength={tokenLength}
+          {...(onPromptCursorChange === undefined ? {} : { onCursorChange: onPromptCursorChange })}
+        />
+        <FooterStatus
+          hint={completion !== undefined
+            ? "↑/↓ select · Tab complete · Esc close"
+            : mentionCompletion !== undefined
+              ? "↑/↓ select · Tab complete · click choose · Esc close"
+              : activeSession
+                ? `Esc ${pendingPrompts.length > 0 ? "edit latest" : "stop"} · Ctrl+C cancel · Enter queue · Ctrl/Cmd+R history · ${outputShortcut} ${expandedOutput ? "collapse" : "expand"} tools`
+                : `Enter send · ↑↓/Ctrl/Cmd+R history · ${outputShortcut} ${expandedOutput ? "collapse" : "expand"} tools · Ctrl+C exit`}
+          {...(ideContext === undefined ? {} : { ideContext })}
+        />
+      </Box>
     </Box>
   </Box>;
 }
@@ -1794,7 +1876,7 @@ const DIFF_CONTENT = fileDiffLineStyle("context").contentColor;
 const DIFF_REMOVED_MARKER = fileDiffLineStyle("removed").markerColor;
 const DIFF_ADDED_MARKER = fileDiffLineStyle("added").markerColor;
 
-function FileDiffView({ presentation }: { presentation: FileChangePresentation }): React.JSX.Element {
+function FileDiffView({ presentation, expanded }: { presentation: FileChangePresentation; expanded: boolean }): React.JSX.Element {
   const operation = presentation.operation === "create" ? "Create"
     : presentation.operation === "delete" ? "Delete"
     : "Update";
@@ -1812,7 +1894,7 @@ function FileDiffView({ presentation }: { presentation: FileChangePresentation }
       <Text color={DIFF_CONTENT}> <Text bold>{operation}</Text>({basename(presentation.path)})</Text>
     </Box>
     <Text color={DIFF_CONTENT}>  └ Added {lineCount(presentation.added)}, removed {lineCount(presentation.removed)}</Text>
-    {presentation.lines.map((line, index) => (
+    {(expanded ? presentation.lines : []).map((line, index) => (
       <FileDiffRow key={`${line.kind}:${line.oldLine ?? ""}:${line.newLine ?? ""}:${index}`} line={line} lineWidth={lineWidth} />
     ))}
   </Box>;
@@ -1967,6 +2049,7 @@ function StatusBlockView({
 }): React.JSX.Element {
   const visibleBlock = cliToolTitle(block);
   const outcome = cliToolOutcome(block);
+  const toolOutput = block.tool !== undefined || block.presentation !== undefined;
   const primary = visibleBlock.activity === "model" || visibleBlock.task !== undefined
     ? <TaskStatusLine block={visibleBlock} interactive={interactive} />
     : visibleBlock.state === "completed" && visibleBlock.presentation !== undefined
@@ -1975,7 +2058,7 @@ function StatusBlockView({
   return <Box flexDirection="column">
     {primary}
     {outcome === undefined ? null : <Box paddingLeft={2}><Text dimColor>└ {outcome}</Text></Box>}
-    {block.details === undefined || block.presentation?.kind === "changeset"
+    {block.details === undefined || block.presentation?.kind === "changeset" || (toolOutput && !expandedOutput)
       ? null
       : <Box paddingLeft={2}><AssistantText text={block.details} /></Box>}
   </Box>;
@@ -1991,14 +2074,16 @@ function ToolPresentationView({
   expandedOutput: boolean;
 }): React.JSX.Element {
   if (presentation.kind === "changeset") return <ChangeSetPresentationView presentation={presentation} workspaceName={workspaceName} expanded={expandedOutput} />;
-  if (presentation.kind === "file-change") return <FileDiffView presentation={presentation} />;
+  if (presentation.kind === "file-change") return <FileDiffView presentation={presentation} expanded={expandedOutput} />;
   if (presentation.kind === "terminal") return <CommandPresentationView presentation={presentation} expanded={expandedOutput} />;
   if (presentation.kind === "web") return <WebPresentationView presentation={presentation} expanded={expandedOutput} />;
   if (presentation.kind === "job") return <JobPresentationView presentation={presentation} expanded={expandedOutput} />;
-  return <Box paddingLeft={2}><Text>{presentation.title}{presentation.summary ? ` · ${presentation.summary}` : ""}</Text></Box>;
+  return <Box flexDirection="column" paddingLeft={2}>
+    <Text>{presentation.title}{presentation.summary ? ` · ${presentation.summary}` : ""}</Text>
+    {!expandedOutput || presentation.details === undefined ? null : <AssistantText text={presentation.details} />}
+  </Box>;
 }
 
-const CLI_CHANGESET_FILE_LIMIT = 8;
 const CHANGESET_TONE = "#b99bf8";
 
 function ChangeSetPresentationView({
@@ -2010,7 +2095,7 @@ function ChangeSetPresentationView({
   workspaceName: string;
   expanded: boolean;
 }): React.JSX.Element {
-  const visibleFiles = expanded ? presentation.files : presentation.files.slice(0, CLI_CHANGESET_FILE_LIMIT);
+  const visibleFiles = expanded ? presentation.files : [];
   const added = presentation.files.reduce((total, file) => total + file.added, 0);
   const removed = presentation.files.reduce((total, file) => total + file.removed, 0);
   const fileLabel = presentation.files.length === 1 ? "FILE" : "FILES";
@@ -2055,8 +2140,6 @@ function workspaceRelativePath(value: string, workspaceName: string): string {
   return normalized;
 }
 
-const CLI_COMMAND_OUTPUT_LINE_LIMIT = 8;
-
 function CommandPresentationView({
   presentation,
   expanded,
@@ -2067,16 +2150,9 @@ function CommandPresentationView({
   const state = presentation.state ?? commandState(presentation.exitCode);
   const tone = jobStateColor(state);
   const label = presentation.variant === "terminal" ? "TERMINAL" : "COMMAND";
-  const hasStdout = jobOutputLines(presentation.stdout ?? "").length > 0;
-  const hasStderr = jobOutputLines(presentation.stderr ?? "").length > 0;
-  const collapsedPerStreamLimit = hasStdout && hasStderr
-    ? Math.floor(CLI_COMMAND_OUTPUT_LINE_LIMIT / 2)
-    : CLI_COMMAND_OUTPUT_LINE_LIMIT;
-  const perStreamLimit = expanded ? Number.POSITIVE_INFINITY : collapsedPerStreamLimit;
+  const perStreamLimit = expanded ? Number.POSITIVE_INFINITY : 0;
   const stdout = boundedCommandLines(presentation.stdout ?? "", perStreamLimit);
   const stderr = boundedCommandLines(presentation.stderr ?? "", perStreamLimit);
-  const collapsible = stdout.total > collapsedPerStreamLimit || stderr.total > collapsedPerStreamLimit;
-  const shortcut = outputToggleShortcut();
   return <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
     <Box>
       <Text color={tone}>┌─ </Text>
@@ -2088,18 +2164,13 @@ function CommandPresentationView({
     </Box>
     {stdout.total === 0 ? null : <CommandOutputSection label="OUTPUT" value={stdout} tone={tone} error={false} />}
     {stderr.total === 0 ? null : <CommandOutputSection label="ERROR" value={stderr} tone={tone} error />}
-    {presentation.diagnostic === undefined ? null : <Box>
+    {!expanded || presentation.diagnostic === undefined ? null : <Box>
       <Text color={tone}>│  </Text>
       <Text color={tone}>{presentation.diagnostic}</Text>
     </Box>}
     <Box>
       <Text color={tone}>└─ </Text>
       <Text dimColor>{commandFooter(presentation, state)}</Text>
-      {collapsible ? <>
-        <Text dimColor> · </Text>
-        <Text color="ansi:cyanBright">{shortcut}</Text>
-        <Text dimColor> {expanded ? "collapse" : "expand"}</Text>
-      </> : null}
     </Box>
   </Box>;
 }
@@ -2147,6 +2218,7 @@ function CommandOutputLine({ line, tone, error }: { line: string; tone: string; 
 
 function boundedCommandLines(output: string, limit: number): BoundedCommandLines {
   const lines = jobOutputLines(output);
+  if (limit <= 0) return { total: lines.length, head: [], tail: [], hidden: lines.length };
   if (lines.length <= limit) return { total: lines.length, head: lines, tail: [], hidden: 0 };
   // Give the beginning slightly more room: commands usually print their most
   // useful context first, while a short tail still preserves summaries/errors.
@@ -2176,8 +2248,6 @@ function commandFooter(
   return parts.join(" · ");
 }
 
-const CLI_WEB_RESULT_LIMIT = 5;
-
 function WebPresentationView({
   presentation,
   expanded,
@@ -2194,7 +2264,7 @@ function WebPresentationView({
     <Box><Text color="#5f87af">└─ </Text><Text dimColor>Page content added to context</Text></Box>
   </Box>;
 
-  const visibleItems = expanded ? items : items.slice(0, CLI_WEB_RESULT_LIMIT);
+  const visibleItems = expanded ? items : [];
   const query = presentation.title.replace(/^Search:\s*/iu, "").trim();
   return <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
     <Box>
@@ -2233,9 +2303,6 @@ function compactWebSource(value: string): string {
   } catch { return value; }
 }
 
-const CLI_JOB_LOG_LINE_LIMIT = 12;
-const CLI_JOB_LIST_LIMIT = 8;
-
 function JobPresentationView({
   presentation,
   expanded,
@@ -2247,7 +2314,7 @@ function JobPresentationView({
   const state = presentation.state ?? "running";
   const tone = jobStateColor(state);
   const lines = jobOutputLines(presentation.output ?? "");
-  const visibleLines = expanded ? lines : lines.slice(-CLI_JOB_LOG_LINE_LIMIT);
+  const visibleLines = expanded ? lines : [];
   const hiddenLines = lines.length - visibleLines.length;
   const showLog = presentation.action === "read" || presentation.action === "kill" || lines.length > 0;
   return <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
@@ -2295,7 +2362,7 @@ function JobListPresentationView({
   expanded: boolean;
 }): React.JSX.Element {
   const jobs = presentation.jobs ?? [];
-  const visibleJobs = expanded ? jobs : jobs.slice(0, CLI_JOB_LIST_LIMIT);
+  const visibleJobs = expanded ? jobs : [];
   return <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
     <Box><Text color="#d7a657">┌─ </Text><Text color="#d7a657" bold>JOBS · {jobs.length}</Text></Box>
     {jobs.length === 0

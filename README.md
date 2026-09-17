@@ -154,7 +154,7 @@ Runtime behavior and configuration conventions for OAuth PKCE are described in t
 
 ### CLI
 
-Run `flavor` and type natural language. Typing `/` shows built-in commands, plugin commands, and Skills.
+Run `flavor` and type natural language. Typing `/` shows built-in commands, plugin commands, and Skills. A leading `/name` is dispatched only when that name is registered; otherwise the complete text is sent as an ordinary prompt. On macOS, use `Command+C` / `Command+V` for copy and paste; `Ctrl+C` always stops the active turn or exits.
 
 Common commands:
 
@@ -166,6 +166,7 @@ Common commands:
 | `/permissions` | Switch permission modes |
 | `/tasks` | View task plans and sub-agent status |
 | `/compact` | Manually compact long session context |
+| `/paste-image` | Ignore clipboard text and explicitly attach the clipboard image |
 | `/checkpoint`, `/tree` | Save state, view the session tree |
 | `/rewind`, `/unrevert`, `/fork` | Resume or fork sessions |
 | `/memory`, `/remember`, `/forget`, `/forget-cold` | Manage long-term memory; `/forget-cold` purges cold entries and their files |
@@ -299,7 +300,9 @@ Project runtime data lives under `.flavor/`:
 
 Long-term memory distinguishes user preferences, behavioral feedback, project conventions, and external references. Automatic extraction only keeps high-confidence candidates and provides confirm, ignore, and delete actions; secrets, tokens, raw tool output, and model guesses are rejected.
 
-Image prompts support PNG, JPEG, and WebP, with a 5 MiB per-image maximum and up to 5 images per prompt. The desktop app supports picking or drag-and-drop; CLI clipboard images currently work on Windows and macOS.
+Image prompts support PNG, JPEG, and WebP, with a 5 MiB per-image maximum and up to 5 images per prompt. The desktop app supports picking or drag-and-drop; CLI clipboard images currently work on Windows and macOS. Standard CLI paste prefers clipboard text and creates an image attachment only when no usable text flavor is available; use `/paste-image` when both flavors exist and the image is intended.
+
+CLI tool receipts are collapsed by default. Press `Ctrl+O` on Windows, Linux, or macOS to expand or collapse tool output globally. This shortcut affects tool output only; user prompts and assistant replies keep the same conversation window. On macOS, `Command+O` remains available to the terminal or host application.
 
 ## Permissions & Sandbox
 

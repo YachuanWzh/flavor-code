@@ -133,7 +133,7 @@ it("maps platform-native undo and redo shortcuts", () => {
   expect(promptHistoryAction("z", { ctrl: true, shift: false, super: false }, "darwin")).toBeNull();
 });
 
-it("prepares images for new and pending prompts while rejecting slash-command attachments", () => {
+it("prepares images for new and pending prompts while rejecting only recognized slash-command attachments", () => {
   const images = [
     { type: "image" as const, source: { type: "file" as const, path: "one.png" }, mediaType: "image/png" as const, sha256: "a".repeat(64), bytes: 8 },
   ];
@@ -143,9 +143,19 @@ it("prepares images for new and pending prompts while rejecting slash-command at
     displayText: "Analyze the attached image(s).\n[Image #1]",
     content: [{ type: "text", text: "Analyze the attached image(s)." }, images[0]],
   });
-  expect(prepareCliSubmission("/help", images)).toEqual({
+  expect(prepareCliSubmission("/help", images, ["help", "frontend-design"])).toEqual({
     kind: "error",
     message: "Image attachments cannot be used with slash commands.",
+  });
+  expect(prepareCliSubmission("/frontend-design polish", images, ["help", "frontend-design"])).toEqual({
+    kind: "error",
+    message: "Image attachments cannot be used with slash commands.",
+  });
+  expect(prepareCliSubmission("/write a regex", images, ["help", "frontend-design"])).toEqual({
+    kind: "ready",
+    text: "/write a regex",
+    displayText: "/write a regex\n[Image #1]",
+    content: [{ type: "text", text: "/write a regex" }, images[0]],
   });
   expect(prepareCliSubmission("inspect", images)).toEqual({
     kind: "ready",

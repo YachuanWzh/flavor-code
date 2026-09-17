@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  clipboardPasteIntent,
+  readClipboardContent,
   readClipboardImage,
   readMacClipboardImage,
+  readMacClipboardText,
   readWindowsClipboardImage,
-  shouldReadClipboardImage,
+  readWindowsClipboardText,
 } from "../../src/ui/clipboard-image.js";
 
 const pngBase64 = Buffer.from([
@@ -94,18 +97,53 @@ async function captureMacClipboardScript(): Promise<string> {
 
 describe("CLI clipboard image detection", () => {
   it("handles raw Ctrl+V and empty bracketed paste without hijacking text paste", () => {
-    expect(shouldReadClipboardImage("v", { ctrl: true }, false)).toBe(true);
-    expect(shouldReadClipboardImage("v", { ctrl: false, meta: true }, false)).toBe(true);
-    expect(shouldReadClipboardImage("", { ctrl: false }, true)).toBe(true);
-    expect(shouldReadClipboardImage("pasted text", { ctrl: false }, true)).toBe(false);
-    expect(shouldReadClipboardImage("v", { ctrl: false }, false)).toBe(false);
+    expect(clipboardPasteIntent("v", { ctrl: true }, false, "win32")).toBe("deferred");
+    expect(clipboardPasteIntent("v", { ctrl: false, super: true }, false, "darwin")).toBe("deferred");
+    expect(clipboardPasteIntent("v", { ctrl: true, super: false }, false, "darwin")).toBeUndefined();
+    expect(clipboardPasteIntent("v", { ctrl: false, super: true }, false, "win32")).toBeUndefined();
+    expect(clipboardPasteIntent("", { ctrl: false }, true)).toBe("immediate");
+    expect(clipboardPasteIntent("pasted text", { ctrl: false }, true)).toBeUndefined();
+  });
+
+  it("reads native clipboard text on Windows and macOS", async () => {
+    const text = "普通文字 🙂\nsecond line";
+    await expect(readWindowsClipboardText({
+      platform: "win32",
+      run: async () => ({ stdout: Buffer.from(text).toString("base64"), stderr: "", code: 0 }),
+    })).resolves.toBe(text);
+    await expect(readMacClipboardText({
+      platform: "darwin",
+      run: async () => ({ stdout: text, stderr: "", code: 0 }),
+    })).resolves.toBe(text);
+  });
+
+  it("prefers text when the clipboard also exposes an image", async () => {
+    const run = vi.fn(async () => ({
+      stdout: Buffer.from("paste this text").toString("base64"), stderr: "", code: 0,
+    }));
+    await expect(readClipboardContent({ platform: "win32", run })).resolves.toEqual({
+      kind: "text",
+      text: "paste this text",
+    });
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("falls back to an image only when native text is absent", async () => {
+    const run = vi.fn()
+      .mockResolvedValueOnce({ stdout: "", stderr: "", code: 3 })
+      .mockResolvedValueOnce({ stdout: pngBase64, stderr: "", code: 0 });
+    await expect(readClipboardContent({ platform: "win32", run })).resolves.toMatchObject({
+      kind: "image",
+      attachment: { mediaType: "image/png", dataBase64: pngBase64 },
+    });
+    expect(run).toHaveBeenCalledTimes(2);
   });
 
   it("reads a Windows bitmap as PNG through an STA PowerShell process", async () => {
     const run = vi.fn(async (
       _file: string,
       _args: string[],
-      _options?: { timeout?: number; useCwd?: boolean },
+      _options?: { timeout?: number; useCwd?: boolean; maxBuffer?: number },
     ) => ({ stdout: `${pngBase64}\r\n`, stderr: "", code: 0 }));
 
     await expect(readWindowsClipboardImage({
@@ -121,8 +159,9 @@ describe("CLI clipboard image detection", () => {
     expect(run).toHaveBeenCalledWith(
       "powershell.exe",
       expect.arrayContaining(["-NoProfile", "-NonInteractive", "-STA", "-Command"]),
-      expect.objectContaining({ timeout: 10_000, useCwd: false }),
+      expect.objectContaining({ timeout: 10_000, useCwd: false, maxBuffer: expect.any(Number) }),
     );
+    expect(run.mock.calls[0]?.[2]?.maxBuffer).toBeGreaterThan(1024 * 1024);
     expect(run.mock.calls[0]?.[1].at(-1)).toContain("[Windows.Forms.Clipboard]::GetImage()");
   });
 
@@ -130,7 +169,7 @@ describe("CLI clipboard image detection", () => {
     const run = vi.fn(async (
       _file: string,
       _args: string[],
-      _options?: { timeout?: number; useCwd?: boolean },
+      _options?: { timeout?: number; useCwd?: boolean; maxBuffer?: number },
     ) => ({ stdout: `${pngBase64}\n`, stderr: "", code: 0 }));
 
     await expect(readMacClipboardImage({
@@ -146,8 +185,9 @@ describe("CLI clipboard image detection", () => {
     expect(run).toHaveBeenCalledWith(
       "osascript",
       ["-l", "JavaScript", "-e", expect.any(String)],
-      expect.objectContaining({ timeout: 10_000, useCwd: false }),
+      expect.objectContaining({ timeout: 10_000, useCwd: false, maxBuffer: expect.any(Number) }),
     );
+    expect(run.mock.calls[0]?.[2]?.maxBuffer).toBeGreaterThan(1024 * 1024);
     const script = run.mock.calls[0]?.[1].at(-1) ?? "";
     expect(script).toContain("$.NSPasteboard.generalPasteboard");
     expect(script).toContain("$.NSPasteboardTypePNG");

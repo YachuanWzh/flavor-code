@@ -1,6 +1,6 @@
 export const MVP_COMMANDS = [
   "model", "init", "config", "login", "logout", "permissions", "skills", "plugins", "hooks",
-  "tasks", "finish", "compact", "clear", "help", "exit", "audit", "usage", "doctor",
+  "tasks", "finish", "compact", "clear", "paste-image", "help", "exit", "audit", "usage", "doctor",
   "loop", "goal", "evolve", "mcp",
   "commit", "review", "explain",
   "ide",
@@ -24,6 +24,7 @@ export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string>
   finish: "Complete this task and evaluate long-term memory",
   compact: "Compact the conversation context",
   clear: "Clear the transcript",
+  "paste-image": "Attach the clipboard image explicitly",
   help: "Show available commands",
   exit: "Exit Flavor",
   audit: "Query tool failure audit log",
@@ -91,7 +92,6 @@ export type SlashCommand =
   | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop" | "goal" | "evolve" | "commit" | "review" | "explain" | "mcp" | "remember" | "forget" | "checkpoint" | "rewind" | "fork" | "pals" | "chat" | "co-work" | "tool"> }
   | { name: "audit"; toolFilter?: string | undefined }
   | { name: "evolve"; args: string[] }
-  | { name: "unknown"; input: string; suggestions: string[] }
   | { name: "invalid"; command: string; message: string };
 
 export function parseSlashCommand(
@@ -118,7 +118,7 @@ export function parseSlashCommand(
     return { name: "skill", skill: name, prompt: args.join(" ") };
   }
   if (!(MVP_COMMANDS as readonly string[]).includes(name)) {
-    return { name: "unknown", input: rawName, suggestions: suggestionsFor(name) };
+    return null;
   }
   if (name === "model") {
     const [role, modelId, ...extra] = args;
@@ -267,30 +267,6 @@ function validText(value: string): boolean {
   return value.length > 0 && Buffer.byteLength(value, "utf8") <= MAX_MESSAGE_BYTES;
 }
 
-function suggestionsFor(input: string): string[] {
-  return MVP_COMMANDS
-    .map((command) => ({ command, distance: editDistance(input, command) }))
-    .filter(({ distance }) => distance <= Math.max(2, Math.floor(input.length / 3)))
-    .sort((left, right) => left.distance - right.distance || left.command.localeCompare(right.command))
-    .slice(0, 3)
-    .map(({ command }) => command);
-}
-
-function editDistance(left: string, right: string): number {
-  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
-  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
-    const current = [leftIndex];
-    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
-      current[rightIndex] = Math.min(
-        (current[rightIndex - 1] ?? 0) + 1,
-        (previous[rightIndex] ?? 0) + 1,
-        (previous[rightIndex - 1] ?? 0) + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1),
-      );
-    }
-    previous = current;
-  }
-  return previous[right.length] ?? left.length;
-}
 import { normalizePermissionMode, PERMISSION_MODES, type PermissionMode } from "../config/schema.js";
 import { MEMORY_TYPES, type MemoryType } from "../memory/types.js";
 import { MAX_ALIAS_LENGTH, MAX_MESSAGE_BYTES } from "../pals/protocol.js";

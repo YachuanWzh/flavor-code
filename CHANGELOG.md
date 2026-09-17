@@ -2,7 +2,25 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.1-beta.2 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.2 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.2] - 2026-09-17
+
+### 修复
+- CLI 流式输出期间打开或关闭斜杠/文件补全菜单时，菜单改为不占用正文高度的悬浮层，避免滚动区反复缩放导致输入行与样式偶发错乱。
+- CLI 剪贴板图片读取缓冲按合法图片上限计算，不再受 Node.js 默认 1 MiB `stdout` 缓冲限制。
+- macOS 终端无法把 `Command+C` 交给全屏 CLI 时，在选区完成后直接写入系统剪贴板；支持扩展键协议的终端仍可使用显式 `Command+C`，`Ctrl+C` 始终停止或退出。
+- macOS 粘贴严格使用 `Command+V`；普通粘贴优先采用终端或系统剪贴板文字，只有没有文字时才添加图片。
+- 未命中的 `/文本` 作为普通消息发送，并可携带图片；只有已注册的命令、插件、Skill 或托管工具按斜杠命令处理。
+
+### 改进
+- 新增 `/paste-image`，可在剪贴板同时含有文字和图片时明确添加图片。
+- CLI 所有带明细的工具回执均可折叠，`Ctrl+O` 在 Windows、Linux 和 macOS 上统一展开或收起工具输出；macOS 不占用已有系统语义的 `Command+O`。
+- 工具输出的展开状态与普通用户/助手对话彻底解耦，切换时不会显示或隐藏更多正常对话内容；命令输出、文件差异、changeset、Web 搜索、后台任务和通用工具详情均遵循同一折叠行为。
+
+### 测试与维护
+- 新增工具输出折叠范围、macOS `Ctrl+O`、普通对话不受折叠状态影响，以及剪贴板、斜杠回退和 macOS 复制粘贴的回归覆盖。
+- `package.json` 与 `package-lock.json` 的项目版本统一更新为正式版 `1.4.2`。
 
 ## [1.4.1-beta.2] - 2026-09-11
 
