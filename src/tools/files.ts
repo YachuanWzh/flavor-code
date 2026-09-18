@@ -24,7 +24,7 @@ const EditInput = z.object({
   oldText: z.string().min(1).describe("Copy exact current file text from Read, without displayed line numbers or diff prefixes. Include enough context for one unique match."),
   newText: z.string(),
 });
-const ApplyPatchInput = z.object({ patch: z.string().min(1).describe("One-file unified diff with --- a/path, +++ b/path and @@ hunk headers. Use /dev/null as the old path to create a file.") });
+const ApplyPatchInput = z.object({ patch: z.string().min(1).describe("One-file unified diff with --- a/path, +++ b/path and numbered or bare @@ hunk headers. Use /dev/null as the old path to create a file.") });
 
 export interface ReadFileHandle {
   read(buffer: Buffer, offset: number, length: number, position: number | null): Promise<{ bytesRead: number }>;
@@ -224,7 +224,7 @@ export function createApplyPatchTool(workspace: string, options: FileMutationOpt
   const guard = createPathGuard(workspace);
   return {
     name: "ApplyPatch",
-    description: "Apply a single-file workspace-limited unified diff, relocating hunks only by unique exact context. Submit separate calls for multiple files.",
+    description: "Apply a single-file workspace-limited unified diff with numbered or bare @@ hunk headers, relocating hunks only by unique exact context anywhere in the file. Submit separate calls for multiple files.",
     inputSchema: ApplyPatchInput,
     paths: (input) => parsePatch(input.patch).map((file) => guard.lexical(file.path)),
     execute: async (input, signal) => {
@@ -522,13 +522,13 @@ function isMissing(error: unknown): boolean {
 }
 
 interface PatchFile { path: string; created: boolean; hunks: PatchHunk[] }
-interface PatchHunk { oldStart: number; newStart: number; lines: string[] }
+interface PatchHunk { oldStart: number; newStart: number; lines: string[]; hasCoordinates: boolean }
 interface AppliedHunks { content: string; hunks: PatchHunk[] }
 
 const PATCH_SEARCH_RADIUS = 100;
 
 function parsePatch(patch: string): PatchFile[] {
-  const lines = patch.replaceAll("\r\n", "\n").split("\n");
+  const lines = normalizePatchLines(patch);
   const files: PatchFile[] = [];
   let index = 0;
   while (index < lines.length) {
@@ -549,11 +549,20 @@ function parsePatch(patch: string): PatchFile[] {
     const hunks: PatchHunk[] = [];
     while (index < lines.length && !lines[index]?.startsWith("--- ")) {
       if (lines[index] === "") { index += 1; continue; }
-      const header = lines[index]?.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
-      if (!header) throw new Error(`Unsupported unified diff metadata or line: ${lines[index]}`);
-      const hunk: PatchHunk = { oldStart: Number(header[1]), newStart: Number(header[3]), lines: [] };
+      const rawHeader = lines[index]!;
+      const header = rawHeader.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+      const hasCoordinates = header !== null;
+      if (!hasCoordinates && rawHeader !== "@@") {
+        throw new Error(`Unsupported unified diff metadata or line: ${rawHeader}`);
+      }
+      const hunk: PatchHunk = {
+        oldStart: hasCoordinates ? Number(header[1]) : 0,
+        newStart: hasCoordinates ? Number(header[3]) : 0,
+        lines: [],
+        hasCoordinates,
+      };
       index += 1;
-      while (index < lines.length && !lines[index]?.startsWith("@@ ") && !lines[index]?.startsWith("--- ")) {
+      while (index < lines.length && !isPatchHunkHeader(lines[index]) && !lines[index]?.startsWith("--- ")) {
         const line = lines[index]!;
         if (line.startsWith("\\ No newline")) throw new Error("No-final-newline markers are not supported");
         if (line !== "" && ![" ", "+", "-"].includes(line[0]!)) throw new Error("Invalid unified diff line");
@@ -573,6 +582,25 @@ function parsePatch(patch: string): PatchFile[] {
   if (files.length === 0) throw new Error("Invalid unified diff: no files");
   if (files.length > 1) throw new Error("ApplyPatch supports a single file per call");
   return files;
+}
+
+function normalizePatchLines(patch: string): string[] {
+  const lines = patch.replaceAll("\r\n", "\n").split("\n");
+  const firstContent = lines.findIndex((line) => line !== "");
+  let lastContent = lines.length - 1;
+  while (lastContent >= 0 && lines[lastContent] === "") lastContent -= 1;
+  if (lastContent >= 0 && lines[lastContent] === "```") {
+    lines.splice(lastContent, 1);
+    if (firstContent >= 0 && /^```(?:diff|patch)?$/i.test(lines[firstContent]!)) lines.splice(firstContent, 1);
+    // Models frequently emit blank lines after the closing fence; drop them so
+    // they never reach the hunk body parser as bare empty lines.
+    while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  }
+  return lines;
+}
+
+function isPatchHunkHeader(line: string | undefined): boolean {
+  return line === "@@" || line?.startsWith("@@ ") === true;
 }
 
 async function requireAbsent(guard: PathGuard, path: string): Promise<string> {
@@ -638,13 +666,14 @@ function applyHunks(original: string, hunks: readonly PatchHunk[]): AppliedHunks
   const appliedHunks: PatchHunk[] = [];
   let cursor = 0;
   for (const [index, hunk] of hunks.entries()) {
-    const declaredTarget = Math.max(0, hunk.oldStart - 1);
     const target = resolveHunkTarget(source, hunk, cursor, index + 1);
-    const offset = target - declaredTarget;
+    const untouchedLines = target - cursor;
+    const oldLines = patchSideLines(hunk, "old");
     appliedHunks.push({
       ...hunk,
-      oldStart: hunk.oldStart === 0 ? 0 : target + 1,
-      newStart: hunk.newStart === 0 ? 0 : Math.max(1, hunk.newStart + offset),
+      oldStart: oldLines.length === 0 && target === 0 ? 0 : target + 1,
+      newStart: output.length + untouchedLines + 1,
+      hasCoordinates: true,
     });
     output.push(...source.slice(cursor, target));
     cursor = target;
@@ -675,38 +704,63 @@ function resolveHunkTarget(
   const declared = Math.max(0, hunk.oldStart - 1);
   const oldLines = patchSideLines(hunk, "old");
   if (oldLines.length === 0) {
+    if (!hunk.hasCoordinates) {
+      if (source.length === 0 && cursor === 0) return 0;
+      throw new Error(
+        `Patch hunk ${hunkNumber} has no line numbers or context; add an unchanged or removed line to locate the insertion safely`,
+      );
+    }
     if (declared < cursor || declared > source.length) {
       throw new Error(`Patch hunk ${hunkNumber} is out of range at declared line ${hunk.oldStart}`);
     }
     return declared;
   }
-  if (declared >= cursor && matchesLines(source, declared, oldLines)) return declared;
+  if (hunk.hasCoordinates && declared >= cursor && matchesLines(source, declared, oldLines)) return declared;
 
-  const matches = exactMatchesNear(source, oldLines, declared, cursor);
-  if (matches.length === 1) return matches[0]!;
-  if (matches.length > 1) {
-    const lines = matches.map((match) => match + 1).join(", ");
+  const nearbyMatches = hunk.hasCoordinates ? exactMatchesNear(source, oldLines, declared, cursor) : [];
+  if (nearbyMatches.length === 1) return nearbyMatches[0]!;
+  if (nearbyMatches.length > 1) {
+    const lines = nearbyMatches.map((match) => match + 1).join(", ");
     throw new Error(`Patch hunk ${hunkNumber} is ambiguous near declared line ${hunk.oldStart}; exact context matches at lines ${lines}`);
   }
 
+  const matches = exactMatches(source, oldLines, cursor);
+  if (matches.length === 1) return matches[0]!;
+  if (matches.length > 1) {
+    const lines = matches.map((match) => match + 1).join(", ");
+    const location = hunk.hasCoordinates ? ` after declared line ${hunk.oldStart} drifted` : "";
+    throw new Error(`Patch hunk ${hunkNumber} is ambiguous${location}; exact context matches at lines ${lines}`);
+  }
+
   const newLines = patchSideLines(hunk, "new");
-  const newDeclared = Math.max(0, hunk.newStart - 1);
-  const appliedMatches = exactMatchesNear(source, newLines, newDeclared, cursor);
+  const appliedMatches = exactMatches(source, newLines, cursor);
   if (appliedMatches.length === 1) {
     throw new Error(`Patch hunk ${hunkNumber} appears to be already applied at line ${appliedMatches[0]! + 1}`);
   }
 
   const expected = JSON.stringify(oldLines[0]);
-  const actualLine = declared < source.length ? source[declared] : "<end of file>";
+  const actualLine = hunk.hasCoordinates && declared < source.length ? source[declared] : "<no exact match>";
   const actual = JSON.stringify(actualLine);
-  throw new Error(
-    `Patch hunk ${hunkNumber} does not match near declared line ${hunk.oldStart}; expected ${expected}, actual ${actual}`,
-  );
+  const location = hunk.hasCoordinates ? `declared line ${hunk.oldStart}` : "anywhere in the file";
+  throw new Error(`Patch hunk ${hunkNumber} does not match ${location}; expected ${expected}, actual ${actual}`);
 }
 
 function patchSideLines(hunk: PatchHunk, side: "old" | "new"): string[] {
   const markers = side === "old" ? new Set([" ", "-"]) : new Set([" ", "+"]);
   return hunk.lines.filter((line) => markers.has(line[0]!)).map((line) => line.slice(1));
+}
+
+function exactMatches(
+  source: readonly string[],
+  expected: readonly string[],
+  cursor: number,
+): number[] {
+  if (expected.length === 0 || source.length < expected.length) return [];
+  const matches: number[] = [];
+  for (let start = Math.max(cursor, 0); start <= source.length - expected.length; start += 1) {
+    if (matchesLines(source, start, expected)) matches.push(start);
+  }
+  return matches;
 }
 
 function exactMatchesNear(

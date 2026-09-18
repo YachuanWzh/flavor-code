@@ -464,6 +464,130 @@ describe("file tools", () => {
     expect(presentation.lines).toContainEqual({ kind: "added", newLine: 2, text: "ONE" });
   });
 
+  it("ApplyPatch accepts unnumbered model-style hunks with unique exact context", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "alpha\none\nbeta\nmiddle\ngamma\ntwo\ndelta\n");
+    const patch = [
+      "--- a/file.txt", "+++ b/file.txt",
+      "@@", " alpha", "-one", "+ONE", " beta",
+      "@@", " gamma", "-two", "+TWO", " delta", "",
+    ].join("\n");
+
+    const output = await createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal);
+
+    expect(readFileSync(path, "utf8")).toBe("alpha\nONE\nbeta\nmiddle\ngamma\nTWO\ndelta\n");
+    const presentation = getToolPresentation(output);
+    if (presentation?.kind !== "file-change") throw new Error("Expected file-change presentation");
+    expect(presentation.lines).toContainEqual({ kind: "removed", oldLine: 2, text: "one" });
+    expect(presentation.lines).toContainEqual({ kind: "added", newLine: 6, text: "TWO" });
+  });
+
+  it.each([
+    ["paired", "```diff\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n```\n"],
+    ["trailing", "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n```\n"],
+  ])("ApplyPatch ignores %s Markdown fence noise", async (_kind, patch) => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "old\n");
+
+    await createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal);
+
+    expect(readFileSync(path, "utf8")).toBe("new\n");
+  });
+
+  it("ApplyPatch relocates unique exact context anywhere in the file", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    const prefix = Array.from({ length: 150 }, (_, index) => `line-${index + 1}`);
+    writeFileSync(path, [...prefix, "unique-before", "old", "unique-after", ""].join("\n"));
+    const patch = [
+      "--- a/file.txt", "+++ b/file.txt", "@@ -1,3 +1,3 @@",
+      " unique-before", "-old", "+new", " unique-after", "",
+    ].join("\n");
+
+    const output = await createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal);
+
+    expect(readFileSync(path, "utf8")).toContain("unique-before\nnew\nunique-after\n");
+    const presentation = getToolPresentation(output);
+    if (presentation?.kind !== "file-change") throw new Error("Expected file-change presentation");
+    expect(presentation.lines).toContainEqual({ kind: "removed", oldLine: 152, text: "old" });
+  });
+
+  it("ApplyPatch rejects ambiguous unnumbered context without writing", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    const original = "same\nold\nsame\nseparator\nsame\nold\nsame\n";
+    writeFileSync(path, original);
+    const patch = "--- a/file.txt\n+++ b/file.txt\n@@\n same\n-old\n+new\n same\n";
+
+    await expect(createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal))
+      .rejects.toThrow(/hunk 1.*ambiguous.*lines 1, 5/i);
+    expect(readFileSync(path, "utf8")).toBe(original);
+  });
+
+  it("ApplyPatch rejects an unnumbered insertion with no locating context", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "existing\n");
+    const patch = "--- a/file.txt\n+++ b/file.txt\n@@\n+new\n";
+
+    await expect(createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal))
+      .rejects.toThrow(/hunk 1.*line numbers.*context/i);
+    expect(readFileSync(path, "utf8")).toBe("existing\n");
+  });
+
+  it("ApplyPatch ignores blank lines after a closing Markdown fence", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "alpha\nbeta\ngamma\n");
+    const patch = "```diff\n--- a/file.txt\n+++ b/file.txt\n@@\n alpha\n-beta\n+BETA\n gamma\n```\n\n";
+
+    await createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal);
+
+    expect(readFileSync(path, "utf8")).toBe("alpha\nBETA\ngamma\n");
+  });
+
+  it("ApplyPatch accepts a CRLF patch with bare headers on a heavily drifted file", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    const prefix = Array.from({ length: 200 }, (_, index) => `pad-${index}`);
+    writeFileSync(path, [...prefix, "ctx-a", "stale", "ctx-b"].join("\r\n") + "\r\n");
+    const patch = "--- a/file.txt\r\n+++ b/file.txt\r\n@@\r\n ctx-a\r\n-stale\r\n+fresh\r\n ctx-b\r\n";
+
+    await createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal);
+
+    expect(readFileSync(path, "utf8").replace(/\r\n/g, "\n")).toContain("ctx-a\nfresh\nctx-b\n");
+  });
+
+  it("ApplyPatch numbers added lines across multiple bare hunks", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "one\ntwo\nthree\nfour\nfive\nsix\n");
+    const patch = [
+      "--- a/file.txt", "+++ b/file.txt",
+      "@@", " one", "-two", "+TWO", " three",
+      "@@", " four", "-five", "+FIVE", " six", "",
+    ].join("\n");
+
+    const output = await createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal);
+
+    expect(readFileSync(path, "utf8")).toBe("one\nTWO\nthree\nfour\nFIVE\nsix\n");
+    const presentation = getToolPresentation(output);
+    if (presentation?.kind !== "file-change") throw new Error("Expected file-change presentation");
+    expect(presentation.lines).toContainEqual({ kind: "added", newLine: 2, text: "TWO" });
+    expect(presentation.lines).toContainEqual({ kind: "added", newLine: 5, text: "FIVE" });
+  });
+
+  it("ApplyPatch creates a file from /dev/null with a bare header", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const patch = "--- /dev/null\n+++ b/new.txt\n@@\n+hello\n+world\n";
+
+    await createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal);
+
+    expect(readFileSync(join(workspace, "new.txt"), "utf8")).toBe("hello\nworld\n");
+  });
+
   it("ApplyPatch relocates multiple hunks independently", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
     const path = join(workspace, "file.txt");

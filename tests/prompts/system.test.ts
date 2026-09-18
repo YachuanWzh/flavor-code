@@ -60,7 +60,8 @@ describe("buildSystemPrompt", () => {
       "AskUserQuestion", "TodoWrite", "TaskPlan", "TaskUpdate", "Task",
       "TaskOutput", "Skill", "SkillResource", "RegisterTool", "RemoveTool", "ListRegisteredTools",
     ]) expect(allTools).toContain(`\`${name}\``);
-    expect(allTools).toContain("exact context has one unique nearby match");
+    expect(allTools).toContain("Numbered and bare `@@` hunk headers are accepted");
+    expect(allTools).toContain("exact context has one unique match anywhere in the file");
     expect(allTools).toContain("never construct paths from memory");
     expect(allTools).toContain("copy `oldText` verbatim");
     expect(allTools).toContain("never pass absolute paths outside");
