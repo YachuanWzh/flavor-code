@@ -40,6 +40,7 @@ Flavor Code 接入 OpenAI、Anthropic 或兼容服务，在受控工作区内使
 | 🔎 | **代码图导航** | 本地 AST 代码图索引（`.flavor/astgraph/`），通过 `ast_search`/`ast_callers`/`ast_impact` 等查询精确定位符号、追踪可达性；`/explain` 结合代码图与 Git 历史，向新人讲解一个符号 |
 | 🌿 | **Git 原生工作流** | `/commit` 为暂存改动生成 Conventional Commits 提交信息并确认提交；`/review` 审查未提交改动；只读 `GitHistory` 工具回答“这段代码为什么是这样” |
 | 🎨 | **E2E 需求到交付** | 从粗需求或设计稿到可交付产品：PRD、交互原型、视觉还原、接口联调、自主验收与评分交付（仅 Electron） |
+| 🌐 | **Agent 内置浏览器** | Electron 桌面端内置可交互浏览器：Agent 通过 `BrowserSnapshot`/`BrowserAct` 等工具导航页面、按元素引用点击与输入，操作以可视化覆盖层实时标注；导航受 SSRF 防护约束，快照自动脱敏密码、token 等敏感字段（仅 Electron） |
 | 🔁 | **有界自进化** | 重复的工具失败被捕获、去重并形成建议；修复以沙箱验证过的插件形式落地，或沉淀为注入后续提示词的 guardrail 规则，并支持运行趋势与规则管理（`/evolve`） |
 | 🛡️ | **明确的权限边界** | 分别控制读、写、Shell、网络和破坏性操作，也可使用 Docker |
 

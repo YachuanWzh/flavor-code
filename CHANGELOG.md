@@ -2,7 +2,24 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.2 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.3-beta.1 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.3-beta.1] - 2026-09-18
+
+### 新增
+- Electron 桌面端新增 Agent 可操作的内置浏览器：浏览器面板、浏览器空间与标签页管理，Agent 与用户可分别持有标签页；提供 `BrowserTabs`、`BrowserNavigate`、`BrowserControl`、`BrowserSnapshot`、`BrowserAct`、`BrowserRead`、`BrowserMouse`、`BrowserWait` 八个工具，经 CDP 驱动页面。
+- `BrowserSnapshot` 生成带元素引用（如 `@12`）的结构化页面快照，`BrowserAct` 按引用点击、输入与选择，元素解析把引用映射回视口内目标。
+- 浏览器操作可视化覆盖层：Agent 的点击、输入等操作在页面上实时高亮标注，用户可直观看到 Agent 正在做什么。
+- 浏览器安全策略：导航仅允许 `http/https`；默认阻止私网地址（SSRF 防护，可显式放行），云元数据域名始终拒绝；快照输出自动脱敏密码、token、cookie、OTP、CVV 等敏感字段；渲染进程传入的 URL、ID 与坐标均经严格 schema 校验。
+- 新增 shell-doctor 守护插件：分类 Shell 失败（Windows/POSIX 命令误用等）并维护失败台账，接入 PreToolUse / PostToolUse / PostToolUseFailure / UserPromptSubmit 钩子。
+
+### 修复
+- zh-CN Windows 上 Shell 工具现可识别 PowerShell 7 的「术语 'x' 不会被识别为 …」报错，正确归类为 command-not-found（此前仅识别 PowerShell 5 的「无法将 … 识别为」）。
+- Vitest 固定注入 `NODE_ENV=test`，避免从打包后的 Agent 环境继承 `NODE_ENV=production` 时加载 React 生产内部实现导致测试套件整体失败。
+
+### 测试与维护
+- 新增浏览器契约、CDP 传输、BrowserHost、安全策略、快照/act/overlay、面板等回归测试；全仓 240 个测试文件、2244 个用例通过。
+- `package.json` 与 `package-lock.json` 的项目版本更新为 `1.4.3-beta.1`。
 
 ## [1.4.2] - 2026-09-17
 
@@ -905,6 +922,8 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.4.3-beta.1 | 2026-09-18 | Electron 桌面端新增 Agent 可操作的内置浏览器（八个 Browser 工具、快照元素引用、操作可视化覆盖层与 SSRF/脱敏安全策略）；新增 shell-doctor 守护插件；修复 zh-CN PowerShell 7 命令未找到识别与测试环境 NODE_ENV 问题 |
+| 1.4.2 | 2026-09-17 | 斜杠/文件补全菜单悬浮化避免输入行错乱；macOS 剪贴板复制粘贴与图片读取修复；未命中 `/文本` 按普通消息发送；工具输出折叠跨平台统一 `Ctrl+O` 并与普通对话解耦 |
 | 1.4.1 | 2026-09-11 | Esc 中断、历史草稿恢复/持久化与跨平台反向搜索、可审阅审批参数及 acceptEdits 入口、跨平台完整输出模式 |
 | 1.4.0-beta.12 | 2026-09-11 | 彻底隔离任务双栏滚动并优化为更疏朗的非对称布局；pending 支持多条队列与逐条回退；补齐跨平台复制、撤销/重做；思考强度默认 high、支持 ultra 并由子 Agent 继承；初始化 PKCE 地址改用 127.0.0.1 |
 | 1.4.0-beta.11 | 2026-09-09 | CLI 主任务/子 Agent 双栏改为独立滚动与独立内容高度，新增连通的白色表头横线和中央分割线 |
