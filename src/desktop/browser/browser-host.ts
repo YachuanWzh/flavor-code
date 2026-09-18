@@ -6,7 +6,10 @@
  * See md_docs/todo.md sections 5, 6 and 8.
  */
 
+import { hideActVisual, inspectActTarget, playActVisual, renderOverlay, sleepGlide } from "./act-overlay.js";
 import { actViaRef, type ActCommandOptions, type ActRequest } from "./act-service.js";
+import { mouseViaCdp, pointerLabel, type MouseOperation, type MouseRequest } from "./mouse-service.js";
+import { readViaCdp, type ReadRequest, type ReadResult } from "./read-service.js";
 import { BrowserSpace } from "./browser-space.js";
 import { BrowserTab, type BrowserViewLike } from "./browser-tab.js";
 import { validateBrowserNavigationUrl, type UrlPolicyOptions } from "./browser-security.js";
@@ -22,7 +25,27 @@ import {
 export type BrowserEventPayload =
   | { kind: "tabs-changed"; spaceId: string }
   | { kind: "tab-state"; spaceId: string; tabId: string }
-  | { kind: "ownership-changed"; spaceId: string; ownership: "agent" | "user" };
+  | { kind: "ownership-changed"; spaceId: string; ownership: "agent" | "user" }
+  | {
+    kind: "activity";
+    spaceId: string;
+    tabId: string;
+    action: "click" | "dblclick" | "fill" | "focus" | "hover" | "press" | "select" | "navigate"
+      | "type" | "scroll" | "move" | "drag" | "wheel";
+    label: string;
+  };
+
+const ACTIVITY_VERBS: Record<ActRequest["action"], string> = {
+  click: "点击",
+  dblclick: "双击",
+  fill: "替换输入",
+  focus: "聚焦",
+  hover: "悬停",
+  press: "按键",
+  select: "选择",
+  type: "逐字输入",
+  scroll: "滚动",
+};
 
 export interface BrowserHostDeps {
   /** Creates a securely-configured remote-content view (production: WebContentsView). */
@@ -190,6 +213,15 @@ export class BrowserHost {
 
   async navigate(spaceId: string, tabId: string, url: string): Promise<BrowserTabSummary> {
     const state = this.state(spaceId);
+    if (state.space.summary().ownership === "agent") {
+      this.deps.emit({
+        kind: "activity",
+        spaceId,
+        tabId,
+        action: "navigate",
+        label: `打开 ${url.length > 96 ? `${url.slice(0, 95)}…` : url}`,
+      });
+    }
     await this.tab(state, tabId).navigate(url);
     // Sync from the live view immediately; did-navigate may still be pending.
     this.syncTabFromView(state, tabId);
@@ -252,8 +284,111 @@ export class BrowserHost {
     request: ActRequest,
     options: ActCommandOptions = {},
   ): Promise<{ action: ActRequest["action"]; ref: number }> {
-    const tab = this.tab(this.state(spaceId), tabId);
+    const state = this.state(spaceId);
+    const tab = this.tab(state, tabId);
+    await this.announceAct(state, spaceId, tab, request, options.signal);
     return actViaRef(tab.cdp(), this.registryFor(spaceId, tabId), request, options);
+  }
+
+  /**
+   * Announces one agent operation (so the panel can wake and show status) and
+   * plays the in-page overlay when the panel is actually showing. Best-effort:
+   * any visual failure is swallowed and never blocks the action itself.
+   */
+  private async announceAct(
+    state: SpaceState,
+    spaceId: string,
+    tab: BrowserTab,
+    request: ActRequest,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    try {
+      const target = this.registryFor(spaceId, tab.id).resolve(request.ref);
+      if (target.frameId !== "main" || tab.isDestroyed) return;
+      const summary = state.space.requireTab(tab.id);
+      let name: string | undefined;
+      const commander = tab.cdp();
+      const info = await inspectActTarget(commander, target.backendNodeId,
+        ...(signal === undefined ? [] : [{ signal }])).catch(() => undefined);
+      name = info?.name;
+      // Announce first: a flaky geometry probe must not swallow the panel wake-up.
+      this.deps.emit({
+        kind: "activity",
+        spaceId,
+        tabId: tab.id,
+        action: request.action,
+        label: `${ACTIVITY_VERBS[request.action]} ${summary.label}${name === undefined ? "" : `「${name}」`}`,
+      });
+      const panelShown = spaceId === this.activeSpaceId && state.panelVisible && !state.modalVisible;
+      if (!panelShown || info === undefined) return;
+      await playActVisual(commander, request, info,
+        ...(signal === undefined ? [] : [{ signal }]));
+    } catch (error) {
+      // Visuals must never break the action that follows.
+      if (process.env.FLAVOR_BROWSER_DEBUG !== undefined) {
+        console.warn("[browser-host] announceAct failed:", error instanceof Error ? error.message : error);
+      }
+    }
+  }
+
+  /** Coordinate-level pointer op with activity announcement + overlay glide. */
+  async mouse(
+    spaceId: string,
+    tabId: string,
+    request: MouseRequest,
+    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<{ operation: MouseOperation; x: number; y: number }> {
+    const state = this.state(spaceId);
+    const tab = this.tab(state, tabId);
+    const activityAction: "click" | "move" | "drag" | "wheel" = request.operation === "click"
+      || request.operation === "down" || request.operation === "up" ? "click"
+      : request.operation === "drag" ? "drag"
+        : request.operation === "wheel" ? "wheel" : "move";
+    this.deps.emit({
+      kind: "activity",
+      spaceId,
+      tabId,
+      action: activityAction,
+      label: pointerLabel(request),
+    });
+    const panelShown = spaceId === this.activeSpaceId && state.panelVisible && !state.modalVisible;
+    const commander = tab.cdp();
+    if (panelShown && !tab.isDestroyed) {
+      const x = Math.round(request.x);
+      const y = Math.round(request.y);
+      const isClick = request.operation === "click" || request.operation === "down";
+      try {
+        await renderOverlay(commander, {
+          cursor: { x, y, moveMs: request.operation === "drag" ? 160 : 220 },
+          ...(isClick ? { click: { x, y, count: request.operation === "click" ? (request.clickCount ?? 1) : 1 } } : {}),
+        }, options.signal);
+        await sleepGlide(request.operation === "drag" ? 160 : 220, options.signal);
+      } catch {
+        // visuals are best-effort
+      }
+    }
+    const result = await mouseViaCdp(commander, request, options);
+    if (panelShown && request.operation === "drag" && !tab.isDestroyed) {
+      try {
+        const toX = Math.round(request.toX ?? request.x);
+        const toY = Math.round(request.toY ?? request.y);
+        await renderOverlay(commander, {
+          cursor: { x: toX, y: toY, moveMs: 320 },
+          click: { x: toX, y: toY, count: 1 },
+        });
+        await sleepGlide(320);
+      } catch {
+        // visuals are best-effort
+      }
+    }
+    return result;
+  }
+
+  /** Extract real page data (text/html/value/attributes/links). */
+  async read(spaceId: string, tabId: string, request: ReadRequest): Promise<ReadResult> {
+    const state = this.state(spaceId);
+    const tab = this.tab(state, tabId);
+    return readViaCdp(tab.cdp(), this.registryFor(spaceId, tabId), request);
   }
 
   setBounds(spaceId: string, bounds: BrowserBounds): void {
@@ -279,6 +414,10 @@ export class BrowserHost {
   handOff(spaceId: string): void {
     const state = this.state(spaceId);
     state.space.handOff();
+    // The fake agent cursor is meaningless once the user holds control.
+    for (const tab of state.tabs.values()) {
+      if (!tab.isDestroyed) void hideActVisual(tab.cdp());
+    }
     this.deps.emit({ kind: "ownership-changed", spaceId, ownership: "user" });
     this.relayout();
   }

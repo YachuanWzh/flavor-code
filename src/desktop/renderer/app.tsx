@@ -39,6 +39,7 @@ import { McpManagerView } from "./mcp-manager.js";
 import { E2eViewer } from "./e2e-viewer.js";
 import { GitChangesView } from "./git-changes.js";
 import { AgentWorkbench } from "./agent-workbench.js";
+import { BrowserPanel } from "./browser-panel.js";
 import {
   applyD2cAgentProgress,
   applyD2cEngineProgress,
@@ -125,6 +126,13 @@ export function DesktopApp(): React.JSX.Element {
   const [mentionSpan, setMentionSpan] = useState<{ start: number; end: number; text: string }>();
   const [cursorPos, setCursorPos] = useState(0);
   const [view, setView] = useState<"conversation" | "skills" | "memory" | "mcp" | "e2e" | "activity" | "git" | "workbench">("conversation");
+  const [browserOpen, setBrowserOpen] = useState(false);
+  const [browserFull, setBrowserFull] = useState(false);
+  const [browserWidth, setBrowserWidth] = useState<number | undefined>(undefined);
+  const toggleBrowserPanel = useCallback((next: boolean) => {
+    setBrowserOpen(next);
+    if (!next) setBrowserFull(false);
+  }, []);
   const [newTaskChooser, setNewTaskChooser] = useState(false);
   const [sessionQuery, setSessionQuery] = useState("");
   const [sessionGroup, setSessionGroup] = useState<"active" | "running" | "unread" | "archived">("active");
@@ -800,7 +808,12 @@ export function DesktopApp(): React.JSX.Element {
       <div className="rail-footer"><span className="avatar">F</span><span>本地工作区</span><button title="帮助">?</button></div>
     </aside>
 
-    <main className="workspace-panel">
+    <main
+      className="workspace-panel"
+      data-browser-open={browserOpen}
+      data-browser-full={browserOpen && browserFull}
+      style={browserWidth === undefined ? undefined : ({ "--browser-w": `${browserWidth}px` } as React.CSSProperties)}
+    >
       {view === "workbench" && snapshot.workspace !== undefined && snapshot.activeSession !== undefined ? <AgentWorkbench snapshot={snapshot} onClose={() => setView("conversation")} onError={setError} onCompose={(value) => { updateInput(value); setView("conversation"); setTimeout(() => inputRef.current?.focus(), 0); }} />
         : view === "skills" && snapshot.workspace !== undefined ? <SkillManagerView onClose={() => setView("conversation")} onError={setError} />
         : view === "memory" && snapshot.workspace !== undefined ? <MemoryManagerView onClose={() => setView("conversation")} onError={setError} />
@@ -821,6 +834,7 @@ export function DesktopApp(): React.JSX.Element {
           {snapshot.jobs.some((job) => job.state === "running") && <div className="job-strip" title="后台任务">
             <span className="job-pulse" />{snapshot.jobs.filter((job) => job.state === "running").length} 个后台任务
           </div>}
+          <button className="browser-toggle" data-active={browserOpen} title="内嵌浏览器" onClick={() => toggleBrowserPanel(!browserOpen)}>浏览器</button>
           <button className="finish-task-button" onClick={() => void finishTask()}
             disabled={busy || snapshot.activeSession === undefined} title="评估并完成当前任务">完成任务</button>
           <button title="更多选项">•••</button>
@@ -835,6 +849,7 @@ export function DesktopApp(): React.JSX.Element {
         </div>)}
       </div>}
 
+      <div className="conversation-row">
       <div className="conversation-scroll" ref={scrollRef}>
         {loading ? <LoadingState /> : snapshot.workspace === undefined ? <OpenProjectState onOpen={chooseWorkspace} />
           : transcript.completed.length === 0 && transcript.active === undefined
@@ -846,6 +861,9 @@ export function DesktopApp(): React.JSX.Element {
               {transcript.completed.slice(-60).map((turn) => <DesktopTurnView key={turn.id} turn={turn} />)}
               {transcript.active !== undefined && <DesktopTurnView turn={transcript.active} active />}
             </div>}
+      </div>
+        <BrowserPanel open={browserOpen} setOpen={toggleBrowserPanel} fullscreen={browserFull}
+          setFullscreen={setBrowserFull} onWidth={setBrowserWidth} />
       </div>
 
       {snapshot.diagnostics.length > 0 && <details className="diagnostics"><summary>{snapshot.diagnostics.length} 条启动提示</summary><pre>{snapshot.diagnostics.join("\n")}</pre></details>}

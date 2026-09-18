@@ -64,6 +64,7 @@ export type BrowserErrorCode =
   | "unknown-space"
   | "user-controlled"
   | "stale-ref"
+  | "bad-input"
   | "invalid-url"
   | "invalid-bounds"
   | "bad-locator"

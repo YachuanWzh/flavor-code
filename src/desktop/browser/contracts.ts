@@ -111,10 +111,23 @@ export const BrowserOwnershipEventSchema = z
   })
   .strict();
 
+/** One agent operation announcement; carries a short human label only. */
+export const BrowserActivityEventSchema = z
+  .object({
+    kind: z.literal("activity"),
+    spaceId: BrowserSpaceIdSchema,
+    tabId: BrowserTabIdSchema,
+    action: z.enum(["click", "dblclick", "fill", "focus", "hover", "press", "select", "navigate",
+      "type", "scroll", "move", "drag", "wheel"]),
+    label: z.string().max(160),
+  })
+  .strict();
+
 export const BrowserEventSchema = z.discriminatedUnion("kind", [
   BrowserTabsChangedEventSchema,
   BrowserTabStateEventSchema,
   BrowserOwnershipEventSchema,
+  BrowserActivityEventSchema,
 ]);
 export type BrowserEvent = z.infer<typeof BrowserEventSchema>;
 

@@ -44,14 +44,44 @@ const BrowserSnapshotInputSchema = z.object({
 type BrowserSnapshotInput = z.infer<typeof BrowserSnapshotInputSchema>;
 
 const BrowserActInputSchema = z.object({
-  action: z.enum(["click", "dblclick", "fill", "focus", "hover", "press", "select"]),
+  action: z.enum(["click", "dblclick", "fill", "focus", "hover", "press", "select", "type", "scroll"]),
   tab: z.string().regex(/^p(?:[1-9]|1[0-9]|20)$/).optional(),
   /** Snapshot element reference, e.g. "@12". Take a BrowserSnapshot first. */
   target: z.string().trim().min(1).max(256),
   value: z.string().max(20_000).optional(),
   key: z.string().trim().min(1).max(64).optional(),
+  /** type only: per-character pause 0..200 ms (default 15). */
+  charDelayMs: z.number().int().min(0).max(200).optional(),
+  /** scroll only: wheel deltas in CSS pixels (default deltaY 300). */
+  deltaX: z.number().int().min(-20_000).max(20_000).optional(),
+  deltaY: z.number().int().min(-20_000).max(20_000).optional(),
 }).strict();
 type BrowserActInput = z.infer<typeof BrowserActInputSchema>;
+
+const BrowserReadInputSchema = z.object({
+  mode: z.enum(["text", "html", "value", "attributes", "links"]),
+  tab: z.string().regex(/^p(?:[1-9]|1[0-9]|20)$/).optional(),
+  /** Snapshot ref (@N) or a CSS selector; omit for the whole document. */
+  target: z.string().trim().max(256).optional(),
+  maxChars: z.number().int().min(200).max(100_000).optional(),
+}).strict();
+type BrowserReadInput = z.infer<typeof BrowserReadInputSchema>;
+
+const BrowserMouseInputSchema = z.object({
+  operation: z.enum(["move", "click", "down", "up", "drag", "wheel"]),
+  tab: z.string().regex(/^p(?:[1-9]|1[0-9]|20)$/).optional(),
+  /** Viewport CSS pixels — take a BrowserSnapshot to see geometry, or use @ref via BrowserAct. */
+  x: z.number().int().min(0).max(100_000),
+  y: z.number().int().min(0).max(100_000),
+  toX: z.number().int().min(0).max(100_000).optional(),
+  toY: z.number().int().min(0).max(100_000).optional(),
+  button: z.enum(["left", "right", "middle"]).optional(),
+  clickCount: z.number().int().min(1).max(2).optional(),
+  deltaX: z.number().int().min(-20_000).max(20_000).optional(),
+  deltaY: z.number().int().min(-20_000).max(20_000).optional(),
+  steps: z.number().int().min(2).max(30).optional(),
+}).strict();
+type BrowserMouseInput = z.infer<typeof BrowserMouseInputSchema>;
 
 const BrowserWaitInputSchema = z.object({
   mode: z.enum(["idle", "timeout"]),
@@ -282,7 +312,7 @@ export function createBrowserTools(options: BrowserToolsOptions): ToolDefinition
   const browserAct: ToolDefinition<BrowserActInput> = {
     name: "BrowserAct",
     description:
-      "Act on a snapshotted element by @ref in this task's browser space: click, dblclick, fill (value), focus, hover, press (key), select (value). Requires a current BrowserSnapshot; stale refs return a re-snapshot error.",
+      "Act on a snapshotted element by @ref in this task's browser space: click, dblclick, fill (value replaces content via insertText), type (value typed character-by-character with real key events, charDelayMs), focus, hover, press (key), select (value), scroll (deltaX/deltaY wheel, default down 300). Requires a current BrowserSnapshot; stale refs return a re-snapshot error.",
     inputSchema: BrowserActInputSchema,
     agents: ["main"],
     paths: () => [],
@@ -303,11 +333,19 @@ export function createBrowserTools(options: BrowserToolsOptions): ToolDefinition
         );
       }
       const tabId = resolveTab(input.tab);
+      const deltaFields: { deltaX?: number; deltaY?: number } = {};
+      if (input.deltaX !== undefined) deltaFields.deltaX = input.deltaX;
+      if (input.deltaY !== undefined) deltaFields.deltaY = input.deltaY;
+      if (input.action === "scroll" && deltaFields.deltaX === undefined && deltaFields.deltaY === undefined) {
+        deltaFields.deltaY = 300;
+      }
       const result = await host.act(spaceId, tabId, {
         action: input.action,
         ref: locator.ref,
         ...(input.value === undefined ? {} : { value: input.value }),
         ...(input.key === undefined ? {} : { key: input.key }),
+        ...(input.charDelayMs === undefined ? {} : { charDelayMs: input.charDelayMs }),
+        ...deltaFields,
       }, { signal });
       const tab = host.tabSummary(spaceId, tabId);
       return withToolPresentation(
@@ -362,7 +400,109 @@ export function createBrowserTools(options: BrowserToolsOptions): ToolDefinition
     },
   };
 
-  return [browserTabs, browserNavigate, browserSnapshot, browserAct, browserWait, browserControl];
+  const browserRead: ToolDefinition<BrowserReadInput> = {
+    name: "BrowserRead",
+    description:
+      "Extract real page data from a browser tab: mode text (visible innerText), html (outer markup), value (form field value), attributes (tag + attribute list), links (anchor texts with hrefs). Optional target: a snapshot ref (@N) or a CSS selector; omit for the whole document. Returns plain text capped at maxChars with a truncated flag — use BrowserSnapshot instead to get clickable @refs.",
+    inputSchema: BrowserReadInputSchema,
+    agents: ["main"],
+    paths: () => [],
+    summarize: (input) => `read ${input.mode}`,
+    permissions: (readInput) => ({
+      input: { spaceId, read: readInput.mode, target: readInput.target },
+    }),
+    renderForModel: (output) => {
+      const read = output as { tab: BrowserTabOutput; mode: string; truncated: boolean; text: string };
+      return `${read.mode} — ${read.tab.label} ${read.tab.url}${read.truncated ? "  [truncated]" : ""}\n${read.text}`;
+    },
+    presentResult: (output) => {
+      const read = output as { tab: BrowserTabOutput; mode: string; truncated: boolean; text: string };
+      return {
+        kind: "web",
+        title: `Read ${read.mode} ${read.tab.label}`,
+        url: read.tab.url,
+        summary: read.text.slice(0, 800),
+      };
+    },
+    execute: async (input, signal) => {
+      signal.throwIfAborted();
+      // Reads can expose freshly typed content, so they share the write gate.
+      host.assertAgentControl(spaceId);
+      const tabId = resolveTab(input.tab);
+      const trimmed = input.target?.trim();
+      let ref: number | undefined;
+      let selector: string | undefined;
+      if (trimmed !== undefined && trimmed !== "") {
+        if (trimmed.startsWith("@")) {
+          const locator = parseLocator(trimmed);
+          if (locator.kind !== "ref") {
+            throw new BrowserError("bad-locator", "BrowserRead @targets must be a snapshot ref like @12");
+          }
+          ref = locator.ref;
+        } else {
+          selector = trimmed;
+        }
+      }
+      const result = await host.read(spaceId, tabId, {
+        mode: input.mode,
+        ...(ref === undefined ? {} : { ref }),
+        ...(selector === undefined ? {} : { selector }),
+        ...(input.maxChars === undefined ? {} : { maxChars: input.maxChars }),
+      });
+      const tab = host.tabSummary(spaceId, tabId);
+      return withToolPresentation(
+        { tab: toOutput(tab), ...result },
+        { kind: "web", title: `Read ${result.mode} ${tab.label}`, url: tab.url },
+      );
+    },
+  };
+
+  const browserMouse: ToolDefinition<BrowserMouseInput> = {
+    name: "BrowserMouse",
+    description:
+      "Coordinate-level pointer control in a browser tab (viewport CSS pixels): move, click (clickCount 2 = double), down/up for held buttons, drag from x,y to toX,toY with interpolated moves, wheel scroll at x,y with deltaX/deltaY. Prefer BrowserAct @ref targets when you have a snapshot; use this for canvases, sliders, drag-and-drop and pixel layouts.",
+    inputSchema: BrowserMouseInputSchema,
+    agents: ["main"],
+    paths: () => [],
+    summarize: (input) => input.operation,
+    permissions: (mouseInput) => ({
+      input: { spaceId, mouse: mouseInput.operation, x: mouseInput.x, y: mouseInput.y },
+    }),
+    renderForModel: (output) => JSON.stringify(output),
+    execute: async (input, signal) => {
+      signal.throwIfAborted();
+      host.assertAgentControl(spaceId);
+      const tabId = resolveTab(input.tab);
+      const result = await host.mouse(spaceId, tabId, {
+        operation: input.operation,
+        x: input.x,
+        y: input.y,
+        ...(input.toX === undefined ? {} : { toX: input.toX }),
+        ...(input.toY === undefined ? {} : { toY: input.toY }),
+        ...(input.button === undefined ? {} : { button: input.button }),
+        ...(input.clickCount === undefined ? {} : { clickCount: input.clickCount }),
+        ...(input.deltaX === undefined ? {} : { deltaX: input.deltaX }),
+        ...(input.deltaY === undefined ? {} : { deltaY: input.deltaY }),
+        ...(input.steps === undefined ? {} : { steps: input.steps }),
+      }, { signal });
+      const tab = host.tabSummary(spaceId, tabId);
+      return withToolPresentation(
+        { ...result, tab: toOutput(tab) },
+        { kind: "web", title: `Browser ${input.operation}`, url: tab.url, summary: tab.title },
+      );
+    },
+  };
+
+  return [
+    browserTabs,
+    browserNavigate,
+    browserSnapshot,
+    browserAct,
+    browserRead,
+    browserMouse,
+    browserWait,
+    browserControl,
+  ];
 }
 
 function delay(ms: number, signal: AbortSignal): Promise<void> {

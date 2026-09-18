@@ -282,6 +282,66 @@ describe("browser host", () => {
     expect(() => host.createSpace("bspace-c")).toThrow(/disposed/);
   });
 
+  it("announces agent activity with a friendly label before acting", async () => {
+    const { host, views, events } = harness();
+    host.createSpace("bspace-a");
+    const tab = host.newTab("bspace-a", "https://example.com/");
+    const seen: string[] = [];
+    const fakeDebugger = views[0]!.webContents.debugger as unknown as {
+      sendCommand(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<unknown>;
+    };
+    fakeDebugger.sendCommand = (method: string) => {
+      seen.push(method);
+      if (method === "DOM.getContentQuads") {
+        return Promise.resolve({ quads: [[0, 0, 10, 0, 10, 5, 0, 5]] });
+      }
+      if (method === "DOM.describeNode") {
+        return Promise.resolve({ node: { nodeName: "BUTTON", attributes: ["aria-label", "提交订单"] } });
+      }
+      return Promise.resolve({});
+    };
+    host.registryFor("bspace-a", tab.id).replaceDocument("doc-1", [
+      { frameId: "main", backendNodeId: 77, role: "button", name: "提交订单" },
+    ]);
+    await host.act("bspace-a", tab.id, { action: "click", ref: 1 });
+    expect(events).toContainEqual({
+      kind: "activity",
+      spaceId: "bspace-a",
+      tabId: tab.id,
+      action: "click",
+      label: "点击 p1「提交订单」",
+    });
+    // The panel is hidden: activity is announced, but no visual is injected.
+    expect(seen).not.toContain("Runtime.evaluate");
+  });
+
+  it("plays in-page visuals for the active visible panel", async () => {
+    const { host, views } = harness();
+    host.createSpace("bspace-a");
+    const tab = host.newTab("bspace-a", "https://example.com/");
+    const expressions: string[] = [];
+    const fakeDebugger = views[0]!.webContents.debugger as unknown as {
+      sendCommand(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<unknown>;
+    };
+    fakeDebugger.sendCommand = (method: string, params?: Record<string, unknown>) => {
+      if (method === "DOM.getContentQuads") {
+        return Promise.resolve({ quads: [[0, 0, 10, 0, 10, 5, 0, 5]] });
+      }
+      if (method === "Runtime.evaluate") expressions.push(String(params?.expression ?? ""));
+      return Promise.resolve({});
+    };
+    host.setBounds("bspace-a", BOUNDS);
+    host.setPanelVisible("bspace-a", true);
+    host.registryFor("bspace-a", tab.id).replaceDocument("doc-2", [
+      { frameId: "main", backendNodeId: 88, role: "button", name: "保存" },
+    ]);
+    await host.act("bspace-a", tab.id, { action: "click", ref: 1 });
+    expect(expressions).toHaveLength(1);
+    expect(expressions[0]).toContain('"cursor"');
+    expect(expressions[0]).toContain('"click"');
+    void tab;
+  });
+
   it("unknown spaces and tabs produce typed errors", () => {
     const { host } = harness();
     expect(() => host.listTabs("bspace-missing")).toThrowError(

@@ -61,7 +61,11 @@ function fakeView(state?: ScriptedWebContentsState): BrowserViewLike {
           return Promise.resolve({ quads: [[0, 0, 100, 0, 100, 40, 0, 40]] });
         }
         if (method === "Input.dispatchKeyEvent") {
+          lastCdp = { method, params };
           return Promise.resolve({ handled: true });
+        }
+        if (method === "Runtime.evaluate") {
+          return Promise.resolve({ result: { value: "文档正文内容" } });
         }
         lastCdp = { method, params };
         return Promise.resolve({});
@@ -111,7 +115,9 @@ describe("browser tools", () => {
     expect(tools.map((tool) => tool.name).sort()).toEqual([
       "BrowserAct",
       "BrowserControl",
+      "BrowserMouse",
       "BrowserNavigate",
+      "BrowserRead",
       "BrowserSnapshot",
       "BrowserTabs",
       "BrowserWait",
@@ -243,6 +249,53 @@ describe("browser snapshot/act tools", () => {
     await snapshot.execute({} as never, signal, mainAgent);
     // act on a ref beyond the 2 known nodes -> stale
     await expect(act.execute({ action: "click", target: "@9" } as never, signal, mainAgent)).rejects.toThrow(/stale/i);
+  });
+
+  it("BrowserRead extracts page text from the whole document", async () => {
+    const host = makeHost();
+    host.createSpace("bspace-a");
+    const tools = createBrowserTools({ host, spaceId: "bspace-a" });
+    const navigate = toolByName<AnyTool>(tools, "BrowserNavigate");
+    await navigate.execute({ operation: "goto", url: "https://a.test/docs" } as never, signal, mainAgent);
+    const read = toolByName<AnyTool>(tools, "BrowserRead");
+    const result = (await read.execute({ mode: "text" } as never, signal, mainAgent)) as {
+      text: string; scope: string; truncated: boolean; mode: string;
+    };
+    expect(result).toMatchObject({ mode: "text", scope: "document", truncated: false, text: "文档正文内容" });
+  });
+
+  it("BrowserMouse drives coordinate-level input events", async () => {
+    const host = makeHost();
+    host.createSpace("bspace-a");
+    const tools = createBrowserTools({ host, spaceId: "bspace-a" });
+    const navigate = toolByName<AnyTool>(tools, "BrowserNavigate");
+    await navigate.execute({ operation: "goto", url: "https://a.test/" } as never, signal, mainAgent);
+    const mouse = toolByName<AnyTool>(tools, "BrowserMouse");
+    const dragged = (await mouse.execute(
+      { operation: "drag", x: 10, y: 20, toX: 60, toY: 80, steps: 3 } as never, signal, mainAgent,
+    )) as { operation: string; x: number; y: number };
+    expect(dragged).toMatchObject({ operation: "drag", x: 10, y: 20 });
+    expect(lastCdp?.method).toBe("Input.dispatchMouseEvent");
+    expect(lastCdp?.params).toMatchObject({ type: "mouseReleased", x: 60, y: 80 });
+    await expect(mouse.execute({ operation: "wheel", x: 5, y: 5 } as never, signal, mainAgent))
+      .rejects.toThrow(/deltaX or deltaY/);
+  });
+
+  it("BrowserAct types character-by-character key events", async () => {
+    const host = makeHost();
+    host.createSpace("bspace-a");
+    const tools = createBrowserTools({ host, spaceId: "bspace-a" });
+    const navigate = toolByName<AnyTool>(tools, "BrowserNavigate");
+    await navigate.execute({ operation: "goto", url: "https://a.test/docs" } as never, signal, mainAgent);
+    const snapshot = toolByName<AnyTool>(tools, "BrowserSnapshot");
+    await snapshot.execute({} as never, signal, mainAgent);
+    const act = toolByName<AnyTool>(tools, "BrowserAct");
+    const typed = (await act.execute(
+      { action: "type", target: "@2", value: "hi", charDelayMs: 0 } as never, signal, mainAgent,
+    )) as { action: string; ref: number };
+    expect(typed).toMatchObject({ action: "type", ref: 2 });
+    expect(lastCdp?.method).toBe("Input.dispatchKeyEvent");
+    expect(lastCdp?.params).toMatchObject({ type: "keyUp", key: "i" });
   });
 
   it("wait returns idle with the observed tab state", async () => {

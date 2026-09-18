@@ -128,6 +128,11 @@ function currentBrowserSpaceId(): string {
   if (activeWorkspace === undefined) throw new Error("请先打开项目");
   const task = managedProjects.get(activeWorkspace)?.selectedTask;
   if (task === undefined) throw new Error("请先启动一个任务");
+  const host = requireBrowserHost();
+  host.createSpace(task.browserSpaceId);
+  // The visible panel (and agent action visuals) always follow the task
+  // whose browser APIs are being called.
+  host.activateSpace(task.browserSpaceId);
   return task.browserSpaceId;
 }
 /** Page-mutating UI actions require user ownership; the agent default blocks them until 我来操作. */
@@ -540,6 +545,7 @@ async function startManagedSession(resumeSession?: string, environment: "local" 
     browserSpaceId: `bspace-${randomUUID()}`,
   } as ManagedDesktopTask;
   requireBrowserHost().createSpace(task.browserSpaceId);
+  requireBrowserHost().activateSpace(task.browserSpaceId);
   task.controller = createDesktopController(activeWorkspace, task);
   task.snapshot = task.controller.snapshot();
   project.tasks.add(task); project.selectedTask = task; controller = task.controller;
@@ -562,6 +568,7 @@ async function activateManagedSession(workspace: string, sessionId?: string): Pr
   let payload: SessionStartedPayload;
   if (task !== undefined) {
     project.selectedTask = task; controller = task.controller;
+    requireBrowserHost().activateSpace(task.browserSpaceId);
     payload = task.payload ?? await task.controller.startSession(sessionId);
     task.payload = payload; task.snapshot = payload.snapshot;
   } else payload = await startManagedSession(sessionId);
@@ -732,6 +739,7 @@ function installIpcHandlers(): void {
     if (task === undefined) return undefined;
     const host = requireBrowserHost();
     host.createSpace(task.browserSpaceId, task.sessionId);
+    host.activateSpace(task.browserSpaceId);
     return host.listTabs(task.browserSpaceId);
   });
   ipcMain.handle(DESKTOP_CHANNELS.browserNewTab, async (_event, value) => {
