@@ -105,18 +105,32 @@ export async function readViaCdp(
       throw new BrowserError("bad-locator", "Read targets in subframes are not supported yet");
     }
     scope = "ref";
-    const call = await commander.sendCommand<{
-      wasThrown?: boolean; value?: unknown; description?: string;
-    }>("Runtime.callFunctionOn", {
-      backendNodeId: target.backendNodeId,
-      functionDeclaration: READ_PAGE_FUNCTION,
-      arguments: [{ value: spec }],
-      returnByValue: true,
-    }, commandOptions);
-    if (call.wasThrown === true) {
-      throw new BrowserError("bad-input", call.description?.split("\n")[0] ?? "Read failed on ref");
+    const resolved = await commander.sendCommand<{ object?: { objectId?: string } }>(
+      "DOM.resolveNode",
+      { backendNodeId: target.backendNodeId },
+      commandOptions,
+    );
+    const objectId = resolved.object?.objectId;
+    if (objectId === undefined) {
+      throw new BrowserError("stale-ref", `Element reference @${request.ref} can no longer be resolved`);
     }
-    raw = typeof call.value === "string" ? call.value : JSON.stringify(call.value ?? null);
+    try {
+      const call = await commander.sendCommand<EvaluateOutcome>("Runtime.callFunctionOn", {
+        objectId,
+        functionDeclaration: READ_PAGE_FUNCTION,
+        arguments: [{ value: spec }],
+        returnByValue: true,
+      }, commandOptions);
+      if (call.exceptionDetails !== undefined || call.result === undefined) {
+        throwReadFailure(call.exceptionDetails
+          ?? (call.result?.description === undefined ? undefined : { text: call.result.description }));
+      }
+      raw = typeof call.result.value === "string"
+        ? call.result.value
+        : JSON.stringify(call.result.value ?? null);
+    } finally {
+      await commander.sendCommand("Runtime.releaseObject", { objectId }, commandOptions).catch(() => undefined);
+    }
   } else {
     scope = request.selector !== undefined ? "selector" : "document";
     const expression = `(${READ_PAGE_FUNCTION}).call(undefined, ${JSON.stringify(spec)})`;

@@ -36,15 +36,19 @@ describe("readViaCdp", () => {
     expect(expression).toContain(".call(undefined,");
   });
 
-  it("reads a snapshot ref through callFunctionOn on the backend node", async () => {
+  it("resolves a snapshot ref to a runtime object before callFunctionOn", async () => {
     const { commander, sent } = fakeCommander({
-      "Runtime.callFunctionOn": () => ({ value: "input-value" }),
+      "DOM.resolveNode": () => ({ object: { objectId: "object-40" } }),
+      "Runtime.callFunctionOn": () => ({ result: { value: "input-value" } }),
     });
     const result = await readViaCdp(commander, registryStub, { mode: "value", ref: 4 });
     expect(result.scope).toBe("ref");
     expect(result.text).toBe("input-value");
-    const params = sent[0]?.params as { backendNodeId: number };
-    expect(params.backendNodeId).toBe(40);
+    expect(sent.map((call) => call.method)).toEqual([
+      "DOM.resolveNode", "Runtime.callFunctionOn", "Runtime.releaseObject",
+    ]);
+    expect(sent[0]?.params).toMatchObject({ backendNodeId: 40 });
+    expect(sent[1]?.params).toMatchObject({ objectId: "object-40" });
   });
 
   it("truncates oversized output with the truncated flag", async () => {

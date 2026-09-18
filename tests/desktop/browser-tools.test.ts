@@ -193,10 +193,21 @@ describe("browser tools", () => {
     expect(control.inputSchema.safeParse({ operation: "takeOver" }).success).toBe(false);
   });
 
-  it("declares read-only metadata only for pure reads", () => {
-    const tabs = toolByName<AnyTool>(createBrowserTools({ host: makeHost(), spaceId: "bspace-a" }), "BrowserTabs");
+  it("opens and navigates without approval while keeping destructive close guarded", () => {
+    const tools = createBrowserTools({ host: makeHost(), spaceId: "bspace-a" });
+    const tabs = toolByName<AnyTool>(tools, "BrowserTabs");
     expect(tabs.permissions({ operation: "list" } as never).readOnly).toBe(true);
-    expect(tabs.permissions({ operation: "new" } as never).readOnly).toBe(false);
+    expect(tabs.permissions({ operation: "new" } as never).readOnly).toBe(true);
+    expect(tabs.permissions({ operation: "activate" } as never).readOnly).toBe(true);
+    expect(tabs.permissions({ operation: "close" } as never).readOnly).toBe(false);
+    const navigate = toolByName<AnyTool>(tools, "BrowserNavigate");
+    expect(navigate.permissions({ operation: "goto", url: "https://a.test/" } as never).readOnly).toBe(true);
+    const snapshot = toolByName<AnyTool>(tools, "BrowserSnapshot");
+    const read = toolByName<AnyTool>(tools, "BrowserRead");
+    const wait = toolByName<AnyTool>(tools, "BrowserWait");
+    expect(snapshot.permissions({} as never).readOnly).toBe(true);
+    expect(read.permissions({ mode: "text" } as never).readOnly).toBe(true);
+    expect(wait.permissions({ mode: "idle" } as never).readOnly).toBe(true);
   });
 });
 
@@ -323,5 +334,34 @@ describe("browser snapshot/act tools", () => {
     await expect(
       wait.execute({ mode: "idle", timeoutMs: 300 } as never, signal, mainAgent),
     ).rejects.toThrow(/timed out after 300ms/);
+  });
+
+  it("wait timeout actually waits for the requested duration", async () => {
+    const host = makeHost();
+    host.createSpace("bspace-a");
+    const wait = toolByName<AnyTool>(createBrowserTools({ host, spaceId: "bspace-a" }), "BrowserWait");
+    const started = Date.now();
+    const result = await wait.execute(
+      { mode: "timeout", timeoutMs: 100 } as never,
+      new AbortController().signal,
+      mainAgent,
+    ) as { waited: string };
+    expect(result.waited).toBe("timeout");
+    expect(Date.now() - started).toBeGreaterThanOrEqual(80);
+  });
+
+  it("waits on URL conditions without taking repeated snapshots", async () => {
+    const host = makeHost();
+    host.createSpace("bspace-a");
+    const tools = createBrowserTools({ host, spaceId: "bspace-a" });
+    const navigate = toolByName<AnyTool>(tools, "BrowserNavigate");
+    await navigate.execute({ operation: "goto", url: "https://a.test/ready?id=2" } as never, signal, mainAgent);
+    const wait = toolByName<AnyTool>(tools, "BrowserWait");
+    const result = await wait.execute(
+      { mode: "url", value: "/ready", timeoutMs: 300 } as never,
+      signal,
+      mainAgent,
+    ) as { waited: string; matched: string };
+    expect(result).toMatchObject({ waited: "url", matched: "/ready" });
   });
 });

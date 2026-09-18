@@ -39,6 +39,9 @@ type BrowserControlInput = z.infer<typeof BrowserControlInputSchema>;
 
 const BrowserSnapshotInputSchema = z.object({
   tab: z.string().regex(/^p(?:[1-9]|1[0-9]|20)$/).optional(),
+  scope: z.enum(["viewport", "full_page", "subtree"]).optional(),
+  /** Required for subtree; snapshot ref such as @12 from the current document. */
+  root: z.string().trim().regex(/^@[1-9][0-9]*$/).optional(),
   maxNodes: z.number().int().min(1).max(2_000).optional(),
 }).strict();
 type BrowserSnapshotInput = z.infer<typeof BrowserSnapshotInputSchema>;
@@ -84,8 +87,10 @@ const BrowserMouseInputSchema = z.object({
 type BrowserMouseInput = z.infer<typeof BrowserMouseInputSchema>;
 
 const BrowserWaitInputSchema = z.object({
-  mode: z.enum(["idle", "timeout"]),
+  mode: z.enum(["idle", "timeout", "url", "text", "selector"]),
   tab: z.string().regex(/^p(?:[1-9]|1[0-9]|20)$/).optional(),
+  /** url/text substring, or CSS selector, for conditional modes. */
+  value: z.string().trim().min(1).max(2_048).optional(),
   timeoutMs: z.number().int().min(100).max(120_000).default(10_000),
 }).strict();
 type BrowserWaitInput = z.infer<typeof BrowserWaitInputSchema>;
@@ -145,7 +150,9 @@ export function createBrowserTools(options: BrowserToolsOptions): ToolDefinition
     paths: () => [],
     summarize: (input) => input.operation,
     permissions: (input) => ({
-      readOnly: input.operation === "list",
+      // Opening/switching the embedded browser is a trusted agent UI action;
+      // only destructive tab closing remains approval-aware.
+      readOnly: input.operation !== "close",
       input: { spaceId, operation: input.operation, url: input.url },
     }),
     renderForModel: (output) => JSON.stringify(output),
@@ -200,6 +207,9 @@ export function createBrowserTools(options: BrowserToolsOptions): ToolDefinition
     paths: () => [],
     summarize: (input) => (input.operation === "goto" ? `goto ${input.url ?? ""}`.trim() : input.operation),
     permissions: (input) => ({
+      // Browser navigation is what wakes the embedded agent browser and must
+      // not be blocked behind a generic filesystem/shell approval sheet.
+      readOnly: true,
       input: { spaceId, operation: input.operation, url: input.url },
     }),
     renderForModel: (output) => JSON.stringify(output),
@@ -268,12 +278,13 @@ export function createBrowserTools(options: BrowserToolsOptions): ToolDefinition
   const browserSnapshot: ToolDefinition<BrowserSnapshotInput> = {
     name: "BrowserSnapshot",
     description:
-      "Take a semantic snapshot of a browser tab in this task's space (default: active tab). Returns compact @-numbered accessibility nodes with URL/title; use the refs as BrowserAct targets. Refs die on navigation.",
+      "Take a compact semantic snapshot of a browser tab (default scope viewport to save tokens). scope subtree requires root @ref and reuses stable refs; viewport/full_page replace the current ref set. Use returned @refs as BrowserAct targets. Refs die on navigation.",
     inputSchema: BrowserSnapshotInputSchema,
     agents: ["main"],
     paths: () => [],
     summarize: (input) => `snapshot ${input.tab ?? "active"}`,
     permissions: () => ({
+      readOnly: true,
       input: { spaceId, read: "browser-snapshot" },
     }),
     presentCall: (input) => ({ kind: "web", title: `Snapshot ${input.tab ?? "active"}` }),
@@ -292,7 +303,16 @@ export function createBrowserTools(options: BrowserToolsOptions): ToolDefinition
       // the user holds control (same gate as writes).
       host.assertAgentControl(spaceId);
       const tabId = resolveTab(input.tab);
+      let rootBackendNodeId: number | undefined;
+      if (input.scope === "subtree") {
+        if (input.root === undefined) throw new BrowserError("bad-input", "BrowserSnapshot subtree requires root @ref");
+        const locator = parseLocator(input.root);
+        if (locator.kind !== "ref") throw new BrowserError("bad-locator", "Snapshot subtree root must be an @ref");
+        rootBackendNodeId = host.registryFor(spaceId, tabId).resolve(locator.ref).backendNodeId;
+      }
       const { tab, snapshot } = await host.capture(spaceId, tabId, {
+        scope: input.scope ?? "viewport",
+        ...(rootBackendNodeId === undefined ? {} : { rootBackendNodeId }),
         ...(input.maxNodes === undefined ? {} : { maxNodes: input.maxNodes }),
         signal,
       });
@@ -301,6 +321,7 @@ export function createBrowserTools(options: BrowserToolsOptions): ToolDefinition
           tabId: tab.id,
           label: tab.label,
           documentId: snapshot.documentId,
+          scope: input.scope ?? "viewport",
           truncated: snapshot.truncated,
           text: snapshot.text,
         },
@@ -358,42 +379,71 @@ export function createBrowserTools(options: BrowserToolsOptions): ToolDefinition
   const browserWait: ToolDefinition<BrowserWaitInput> = {
     name: "BrowserWait",
     description:
-      "Wait for a browser tab condition: idle (loading finished and settled) or a fixed timeout. Aborts with the tool signal. No blind sleeping as an outcome — the result reports the observed tab state.",
+      "Wait for a browser condition: idle, fixed timeout, URL containing value, visible page text containing value, or a CSS selector to exist. Conditional waits poll until timeout and avoid repeated snapshots.",
     inputSchema: BrowserWaitInputSchema,
     agents: ["main"],
     paths: () => [],
     summarize: (input) => `wait ${input.mode}`,
     permissions: (waitInput) => ({
+      readOnly: true,
       input: { spaceId, wait: waitInput.mode },
     }),
     renderForModel: (output) => JSON.stringify(output),
     execute: async (input, signal) => {
       host.assertAgentControl(spaceId);
       const tabId = resolveTab(input.tab);
-      const deadline = Date.now() + input.timeoutMs;
+      if ((input.mode === "url" || input.mode === "text" || input.mode === "selector") && input.value === undefined) {
+        throw new BrowserError("bad-input", `BrowserWait ${input.mode} requires value`);
+      }
+      const timeoutMs = input.timeoutMs ?? 10_000;
+      const deadline = Date.now() + timeoutMs;
       let settledSince: number | undefined;
       for (;;) {
         signal.throwIfAborted();
         const tab = host.tabSummary(spaceId, tabId);
         if (input.mode === "timeout") {
+          await delay(timeoutMs, signal);
+          const current = host.tabSummary(spaceId, tabId);
           return withToolPresentation(
-            { waited: "timeout", tab: toOutput(tab) },
-            { kind: "web", title: "Waited", url: tab.url },
+            { waited: "timeout", tab: toOutput(current) },
+            { kind: "web", title: "Waited", url: current.url },
           );
         }
-        if (!tab.loading) {
-          settledSince ??= Date.now();
-          if (Date.now() - settledSince >= 250) {
+        if (input.mode === "idle") {
+          if (!tab.loading) {
+            settledSince ??= Date.now();
+            if (Date.now() - settledSince >= 250) {
+              return withToolPresentation(
+                { waited: "idle", tab: toOutput(tab) },
+                { kind: "web", title: `Idle ${tab.label}`, url: tab.url },
+              );
+            }
+          } else {
+            settledSince = undefined;
+          }
+        }
+        if (input.mode === "url" && tab.url.includes(input.value ?? "")) {
+          return withToolPresentation(
+            { waited: "url", matched: input.value, tab: toOutput(tab) },
+            { kind: "web", title: `URL matched ${tab.label}`, url: tab.url },
+          );
+        }
+        if (input.mode === "text" || input.mode === "selector") {
+          const expression = input.mode === "text"
+            ? `Boolean(document.body && document.body.innerText.includes(${JSON.stringify(input.value)}))`
+            : `Boolean(document.querySelector(${JSON.stringify(input.value)}))`;
+          const evaluated = await host.cdpFor(spaceId, tabId).sendCommand<{
+            result?: { value?: unknown };
+          }>("Runtime.evaluate", { expression, returnByValue: true }, { signal });
+          if (evaluated.result?.value === true) {
             return withToolPresentation(
-              { waited: "idle", tab: toOutput(tab) },
-              { kind: "web", title: `Idle ${tab.label}`, url: tab.url },
+              { waited: input.mode, matched: input.value, tab: toOutput(tab) },
+              { kind: "web", title: `${input.mode} matched ${tab.label}`, url: tab.url },
             );
           }
-        } else {
-          settledSince = undefined;
         }
         if (Date.now() >= deadline) {
-          throw new Error(`BrowserWait timed out after ${input.timeoutMs}ms; tab ${tab.label} state: ${tab.loading ? "loading" : "quiet"}`);
+          throw new Error(`BrowserWait timed out after ${timeoutMs}ms; tab ${tab.label} state: ${tab.loading ? "loading" : "quiet"}`);
         }
         await delay(Math.min(120, Math.max(10, deadline - Date.now())), signal);
       }
@@ -409,6 +459,7 @@ export function createBrowserTools(options: BrowserToolsOptions): ToolDefinition
     paths: () => [],
     summarize: (input) => `read ${input.mode}`,
     permissions: (readInput) => ({
+      readOnly: true,
       input: { spaceId, read: readInput.mode, target: readInput.target },
     }),
     renderForModel: (output) => {

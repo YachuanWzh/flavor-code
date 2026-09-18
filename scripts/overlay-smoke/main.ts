@@ -4,9 +4,17 @@
  * --platform node --external electron --outDir .tmp-overlay-smoke && npx
  * electron .tmp-overlay-smoke/main.js */
 import { app, BrowserWindow } from "electron";
+import { writeFile } from "node:fs/promises";
 import http from "node:http";
+import { join } from "node:path";
 
 import { createElectronBrowserHost } from "../../src/desktop/browser/electron-browser.js";
+
+// Keep the smoke deterministic on Windows hosts whose GPU sandbox cannot
+// initialize (the production app applies the same sandbox workaround).
+app.commandLine.appendSwitch("disable-gpu-sandbox");
+app.commandLine.appendSwitch("no-sandbox");
+app.disableHardwareAcceleration();
 
 const PAGE = `<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0">
 <button id="b" style="position:absolute;left:120px;top:160px;width:200px;height:60px">Go</button>
@@ -29,7 +37,7 @@ async function main(): Promise<void> {
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as { port: number }).port;
-  const win = new BrowserWindow({ show: false, width: 1200, height: 800 });
+  const win = new BrowserWindow({ show: true, width: 1200, height: 800 });
   const host = createElectronBrowserHost({
     getWindow: () => win,
     emit: (event) => console.log("EVENT", JSON.stringify(event)),
@@ -64,7 +72,14 @@ async function main(): Promise<void> {
   registry.replaceDocument("smoke-doc", [{
     frameId: "main", backendNodeId, role: "button", name: "Go",
   }]);
-  const actResult = await host.act("s1", tab.id, { action: "click", ref: 1 });
+  const actPromise = host.act("s1", tab.id, { action: "click", ref: 1 });
+  await delay(250);
+  const midFlight = await wc.executeJavaScript(`(function () {
+    var f = document.getElementById("__flavor_act_overlay__")?.__f;
+    return f ? getComputedStyle(f.cur).transform : "NO-CURSOR";
+  })()`);
+  console.log("CURSOR_MID_FLIGHT", midFlight);
+  const actResult = await actPromise;
   console.log("ACT_RESULT", JSON.stringify(actResult));
   await delay(150);
   const overlay = await wc.executeJavaScript(`(function () {
@@ -82,6 +97,9 @@ async function main(): Promise<void> {
     });
   })()`);
   console.log("OVERLAY_STATE", overlay);
+  const screenshotPath = join(app.getPath("temp"), "flavor-overlay-smoke.png");
+  await writeFile(screenshotPath, (await wc.capturePage()).toPNG());
+  console.log("OVERLAY_SCREENSHOT", screenshotPath);
   console.log("PAGE_LOG", await wc.executeJavaScript("document.getElementById('log').textContent"));
   console.log("LAST_MOUSEMOVE", await wc.executeJavaScript("window.__lastMove || 'none'"));
   server.close();

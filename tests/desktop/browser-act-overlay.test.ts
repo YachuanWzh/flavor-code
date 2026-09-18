@@ -54,6 +54,8 @@ describe("act overlay expression", () => {
     });
     // Compiles the body without executing it: parses the whole IIFE + payload.
     expect(() => new Function(expression)).not.toThrow();
+    expect(expression).not.toContain("shadow.innerHTML");
+    expect(expression).toContain("createElementNS");
   });
 
   it("previewTypedText collapses whitespace and caps length", () => {
@@ -84,18 +86,38 @@ describe("inspectActTarget", () => {
     expect(result.name).toBeUndefined();
     expect(result.masked).toBe(false);
   });
+
+  it("falls back to the box model when content quads are unavailable", async () => {
+    const { commander } = fakeCommander({
+      "DOM.getContentQuads": () => Promise.reject(new Error("no quads")),
+      "DOM.getBoxModel": () => ({ model: { border: [20, 30, 120, 30, 120, 70, 20, 70] } }),
+    });
+    const result = await inspectActTarget(commander, 8);
+    expect(result.box?.center).toEqual({ x: 70, y: 50 });
+  });
+
+  it("uses a visible viewport fallback when all node geometry probes fail", async () => {
+    const { commander } = fakeCommander({
+      "Runtime.evaluate": () => ({ result: { value: { width: 800, height: 600 } } }),
+    });
+    const result = await inspectActTarget(commander, 9);
+    expect(result.box?.center).toEqual({ x: 400, y: 300 });
+  });
 });
 
 describe("playActVisual", () => {
-  it("injects cursor + click + highlight for a click and resolves after the glide", async () => {
+  it("moves first, then paints click feedback after the glide", async () => {
     const { commander, calls } = fakeCommander();
     await playActVisual(commander, { action: "click", ref: 1 }, info(), { moveMs: 1 });
-    const evaluate = calls.find((call) => call.method === "Runtime.evaluate");
-    expect(evaluate).toBeDefined();
-    const expression = String((evaluate?.params as { expression: string }).expression);
-    expect(expression).toContain('"cursor":{"x":60,"y":45,"moveMs":1}');
-    expect(expression).toContain('"click":{"x":60,"y":45,"count":1}');
-    expect(expression).toContain('"highlight":{');
+    const evaluations = calls.filter((call) => call.method === "Runtime.evaluate");
+    expect(evaluations).toHaveLength(2);
+    const movement = String((evaluations[0]?.params as { expression: string }).expression);
+    const feedback = String((evaluations[1]?.params as { expression: string }).expression);
+    expect(movement).toContain('"cursor":{"x":60,"y":45,"moveMs":1}');
+    expect(movement).toContain('"highlight":{');
+    expect(movement).not.toContain('"click":');
+    expect(feedback).toContain('"click":{"x":60,"y":45,"count":1}');
+    expect(feedback).not.toContain('"cursor":');
   });
 
   it("never echoes password values in the typing bubble", async () => {
@@ -106,7 +128,9 @@ describe("playActVisual", () => {
       info({ masked: true }),
       { moveMs: 1 },
     );
-    const expression = String((calls[0]?.params as { expression: string }).expression);
+    const expression = String((calls[1]?.params as { expression: string }).expression);
+    expect(String((calls[0]?.params as { expression: string }).expression)).toContain('"moveMs":1');
+    expect(expression).toContain('"click"');
     expect(expression).toContain('"text":null');
     expect(expression).not.toContain("hunter2");
   });

@@ -120,23 +120,47 @@ export async function actViaRef(
     }
     case "select": {
       // Select a native <option> without depending on the popup that a click
-      // would open: set selectedIndex through the isolated world.
+      // would open: resolve the backend DOM node to a Runtime object, then
+      // invoke against that object. Runtime.callFunctionOn does not accept a
+      // backendNodeId directly.
       const value = request.value ?? "";
-      await commander.sendCommand(
-        "DOM.setNodeValue",
-        { backendNodeId, value },
-        command(options),
-      ).catch(() => undefined);
-      const changed =
-        `this.selectedIndex = Array.prototype.findIndex.call(this.options, (option) => option.value === ${JSON.stringify(value)}); ` +
-        "this.dispatchEvent(new Event('input', { bubbles: true })); this.dispatchEvent(new Event('change', { bubbles: true }));";
-      const evaluated = await commander.sendCommand<{ wasThrown?: boolean; value?: unknown }>(
-        "Runtime.callFunctionOn",
-        { backendNodeId, functionDeclaration: `function() { ${changed} }`, returnByValue: true },
+      const resolved = await commander.sendCommand<{ object?: { objectId?: string } }>(
+        "DOM.resolveNode",
+        { backendNodeId },
         command(options),
       );
-      if (evaluated.wasThrown === true) {
-        throw new Error("Select option failed");
+      const objectId = resolved.object?.objectId;
+      if (objectId === undefined) throw new Error("Select target can no longer be resolved");
+      try {
+        const evaluated = await commander.sendCommand<{
+          result?: { value?: unknown; description?: string };
+          exceptionDetails?: { text?: string; exception?: { description?: string } };
+        }>(
+          "Runtime.callFunctionOn",
+          {
+            objectId,
+            functionDeclaration: `function(value) {
+              var index = Array.prototype.findIndex.call(this.options || [], function(option) { return option.value === value; });
+              if (index < 0) return false;
+              this.selectedIndex = index;
+              this.dispatchEvent(new Event('input', { bubbles: true }));
+              this.dispatchEvent(new Event('change', { bubbles: true }));
+              return true;
+            }`,
+            arguments: [{ value }],
+            returnByValue: true,
+          },
+          command(options),
+        );
+        if (evaluated.exceptionDetails !== undefined) {
+          const message = evaluated.exceptionDetails.exception?.description
+            ?? evaluated.exceptionDetails.text
+            ?? "Select option failed";
+          throw new Error(message.split("\n")[0]);
+        }
+        if (evaluated.result?.value !== true) throw new Error(`No option has value ${JSON.stringify(value)}`);
+      } finally {
+        await commander.sendCommand("Runtime.releaseObject", { objectId }, command(options)).catch(() => undefined);
       }
       break;
     }

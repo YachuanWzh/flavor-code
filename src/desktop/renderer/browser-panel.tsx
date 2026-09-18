@@ -30,9 +30,10 @@ function normalizeBrowserUrl(raw: string): string | undefined {
   return /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value) ? value : `https://${value}`;
 }
 
-export function BrowserPanel({ open, setOpen, fullscreen, setFullscreen, onWidth }: {
+export function BrowserPanel({ open, setOpen, onClose, fullscreen, setFullscreen, onWidth }: {
   open: boolean;
   setOpen(next: boolean): void;
+  onClose(): void;
   fullscreen: boolean;
   setFullscreen(next: boolean): void;
   onWidth(width: number | undefined): void;
@@ -66,20 +67,53 @@ export function BrowserPanel({ open, setOpen, fullscreen, setFullscreen, onWidth
     void refresh();
     return window.flavorDesktop.onBrowserEvent((event) => {
       if (event.kind === "activity") {
-        const entry = { id: ++activitySequence, action: event.action, label: event.label };
-        setActivities((current) => [entry, ...current].slice(0, 4));
-        // Agent is operating: wake a hidden panel so the action is always seen.
-        if (!openRef.current) setOpen(true);
+        // Events are global but this panel follows only the selected task's
+        // Browser Space. Resolve once before showing activity or waking it.
+        const showActivity = (next: BrowserSpaceSummary | undefined): void => {
+          if (next?.id !== event.spaceId) return;
+          const entry = { id: ++activitySequence, action: event.action, label: event.label };
+          setActivities([entry]);
+          if (!openRef.current) setOpen(true);
+        };
+        if (spaceRef.current !== undefined) {
+          showActivity(spaceRef.current);
+        } else void window.flavorDesktop.browserListTabs().then((next) => {
+          spaceRef.current = next;
+          setSpace(next);
+          showActivity(next);
+        }).catch(() => undefined);
         return;
       }
-      if (event.kind === "ownership-changed" && event.ownership === "user") {
-        setActivities([]);
+      const current = spaceRef.current;
+      if (event.kind === "tab-state" && current?.id === event.spaceId) {
+        const next = {
+          ...current,
+          tabs: current.tabs.map((tab) => tab.id === event.tabId ? {
+            ...tab,
+            url: event.url,
+            title: event.title,
+            loading: event.loading,
+            canGoBack: event.canGoBack,
+            canGoForward: event.canGoForward,
+            ...(event.crashed === undefined ? {} : { crashed: event.crashed }),
+          } : tab),
+        };
+        spaceRef.current = next;
+        setSpace(next);
+        return;
+      }
+      if (event.kind === "ownership-changed" && current?.id === event.spaceId) {
+        const next = { ...current, ownership: event.ownership };
+        spaceRef.current = next;
+        setSpace(next);
+        if (event.ownership === "user") setActivities([]);
+        return;
       }
       const previousIds = new Set((spaceRef.current?.tabs ?? []).map((tab) => tab.id));
       void window.flavorDesktop.browserListTabs().then((next) => {
         spaceRef.current = next;
         setSpace(next);
-        if (event.kind === "tabs-changed" && next !== undefined && !openRef.current) {
+        if (event.kind === "tabs-changed" && next?.id === event.spaceId && !openRef.current) {
           const hasNewTab = next.tabs.some((tab) => !previousIds.has(tab.id));
           const hadTabsBefore = previousIds.size > 0;
           if (hasNewTab || !hadTabsBefore) setOpen(true);
@@ -199,11 +233,11 @@ export function BrowserPanel({ open, setOpen, fullscreen, setFullscreen, onWidth
       title="拖拽调整浏览器面板宽度" onPointerDown={startWidthDrag} />
     <aside className="browser-panel" data-fullscreen={fullscreen} aria-label="内嵌浏览器">
     <header className="browser-toolbar">
-      <button title="后退" disabled={activeTab === undefined || !activeTab.canGoBack}
+      <button title="后退" disabled={agentControls || activeTab === undefined || !activeTab.canGoBack}
         onClick={() => activeTab !== undefined && run(window.flavorDesktop.browserHistory(activeTab.id, "back"), "后退")}>&larr;</button>
-      <button title="前进" disabled={activeTab === undefined || !activeTab.canGoForward}
+      <button title="前进" disabled={agentControls || activeTab === undefined || !activeTab.canGoForward}
         onClick={() => activeTab !== undefined && run(window.flavorDesktop.browserHistory(activeTab.id, "forward"), "前进")}>&rarr;</button>
-      <button title="刷新" disabled={activeTab === undefined}
+      <button title="刷新" disabled={agentControls || activeTab === undefined}
         onClick={() => activeTab !== undefined && run(window.flavorDesktop.browserHistory(activeTab.id, "reload"), "刷新")}>&#x21bb;</button>
       <form className="browser-address" onSubmit={(event) => {
         event.preventDefault();
@@ -215,10 +249,11 @@ export function BrowserPanel({ open, setOpen, fullscreen, setFullscreen, onWidth
         const url = normalizeBrowserUrl(urlDraft);
         if (url !== undefined) run(window.flavorDesktop.browserNavigate(activeTab.id, url), "打开页面");
       }}>
-        <input value={urlDraft} onChange={(event) => { setUrlDraft(event.target.value); syncedTabRef.current = activeTab?.id; }}
+        <input value={urlDraft} disabled={agentControls} onChange={(event) => { setUrlDraft(event.target.value); syncedTabRef.current = activeTab?.id; }}
           placeholder={activeTab === undefined ? "输入网址，打开新标签页" : "输入网址后回车"} spellCheck={false} />
       </form>
       <button title="新标签页" className="browser-new-tab"
+        disabled={agentControls}
         onClick={() => run(window.flavorDesktop.browserNewTab(), "新建标签页")}>+</button>
       <button className="browser-ownership" data-agent={agentControls}
         title={agentControls ? "助手正在操作页面；接管后你可以手动浏览" : "把控制权交还给助手"}
@@ -229,16 +264,18 @@ export function BrowserPanel({ open, setOpen, fullscreen, setFullscreen, onWidth
         onClick={() => { if (!fullscreen) onWidth(undefined); setFullscreen(!fullscreen); }}>
         {fullscreen ? "退出全屏" : "⛶ 全屏"}
       </button>
-      <button title="关闭浏览器面板" className="browser-close" onClick={() => setOpen(false)}>&times;</button>
+      <button title="关闭浏览器并中断当前任务" className="browser-close" onClick={onClose}>&times;</button>
     </header>
     <nav className="browser-tabbar" aria-label="浏览器标签页">
       {(space?.tabs ?? []).map((tab) => <div key={tab.id} className="browser-tab-shell">
         <button className="browser-tab" data-active={tab.id === activeTab?.id} title={tab.url || tab.label}
+          disabled={agentControls}
           onClick={() => run(window.flavorDesktop.browserActivateTab(tab.id), "切换标签页")}>
           <span className="browser-tab-label">{tab.label}</span>
           <span className="browser-tab-title">{tab.loading ? "加载中…" : tab.crashed === true ? "（已崩溃）" : ""}{tab.title || tab.url || "空白页"}</span>
         </button>
         <button className="browser-tab-close" title={`关闭 ${tab.label}`} aria-label={`关闭标签页 ${tab.label}`}
+          disabled={agentControls}
           onClick={() => run(window.flavorDesktop.browserCloseTab(tab.id), "关闭标签页")}>&times;</button>
       </div>)}
     </nav>

@@ -6,6 +6,7 @@ import { BrowserPanel } from "../../src/desktop/renderer/browser-panel.js";
 
 const panelProps = {
   setOpen: vi.fn(),
+  onClose: vi.fn(),
   fullscreen: false,
   setFullscreen: vi.fn(),
   onWidth: vi.fn(),
@@ -20,6 +21,7 @@ describe("embedded browser panel", () => {
     expect(output).toContain('aria-label="浏览器标签页"');
     expect(output).toContain('class="browser-viewport"');
     expect(output).toContain("当前项目还没有运行中的任务");
+    expect(output).toContain("关闭浏览器并中断当前任务");
   });
 
   it("offers a width splitter and a fullscreen toggle", () => {

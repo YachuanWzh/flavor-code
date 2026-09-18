@@ -10,8 +10,10 @@
 import type { ActRequest } from "./act-service.js";
 import type { SnapshotCommander } from "./snapshot-service.js";
 
-/** Cursor glide time; the real input is dispatched only after this elapses. */
-export const ACT_CURSOR_MOVE_MS = 320;
+/** Cursor glide time; deliberately long enough to remain visible to a human. */
+export const ACT_CURSOR_MOVE_MS = 650;
+/** Short arrival pause before the real click / keyboard input is dispatched. */
+export const ACT_CURSOR_ARRIVAL_MS = 180;
 export const ACT_OVERLAY_HOST_ID = "__flavor_act_overlay__";
 
 export interface ActTargetBox {
@@ -61,15 +63,30 @@ const OVERLAY_SCRIPT = `function (p) {
     if (host && host.parentNode) host.parentNode.removeChild(host);
     return;
   }
+  if (host && !host.__f) {
+    if (host.parentNode) host.parentNode.removeChild(host);
+    host = null;
+  }
   if (!host || !host.__f) {
     host = document.createElement("div");
     host.id = ID;
-    host.style.cssText = "position:fixed;left:0;top:0;width:0;height:0;z-index:2147483647;pointer-events:none;";
+    host.style.setProperty("all", "initial", "important");
+    host.style.setProperty("position", "fixed", "important");
+    host.style.setProperty("inset", "0", "important");
+    host.style.setProperty("display", "block", "important");
+    host.style.setProperty("visibility", "visible", "important");
+    host.style.setProperty("opacity", "1", "important");
+    host.style.setProperty("overflow", "visible", "important");
+    host.style.setProperty("z-index", "2147483647", "important");
+    host.style.setProperty("pointer-events", "none", "important");
     var shadow = host.attachShadow({ mode: "closed" });
-    shadow.innerHTML =
-      "<style>" +
-      ".cur{position:fixed;left:0;top:0;width:27px;height:27px;opacity:0;filter:drop-shadow(0 3px 8px rgba(10,30,60,.55));will-change:transform;}" +
+    /* Never use innerHTML: require-trusted-types-for 'script' blocks it on
+       many real sites and used to make the entire visual silently disappear. */
+    var style = document.createElement("style");
+    style.textContent =
+      ".cur{position:fixed;left:0;top:0;width:34px;height:34px;opacity:0;filter:drop-shadow(0 3px 9px rgba(10,30,60,.65));will-change:transform;}" +
       ".cur.on{opacity:1;}" +
+      ".cur b{position:absolute;left:19px;top:19px;padding:2px 5px;border:1px solid rgba(255,255,255,.9);border-radius:999px;background:#1677df;color:#fff;font:700 9px/1 -apple-system,'Segoe UI',Arial,sans-serif;letter-spacing:.04em;box-shadow:0 2px 7px rgba(10,60,130,.35);}" +
       ".rip{position:fixed;left:0;top:0;width:56px;height:56px;margin:-28px 0 0 -28px;border-radius:50%;border:3px solid rgba(47,136,247,.95);background:rgba(64,150,255,.25);opacity:0;will-change:transform;}" +
       ".rip.go{animation:flRip .85s cubic-bezier(.2,.6,.3,1);}" +
       ".rip.d2{animation-delay:.17s;}" +
@@ -77,16 +94,36 @@ const OVERLAY_SCRIPT = `function (p) {
       ".hl{position:fixed;left:0;top:0;border:2px solid rgba(64,150,255,.95);border-radius:8px;background:rgba(64,150,255,.10);box-shadow:0 0 0 4px rgba(64,150,255,.14),0 8px 26px rgba(28,88,170,.28);opacity:0;transition:opacity .16s ease;will-change:transform;}" +
       ".hl.on{opacity:1;}" +
       ".bub{position:fixed;left:0;top:0;max-width:280px;padding:5px 11px;border-radius:999px;background:rgba(22,36,56,.9);color:#eef4fb;font:12px/1.45 -apple-system,'Segoe UI',Arial,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:0;transition:opacity .18s ease;box-shadow:0 6px 20px rgba(15,35,60,.35);}" +
-      ".bub.on{opacity:1;}" +
-      "</style>" +
-      "<div class='hl'></div><div class='rip'></div><div class='bub'></div>" +
-      "<div class='cur'><svg viewBox='0 0 24 24' width='27' height='27'><path d='M5 3l13.5 7.8-6.2 1.4L9 18.6 5 3z' fill='#fff' stroke='#1d5fa8' stroke-width='2' stroke-linejoin='round'/></svg></div>";
+      ".bub.on{opacity:1;}";
+    shadow.appendChild(style);
+    function make(className) {
+      var element = document.createElement("div");
+      element.className = className;
+      shadow.appendChild(element);
+      return element;
+    }
+    var hl = make("hl"), rip = make("rip"), bub = make("bub"), cur = make("cur");
+    var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("width", "32");
+    svg.setAttribute("height", "32");
+    var path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "M5 3l13.5 7.8-6.2 1.4L9 18.6 5 3z");
+    path.setAttribute("fill", "#fff");
+    path.setAttribute("stroke", "#126fd1");
+    path.setAttribute("stroke-width", "2.4");
+    path.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(path);
+    cur.appendChild(svg);
+    var badge = document.createElement("b");
+    badge.textContent = "AI";
+    cur.appendChild(badge);
     (document.body || document.documentElement).appendChild(host);
     host.__f = {
-      cur: shadow.querySelector(".cur"),
-      rip: shadow.querySelector(".rip"),
-      hl: shadow.querySelector(".hl"),
-      bub: shadow.querySelector(".bub"),
+      cur: cur,
+      rip: rip,
+      hl: hl,
+      bub: bub,
       pos: null, hlT: 0, bubT: 0, curT: 0
     };
   }
@@ -97,7 +134,9 @@ const OVERLAY_SCRIPT = `function (p) {
   /* SVG arrow tip sits at (5,3) in a 24-unit box scaled to 27px. */
   var TIP_X = 5.6, TIP_Y = 3.4;
   if (p.cursor) {
-    var from = api.pos || { x: p.cursor.x - TIP_X, y: p.cursor.y - TIP_Y };
+    /* The first action must visibly travel too. Start inside the bottom-right
+       of the viewport; later actions continue from the previous fake cursor. */
+    var from = api.pos || { x: 18, y: 18 };
     api.cur.style.transition = "transform " + p.cursor.moveMs + "ms cubic-bezier(.22,.7,.25,1), opacity .25s ease";
     api.cur.style.transform = "translate3d(" + from.x + "px," + from.y + "px,0)";
     void api.cur.offsetWidth;
@@ -107,7 +146,10 @@ const OVERLAY_SCRIPT = `function (p) {
     api.curT = setTimeout(function () { api.cur.classList.remove("on"); api.pos = null; }, 9000);
   }
   if (p.click) {
-    api.rip.style.transform = "translate3d(" + p.click.x + "px," + p.click.y + "px,0)";
+    /* The ripple animation owns transform for scale, so position via left/top.
+       Using translate here was overwritten by @keyframes and painted at 0,0. */
+    api.rip.style.left = p.click.x + "px";
+    api.rip.style.top = p.click.y + "px";
     api.rip.classList.remove("go");
     if (p.click.count > 1) api.rip.classList.add("d2"); else api.rip.classList.remove("d2");
     void api.rip.offsetWidth;
@@ -136,19 +178,53 @@ export async function inspectActTarget(
   backendNodeId: number,
   options: { signal?: AbortSignal } = {},
 ): Promise<ActTargetInfo> {
+  // Focus/type can still work when a node starts outside the viewport, while
+  // getContentQuads fails. Scroll first and keep all geometry probes
+  // best-effort so a single CDP geometry error never removes the fake cursor.
+  await commander.sendCommand(
+    "DOM.scrollIntoViewIfNeeded",
+    { backendNodeId },
+    options.signal === undefined ? {} : { signal: options.signal },
+  ).catch(() => undefined);
   const [quads, described] = await Promise.all([
     commander.sendCommand<{ quads?: number[][] }>(
       "DOM.getContentQuads",
       { backendNodeId },
       options.signal === undefined ? {} : { signal: options.signal },
-    ),
+    ).catch(() => undefined),
     commander.sendCommand<{ node?: { nodeName?: string; attributes?: string[] } }>(
       "DOM.describeNode",
       { backendNodeId },
       options.signal === undefined ? {} : { signal: options.signal },
     ).catch(() => undefined),
   ]);
-  const box = boxFromQuads(quads.quads?.[0]);
+  let box = boxFromQuads(quads?.quads?.[0]);
+  if (box === undefined) {
+    const model = await commander.sendCommand<{
+      model?: { content?: number[]; border?: number[] };
+    }>(
+      "DOM.getBoxModel",
+      { backendNodeId },
+      options.signal === undefined ? {} : { signal: options.signal },
+    ).catch(() => undefined);
+    box = boxFromQuads(model?.model?.content ?? model?.model?.border);
+  }
+  if (box === undefined) {
+    const viewport = await commander.sendCommand<{
+      result?: { value?: { width?: number; height?: number } };
+    }>(
+      "Runtime.evaluate",
+      { expression: "({width: innerWidth, height: innerHeight})", returnByValue: true },
+      options.signal === undefined ? {} : { signal: options.signal },
+    ).catch(() => undefined);
+    const width = viewport?.result?.value?.width;
+    const height = viewport?.result?.value?.height;
+    if (width !== undefined && height !== undefined) {
+      const x = Math.round(Math.max(24, width / 2));
+      const y = Math.round(Math.max(24, height / 2));
+      box = { center: { x, y }, rect: { x: x - 2, y: y - 2, width: 4, height: 4 } };
+    }
+  }
   const attributes = described?.node?.attributes ?? [];
   const attribute = (name: string): string | undefined => {
     for (let index = 0; index + 1 < attributes.length; index += 2) {
@@ -233,55 +309,57 @@ export async function playActVisual(
     width: Math.round(rect.width),
     height: Math.round(rect.height),
   };
-  const payload: ActOverlayPayload = (() => {
+  const moveDuration = request.action === "scroll" ? Math.min(moveMs, 280) : moveMs;
+  // Movement is deliberately a separate paint from the click/typing feedback.
+  // Otherwise the ripple appears at the destination before the fake cursor
+  // has arrived, which looks like an unrelated click.
+  await evaluate(commander, {
+    cursor: { x: Math.round(center.x), y: Math.round(center.y), moveMs: moveDuration },
+    highlight,
+  }, options.signal);
+  await sleepGlide(moveDuration, options.signal);
+
+  const feedback: ActOverlayPayload | undefined = (() => {
     switch (request.action) {
       case "click":
       case "dblclick":
         return {
-          cursor: { x: Math.round(center.x), y: Math.round(center.y), moveMs },
           click: { x: Math.round(center.x), y: Math.round(center.y), count: request.action === "dblclick" ? 2 : 1 },
-          highlight,
         };
-      case "hover":
-        return { cursor: { x: Math.round(center.x), y: Math.round(center.y), moveMs }, highlight };
       case "fill":
         return {
-          cursor: { x: Math.round(center.x), y: Math.round(center.y), moveMs: Math.round(moveMs / 2) },
-          highlight,
+          click: { x: Math.round(center.x), y: Math.round(center.y), count: 1 },
           typing: { ...bubble, text: info.masked ? null : previewTypedText(request.value ?? "") },
         };
       case "press":
         return {
-          cursor: { x: Math.round(center.x), y: Math.round(center.y), moveMs: Math.round(moveMs / 2) },
-          highlight,
+          click: { x: Math.round(center.x), y: Math.round(center.y), count: 1 },
           typing: { ...bubble, text: `⏎ ${request.key ?? "Enter"}` },
         };
       case "select":
         return {
-          cursor: { x: Math.round(center.x), y: Math.round(center.y), moveMs: Math.round(moveMs / 2) },
-          highlight,
+          click: { x: Math.round(center.x), y: Math.round(center.y), count: 1 },
           typing: { ...bubble, text: `▾ ${previewTypedText(request.value ?? "")}` },
         };
       case "type":
         return {
-          cursor: { x: Math.round(center.x), y: Math.round(center.y), moveMs: Math.round(moveMs / 2) },
-          highlight,
+          click: { x: Math.round(center.x), y: Math.round(center.y), count: 1 },
           typing: { ...bubble, text: info.masked ? null : previewTypedText(request.value ?? "") },
         };
       case "scroll": {
         const deltaY = request.deltaY ?? 0;
         return {
-          cursor: { x: Math.round(center.x), y: Math.round(center.y), moveMs: 1 },
-          highlight,
           typing: { ...bubble, text: deltaY <= 0 ? `↕ 向上 ${Math.abs(deltaY)}` : `↕ 向下 ${deltaY}` },
         };
       }
       default:
-        return { cursor: { x: Math.round(center.x), y: Math.round(center.y), moveMs }, highlight };
+        return undefined;
     }
   })();
-  await evaluate(commander, payload, options.signal);
-  await sleepGlide(payload.cursor?.moveMs ?? moveMs, options.signal);
+  if (feedback !== undefined) {
+    await evaluate(commander, feedback, options.signal);
+    await sleepGlide(ACT_CURSOR_ARRIVAL_MS, options.signal);
+  }
 }
 
 /** Fades the overlay out (panel hidden, tab closed, control handed over). */

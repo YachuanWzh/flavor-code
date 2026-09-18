@@ -745,17 +745,22 @@ function installIpcHandlers(): void {
   ipcMain.handle(DESKTOP_CHANNELS.browserNewTab, async (_event, value) => {
     const input = BrowserUiNewTabInputSchema.parse(value ?? {});
     const spaceId = currentBrowserSpaceId();
+    ensureBrowserUiWriteAllowed(spaceId);
     const host = requireBrowserHost();
     host.createSpace(spaceId);
     return host.newTab(spaceId, input.url);
   });
   ipcMain.handle(DESKTOP_CHANNELS.browserActivateTab, async (_event, value) => {
     const input = BrowserUiTabTargetInputSchema.parse(value);
-    requireBrowserHost().activateTab(currentBrowserSpaceId(), input.tabId);
+    const spaceId = currentBrowserSpaceId();
+    ensureBrowserUiWriteAllowed(spaceId);
+    requireBrowserHost().activateTab(spaceId, input.tabId);
   });
   ipcMain.handle(DESKTOP_CHANNELS.browserCloseTab, async (_event, value) => {
     const input = BrowserUiTabTargetInputSchema.parse(value);
-    requireBrowserHost().closeTab(currentBrowserSpaceId(), input.tabId);
+    const spaceId = currentBrowserSpaceId();
+    ensureBrowserUiWriteAllowed(spaceId);
+    requireBrowserHost().closeTab(spaceId, input.tabId);
   });
   ipcMain.handle(DESKTOP_CHANNELS.browserNavigate, async (_event, value) => {
     const input = BrowserUiNavigateInputSchema.parse(value);

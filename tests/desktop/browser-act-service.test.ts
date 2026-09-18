@@ -66,6 +66,23 @@ describe("act service", () => {
     expect(commander.sent[1]?.params).toMatchObject({ type: "keyDown", key: "a", modifiers: 2 });
   });
 
+  it("selects through a resolved runtime object and releases it", async () => {
+    const commander = new RecordingCommander();
+    commander.responses.set("DOM.resolveNode", { object: { objectId: "select-77" } });
+    commander.responses.set("Runtime.callFunctionOn", { result: { value: true } });
+    const registry = registryWith(77);
+    await actViaRef(commander, registry, { action: "select", ref: 1, value: "green" });
+    expect(commander.sent.map((entry) => entry.method)).toEqual([
+      "DOM.resolveNode", "Runtime.callFunctionOn", "Runtime.releaseObject",
+    ]);
+    expect(commander.sent[0]?.params).toEqual({ backendNodeId: 77 });
+    expect(commander.sent[1]?.params).toMatchObject({
+      objectId: "select-77",
+      arguments: [{ value: "green" }],
+      returnByValue: true,
+    });
+  });
+
   it("presses Enter with a raw key sequence", async () => {
     const commander = new RecordingCommander();
     const registry = registryWith(77);

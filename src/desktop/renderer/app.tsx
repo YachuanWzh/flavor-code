@@ -129,10 +129,23 @@ export function DesktopApp(): React.JSX.Element {
   const [browserOpen, setBrowserOpen] = useState(false);
   const [browserFull, setBrowserFull] = useState(false);
   const [browserWidth, setBrowserWidth] = useState<number | undefined>(undefined);
+  const [browserCloseNotice, setBrowserCloseNotice] = useState<string>();
   const toggleBrowserPanel = useCallback((next: boolean) => {
     setBrowserOpen(next);
     if (!next) setBrowserFull(false);
   }, []);
+  const closeBrowserAndInterrupt = useCallback(() => {
+    toggleBrowserPanel(false);
+    const message = "内嵌浏览器已关闭，相关任务已中断。";
+    setBrowserCloseNotice(message);
+    setTranscript((state) => transcriptReducer(state, {
+      type: "session",
+      event: { type: "notice", message },
+    }));
+    void window.flavorDesktop.interrupt().catch((cause: unknown) => {
+      setError(cause instanceof Error ? cause.message : "中断任务失败");
+    });
+  }, [toggleBrowserPanel]);
   const [newTaskChooser, setNewTaskChooser] = useState(false);
   const [sessionQuery, setSessionQuery] = useState("");
   const [sessionGroup, setSessionGroup] = useState<"active" | "running" | "unread" | "archived">("active");
@@ -834,7 +847,6 @@ export function DesktopApp(): React.JSX.Element {
           {snapshot.jobs.some((job) => job.state === "running") && <div className="job-strip" title="后台任务">
             <span className="job-pulse" />{snapshot.jobs.filter((job) => job.state === "running").length} 个后台任务
           </div>}
-          <button className="browser-toggle" data-active={browserOpen} title="内嵌浏览器" onClick={() => toggleBrowserPanel(!browserOpen)}>浏览器</button>
           <button className="finish-task-button" onClick={() => void finishTask()}
             disabled={busy || snapshot.activeSession === undefined} title="评估并完成当前任务">完成任务</button>
           <button title="更多选项">•••</button>
@@ -851,6 +863,10 @@ export function DesktopApp(): React.JSX.Element {
 
       <div className="conversation-row">
       <div className="conversation-scroll" ref={scrollRef}>
+        {browserCloseNotice !== undefined && <div className="browser-close-notice" role="status">
+          <span>{browserCloseNotice}</span>
+          <button type="button" aria-label="关闭提示" onClick={() => setBrowserCloseNotice(undefined)}>×</button>
+        </div>}
         {loading ? <LoadingState /> : snapshot.workspace === undefined ? <OpenProjectState onOpen={chooseWorkspace} />
           : transcript.completed.length === 0 && transcript.active === undefined
             ? <WelcomeState project={workspaceName(snapshot.workspace)} onStart={(prompt) => void send(prompt)} />
@@ -862,11 +878,10 @@ export function DesktopApp(): React.JSX.Element {
               {transcript.active !== undefined && <DesktopTurnView turn={transcript.active} active />}
             </div>}
       </div>
-        <BrowserPanel open={browserOpen} setOpen={toggleBrowserPanel} fullscreen={browserFull}
+        <BrowserPanel open={browserOpen} setOpen={toggleBrowserPanel} onClose={closeBrowserAndInterrupt} fullscreen={browserFull}
           setFullscreen={setBrowserFull} onWidth={setBrowserWidth} />
       </div>
 
-      {snapshot.diagnostics.length > 0 && <details className="diagnostics"><summary>{snapshot.diagnostics.length} 条启动提示</summary><pre>{snapshot.diagnostics.join("\n")}</pre></details>}
       <Composer input={input} setInput={updateInput} onSend={(delivery) => void send(undefined, delivery)} busy={busy}
         onInterrupt={() => { setD2cPending(undefined); void window.flavorDesktop.interrupt(); }} inputRef={inputRef} snapshot={snapshot}
         attachments={attachments} onAddImages={(files) => void addImageFiles(files)}

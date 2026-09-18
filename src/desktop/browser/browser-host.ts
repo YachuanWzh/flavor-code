@@ -6,7 +6,7 @@
  * See md_docs/todo.md sections 5, 6 and 8.
  */
 
-import { hideActVisual, inspectActTarget, playActVisual, renderOverlay, sleepGlide } from "./act-overlay.js";
+import { ACT_CURSOR_ARRIVAL_MS, hideActVisual, inspectActTarget, playActVisual, renderOverlay, sleepGlide } from "./act-overlay.js";
 import { actViaRef, type ActCommandOptions, type ActRequest } from "./act-service.js";
 import { mouseViaCdp, pointerLabel, type MouseOperation, type MouseRequest } from "./mouse-service.js";
 import { readViaCdp, type ReadRequest, type ReadResult } from "./read-service.js";
@@ -24,7 +24,8 @@ import {
 
 export type BrowserEventPayload =
   | { kind: "tabs-changed"; spaceId: string }
-  | { kind: "tab-state"; spaceId: string; tabId: string }
+  | ({ kind: "tab-state"; spaceId: string; tabId: string } & Pick<BrowserTabSummary,
+    "url" | "title" | "loading" | "canGoBack" | "canGoForward" | "crashed">)
   | { kind: "ownership-changed"; spaceId: string; ownership: "agent" | "user" }
   | {
     kind: "activity";
@@ -56,6 +57,8 @@ export interface BrowserHostDeps {
   emit(event: BrowserEventPayload): void;
   urlPolicy?: UrlPolicyOptions;
   newTabId?(): string;
+  /** Time allowed for the renderer to reveal the panel after agent activity. */
+  panelWakeTimeoutMs?: number;
 }
 
 function registryKey(spaceId: string, tabId: string): string {
@@ -153,7 +156,7 @@ export class BrowserHost {
       {
         onStateChange: () => {
           this.syncTabFromView(state, tabId);
-          this.deps.emit({ kind: "tab-state", spaceId, tabId });
+          this.emitTabState(state, spaceId, tabId);
         },
         onPopup: (_fromTabId, url) => {
           // Popups open inside the same space once agent control allows it;
@@ -164,13 +167,14 @@ export class BrowserHost {
         onCrashed: () => {
           state.space.updateTab(tabId, { crashed: true, loading: false });
           this.registries.get(registryKey(spaceId, tabId))?.invalidateDocument();
-          this.deps.emit({ kind: "tab-state", spaceId, tabId });
+          this.emitTabState(state, spaceId, tabId);
         },
         onDocumentChange: () => {
           this.registries.get(registryKey(spaceId, tabId))?.invalidateDocument();
         },
       },
     );
+    tab.setUserInputAllowed(state.space.summary().ownership === "user");
     this.deps.attachView(view);
     state.tabs.set(tabId, tab);
     if (target !== undefined) {
@@ -225,7 +229,7 @@ export class BrowserHost {
     await this.tab(state, tabId).navigate(url);
     // Sync from the live view immediately; did-navigate may still be pending.
     this.syncTabFromView(state, tabId);
-    this.deps.emit({ kind: "tab-state", spaceId, tabId });
+    this.emitTabState(state, spaceId, tabId);
     return state.space.requireTab(tabId);
   }
 
@@ -235,7 +239,8 @@ export class BrowserHost {
     if (direction === "back") tab.back();
     else if (direction === "forward") tab.forward();
     else tab.reload();
-    this.deps.emit({ kind: "tab-state", spaceId, tabId });
+    this.syncTabFromView(state, tabId);
+    this.emitTabState(state, spaceId, tabId);
   }
 
   tabSummary(spaceId: string, tabId: string): BrowserTabSummary {
@@ -271,7 +276,7 @@ export class BrowserHost {
       commander: tab.cdp(),
       registry: this.registryFor(spaceId, tabId),
       tabLabel: summary.label,
-      url: summary.url,
+      url: summary.url === "" ? "about:blank" : summary.url,
       title: summary.title,
       ...options,
     });
@@ -287,7 +292,7 @@ export class BrowserHost {
     const state = this.state(spaceId);
     const tab = this.tab(state, tabId);
     await this.announceAct(state, spaceId, tab, request, options.signal);
-    return actViaRef(tab.cdp(), this.registryFor(spaceId, tabId), request, options);
+    return tab.runAgentInput(() => actViaRef(tab.cdp(), this.registryFor(spaceId, tabId), request, options));
   }
 
   /**
@@ -319,7 +324,7 @@ export class BrowserHost {
         action: request.action,
         label: `${ACTIVITY_VERBS[request.action]} ${summary.label}${name === undefined ? "" : `「${name}」`}`,
       });
-      const panelShown = spaceId === this.activeSpaceId && state.panelVisible && !state.modalVisible;
+      const panelShown = await this.waitForPanelVisible(state, spaceId, signal);
       if (!panelShown || info === undefined) return;
       await playActVisual(commander, request, info,
         ...(signal === undefined ? [] : [{ signal }]));
@@ -351,32 +356,38 @@ export class BrowserHost {
       action: activityAction,
       label: pointerLabel(request),
     });
-    const panelShown = spaceId === this.activeSpaceId && state.panelVisible && !state.modalVisible;
+    const panelShown = await this.waitForPanelVisible(state, spaceId, options.signal);
     const commander = tab.cdp();
     if (panelShown && !tab.isDestroyed) {
       const x = Math.round(request.x);
       const y = Math.round(request.y);
       const isClick = request.operation === "click" || request.operation === "down";
       try {
+        const moveMs = request.operation === "drag" ? 420 : 560;
         await renderOverlay(commander, {
-          cursor: { x, y, moveMs: request.operation === "drag" ? 160 : 220 },
-          ...(isClick ? { click: { x, y, count: request.operation === "click" ? (request.clickCount ?? 1) : 1 } } : {}),
+          cursor: { x, y, moveMs },
         }, options.signal);
-        await sleepGlide(request.operation === "drag" ? 160 : 220, options.signal);
+        await sleepGlide(moveMs, options.signal);
+        if (isClick) {
+          await renderOverlay(commander, {
+            click: { x, y, count: request.operation === "click" ? (request.clickCount ?? 1) : 1 },
+          }, options.signal);
+          await sleepGlide(ACT_CURSOR_ARRIVAL_MS, options.signal);
+        }
       } catch {
         // visuals are best-effort
       }
     }
-    const result = await mouseViaCdp(commander, request, options);
+    const result = await tab.runAgentInput(() => mouseViaCdp(commander, request, options));
     if (panelShown && request.operation === "drag" && !tab.isDestroyed) {
       try {
         const toX = Math.round(request.toX ?? request.x);
         const toY = Math.round(request.toY ?? request.y);
         await renderOverlay(commander, {
-          cursor: { x: toX, y: toY, moveMs: 320 },
+          cursor: { x: toX, y: toY, moveMs: 520 },
           click: { x: toX, y: toY, count: 1 },
         });
-        await sleepGlide(320);
+        await sleepGlide(520);
       } catch {
         // visuals are best-effort
       }
@@ -416,6 +427,7 @@ export class BrowserHost {
     state.space.handOff();
     // The fake agent cursor is meaningless once the user holds control.
     for (const tab of state.tabs.values()) {
+      tab.setUserInputAllowed(true);
       if (!tab.isDestroyed) void hideActVisual(tab.cdp());
     }
     this.deps.emit({ kind: "ownership-changed", spaceId, ownership: "user" });
@@ -425,7 +437,31 @@ export class BrowserHost {
   takeControl(spaceId: string): void {
     const state = this.state(spaceId);
     state.space.takeControl();
+    for (const tab of state.tabs.values()) tab.setUserInputAllowed(false);
     this.deps.emit({ kind: "ownership-changed", spaceId, ownership: "agent" });
+  }
+
+  /**
+   * Activity opens the panel in the renderer, which reports native-view
+   * visibility back on the next animation frame. Give that handshake a short
+   * window so the very first agent action also gets a visible cursor glide.
+   */
+  private async waitForPanelVisible(
+    state: SpaceState,
+    spaceId: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (spaceId !== this.activeSpaceId || state.modalVisible) return false;
+    if (state.panelVisible) return true;
+    const timeoutMs = this.deps.panelWakeTimeoutMs ?? 800;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (signal?.aborted === true) return false;
+      await new Promise<void>((resolve) => setTimeout(resolve, 16));
+      if (spaceId !== this.activeSpaceId || state.modalVisible) return false;
+      if (state.panelVisible) return true;
+    }
+    return false;
   }
 
   /** Only the active space's active tab is ever visible. */
@@ -455,6 +491,21 @@ export class BrowserHost {
       loading: tab.loading,
       canGoBack: tab.canGoBack,
       canGoForward: tab.canGoForward,
+    });
+  }
+
+  private emitTabState(state: SpaceState, spaceId: string, tabId: string): void {
+    const summary = state.space.requireTab(tabId);
+    this.deps.emit({
+      kind: "tab-state",
+      spaceId,
+      tabId,
+      url: summary.url === "" ? "about:blank" : summary.url,
+      title: summary.title.slice(0, 300),
+      loading: summary.loading,
+      canGoBack: summary.canGoBack,
+      canGoForward: summary.canGoForward,
+      ...(summary.crashed === undefined ? {} : { crashed: summary.crashed }),
     });
   }
 

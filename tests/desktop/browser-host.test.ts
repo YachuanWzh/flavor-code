@@ -111,6 +111,7 @@ function harness(): Harness {
     detachView: (view) => detached.push(view as FakeView),
     emit: (event) => events.push(event),
     newTabId: () => `btab-${(counter += 1)}`,
+    panelWakeTimeoutMs: 0,
   });
   return { host, views, events, attached, detached };
 }
@@ -249,11 +250,17 @@ describe("browser host", () => {
     expect(host.listTabs("bspace-a").tabs[0]?.crashed).toBe(true);
   });
 
-  it("enforces ownership for agent writes but never for user UI actions", () => {
-    const { host } = harness();
+  it("enforces ownership and blocks native human input until hand-off", () => {
+    const { host, views } = harness();
     host.createSpace("bspace-a");
     const tab = host.newTab("bspace-a");
+    const beforeMouse = views[0]!.webContents.listeners.get("before-mouse-event")?.[0];
+    let prevented = 0;
+    beforeMouse?.({ preventDefault: () => { prevented += 1; } });
+    expect(prevented).toBe(1);
     host.handOff("bspace-a");
+    beforeMouse?.({ preventDefault: () => { prevented += 1; } });
+    expect(prevented).toBe(1);
     expect(() => host.assertAgentControl("bspace-a")).toThrow(BrowserError);
     // user UI path keeps working
     host.setBounds("bspace-a", BOUNDS);
@@ -336,10 +343,46 @@ describe("browser host", () => {
       { frameId: "main", backendNodeId: 88, role: "button", name: "保存" },
     ]);
     await host.act("bspace-a", tab.id, { action: "click", ref: 1 });
-    expect(expressions).toHaveLength(1);
+    expect(expressions).toHaveLength(2);
     expect(expressions[0]).toContain('"cursor"');
-    expect(expressions[0]).toContain('"click"');
+    expect(expressions[0]).not.toContain('"click"');
+    expect(expressions[1]).toContain('"click"');
     void tab;
+  });
+
+  it("waits for an activity-driven panel wake before the first visual", async () => {
+    const view = new FakeView();
+    const expressions: string[] = [];
+    const fakeDebugger = view.webContents.debugger as unknown as {
+      sendCommand(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<unknown>;
+    };
+    fakeDebugger.sendCommand = (method: string, params?: Record<string, unknown>) => {
+      if (method === "DOM.getContentQuads") {
+        return Promise.resolve({ quads: [[0, 0, 20, 0, 20, 10, 0, 10]] });
+      }
+      if (method === "Runtime.evaluate") expressions.push(String(params?.expression ?? ""));
+      return Promise.resolve({});
+    };
+    let host!: BrowserHost;
+    host = new BrowserHost({
+      createView: () => view,
+      attachView: () => undefined,
+      detachView: () => undefined,
+      panelWakeTimeoutMs: 120,
+      emit: (event) => {
+        if (event.kind === "activity") setTimeout(() => host.setPanelVisible("bspace-a", true), 10);
+      },
+    });
+    host.createSpace("bspace-a");
+    host.setBounds("bspace-a", BOUNDS);
+    const tab = host.newTab("bspace-a", "https://example.com/");
+    host.registryFor("bspace-a", tab.id).replaceDocument("doc-wake", [
+      { frameId: "main", backendNodeId: 99, role: "button", name: "打开" },
+    ]);
+    await host.act("bspace-a", tab.id, { action: "click", ref: 1 });
+    expect(expressions).toHaveLength(2);
+    expect(expressions[0]).toContain('"cursor"');
+    expect(view.visible).toBe(true);
   });
 
   it("unknown spaces and tabs produce typed errors", () => {

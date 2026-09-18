@@ -115,12 +115,63 @@ export interface CaptureSnapshotOptions {
   tabLabel: string;
   url: string;
   title: string;
+  scope?: "viewport" | "full_page" | "subtree";
+  rootBackendNodeId?: number;
   maxNodes?: number;
   signal?: AbortSignal;
 }
 
 export interface CapturedSnapshot extends SnapshotRenderResult {
   documentId: string;
+}
+
+interface DomSnapshotDocument {
+  nodes?: { backendNodeId?: number[] };
+  layout?: { nodeIndex?: number[]; bounds?: number[][] };
+}
+
+async function viewportBackendNodes(
+  commander: SnapshotCommander,
+  commandOptions: { signal?: AbortSignal },
+): Promise<Set<number> | undefined> {
+  try {
+    const [viewport, snapshot] = await Promise.all([
+      commander.sendCommand<{ result?: { value?: { width?: number; height?: number } } }>(
+        "Runtime.evaluate",
+        { expression: "({width: innerWidth, height: innerHeight})", returnByValue: true },
+        commandOptions,
+      ),
+      commander.sendCommand<{ documents?: DomSnapshotDocument[] }>(
+        "DOMSnapshot.captureSnapshot",
+        { computedStyles: [], includeDOMRects: true, includePaintOrder: false },
+        commandOptions,
+      ),
+    ]);
+    const width = viewport.result?.value?.width;
+    const height = viewport.result?.value?.height;
+    const document = snapshot.documents?.[0];
+    const backendIds = document?.nodes?.backendNodeId;
+    const nodeIndices = document?.layout?.nodeIndex;
+    const bounds = document?.layout?.bounds;
+    if (width === undefined || height === undefined || backendIds === undefined
+      || nodeIndices === undefined || bounds === undefined) return undefined;
+    const visible = new Set<number>();
+    for (let index = 0; index < nodeIndices.length; index += 1) {
+      const nodeIndex = nodeIndices[index];
+      const rect = bounds[index];
+      if (nodeIndex === undefined || rect === undefined) continue;
+      const [x = 0, y = 0, rectWidth = 0, rectHeight = 0] = rect;
+      if (rectWidth <= 0 || rectHeight <= 0 || x + rectWidth <= 0 || y + rectHeight <= 0
+        || x >= width || y >= height) continue;
+      const backendNodeId = backendIds[nodeIndex];
+      if (backendNodeId !== undefined) visible.add(backendNodeId);
+    }
+    return visible.size === 0 ? undefined : visible;
+  } catch {
+    // Some targets do not expose DOMSnapshot. Falling back to the semantic
+    // tree is safer than returning a misleading empty page.
+    return undefined;
+  }
 }
 
 /**
@@ -139,15 +190,44 @@ export async function captureSnapshot(options: CaptureSnapshotOptions): Promise<
     throw new Error("DOM.getDocument returned no document identity");
   }
   const documentId = String(documentRoot);
-  const tree = await options.commander.sendCommand<{ nodes?: AxRawNode[] }>(
-    "Accessibility.getFullAXTree",
-    undefined,
-    commandOptions,
-  );
-  const inputs = axNodesToSnapshotInputs(tree.nodes ?? []);
+  const scope = options.scope ?? "full_page";
+  let tree: { nodes?: AxRawNode[] };
+  if (scope === "subtree") {
+    if (options.rootBackendNodeId === undefined) throw new Error("Subtree snapshot requires a root node");
+    const resolved = await options.commander.sendCommand<{ object?: { objectId?: string } }>(
+      "DOM.resolveNode",
+      { backendNodeId: options.rootBackendNodeId },
+      commandOptions,
+    );
+    const objectId = resolved.object?.objectId;
+    if (objectId === undefined) throw new Error("Subtree root can no longer be resolved");
+    try {
+      tree = await options.commander.sendCommand<{ nodes?: AxRawNode[] }>(
+        "Accessibility.queryAXTree",
+        { objectId },
+        commandOptions,
+      );
+    } finally {
+      await options.commander.sendCommand("Runtime.releaseObject", { objectId }, commandOptions).catch(() => undefined);
+    }
+  } else {
+    tree = await options.commander.sendCommand<{ nodes?: AxRawNode[] }>(
+      "Accessibility.getFullAXTree",
+      undefined,
+      commandOptions,
+    );
+  }
+  let inputs = axNodesToSnapshotInputs(tree.nodes ?? []);
+  if (scope === "viewport") {
+    const visible = await viewportBackendNodes(options.commander, commandOptions);
+    if (visible !== undefined) inputs = inputs.filter((node) => visible.has(node.backendNodeId));
+  }
   const cap = Math.min(options.maxNodes ?? BROWSER_SNAPSHOT_MAX_NODES, BROWSER_SNAPSHOT_MAX_NODES);
   const truncatedByRequest = inputs.length > cap;
-  const nodes = options.registry.replaceDocument(documentId, inputs.slice(0, cap));
+  const selected = inputs.slice(0, cap);
+  const nodes = scope === "subtree" && options.registry.document === documentId
+    ? options.registry.mergeSubtree(documentId, selected)
+    : options.registry.replaceDocument(documentId, selected);
   const rendered = renderSnapshot({
     tabLabel: options.tabLabel,
     url: options.url,

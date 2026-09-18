@@ -58,6 +58,8 @@ export class BrowserTab {
   private transport: CdpTransport | undefined;
   private destroyed = false;
   private lastBounds: BrowserBounds | undefined;
+  private userInputAllowed = false;
+  private agentInputDepth = 0;
 
   constructor(view: BrowserViewLike, options: BrowserTabOptions, events: BrowserTabEvents) {
     this.id = options.id;
@@ -72,6 +74,8 @@ export class BrowserTab {
     wc.on("did-stop-loading", this.onNavigationChanged);
     wc.on("page-title-updated", this.onNavigationChanged);
     wc.on("render-process-gone", this.onRenderProcessGone);
+    wc.on("before-input-event", this.onBeforeUserInput);
+    wc.on("before-mouse-event", this.onBeforeUserInput);
     wc.setWindowOpenHandler((details) => {
       const decision = validateBrowserNavigationUrl(details.url, this.urlPolicy);
       if (decision.ok) this.events.onPopup(this.id, decision.url);
@@ -126,6 +130,25 @@ export class BrowserTab {
     this.liveWebContents().reload();
   }
 
+  /** Native page input belongs to the user only after an explicit hand-off. */
+  setUserInputAllowed(allowed: boolean): void {
+    this.userInputAllowed = allowed;
+  }
+
+  /** Keep CDP-generated input working even if Electron surfaces it as a before-input event. */
+  async runAgentInput<T>(operation: () => Promise<T>): Promise<T> {
+    this.agentInputDepth += 1;
+    try {
+      return await operation();
+    } finally {
+      // Electron may surface a CDP-dispatched mouse/key event just after the
+      // command promise resolves. Keep the agent gate open through that
+      // dispatch turn or our physical-input guard will cancel the real click.
+      await new Promise<void>((resolve) => setTimeout(resolve, 80));
+      this.agentInputDepth -= 1;
+    }
+  }
+
   /** Host-side final arbitration of the native view geometry. */
   applyLayout(bounds: BrowserBounds | undefined, spaceActive: boolean): void {
     if (this.destroyed) return;
@@ -163,6 +186,8 @@ export class BrowserTab {
       ["did-stop-loading", this.onNavigationChanged],
       ["page-title-updated", this.onNavigationChanged],
       ["render-process-gone", this.onRenderProcessGone],
+      ["before-input-event", this.onBeforeUserInput],
+      ["before-mouse-event", this.onBeforeUserInput],
     ];
     for (const [event, listener] of bound) {
       try {
@@ -191,6 +216,11 @@ export class BrowserTab {
   private readonly onRenderProcessGone = (): void => {
     if (this.destroyed) return;
     this.events.onCrashed(this.id);
+  };
+
+  private readonly onBeforeUserInput = (...args: unknown[]): void => {
+    const event = args[0] as { preventDefault?: () => void } | undefined;
+    if (!this.userInputAllowed && this.agentInputDepth === 0) event?.preventDefault?.();
   };
 
   private liveWebContents(): BrowserWebContentsLike {

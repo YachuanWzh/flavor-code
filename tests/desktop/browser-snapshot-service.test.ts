@@ -134,4 +134,63 @@ describe("captureSnapshot", () => {
     expect(result.truncated).toBe(true);
     expect(result.nodeCount).toBe(2);
   });
+
+  it("queries a subtree through a resolved root and keeps stable refs", async () => {
+    const commander = new FakeCommander({
+      "DOM.getDocument": { root: { backendNodeId: 4242 } },
+      "Accessibility.getFullAXTree": { nodes: axTree },
+      "DOM.resolveNode": { object: { objectId: "root-object" } },
+      "Accessibility.queryAXTree": { nodes: axTree.slice(2, 4) },
+      "Runtime.releaseObject": {},
+    });
+    const registry = new RefRegistry("bspace-1", "btab-1");
+    await captureSnapshot({ commander, registry, tabLabel: "p1", url: "u", title: "t" });
+    const result = await captureSnapshot({
+      commander,
+      registry,
+      tabLabel: "p1",
+      url: "u",
+      title: "t",
+      scope: "subtree",
+      rootBackendNodeId: 3,
+    });
+    expect(result.text).toContain('@2 textbox "Email"');
+    expect(result.text).toContain('@3 textbox "Password"');
+    expect(commander.calls.slice(-6)).toEqual([
+      "DOM.enable",
+      "Accessibility.enable",
+      "DOM.getDocument",
+      "DOM.resolveNode",
+      "Accessibility.queryAXTree",
+      "Runtime.releaseObject",
+    ]);
+  });
+
+  it("filters explicit viewport snapshots by layout bounds", async () => {
+    const commander = new FakeCommander({
+      "DOM.getDocument": { root: { backendNodeId: 4242 } },
+      "Accessibility.getFullAXTree": { nodes: axTree },
+      "Runtime.evaluate": { result: { value: { width: 800, height: 600 } } },
+      "DOMSnapshot.captureSnapshot": {
+        documents: [{
+          nodes: { backendNodeId: [2, 3, 4] },
+          layout: {
+            nodeIndex: [0, 1, 2],
+            bounds: [[10, 10, 200, 40], [10, 900, 200, 40], [10, 80, 200, 40]],
+          },
+        }],
+      },
+    });
+    const result = await captureSnapshot({
+      commander,
+      registry: new RefRegistry("bspace-1", "btab-1"),
+      tabLabel: "p1",
+      url: "u",
+      title: "t",
+      scope: "viewport",
+    });
+    expect(result.text).toContain('heading "Sign in"');
+    expect(result.text).toContain('textbox "Password"');
+    expect(result.text).not.toContain('textbox "Email"');
+  });
 });
