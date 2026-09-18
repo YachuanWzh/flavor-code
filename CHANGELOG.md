@@ -2,7 +2,21 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.3-beta.1 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.3-beta.2 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.3-beta.2] - 2026-09-19
+
+### 改进
+- `ApplyPatch` 接受无行号的 `@@` 裸 hunk 头：无坐标时按上下文在整个文件内唯一精确匹配重定位，匹配歧义则在写入前报错并列出候选行号。
+- 带行号的 hunk 在声明行漂移超过 100 行搜索半径后，仍会依据唯一精确上下文自动重定位（此前直接失败），错误信息区分「漂移后歧义」与「不匹配」。
+- 自动剥离模型输出中包裹补丁的 ```` ```diff ```` Markdown 围栏，包括围栏后的多余空行；CRLF 补丁体同样被规范化。
+- 应用后回写的 hunk 行号基于实际匹配位置重算，工具回执中的增删行号与文件真实位置一致。
+- 工具描述、输入 schema 与系统提示词同步说明新的 `@@` 头与全文件重定位行为。
+
+### 测试与维护
+- 新增裸头多 hunk、越半径重定位、歧义/无上下文拒绝、围栏与尾部空行剥离、CRLF 补丁、`/dev/null` 裸头建文件及跨 hunk 行号编号等回归测试。
+- 压测验证：10 万行文件 800 个漂移 hunk 重定位 197ms、5000 hunk 补丁 70ms；600 个随机畸形补丁 fuzz 全部保持失败不写入的原子性；路径逃逸补丁被拒绝。
+- `package.json` 与 `package-lock.json` 的项目版本更新为 `1.4.3-beta.2`。
 
 ## [1.4.3-beta.1] - 2026-09-18
 
@@ -922,6 +936,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.4.3-beta.2 | 2026-09-19 | ApplyPatch 加固：接受裸 `@@` 头并按唯一上下文全文件重定位、行号大幅漂移自动重定位、剥离 Markdown 围栏与尾部空行、回执行号按实际位置重算；fuzz 与压测保证失败原子性与毫秒级性能 |
 | 1.4.3-beta.1 | 2026-09-18 | Electron 桌面端新增 Agent 可操作的内置浏览器（八个 Browser 工具、快照元素引用、操作可视化覆盖层与 SSRF/脱敏安全策略）；新增 shell-doctor 守护插件；修复 zh-CN PowerShell 7 命令未找到识别与测试环境 NODE_ENV 问题 |
 | 1.4.2 | 2026-09-17 | 斜杠/文件补全菜单悬浮化避免输入行错乱；macOS 剪贴板复制粘贴与图片读取修复；未命中 `/文本` 按普通消息发送；工具输出折叠跨平台统一 `Ctrl+O` 并与普通对话解耦 |
 | 1.4.1 | 2026-09-11 | Esc 中断、历史草稿恢复/持久化与跨平台反向搜索、可审阅审批参数及 acceptEdits 入口、跨平台完整输出模式 |
