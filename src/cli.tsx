@@ -15,6 +15,9 @@ import { staticTaskLines } from "./ui/task-progress-model.js";
 import { installUiUserTimingSweeper } from "./ui/user-timing.js";
 import { registerMemoryCommands } from "./memory/cli.js";
 import { registerMcpCommands } from "./mcp/cli.js";
+import { registerSessionCommands } from "./session/cli.js";
+import { registerConfigCommands } from "./config/cli.js";
+import { registerUsageCommands } from "./usage/cli.js";
 import { MAX_ALIAS_LENGTH } from "./pals/protocol.js";
 
 // Runtime-heavy modules are imported lazily inside the actions that need them
@@ -168,6 +171,9 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
 
   registerMemoryCommands(program);
   registerMcpCommands(program);
+  registerSessionCommands(program);
+  registerConfigCommands(program);
+  registerUsageCommands(program);
   program.command("eval <spec>")
     .option("--output <path>", "write the JSON report to a file")
     .description("run a repeatable coding-agent evaluation")

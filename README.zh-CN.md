@@ -217,6 +217,30 @@ flavor --pal-name B
 
 `/co-work` 会先让双方进入规划，等待双方接受同一个哈希计划并声明 READY；较早的 READY 意图会被保留，只有 broker 恰好一次的 START 事件才会放行并行执行。每个 Agent 只在自己的项目内工作，只接收分配给自己的任务，并提交有界的完成证据。broker 指定的集成负责人会检查所有断言，再通过 `CoWorkIntegrate` 广播 END 或 FAIL。通信使用经过认证、有大小上限的本机 IPC，不开放 TCP 监听；peer 输入不能代替本机工具审批，也不能访问另一工作区。UUID/别名路由和协议已能支持第三个活动实例；持久化成果物交换、broker 重启日志与恢复、大规模多方协调属于后续强化。详见 [CLI Pals 规范](./docs/specs/2026-08-14-cli-pals-cowork.md)。
 
+#### 会话、配置与用量管理 CLI
+
+面向脚本、CI 和复盘的非交互管理命令，与 `flavor memory` / `flavor mcp` 同属轻量入口，不会启动 Agent 运行时，因此冷启动很快；读写会话与配置复用交互模式相同的存储与 Schema 校验：
+
+```bash
+# 会话：列出 / 查看 / 导出 / 删除
+flavor sessions list                       # 列出当前项目的历史会话（最新在前）
+flavor sessions show [session-id]          # 查看一次会话摘要，省略 id 取最新
+flavor sessions export <id> --format md --output log.md   # 导出会话记录（md / json）
+flavor sessions delete <id>                # 删除一条会话
+
+# 配置：读取生效值、写入项目配置
+flavor config get context.windowTokens     # 按点路径读取，密钥自动脱敏
+flavor config set permissionMode plan      # 写入前先按合并结果校验，非法值不落盘
+flavor config unset language               # 从项目配置移除某一项
+flavor config list --json                  # 打印合并后的生效配置（脱敏）
+
+# 用量：汇总当前会话的 token 与缓存命中
+flavor usage                               # 人类可读的缓存命中表
+flavor usage --json                        # 机器可读的用量摘要
+```
+
+`flavor sessions list/show`、`flavor config list/get`、`flavor usage` 均支持 `--json` 以便脚本消费。
+
 ### Electron 桌面端
 
 ```bash

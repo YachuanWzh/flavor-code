@@ -4,6 +4,29 @@
 
 本文档记录 1.0.0 到 1.4.3-beta.2 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
 
+## [未发布] / Unreleased
+
+### 新增
+- 新增 `flavor sessions` 子命令族，把已有的会话持久化能力暴露到命令行：`list`（默认，最新在前，`--json`）、`show [session-id]`（会话摘要，省略 id 取最新，`--json`）、`delete <session-id>`、`export <session-id> [--format md|json] [--output <path>]`、`path`。复用 `SessionStore` 的 `list/load/delete`，摘要与导出从时间线轮次提取 prompt/assistantText。
+- 新增 `flavor config` 子命令族，替代手工编辑 `.flavor/flavor.json`：`list`（默认）/ `--json` / `--sources`、`get <key>`（点路径读取，如 `context.windowTokens`）、`set <key> <value>`、`unset <key>`、`path`。读侧走 `loadConfig` + `redactConfig`，密钥自动脱敏；`set` 的值支持 JSON 字面量自动解析（`50`/`true`/`["a"]`）。
+- 新增 `setProjectConfigValue` / `unsetProjectConfigValue`：写入项目配置前先用合并态 `loadConfig` 做完整 Schema 校验，非法值（错误枚举、类型、越界）在写盘前抛错并保留原文件与备份不变；`configPathSegments` 拒绝未知顶层键以防拼写错误。
+- 新增 `flavor usage` 子命令，复用 `parseUsageEntries`/`summarizeUsage`/`formatUsageSummary` 汇总当前会话 `usage.jsonl` 的 token 与缓存命中率，支持 `--json` 与 `--path`。
+- Anthropic provider 新增可选 `cacheTtl: "5m" | "1h"`；省略时维持兼容性更广的服务商默认 TTL，长间隔工作流可显式选择一小时缓存。
+
+### 改进
+- 三条新命令均注册为轻量入口（`LIGHT_CLI_COMMANDS`），跳过带 V8 诊断 flag 的 relaunch，与 `init`/`doctor`/`mcp` 一样保持快速冷启动；入口静态导入均为轻量模块（`sessions` 仅类型导入、`config` 校验工具置于 `schema.ts`），重活在 action 内按需 `await import()`。
+- OpenAI Responses 请求现在发送由稳定前缀与排序后工具定义派生的 `prompt_cache_key`；支持新缓存协议的端点同时启用 30 分钟 implicit cache，并把 provider-neutral 边界和请求尾部映射为最多三个 explicit breakpoints。兼容端点若拒绝新字段，会按模型记忆能力并自动降级为仅路由键、再降级为无缓存扩展，避免影响请求可用性。
+- Anthropic 请求从首轮单消息开始设置滚动尾部缓存标记；历史中追加的动态 system 更新保持原始时间顺序，不再被提升到顶层 system 而破坏既有缓存前缀。
+
+### 修复
+- 修复动态 task/runtime/memory source 更新时重建消息头、导致整个会话缓存前缀实际失效的问题；epoch 现在持久化不可变的初始 source 快照，后续变化只在历史尾部追加。
+- 修正 OpenAI usage 日志口径：`input_tokens` 按服务商定义作为总输入量，cached/write token 作为其子集拆分，不再重复相加；DeepSeek 风格的 miss token 归入普通输入而非缓存写入。
+
+### 测试与维护
+- 新增 `tests/session/cli.test.ts`、`tests/config/cli.test.ts`、`tests/usage/cli.test.ts` 共 17 项单测（注入 fake store/deps），覆盖人读与 `--json` 输出、点路径读取、未知键拒绝、值解析、导出格式校验与路径打印。
+- 在 `tests/config/load.test.ts` 补 `setProjectConfigValue`/`unsetProjectConfigValue` 的真实落盘集成测试，验证合法值持久化、非法值写前拒绝且文件原样保留、以及 `unset` 移除；`tests/cli/launcher.test.ts` 纳入新命令的轻量判定。`tsc --noEmit`、`build:cli` 与 `tests/cli` 全量通过。
+- 新增 OpenAI 稳定路由键、显式断点数量上限、兼容端点自动降级与官方 usage 口径，以及 Anthropic 首轮滚动标记、动态 system 顺序、1 小时 TTL、context epoch append-only 恢复的回归测试。
+
 ## [1.4.3-beta.2] - 2026-09-19
 
 ### 新增

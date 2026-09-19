@@ -29,6 +29,10 @@ export const ProviderConfigSchema = z.object({
   // Defaults to DEFAULT_THINKING_BUDGET; set to 0 to disable the request
   // parameter. Provider thinking deltas are forwarded whenever they arrive.
   thinkingBudget: z.number().int().min(0).optional(),
+  // Anthropic explicit prompt-cache lifetime. Omitted keeps the broadly
+  // compatible provider default (5 minutes); 1h trades higher writes for
+  // better reuse across longer pauses.
+  cacheTtl: z.enum(["5m", "1h"]).optional(),
   // Reasoning effort requested from the OpenAI Responses protocol (sent as
   // reasoning.effort). The adapter defaults an omitted value to high.
   thinkingEffort: z.enum(["minimal", "low", "medium", "high", "xhigh", "ultra"]).optional(),
@@ -197,3 +201,17 @@ export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
 export type McpServerConfigInput = z.input<typeof McpServerConfigSchema>;
 export type McpStdioServerConfig = z.infer<typeof McpStdioServerConfigSchema>;
 export type McpHttpServerConfig = z.infer<typeof McpHttpServerConfigSchema>;
+
+/** Top-level configuration keys, used to reject typos in `flavor config set/get`. */
+export const CONFIG_TOP_LEVEL_KEYS = Object.keys(FlavorConfigSchema.shape);
+
+export function configPathSegments(key: string): string[] {
+  const segments = key.split(".");
+  if (segments.length === 0 || segments.some((segment) => segment.length === 0)) {
+    throw new Error(`Invalid configuration key: "${key}". Use dot notation like "maxSessions" or "context.windowTokens".`);
+  }
+  if (!CONFIG_TOP_LEVEL_KEYS.includes(segments[0]!)) {
+    throw new Error(`Unknown configuration key: "${segments[0]}". Known keys: ${CONFIG_TOP_LEVEL_KEYS.join(", ")}.`);
+  }
+  return segments;
+}

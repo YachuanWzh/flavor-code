@@ -68,6 +68,7 @@ describe("light command detection", () => {
       ["--version"], ["-v"], ["--help"], ["-h"], ["help"],
       ["doctor"], ["doctor", "--json", "C:\\work"], ["init"], ["init", "subdir"],
       ["update"], ["skills"], ["skills", "list"], ["memory", "list"], ["mcp", "list"],
+      ["sessions", "list"], ["config", "list"], ["usage"],
       ["eval", "spec.json"], ["completion", "bash"],
     ]) {
       expect(isLightCommand(argv), argv.join(" ")).toBe(true);

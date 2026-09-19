@@ -134,6 +134,7 @@ describe("OpenAIModelAdapter", () => {
             type: "input_image",
             image_url: "data:image/png;base64,iVBORw0KGgo=",
             detail: "auto",
+            prompt_cache_breakpoint: { mode: "explicit" },
           },
         ],
       }],
@@ -189,7 +190,19 @@ describe("OpenAIModelAdapter", () => {
       },
     ]);
     expect(stream).toHaveBeenCalledWith(
-      expect.objectContaining({ model: "example-model", input: request.messages }),
+      expect.objectContaining({
+        model: "example-model",
+        input: [{
+          role: "user",
+          content: [{
+            type: "input_text",
+            text: "hello",
+            prompt_cache_breakpoint: { mode: "explicit" },
+          }],
+        }],
+        prompt_cache_key: expect.stringMatching(/^flavor-[a-f0-9]{56}$/),
+        prompt_cache_options: { mode: "implicit", ttl: "30m" },
+      }),
       { signal },
     );
   });
@@ -436,7 +449,7 @@ describe("OpenAIModelAdapter", () => {
     expect(JSON.stringify(parameters)).not.toMatch(/"(?:format|default|allOf|oneOf|prefixItems)"/);
   });
 
-  it("keeps OpenAI automatic caching input free of provider-neutral metadata", async () => {
+  it("maps provider-neutral boundaries to OpenAI explicit cache breakpoints", async () => {
     const stream = vi.fn(() => events());
     const client = { responses: { stream } };
 
@@ -452,10 +465,105 @@ describe("OpenAIModelAdapter", () => {
     expect(stream).toHaveBeenCalledWith(expect.objectContaining({
       input: [
         { role: "system", content: "shared system" },
-        { role: "user", content: "shared history" },
-        { role: "user", content: "child directive" },
+        {
+          role: "user",
+          content: [{
+            type: "input_text",
+            text: "shared history",
+            prompt_cache_breakpoint: { mode: "explicit" },
+          }],
+        },
+        {
+          role: "user",
+          content: [{
+            type: "input_text",
+            text: "child directive",
+            prompt_cache_breakpoint: { mode: "explicit" },
+          }],
+        },
       ],
+      prompt_cache_key: expect.stringMatching(/^flavor-[a-f0-9]{56}$/),
+      prompt_cache_options: { mode: "implicit", ttl: "30m" },
     }), { signal });
+  });
+
+  it("keeps the OpenAI routing key stable while the append-only tail grows", async () => {
+    const stream = vi.fn((_body?: unknown) => events());
+    const client = { responses: { stream } };
+    const adapter = new OpenAIModelAdapter({ client: asOpenAIClient(client) });
+
+    await collect(adapter.stream({
+      ...request,
+      messages: [
+        { role: "system", content: "stable rules", cacheBreakpoint: true },
+        { role: "user", content: "first" },
+      ],
+    }));
+    await collect(adapter.stream({
+      ...request,
+      messages: [
+        { role: "system", content: "stable rules", cacheBreakpoint: true },
+        { role: "user", content: "first" },
+        { role: "assistant", content: "reply" },
+        { role: "user", content: "second" },
+      ],
+    }));
+
+    const first = stream.mock.calls[0]?.[0] as { prompt_cache_key?: string };
+    const second = stream.mock.calls[1]?.[0] as { prompt_cache_key?: string };
+    expect(first.prompt_cache_key).toMatch(/^flavor-[a-f0-9]{56}$/);
+    expect(second.prompt_cache_key).toBe(first.prompt_cache_key);
+  });
+
+  it("limits OpenAI to three explicit markers alongside the implicit breakpoint", async () => {
+    const stream = vi.fn((_body?: unknown) => events());
+    const client = { responses: { stream } };
+
+    await collect(new OpenAIModelAdapter({ client: asOpenAIClient(client) }).stream({
+      ...request,
+      messages: [
+        { role: "system", content: "one", cacheBreakpoint: true },
+        { role: "user", content: "two", cacheBreakpoint: true },
+        { role: "assistant", content: "three", cacheBreakpoint: true },
+        { role: "user", content: "four", cacheBreakpoint: true },
+        { role: "user", content: "tail" },
+      ],
+    }));
+
+    const body = stream.mock.calls[0]?.[0];
+    expect(JSON.stringify(body).match(/prompt_cache_breakpoint/g)).toHaveLength(3);
+  });
+
+  it("downgrades once when an OpenAI-compatible endpoint rejects explicit cache controls", async () => {
+    let attempt = 0;
+    const stream = vi.fn((_body?: unknown) => {
+      attempt += 1;
+      if (attempt === 1) {
+        return events({
+          type: "error",
+          code: "invalid_request_error",
+          message: "Unknown parameter: prompt_cache_options",
+        });
+      }
+      return events({
+        type: "response.completed",
+        response: { usage: { input_tokens: 4, output_tokens: 1 } },
+      });
+    });
+    const client = { responses: { stream } };
+
+    const output = await collect(new OpenAIModelAdapter({ client: asOpenAIClient(client) }).stream(request));
+
+    expect(output.at(-1)?.type).toBe("done");
+    expect(stream).toHaveBeenCalledTimes(2);
+    expect(stream.mock.calls[0]?.[0]).toMatchObject({
+      prompt_cache_options: { mode: "implicit", ttl: "30m" },
+    });
+    expect(stream.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
+      prompt_cache_key: expect.any(String),
+    }));
+    expect(stream.mock.calls[1]?.[0]).not.toHaveProperty("prompt_cache_options");
+    expect(stream.mock.calls[1]?.[0]).not.toHaveProperty("input.0.content.0.prompt_cache_breakpoint");
   });
 
   it("turns provider stream errors into stable error events", async () => {
@@ -531,8 +639,18 @@ describe("OpenAIModelAdapter", () => {
           { role: "system", content: "rules" },
           { role: "assistant", content: "checking" },
           { type: "function_call", call_id: "call_7", name: "weather", arguments: "{\"city\":\"Paris\"}" },
-          { type: "function_call_output", call_id: "call_7", output: "sunny" },
+          {
+            type: "function_call_output",
+            call_id: "call_7",
+            output: [{
+              type: "input_text",
+              text: "sunny",
+              prompt_cache_breakpoint: { mode: "explicit" },
+            }],
+          },
         ],
+        prompt_cache_key: expect.stringMatching(/^flavor-[a-f0-9]{56}$/),
+        prompt_cache_options: { mode: "implicit", ttl: "30m" },
         reasoning: { effort: "high" },
         tools: [
           {
@@ -564,7 +682,7 @@ describe("OpenAIModelAdapter", () => {
           type: "response.completed",
           response: {
             usage: {
-              input_tokens: 50,
+              input_tokens: 200,
               output_tokens: 5,
               input_tokens_details: { cached_tokens: 150 },
             },
@@ -622,9 +740,9 @@ describe("OpenAIModelAdapter", () => {
           type: "response.completed",
           response: {
             usage: {
-              input_tokens: 50,
+              input_tokens: 200,
               output_tokens: 5,
-              input_tokens_details: { cached_tokens: 150 },
+              input_tokens_details: { cached_tokens: 150, cache_write_tokens: 30 },
             },
           },
         }),
@@ -636,18 +754,18 @@ describe("OpenAIModelAdapter", () => {
     ).resolves.toEqual([
       {
         type: "usage",
-        inputTokens: 50,
+        inputTokens: 200,
         outputTokens: 5,
         cacheReadTokens: 150,
-        cacheCreationTokens: 0,
+        cacheCreationTokens: 30,
       },
       {
         type: "done",
         usage: {
-          inputTokens: 50,
+          inputTokens: 200,
           outputTokens: 5,
           cacheReadTokens: 150,
-          cacheCreationTokens: 0,
+          cacheCreationTokens: 30,
         },
       },
     ]);
@@ -678,7 +796,7 @@ describe("OpenAIModelAdapter", () => {
         inputTokens: 120,
         outputTokens: 4,
         cacheReadTokens: 100,
-        cacheCreationTokens: 20,
+        cacheCreationTokens: 0,
       },
       {
         type: "done",
@@ -686,7 +804,7 @@ describe("OpenAIModelAdapter", () => {
           inputTokens: 120,
           outputTokens: 4,
           cacheReadTokens: 100,
-          cacheCreationTokens: 20,
+          cacheCreationTokens: 0,
         },
       },
     ]);
@@ -835,6 +953,7 @@ describe("AnthropicModelAdapter", () => {
           {
             type: "image",
             source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" },
+            cache_control: { type: "ephemeral" },
           },
         ],
       }],
@@ -1323,6 +1442,65 @@ describe("AnthropicModelAdapter", () => {
     }), { signal });
   });
 
+  it("adds the rolling marker on the first single-message request", async () => {
+    const stream = vi.fn((_body?: unknown) => events());
+    const client = { messages: { create: stream } };
+
+    await collect(new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream(request));
+
+    expect(stream.mock.calls[0]?.[0]).toMatchObject({
+      messages: [{
+        role: "user",
+        content: [{ type: "text", text: "hello", cache_control: { type: "ephemeral" } }],
+      }],
+    });
+  });
+
+  it("keeps late system context updates in chronological order", async () => {
+    const stream = vi.fn((_body?: unknown) => events());
+    const client = { messages: { create: stream } };
+
+    await collect(new AnthropicModelAdapter({ client: asAnthropicClient(client) }).stream({
+      ...request,
+      messages: [
+        { role: "system", content: "stable rules" },
+        { role: "user", content: "first" },
+        { role: "assistant", content: "reply" },
+        { role: "system", content: "Context update [runtime]\nnew state" },
+        { role: "user", content: "second" },
+      ],
+    }));
+
+    expect(stream.mock.calls[0]?.[0]).toMatchObject({
+      system: "stable rules",
+      messages: [
+        { role: "user", content: "first" },
+        { role: "assistant", content: "reply" },
+        { role: "user", content: "<system-reminder>\nContext update [runtime]\nnew state\n</system-reminder>" },
+        {
+          role: "user",
+          content: [{ type: "text", text: "second", cache_control: { type: "ephemeral" } }],
+        },
+      ],
+    });
+  });
+
+  it("applies the configured one-hour TTL to Anthropic cache markers", async () => {
+    const stream = vi.fn((_body?: unknown) => events());
+    const client = { messages: { create: stream } };
+
+    await collect(new AnthropicModelAdapter({
+      client: asAnthropicClient(client),
+      cacheTtl: "1h",
+    }).stream(request));
+
+    expect(stream.mock.calls[0]?.[0]).toMatchObject({
+      messages: [{
+        content: [{ cache_control: { type: "ephemeral", ttl: "1h" } }],
+      }],
+    });
+  });
+
   it("evicts the least valuable marker to keep the rolling marker within the provider cap", async () => {
     const stream = vi.fn(() => events());
     const client = { messages: { create: stream } };
@@ -1343,12 +1521,12 @@ describe("AnthropicModelAdapter", () => {
       system: [
         { type: "text", text: "s1", cache_control: { type: "ephemeral" } },
         { type: "text", text: "s2", cache_control: { type: "ephemeral" } },
-        { type: "text", text: "s3" },
+        { type: "text", text: "s3", cache_control: { type: "ephemeral" } },
       ],
       messages: [
         {
           role: "user",
-          content: [{ type: "text", text: "history", cache_control: { type: "ephemeral" } }],
+          content: [{ type: "text", text: "history" }],
         },
         { role: "assistant", content: "reply" },
         {

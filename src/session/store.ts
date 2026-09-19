@@ -116,6 +116,7 @@ const ContextEpochSchema = z.object({
     cacheBreakpoint: z.boolean().optional(),
   }).strict()).max(1_000),
   sources: z.record(z.string().min(1).max(128), z.string().max(DEFAULT_MAX_SESSION_BYTES)),
+  pinnedSources: z.record(z.string().min(1).max(128), z.string().max(DEFAULT_MAX_SESSION_BYTES)).optional(),
   stableSourceHash: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
 const ContextVisibilityRecordSchema = z.object({

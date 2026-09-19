@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { ApiKeyAuthProvider } from "../../src/auth/types.js";
-import { loadConfig, redactConfig, setGlobalProviderConfig, setProjectMcpServerDisabled, setProjectProviderConfig } from "../../src/config/load.js";
+import { loadConfig, redactConfig, setGlobalProviderConfig, setProjectConfigValue, setProjectMcpServerDisabled, setProjectProviderConfig, unsetProjectConfigValue } from "../../src/config/load.js";
 import { FlavorConfigSchema } from "../../src/config/schema.js";
 
 afterEach(() => {
@@ -142,6 +142,17 @@ it("validates provider thinkingEffort tiers", () => {
   }
   expect(() => FlavorConfigSchema.parse({
     providers: { openai: { type: "openai", thinkingEffort: "extreme" } },
+  })).toThrow();
+});
+
+it("validates the optional Anthropic prompt-cache TTL", () => {
+  for (const cacheTtl of ["5m", "1h"] as const) {
+    expect(FlavorConfigSchema.parse({
+      providers: { anthropic: { type: "anthropic", cacheTtl } },
+    }).providers.anthropic?.cacheTtl).toBe(cacheTtl);
+  }
+  expect(() => FlavorConfigSchema.parse({
+    providers: { anthropic: { type: "anthropic", cacheTtl: "24h" } },
   })).toThrow();
 });
 
@@ -584,4 +595,43 @@ it("resolves an API key as an authorization header", async () => {
   await expect(auth.resolve("custom")).resolves.toEqual({
     headers: { authorization: "Bearer already-interpolated-key" },
   });
+});
+
+async function scratchProject(): Promise<{ cwd: string; home: string; file: string }> {
+  const root = await mkdtemp(join(tmpdir(), "flavor-config-cli-"));
+  const cwd = join(root, "project");
+  const home = join(root, "home");
+  const file = join(cwd, ".flavor", "flavor.json");
+  await mkdir(join(cwd, ".flavor"), { recursive: true });
+  await writeFile(file, "{}\n", "utf8");
+  return { cwd, home, file };
+}
+
+it("persists a validated project config value", async () => {
+  const { cwd, home, file } = await scratchProject();
+
+  await setProjectConfigValue(cwd, home, "maxSessions", 80);
+  await setProjectConfigValue(cwd, home, "permissionMode", "plan");
+
+  expect(JSON.parse(await readFile(file, "utf8"))).toMatchObject({ maxSessions: 80, permissionMode: "plan" });
+  const loaded = await loadConfig({ cwd, home, seedGlobalEnv: false });
+  expect(loaded.config.maxSessions).toBe(80);
+});
+
+it("rejects an invalid value before writing and leaves the file untouched", async () => {
+  const { cwd, home, file } = await scratchProject();
+
+  await expect(setProjectConfigValue(cwd, home, "permissionMode", "yolo")).rejects.toThrow();
+  await expect(setProjectConfigValue(cwd, home, "bogusKey", 1)).rejects.toThrow(/Unknown configuration key/i);
+
+  expect(JSON.parse(await readFile(file, "utf8"))).toEqual({});
+});
+
+it("unsets a project config key", async () => {
+  const { cwd, home, file } = await scratchProject();
+
+  await setProjectConfigValue(cwd, home, "language", "en-US");
+  await unsetProjectConfigValue(cwd, "language");
+
+  expect(JSON.parse(await readFile(file, "utf8"))).not.toHaveProperty("language");
 });

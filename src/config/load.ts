@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parse } from "dotenv";
-import { FlavorConfigSchema, ProviderConfigSchema, type FlavorConfig, type ProviderConfig } from "./schema.js";
+import { FlavorConfigSchema, ProviderConfigSchema, configPathSegments, type FlavorConfig, type ProviderConfig } from "./schema.js";
 import { readRecoverableFile, updateProtectedFile } from "./protected-file.js";
 import {
   decryptSecretFields,
@@ -360,6 +360,66 @@ export async function setProjectProviderConfig(
     },
   });
   return path;
+}
+
+/**
+ * Write one value into the project `.flavor/flavor.json`. The merged result is
+ * validated through `loadConfig` before any write, so an invalid value aborts
+ * the update and leaves the file untouched (backups included).
+ */
+export async function setProjectConfigValue(
+  cwd: string,
+  home: string,
+  key: string,
+  value: unknown,
+): Promise<string> {
+  const segments = configPathSegments(key);
+  const nested = segments.reduceRight<ConfigObject>(
+    (acc, segment) => ({ [segment]: acc }),
+    value as ConfigObject,
+  );
+  await loadConfig({ cwd, home, cli: nested, seedGlobalEnv: false });
+  const path = join(cwd, ".flavor", "flavor.json");
+  await updateProtectedFile<ConfigObject>({
+    path,
+    decode: (raw) => parseConfigObject(path, raw),
+    encode: (next) => `${JSON.stringify(next, null, 2)}\n`,
+    update: (current) => setPathIn({ ...(current ?? {}) }, segments, value),
+  });
+  return path;
+}
+
+/** Remove one key from the project `.flavor/flavor.json`, falling back to global/default layers. */
+export async function unsetProjectConfigValue(cwd: string, key: string): Promise<string> {
+  const segments = configPathSegments(key);
+  const path = join(cwd, ".flavor", "flavor.json");
+  await updateProtectedFile<ConfigObject>({
+    path,
+    decode: (raw) => parseConfigObject(path, raw),
+    encode: (next) => `${JSON.stringify(next, null, 2)}\n`,
+    update: (current) => deletePathIn({ ...(current ?? {}) }, segments),
+  });
+  return path;
+}
+
+function setPathIn(target: ConfigObject, segments: readonly string[], value: unknown): ConfigObject {
+  const [head, ...rest] = segments;
+  if (head === undefined) return target;
+  if (rest.length === 0) return { ...target, [head]: value };
+  const child = isPlainObject(target[head]) ? (target[head] as ConfigObject) : {};
+  return { ...target, [head]: setPathIn(child, rest, value) };
+}
+
+function deletePathIn(target: ConfigObject, segments: readonly string[]): ConfigObject {
+  const [head, ...rest] = segments;
+  if (head === undefined || !(head in target)) return target;
+  if (rest.length === 0) {
+    const { [head]: _removed, ...remainder } = target;
+    return remainder;
+  }
+  const child = isPlainObject(target[head]) ? (target[head] as ConfigObject) : undefined;
+  if (child === undefined) return target;
+  return { ...target, [head]: deletePathIn(child, rest) };
 }
 
 export function redactConfig(config: unknown): unknown {

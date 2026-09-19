@@ -126,19 +126,21 @@ describe("context memory stress", () => {
 
     const updates = context.snapshot().messages.filter((message) =>
       modelContentText(message.content).startsWith("Context update [task-state]"));
-    console.log(`  [B] turns=${turns} summarizeCalls=${summarizeCalls} staleTaskStateUpdates=${updates.length} heap=${mb(process.memoryUsage().heapUsed)}`);
+    console.log(`  [B] turns=${turns} summarizeCalls=${summarizeCalls} appendOnlyTaskStateUpdates=${updates.length} heap=${mb(process.memoryUsage().heapUsed)}`);
 
     // Pre-fix: 213/300 compactions and 99.9% of window bytes were repeated
     // full-text Context update messages.
     expect(summarizeCalls).toBeLessThan(turns / 2);
-    expect(updates.length).toBeLessThanOrEqual(1);
-    // The surviving update (if any) carries only the latest tail, not the full history.
+    const updateChars = updates.reduce((sum, update) => sum + modelContentText(update.content).length, 0);
+    expect(updateChars).toBeLessThan(state.length * 3);
+    // Every retained update carries only a tail, not the full growing history.
     for (const update of updates) {
       expect(modelContentText(update.content).length).toBeLessThan(state.length / 2);
     }
-    // Latest state stays fully visible via the pinned source message.
-    const pinned = context.messagesForModel().find((message) => modelContentText(message.content).startsWith("Task state\n"));
-    expect(modelContentText(pinned?.content ?? "")).toContain(`step ${turns}`);
+    // The latest state remains visible either in the epoch baseline or its
+    // chronological append-only tail after the most recent compaction.
+    expect(context.messagesForModel().some((message) =>
+      modelContentText(message.content).includes(`step ${turns}`))).toBe(true);
   }, 120_000);
 
   it("scenario B2: prefix-appending dynamic task state emits only the appended tail", () => {

@@ -116,6 +116,24 @@ describe("ContextManager", () => {
     expect(context.snapshot().epoch?.sources.runtime).toBe(JSON.stringify(runtime));
   });
 
+  it("keeps the complete existing prompt append-only when dynamic sources change", () => {
+    let runtime = ["Date: one", "Model: alpha"] as readonly string[];
+    const context = createContext({ volatileSystem: () => runtime });
+    context.append({ role: "user", content: "first request" });
+    context.append({ role: "assistant", content: "first response" });
+    const before = context.messagesForModel();
+
+    runtime = ["Date: two", "Model: beta"];
+    context.updateTaskState("rewritten task state");
+    expect(context.refreshContextSources()).toBe(true);
+
+    expect(context.messagesForModel().slice(0, before.length)).toEqual(before);
+    expect(context.messagesForModel().slice(before.length)).toEqual([
+      { role: "system", content: "Context update [task-state]\nrewritten task state" },
+      { role: "system", content: "Context update [runtime]\nDate: two\n\nModel: beta" },
+    ]);
+  });
+
   it("freezes user memory in the cache prefix until a new epoch", () => {
     let preference = "Prefer concise answers.";
     const context = createContext({ userMemory: () => preference });
@@ -583,7 +601,7 @@ describe("ContextManager", () => {
     expect(log.every((item) => item.content.length < 5_000)).toBe(true);
   });
 
-  it("keeps the complete latest stable baseline when stale updates are collapsed", async () => {
+  it("keeps stable-baseline replacements append-only until an epoch boundary", async () => {
     let sections: readonly string[] = ["A"];
     const context = createContext({ system: () => sections });
 
@@ -595,7 +613,26 @@ describe("ContextManager", () => {
     const updates = context.snapshot().messages.filter((message) =>
       modelContentText(message.content).startsWith("Context update [system-baseline]"));
     expect(updates).toEqual([
+      { role: "system", content: "Context update [system-baseline]\nA\n\nB\n\nFLAVOR.md\nproject guidance" },
       { role: "system", content: "Context update [system-baseline]\nA\n\nB\n\nC\n\nFLAVOR.md\nproject guidance" },
+    ]);
+  });
+
+  it("emits append-only tails for growing dynamic sources", async () => {
+    const context = createContext({ taskState: "phase" });
+
+    context.updateTaskState("phase one");
+    await context.prepareForModelCall();
+    const before = context.messagesForModel();
+    context.updateTaskState("phase one two");
+    await context.prepareForModelCall();
+
+    expect(context.messagesForModel().slice(0, before.length)).toEqual(before);
+    const updates = context.snapshot().messages.filter((message) =>
+      modelContentText(message.content).startsWith("Context update [task-state]"));
+    expect(updates).toEqual([
+      { role: "system", content: "Context update [task-state]\none" },
+      { role: "system", content: "Context update [task-state]\ntwo" },
     ]);
   });
 
@@ -639,7 +676,7 @@ describe("ContextManager", () => {
     expect(summarizeCalls).toBe(1);
   });
 
-  it("drops stale context updates before compaction instead of summarizing them", async () => {
+  it("does not delete earlier context updates during a normal model-call savepoint", async () => {
     let sections: readonly string[] = ["baseline one"];
     const context = createContext({ system: () => sections });
     context.append({ role: "user", content: "turn one" });
@@ -654,6 +691,7 @@ describe("ContextManager", () => {
     expect(compacted).toBe(false);
     const updates = context.snapshot().messages.filter((message) => modelContentText(message.content).startsWith("Context update ["));
     expect(updates).toEqual([
+      { role: "system", content: "Context update [system-baseline]\nbaseline two\n\nFLAVOR.md\nproject guidance" },
       { role: "system", content: "Context update [system-baseline]\nbaseline three\n\nFLAVOR.md\nproject guidance" },
     ]);
   });

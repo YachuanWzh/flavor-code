@@ -217,6 +217,30 @@ Useful commands:
 
 `/co-work` first places both agents in planning and waits for both to accept the same hashed plan and declare READY. Early READY intents are retained, and only the broker's exactly-once START event opens parallel execution. Each agent works only in its own project, receives only its assigned tasks, and reports bounded completion evidence. The broker-selected integration owner verifies all assertions and emits END or FAIL through `CoWorkIntegrate`. Communication uses authenticated, bounded local IPC with no TCP listener; peer input cannot approve tools or access the other workspace. UUID/alias routing and the protocol already support a third active client; durable artifact exchange, broker-restart journaling/recovery, and large-group coordination are later hardening work. See the [CLI pals specification](./docs/specs/2026-08-14-cli-pals-cowork.md).
 
+#### Session, config, and usage management CLI
+
+Non-interactive management commands for scripts, CI, and retrospectives. Like `flavor memory` / `flavor mcp`, these are lightweight entry points that never start the agent runtime, so they cold-start quickly; reading and writing sessions and configuration reuse the same store and schema validation as the interactive mode.
+
+```bash
+# sessions: list / inspect / export / delete
+flavor sessions list                       # saved sessions for this project (newest first)
+flavor sessions show [session-id]          # summarize one session; omit id for the latest
+flavor sessions export <id> --format md --output log.md   # export a transcript (md / json)
+flavor sessions delete <id>                # delete one session
+
+# config: read the effective value, write the project config
+flavor config get context.windowTokens     # read by dot path; secrets are redacted
+flavor config set permissionMode plan      # validated against the merged config before writing; invalid values are not persisted
+flavor config unset language               # remove one key from the project config
+flavor config list --json                  # print the effective (redacted) config
+
+# usage: summarize token and cache usage for the current session
+flavor usage                               # human-readable cache-hit table
+flavor usage --json                        # machine-readable summary
+```
+
+`flavor sessions list/show`, `flavor config list/get`, and `flavor usage` all accept `--json` for scripted consumption.
+
 ### Electron Desktop
 
 ```bash

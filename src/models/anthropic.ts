@@ -46,6 +46,8 @@ export interface AnthropicModelAdapterOptions {
   headers?: Record<string, string>;
   /** Mirror the per-request cache breakdown to stderr. Defaults to FLAVOR_DEBUG_USAGE=1. File logging to usage.jsonl is always on. */
   debugUsage?: boolean;
+  /** Cache lifetime for explicit breakpoints. Defaults to the provider's 5-minute TTL. */
+  cacheTtl?: "5m" | "1h";
 }
 
 /** Claude Code client fingerprint, used by gateways that restrict the Anthropic protocol to Claude clients. */
@@ -84,8 +86,10 @@ interface PendingThinking {
 
 type AnthropicAssistantBlock =
   | { type: "thinking"; thinking: string; signature?: string }
-  | { type: "text"; text: string; cache_control?: { type: "ephemeral" } }
-  | { type: "tool_use"; id: string; name: string; input: unknown; cache_control?: { type: "ephemeral" } };
+  | { type: "text"; text: string; cache_control?: AnthropicCacheControl }
+  | { type: "tool_use"; id: string; name: string; input: unknown; cache_control?: AnthropicCacheControl };
+
+type AnthropicCacheControl = { type: "ephemeral"; ttl?: "5m" | "1h" };
 
 interface InputUsageSnapshot {
   base: number;
@@ -136,7 +140,7 @@ function stripCacheControl(marker: CacheMarkerRef): void {
 }
 
 /** Attach a cache marker to the last content block of a message (in place). */
-function markLastBlock(message: MessageParam): void {
+function markLastBlock(message: MessageParam, cacheControl: AnthropicCacheControl): void {
   const blocks: unknown[] = typeof message.content === "string"
     ? [{ type: "text", text: message.content }]
     : [...message.content];
@@ -144,7 +148,7 @@ function markLastBlock(message: MessageParam): void {
   const index = blocks.length - 1;
   blocks[index] = {
     ...(blocks[index] as Record<string, unknown>),
-    cache_control: { type: "ephemeral" },
+    cache_control: cacheControl,
   };
   message.content = blocks as unknown as MessageParam["content"];
 }
@@ -208,6 +212,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
   private readonly client: AnthropicClient;
   private readonly maxOutputTokens: number;
   private readonly thinkingBudget: number;
+  private readonly cacheControl: AnthropicCacheControl;
   /** Set once an endpoint rejects the `thinking` parameter; later requests stop sending it. */
   #thinkingRejected = false;
   private readonly debugUsage: boolean;
@@ -219,6 +224,9 @@ export class AnthropicModelAdapter implements ModelAdapter {
     }
     this.maxOutputTokens = maxOutputTokens;
     this.thinkingBudget = options.thinkingBudget ?? DEFAULT_THINKING_BUDGET;
+    this.cacheControl = options.cacheTtl === "1h"
+      ? { type: "ephemeral", ttl: "1h" }
+      : { type: "ephemeral" };
     this.debugUsage = options.debugUsage ?? isEnvTruthy(process.env.FLAVOR_DEBUG_USAGE);
     this.client =
       options.client ??
@@ -266,16 +274,23 @@ export class AnthropicModelAdapter implements ModelAdapter {
     const completedTools: PendingToolCall[] = [];
 
     try {
-      const systemMessages = request.messages.filter((message) => message.role === "system");
+      // Only the leading system run belongs in Anthropic's top-level `system`
+      // field. Hoisting chronological context updates from later in the
+      // conversation would rewrite the request prefix and discard its rolling
+      // cache. Late system messages are mapped in place below.
+      const firstNonSystem = request.messages.findIndex((message) => message.role !== "system");
+      const systemMessages = firstNonSystem < 0
+        ? request.messages
+        : request.messages.slice(0, firstNonSystem);
       const system = systemMessages.some((message) => message.cacheBreakpoint)
         ? systemMessages.map((message) => ({
           type: "text" as const,
           text: modelContentText(message.content),
-          ...(message.cacheBreakpoint ? { cache_control: { type: "ephemeral" as const } } : {}),
+          ...(message.cacheBreakpoint ? { cache_control: this.cacheControl } : {}),
         }))
         : systemMessages.map((message) => modelContentText(message.content)).join("\n\n");
       const messages: MessageParam[] = [];
-      const nonSystem = request.messages.filter((m) => m.role !== "system");
+      const nonSystem = firstNonSystem < 0 ? [] : request.messages.slice(firstNonSystem);
       for (let i = 0; i < nonSystem.length; i += 1) {
         const message = nonSystem[i]!;
         if (message.role === "tool") {
@@ -284,13 +299,13 @@ export class AnthropicModelAdapter implements ModelAdapter {
             type: "tool_result";
             tool_use_id: string;
             content: string;
-            cache_control?: { type: "ephemeral" };
+            cache_control?: AnthropicCacheControl;
           }> = [
             {
               type: "tool_result",
               tool_use_id: message.toolCallId,
               content: modelContentText(message.content),
-              ...(message.cacheBreakpoint ? { cache_control: { type: "ephemeral" as const } } : {}),
+              ...(message.cacheBreakpoint ? { cache_control: this.cacheControl } : {}),
             },
           ];
           while (i + 1 < nonSystem.length && nonSystem[i + 1]!.role === "tool") {
@@ -301,7 +316,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
               type: "tool_result",
               tool_use_id: next.toolCallId,
               content: modelContentText(next.content),
-              ...(next.cacheBreakpoint ? { cache_control: { type: "ephemeral" as const } } : {}),
+              ...(next.cacheBreakpoint ? { cache_control: this.cacheControl } : {}),
             });
           }
           messages.push({ role: "user" as const, content: results });
@@ -333,7 +348,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
             // non-empty here), never a thinking block, so the marker is legal.
             content[content.length - 1] = {
               ...content[content.length - 1]!,
-              cache_control: { type: "ephemeral" as const },
+              cache_control: this.cacheControl,
             } as AnthropicAssistantBlock;
           }
           messages.push({
@@ -341,8 +356,12 @@ export class AnthropicModelAdapter implements ModelAdapter {
             content,
           } as MessageParam);
         } else {
+          const role = message.role === "system" ? "user" : message.role;
+          const chronologicalSystem = message.role === "system"
+            ? `<system-reminder>\n${modelContentText(message.content)}\n</system-reminder>`
+            : undefined;
           const content: string | Array<Record<string, unknown>> = typeof message.content === "string"
-            ? message.content
+            ? (chronologicalSystem ?? message.content)
             : await Promise.all(message.content.map(async (block): Promise<Record<string, unknown>> => block.type === "text"
               ? { type: "text" as const, text: block.text }
               : {
@@ -358,14 +377,14 @@ export class AnthropicModelAdapter implements ModelAdapter {
             if (last.type === "text") {
               content[content.length - 1] = {
                 ...last,
-                cache_control: { type: "ephemeral" as const },
+                cache_control: this.cacheControl,
               };
             }
           }
           messages.push({
-            role: message.role,
+            role,
             content: message.cacheBreakpoint && typeof content === "string"
-              ? [{ type: "text", text: content, cache_control: { type: "ephemeral" } }]
+              ? [{ type: "text", text: content, cache_control: this.cacheControl }]
               : content,
           } as unknown as MessageParam);
         }
@@ -381,13 +400,14 @@ export class AnthropicModelAdapter implements ModelAdapter {
       // already spent we evict the least valuable marker: the fork boundary
       // only matters for the first subagent request, while the rolling block
       // protects the entire conversation history every turn.
-      if (messages.length >= 2) {
-        const markers = collectCacheMarkers(system, messages);
-        if (markers.length < MAX_CACHE_MARKERS) {
-          markLastBlock(messages[messages.length - 1]!);
-        } else if (markers.length > 2) {
+      if (messages.length > 0) {
+        markLastBlock(messages[messages.length - 1]!, this.cacheControl);
+        let markers = collectCacheMarkers(system, messages);
+        while (markers.length > MAX_CACHE_MARKERS) {
+          // Keep the earliest stable prefix markers and the rolling tail. The
+          // newest interior boundary is normally a one-request fork marker.
           stripCacheControl(markers[markers.length - 2]!);
-          markLastBlock(messages[messages.length - 1]!);
+          markers = collectCacheMarkers(system, messages);
         }
       }
       // Request shape captured for FLAVOR_DEBUG_USAGE cache diagnostics.

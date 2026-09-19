@@ -35,7 +35,7 @@ export function needsRelaunch(runtime: LauncherRuntime): boolean {
  * `doctor`/`eval` exit would otherwise retain).
  */
 const LIGHT_CLI_COMMANDS = new Set([
-  "init", "update", "doctor", "skills", "memory", "mcp", "eval", "help", "completion",
+  "init", "update", "doctor", "skills", "memory", "mcp", "sessions", "config", "usage", "eval", "help", "completion",
 ]);
 
 /** True when argv selects a light subcommand instead of the runtime-bearing default action. */

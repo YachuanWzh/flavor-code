@@ -66,6 +66,8 @@ export interface ContextEpochSnapshot {
   stableMessages: ContextSystemMessage[];
   /** Last admitted values for dynamic sources. */
   sources: Record<string, string>;
+  /** Immutable dynamic-source snapshot rendered before conversation history. */
+  pinnedSources?: Record<string, string> | undefined;
   stableSourceHash: string;
 }
 
@@ -371,15 +373,6 @@ export class ContextManager {
   async prepareForModelCall(signal: AbortSignal = new AbortController().signal): Promise<boolean> {
     signal.throwIfAborted();
     this.refreshContextSources();
-    // Superseded "Context update" announcements duplicate state that the pinned
-    // source messages already expose. Dropping the stale ones relieves window
-    // pressure without paying for an LLM summarize round-trip.
-    // Keep the provider usage anchor when sources change or stale announcements
-    // are removed. #currentTokenUsage already accounts for newly appended local
-    // content, while retaining the provider value is deliberately conservative
-    // when cleanup removes content. Clearing it here made a 162K-token provider
-    // request fall back to a ~97K local estimate and bypass auto-compaction.
-    this.#dropStaleContextUpdates();
     if (!this.needsCompaction()) return false;
     const originalMessages = this.#messages;
     const originalRecordedUsage = this.#lastRecordedInputTokens;
@@ -490,27 +483,6 @@ export class ContextManager {
     return true;
   }
 
-  #dropStaleContextUpdates(): boolean {
-    const latestBySource = new Map<string, number>();
-    for (let index = this.#messages.length - 1; index >= 0; index -= 1) {
-      const source = contextUpdateSource(this.#messages[index]!);
-      if (source === undefined || latestBySource.has(source)) continue;
-      latestBySource.set(source, index);
-    }
-    const next: ModelMessage[] = [];
-    let changed = false;
-    this.#messages.forEach((message, index) => {
-      const source = contextUpdateSource(message);
-      if (source !== undefined && latestBySource.get(source) !== index) {
-        changed = true;
-        return;
-      }
-      next.push(message);
-    });
-    if (changed) this.#messages = next;
-    return changed;
-  }
-
   #reportCompactProgress(percentage: number): void {
     const normalized = Math.max(0, Math.min(100, Math.floor(percentage / 10) * 10));
     if (normalized === this.#lastCompactProgress) return;
@@ -529,7 +501,7 @@ export class ContextManager {
   #pinnedMessages(): ModelMessage[] {
     return [
       ...this.#epoch.stableMessages.map(cloneMessage),
-      ...sourceMessages(this.#epoch.sources),
+      ...sourceMessages(this.#epoch.pinnedSources ?? this.#epoch.sources),
     ];
   }
 
@@ -547,6 +519,7 @@ export class ContextManager {
       startedAt: new Date().toISOString(),
       stableMessages,
       sources,
+      pinnedSources: { ...sources },
       stableSourceHash: hashMessages(stableMessages),
     };
   }
@@ -625,20 +598,10 @@ function contextUpdateMessage(source: string, content: string): ModelMessage {
   return { role: "system", content: `Context update [${source}]\n${content}` };
 }
 
-const CONTEXT_UPDATE_PREFIX = "Context update [";
-
-function contextUpdateSource(message: ModelMessage): string | undefined {
-  if (message.role !== "system" || typeof message.content !== "string") return undefined;
-  if (!message.content.startsWith(CONTEXT_UPDATE_PREFIX)) return undefined;
-  const end = message.content.indexOf("]\n", CONTEXT_UPDATE_PREFIX.length);
-  if (end < 0) return undefined;
-  return message.content.slice(CONTEXT_UPDATE_PREFIX.length, end);
-}
-
 /**
  * When the new source value only appends to the previously admitted one, emit
- * just the appended tail; the full state stays visible via the pinned source
- * messages. Non-append rewrites fall back to the full value.
+ * just the appended tail. All deltas remain in chronological history until an
+ * explicit compaction starts a new epoch with the latest full source state.
  */
 function deltaSourceValue(previous: string | undefined, display: string): string {
   if (previous === undefined || !display.startsWith(previous)) return display;
@@ -672,6 +635,10 @@ function cloneEpoch(epoch: ContextEpochSnapshot): ContextEpochSnapshot {
       ...(message.cacheBreakpoint === undefined ? {} : { cacheBreakpoint: message.cacheBreakpoint }),
     })),
     sources: { ...epoch.sources },
+    // Version-1 snapshots written before pinnedSources existed used `sources`
+    // for both roles. Freeze that last admitted snapshot on first restore so
+    // later source refreshes can only append after the existing prompt.
+    pinnedSources: { ...(epoch.pinnedSources ?? epoch.sources) },
   };
 }
 

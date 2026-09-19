@@ -2109,6 +2109,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
           ? new AnthropicModelAdapter({
             ...adapterOptions,
             ...(providerConfig?.thinkingBudget === undefined ? {} : { thinkingBudget: providerConfig.thinkingBudget }),
+            ...(providerConfig?.cacheTtl === undefined ? {} : { cacheTtl: providerConfig.cacheTtl }),
             ...(providerConfig?.claudeClient === true ? { headers: CLAUDE_CLIENT_HEADERS } : {}),
           })
           : new OpenAIModelAdapter({
@@ -2863,6 +2864,7 @@ async function registerConfiguredAdapters(
               ...providerFromOAuthConfig(result.llmConfig),
               ...(provider.thinkingEffort === undefined ? {} : { thinkingEffort: provider.thinkingEffort }),
               ...(provider.thinkingBudget === undefined ? {} : { thinkingBudget: provider.thinkingBudget }),
+              ...(provider.cacheTtl === undefined ? {} : { cacheTtl: provider.cacheTtl }),
               ...(provider.claudeClient === undefined ? {} : { claudeClient: provider.claudeClient }),
             };
             effectiveLlm ??= effectiveRuntime(result, credentialId);
@@ -2905,6 +2907,7 @@ async function registerConfiguredAdapters(
         ? new AnthropicModelAdapter({
           ...adapterOptions,
           ...(runtimeProvider.thinkingBudget === undefined ? {} : { thinkingBudget: runtimeProvider.thinkingBudget }),
+          ...(runtimeProvider.cacheTtl === undefined ? {} : { cacheTtl: runtimeProvider.cacheTtl }),
           ...(runtimeProvider.claudeClient === true ? { headers: CLAUDE_CLIENT_HEADERS } : {}),
         })
         : new OpenAIModelAdapter({
@@ -2942,6 +2945,8 @@ interface ProviderRuntimeConfig {
   maxOutputTokens?: number | undefined;
   /** Extended-thinking budget (Anthropic protocol); unset uses the adapter default. */
   thinkingBudget?: number | undefined;
+  /** Anthropic explicit prompt-cache lifetime; unset uses the provider default. */
+  cacheTtl?: "5m" | "1h" | undefined;
   /** Reasoning effort (OpenAI Responses protocol); unset defaults to high in the adapter. */
   thinkingEffort?: ThinkingEffort | undefined;
   models?: string[] | undefined;
