@@ -62,6 +62,8 @@ cd your-project
 flavor
 ```
 
+When you leave the session, the CLI prints the exact command for picking it back up (`flavor --resume <sessionId>`).
+
 **3. Initialize project context**
 
 Run `/init` the first time you enter a project. Flavor analyzes the language, package manager, source directories, and verification commands, then generates a `FLAVOR.md` project guide.
@@ -303,7 +305,7 @@ Long-term memory distinguishes user preferences, behavioral feedback, project co
 
 Image prompts support PNG, JPEG, and WebP, with a 5 MiB per-image maximum and up to 5 images per prompt. The desktop app supports picking or drag-and-drop; CLI clipboard images currently work on Windows and macOS. Standard CLI paste prefers clipboard text and creates an image attachment only when no usable text flavor is available; use `/paste-image` when both flavors exist and the image is intended.
 
-CLI tool receipts are collapsed by default. Press `Ctrl+O` on Windows, Linux, or macOS to expand or collapse tool output globally. This shortcut affects tool output only; user prompts and assistant replies keep the same conversation window. On macOS, `Command+O` remains available to the terminal or host application.
+CLI tool receipts are collapsed by default, and long sessions keep only a viewport-sized window of turns and output items. Press `Ctrl+O` on Windows, Linux, or macOS to expand everything: the render budget is lifted so earlier turns, hidden output items, and full tool details all become visible, with no text truncation. Press it again to return to the compact, responsive view. On macOS, `Command+O` remains available to the terminal or host application.
 
 ## Permissions & Sandbox
 

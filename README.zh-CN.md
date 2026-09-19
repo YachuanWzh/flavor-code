@@ -62,6 +62,8 @@ cd your-project
 flavor
 ```
 
+退出会话时，CLI 会打印接着上次的恢复命令（`flavor --resume <sessionId>`）。
+
 **3. 初始化项目上下文**
 
 首次进入项目后运行 `/init`。Flavor 会分析语言、包管理器、源码目录和验证命令，并生成 `FLAVOR.md` 项目指南。
@@ -303,7 +305,7 @@ Skill 是带有 YAML 头信息的 `SKILL.md`，放在 `.flavor/skills/<name>/` �
 
 图片提示支持 PNG、JPEG 和 WebP，单图最大 5 MiB、每次最多 5 张。桌面端支持选择或拖放；CLI 剪贴板图片目前支持 Windows 和 macOS。CLI 标准粘贴会优先使用剪贴板文字，只有没有可用文字时才把剪贴板图像添加为附件；剪贴板同时含有文字和图片但需要图片时，使用 `/paste-image`。
 
-CLI 工具回执默认折叠。在 Windows、Linux 和 macOS 上均使用 `Ctrl+O` 全局展开或收起工具输出；该快捷键只影响工具输出，用户输入和助手回复的对话窗口不会随之变化。macOS 的 `Command+O` 继续保留给终端或宿主应用。
+CLI 工具回执默认折叠，长会话只保留与终端视口成比例的回合与输出项窗口。在 Windows、Linux 和 macOS 上均使用 `Ctrl+O` 展开：渲染上限随之解除，更早的回合、被隐藏的输出项与完整工具明细都会显示，文本也不再截断；再按一次回到紧凑的响应式视图。macOS 的 `Command+O` 继续保留给终端或宿主应用。
 
 ## 权限与沙箱
 

@@ -1,7 +1,8 @@
-import { expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { runPrint } from "../../src/cli.js";
 import type { ProductionRuntime } from "../../src/production.js";
 import type { ProductionRuntimeOptions } from "../../src/production.js";
+import { compileHeadlessToolAllowlist, matchesHeadlessAllowlist } from "../../src/production.js";
 
 it("returns 2 only for startup failure and redacts credential-shaped errors", async () => {
   const errors: string[] = [];
@@ -95,4 +96,119 @@ it("waits for a restored long-task continuation without replaying the print prom
   expect(code).toBe(0);
   expect(whenIdle).toHaveBeenCalledOnce();
   expect(submit).not.toHaveBeenCalled();
+});
+
+it("emits a single JSON result object for --output-format json", async () => {
+  const output: string[] = [];
+  let captured: ProductionRuntimeOptions | undefined;
+  const createRuntime = async (options: ProductionRuntimeOptions) => {
+    captured = options;
+    return {
+      sessionId: "session-42",
+      session: {
+        start: async () => {},
+        submit: async () => {
+          options.output({ type: "text", text: "hello " });
+          options.output({ type: "text", text: "world" });
+          options.output({ type: "usage", inputTokens: 10, outputTokens: 5, totalInputTokens: 120, totalOutputTokens: 40, cacheReadTokens: 90 });
+        },
+        close: async () => {},
+      },
+      dispose: async () => {},
+    } as unknown as ProductionRuntime;
+  };
+  const code = await runPrint("hi", { createRuntime, stdout: (text) => output.push(text), stderr: () => {} }, undefined, false, {
+    outputFormat: "json",
+  });
+  expect(code).toBe(0);
+  expect(output).toHaveLength(1);
+  const result = JSON.parse(output[0]!) as Record<string, unknown>;
+  expect(result).toMatchObject({
+    type: "result", subtype: "success", sessionId: "session-42", result: "hello world", exitCode: 0,
+    usage: { inputTokens: 120, outputTokens: 40, cacheReadTokens: 90 },
+  });
+  expect(captured).toBeDefined();
+});
+
+it("streams one JSON line per event and a final result for --output-format stream-json", async () => {
+  const lines: string[] = [];
+  const createRuntime = async (options: ProductionRuntimeOptions) => ({
+    sessionId: "session-7",
+    session: {
+      start: async () => {},
+      submit: async () => { options.output({ type: "notice", message: "working" }); },
+      close: async () => {},
+    },
+    dispose: async () => {},
+  } as unknown as ProductionRuntime);
+  const code = await runPrint("hi", {
+    createRuntime,
+    stdout: (text) => lines.push(...text.split("\n").filter((line) => line.length > 0)),
+    stderr: () => {},
+  }, undefined, false, { outputFormat: "stream-json" });
+  expect(code).toBe(0);
+  expect(lines).toHaveLength(2);
+  expect(JSON.parse(lines[0]!)).toMatchObject({ type: "notice", message: "working" });
+  expect(JSON.parse(lines[1]!)).toMatchObject({ type: "result", subtype: "success", sessionId: "session-7", exitCode: 0 });
+});
+
+it("forwards print options into the runtime factory", async () => {
+  let captured: ProductionRuntimeOptions | undefined;
+  const createRuntime = async (options: ProductionRuntimeOptions) => {
+    captured = options;
+    return {
+      sessionId: "s",
+      session: { start: async () => {}, submit: async () => {}, close: async () => {} },
+      dispose: async () => {},
+    } as unknown as ProductionRuntime;
+  };
+  await runPrint("hi", { createRuntime, stdout: () => {}, stderr: () => {} }, undefined, false, {
+    outputFormat: "json", permissionMode: "acceptEdits", allowedTools: ["Read", "Shell(npm test:*)"], model: "openai:gpt-5",
+  });
+  expect(captured?.permissionMode).toBe("acceptEdits");
+  expect(captured?.headlessToolAllowlist).toEqual(["Read", "Shell(npm test:*)"]);
+  expect(captured?.modelOverride).toBe("openai:gpt-5");
+});
+
+it("keeps the plain-text contract unchanged for the default format", async () => {
+  const output: string[] = [];
+  const createRuntime = async (options: ProductionRuntimeOptions) => ({
+    sessionId: "s",
+    session: {
+      start: async () => {},
+      submit: async () => { options.output({ type: "text", text: "answer" }); },
+      close: async () => {},
+    },
+    dispose: async () => {},
+  } as unknown as ProductionRuntime);
+  const code = await runPrint("hi", { createRuntime, stdout: (text) => output.push(text), stderr: () => {} });
+  expect(code).toBe(0);
+  expect(output.join("")).toBe("answer\n");
+});
+
+describe("headless tool allowlist", () => {
+  const entries = compileHeadlessToolAllowlist(["Read", "mcp__docs__*", "Shell(npm test:*)", "", "Broken(", "Shell(missing-wildcard)"]);
+
+  it("matches exact tool names", () => {
+    expect(matchesHeadlessAllowlist(entries, { tool: "Read" })).toBe(true);
+    expect(matchesHeadlessAllowlist(entries, { tool: "Write" })).toBe(false);
+  });
+
+  it("matches tool name prefixes", () => {
+    expect(matchesHeadlessAllowlist(entries, { tool: "mcp__docs__search" })).toBe(true);
+    expect(matchesHeadlessAllowlist(entries, { tool: "mcp__other__search" })).toBe(false);
+  });
+
+  it("matches shell command prefixes but never wrapped or structured commands", () => {
+    expect(matchesHeadlessAllowlist(entries, { tool: "Shell", command: "npm test -- --watch" })).toBe(true);
+    expect(matchesHeadlessAllowlist(entries, { tool: "Shell", command: "npm run build" })).toBe(false);
+    // Structured argv and shell wrappers stay outside the allowlist.
+    expect(matchesHeadlessAllowlist(entries, { tool: "Shell", command: "npm test", args: ["npm", "test"] })).toBe(false);
+    expect(matchesHeadlessAllowlist(entries, { tool: "Shell", command: "bash -c 'npm test'" })).toBe(false);
+  });
+
+  it("ignores malformed patterns", () => {
+    expect(matchesHeadlessAllowlist(entries, { tool: "Broken(" })).toBe(false);
+    expect(entries.every((entry) => entry.tool !== "Shell" || entry.command !== undefined)).toBe(true);
+  });
 });

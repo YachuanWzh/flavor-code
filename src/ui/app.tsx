@@ -436,6 +436,7 @@ export interface FlavorAppProps {
   resumeSession?: string | true;
   instanceId: string;
   palAlias?: string;
+  onSessionEnd?: (sessionId: string) => void;
 }
 
 export function appRuntimeOptions(
@@ -457,7 +458,7 @@ export function appRuntimeOptions(
   };
 }
 
-export function App({ workspace, home, resumeSession, instanceId, palAlias }: FlavorAppProps): React.JSX.Element {
+export function App({ workspace, home, resumeSession, instanceId, palAlias, onSessionEnd }: FlavorAppProps): React.JSX.Element {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [runtime, setRuntime] = useState<ProductionRuntime>();
@@ -593,7 +594,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias }: Fl
     closing.current = true;
     await shutdownRuntime(active, exit, (error) => {
       dispatch({ type: "submit-error", message: error });
-    });
+    }, { ...(onSessionEnd === undefined ? {} : { onSessionEnd }) });
   };
   const shutdownRef = useRef(shutdown);
   shutdownRef.current = shutdown;
@@ -1330,7 +1331,17 @@ export interface CliRenderBudget {
 }
 
 /** Keep Yoga/Markdown work proportional to the visible terminal, not session age. */
-export function cliRenderBudget(rows: number, columns: number): CliRenderBudget {
+export function cliRenderBudget(rows: number, columns: number, expanded = false): CliRenderBudget {
+  if (expanded) {
+    // Ctrl+O is the user's explicit "show me everything" escape hatch: lift the
+    // viewport budget entirely so hidden turns and blocks become scrollable.
+    return {
+      turns: Number.POSITIVE_INFINITY,
+      blocks: Number.POSITIVE_INFINITY,
+      blocksPerTurn: Number.POSITIVE_INFINITY,
+      textChars: Number.POSITIVE_INFINITY,
+    };
+  }
   const viewportRows = Math.max(8, Math.floor(rows));
   const viewportColumns = Math.max(20, Math.floor(columns));
   const screenMultiplier = 4;
@@ -1427,6 +1438,9 @@ export function boundedCliTurn(
   turn: TranscriptTurn;
   hiddenBlocks: number;
 } {
+  const uncapped = !Number.isFinite(maxTextChars);
+  const toolTextLimit = uncapped ? maxTextChars : CLI_VISIBLE_TEXT_CHARS;
+  const promptLimit = uncapped ? maxTextChars : 16_000;
   const blockLimit = Math.max(1, Math.floor(maxBlocks));
   const hiddenBlocks = Math.max(0, turn.blocks.length - blockLimit);
   const visible = turn.blocks.slice(-blockLimit).map((block): TranscriptBlock => block.kind === "text"
@@ -1436,24 +1450,24 @@ export function boundedCliTurn(
       ...(block.details === undefined ? {} : {
         details: boundedCliDisplayText(
           block.details,
-          block.tool !== undefined || block.presentation !== undefined ? CLI_VISIBLE_TEXT_CHARS : maxTextChars,
+          block.tool !== undefined || block.presentation !== undefined ? toolTextLimit : maxTextChars,
         ),
       }),
       ...(block.presentation === undefined ? {} : {
-        presentation: boundedCliPresentation(block.presentation, CLI_VISIBLE_TEXT_CHARS),
+        presentation: boundedCliPresentation(block.presentation, toolTextLimit),
       }),
     });
   const blocks: TranscriptBlock[] = hiddenBlocks === 0 ? visible : [{
     kind: "status",
     id: `display-window:${turn.id}`,
     state: "info",
-    text: `· ${hiddenBlocks} earlier output items hidden to keep the terminal responsive`,
+    text: `· ${hiddenBlocks} earlier output items hidden to keep the terminal responsive · ${outputToggleShortcut()} to view all`,
   }, ...visible];
   return {
     hiddenBlocks,
     turn: {
       ...turn,
-      prompt: boundedCliDisplayText(turn.prompt, 16_000),
+      prompt: boundedCliDisplayText(turn.prompt, promptLimit),
       blocks,
       statusLines: blocks
         .filter((block): block is Extract<TranscriptBlock, { kind: "status" }> => block.kind === "status")
@@ -1467,6 +1481,7 @@ export function cliTranscriptWindow(
   maxTurns = CLI_VISIBLE_TURN_LIMIT,
   maxBlocks = CLI_VISIBLE_BLOCK_LIMIT,
   maxTextChars = CLI_VISIBLE_TEXT_CHARS,
+  maxBlocksPerTurn = CLI_VISIBLE_BLOCKS_PER_TURN,
 ): CliTranscriptWindow {
   const turns: TranscriptTurn[] = [];
   let remainingBlocks = Math.max(1, Math.floor(maxBlocks));
@@ -1474,7 +1489,7 @@ export function cliTranscriptWindow(
   for (let index = completed.length - 1; index >= 0 && turns.length < Math.max(1, Math.floor(maxTurns)); index -= 1) {
     const source = completed[index]!;
     if (remainingBlocks <= 0) break;
-    const allowance = Math.min(CLI_VISIBLE_BLOCKS_PER_TURN, remainingBlocks);
+    const allowance = Math.min(maxBlocksPerTurn, remainingBlocks);
     const bounded = boundedCliTurn(source, allowance, maxTextChars);
     turns.push(bounded.turn);
     hiddenBlocks += bounded.hiddenBlocks;
@@ -1499,8 +1514,8 @@ export function TerminalLayout({
   const showWelcome = completed.length === 0 && active === undefined;
 
   const budget = useMemo(
-    () => cliRenderBudget(rows, columns),
-    [rows, columns],
+    () => cliRenderBudget(rows, columns, expandedOutput),
+    [rows, columns, expandedOutput],
   );
   const activeTaskBlocks = useMemo(() => active?.blocks.filter(
     (block): block is Extract<TranscriptBlock, { kind: "status" }> =>
@@ -1516,7 +1531,7 @@ export function TerminalLayout({
     return boundedCliTurn(raw, budget.blocksPerTurn, budget.textChars).turn;
   }, [active, budget]);
   const completedWindow = useMemo(
-    () => cliTranscriptWindow(completed, budget.turns, budget.blocks, budget.textChars),
+    () => cliTranscriptWindow(completed, budget.turns, budget.blocks, budget.textChars, budget.blocksPerTurn),
     [completed, budget],
   );
 
@@ -1539,7 +1554,7 @@ export function TerminalLayout({
         : <Text dimColor>{"flavor · "}{model}{" · "}{workspaceName}</Text>}
       <Box height={1} />
       {completedWindow.hiddenTurns > 0 || completedWindow.hiddenBlocks > 0
-        ? <Text dimColor>… {completedWindow.hiddenTurns} earlier turns and {completedWindow.hiddenBlocks} output items hidden to keep the terminal responsive</Text>
+        ? <Text dimColor>… {completedWindow.hiddenTurns} earlier turns and {completedWindow.hiddenBlocks} output items hidden to keep the terminal responsive · {outputShortcut} to view all</Text>
         : null}
       {completedWindow.turns.map((turn, index) => (
         <Box key={turn.id} flexDirection="column">
@@ -1617,8 +1632,8 @@ export function TerminalLayout({
             : mentionCompletion !== undefined
               ? "↑/↓ select · Tab complete · click choose · Esc close"
               : activeSession
-                ? `Esc ${pendingPrompts.length > 0 ? "edit latest" : "stop"} · Ctrl+C cancel · Enter queue · Ctrl/Cmd+R history · ${outputShortcut} ${expandedOutput ? "collapse" : "expand"} tools`
-                : `Enter send · ↑↓/Ctrl/Cmd+R history · ${outputShortcut} ${expandedOutput ? "collapse" : "expand"} tools · Ctrl+C exit`}
+                ? `Esc ${pendingPrompts.length > 0 ? "edit latest" : "stop"} · Ctrl+C cancel · Enter queue · Ctrl/Cmd+R history · ${outputShortcut} ${expandedOutput ? "collapse all output" : "expand all output"}`
+                : `Enter send · ↑↓/Ctrl/Cmd+R history · ${outputShortcut} ${expandedOutput ? "collapse all output" : "expand all output"} · Ctrl+C exit`}
           {...(ideContext === undefined ? {} : { ideContext })}
         />
       </Box>
@@ -1777,7 +1792,7 @@ function HighlightedName({
   return <Text>{parts}</Text>;
 }
 
-function jumpScroll(scroll: ScrollBoxHandle, delta: number): void {
+export function jumpScroll(scroll: ScrollBoxHandle, delta: number): void {
   const maximum = Math.max(0, scroll.getScrollHeight() - scroll.getViewportHeight());
   const target = scroll.getScrollTop() + scroll.getPendingDelta() + delta;
   if (target >= maximum) {
@@ -1807,13 +1822,14 @@ export function taskPanelViewportRows(rows: number, reservedBottomRows: number, 
   return Math.min(8, Math.max(1, Math.floor(terminalRows / 3)), available);
 }
 
-function scrollDown(scroll: ScrollBoxHandle, amount: number): void {
+// Exported for wheel-scroll regression tests (live ScrollBox + renderer harness).
+export function scrollDown(scroll: ScrollBoxHandle, amount: number): void {
   const maximum = Math.max(0, scroll.getScrollHeight() - scroll.getViewportHeight());
   if (scroll.getScrollTop() + scroll.getPendingDelta() + amount >= maximum) scroll.scrollToBottom();
   else scroll.scrollBy(amount);
 }
 
-function scrollUp(scroll: ScrollBoxHandle, amount: number): void {
+export function scrollUp(scroll: ScrollBoxHandle, amount: number): void {
   if (scroll.getScrollTop() + scroll.getPendingDelta() - amount <= 0) scroll.scrollTo(0);
   else scroll.scrollBy(-amount);
 }
@@ -2746,6 +2762,8 @@ export interface ShutdownRuntimeOptions {
   shutdownTimeoutMs?: number;
   /** Hard-exit hook used when the watchdog fires. Defaults to `process.exit(1)`. Injectable for tests. */
   forceExit?: () => void;
+  /** Called once with the runtime's sessionId before cleanup begins, so callers can surface a resume hint after exit. */
+  onSessionEnd?: (sessionId: string) => void;
 }
 
 export async function shutdownRuntime(
@@ -2754,6 +2772,10 @@ export async function shutdownRuntime(
 ): Promise<void> {
   const timeoutMs = options.shutdownTimeoutMs ?? SHUTDOWN_TIMEOUT_MS;
   let timedOut = false;
+  if (runtime?.sessionId !== undefined && options.onSessionEnd !== undefined) {
+    try { options.onSessionEnd(runtime.sessionId); }
+    catch (error) { safeReport(report, safeUiError(error)); }
+  }
   try {
     const outcome = await withTimeout(closeAndDisposeRuntime(runtime, report), timeoutMs);
     timedOut = outcome.timedOut;

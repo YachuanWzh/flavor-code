@@ -4,12 +4,8 @@ import { homedir } from "node:os";
 import { posix, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Command, Option } from "commander";
+import chalk from "chalk";
 
-import { createProductionRuntime, type ProductionRuntime } from "./production.js";
-import { formatDoctorReport, runDoctor, type DoctorReport } from "./doctor.js";
-import { initializeFlavor } from "./init/project.js";
-import { runUpdate, type UpdateOutcome } from "./update/apply.js";
-import { NPM_PACKAGE_NAME } from "./update/check.js";
 import { installCrashGuard } from "./utils/crash-guard.js";
 import { message } from "./utils/error.js";
 import { MEMORY_RESTART_EXIT_CODE } from "./utils/memory-restart.js";
@@ -17,15 +13,19 @@ import { redactErrorText } from "./utils/redact.js";
 import { packageVersion } from "./utils/version.js";
 import { staticTaskLines } from "./ui/task-progress-model.js";
 import { installUiUserTimingSweeper } from "./ui/user-timing.js";
-import { SkillManager } from "./skills/manager.js";
 import { registerMemoryCommands } from "./memory/cli.js";
 import { registerMcpCommands } from "./mcp/cli.js";
-import { FlavorRpcServer } from "./rpc/server.js";
-import { RpcWriteStreamBridge } from "./rpc/write-stream.js";
-import { TraceRecorder } from "./trace/recorder.js";
-import { runEvaluationFile } from "./eval/cli.js";
-import { runPalBroker } from "./pals/broker-cli.js";
 import { MAX_ALIAS_LENGTH } from "./pals/protocol.js";
+
+// Runtime-heavy modules are imported lazily inside the actions that need them
+// so light commands (--version, doctor, init, …) never pay for loading the
+// full production graph. These type-only imports are erased at build time.
+import type { ProductionRuntime, ProductionRuntimeOptions } from "./production.js";
+import type { DoctorReport } from "./doctor.js";
+import type { UpdateOutcome } from "./update/apply.js";
+import type { SessionOutput } from "./ui/session.js";
+import type { PermissionMode } from "./config/schema.js";
+import type { TraceRecorder } from "./trace/recorder.js";
 
 export interface InteractiveCliProps {
   workspace: string;
@@ -38,10 +38,21 @@ export interface InteractiveCliProps {
 export interface CliDependencies {
   isTTY?(): boolean;
   randomUUID?(): string;
-  runBroker?: typeof runPalBroker;
+  runBroker?: typeof import("./pals/broker-cli.js").runPalBroker;
   runInteractive?(props: InteractiveCliProps): Promise<void>;
-  runUpdate?(options?: Parameters<typeof runUpdate>[0]): Promise<UpdateOutcome>;
-  runDoctor?(options?: Parameters<typeof runDoctor>[0]): Promise<DoctorReport>;
+  runUpdate?(options?: Parameters<typeof import("./update/apply.js").runUpdate>[0]): Promise<UpdateOutcome>;
+  runDoctor?(options?: Parameters<typeof import("./doctor.js").runDoctor>[0]): Promise<DoctorReport>;
+}
+
+const OUTPUT_FORMATS = ["text", "json", "stream-json"] as const;
+type OutputFormat = (typeof OUTPUT_FORMATS)[number];
+const PRINT_PERMISSION_MODES = ["default", "plan", "acceptEdits", "bypassPermissions"] as const;
+
+export interface PrintOptions {
+  outputFormat?: OutputFormat;
+  permissionMode?: PermissionMode;
+  allowedTools?: readonly string[];
+  model?: string;
 }
 
 export function createProgram(dependencies: CliDependencies = {}): Command {
@@ -49,7 +60,11 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
     .name("flavor")
     .description("Interactive coding agent")
     .version(packageVersion())
-    .option("-p, --print <prompt>", "run one prompt without the interactive UI")
+    .option("-p, --print [prompt]", "run one prompt without the interactive UI (prompt may come from stdin)")
+    .option("--output-format <format>", `--print output format: ${OUTPUT_FORMATS.join(", ")}`, "text")
+    .option("--permission-mode <mode>", `--print permission mode: ${PRINT_PERMISSION_MODES.join(", ")}`)
+    .option("--allowed-tools <patterns>", "comma-separated tools auto-approved in --print mode, e.g. \"Read,Shell(npm test:*)\"")
+    .option("--model <provider:model>", "override the main model for this run")
     .option("--resume [session-id]", "resume a saved session (latest when id is omitted)")
     .option("--mode <mode>", "runtime mode: interactive or rpc")
     .option("--workspace <path>", "workspace path (RPC mode)")
@@ -66,6 +81,7 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
     .action(async (directory?: string) => {
       const cwd = directory ? resolve(directory) : process.cwd();
       try {
+        const { initializeFlavor } = await import("./init/project.js");
         const result = await initializeFlavor(cwd);
         process.stdout.write(`${result.created ? "Created" : "Updated"} ${result.path}\n`);
       } catch (error) {
@@ -76,10 +92,11 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("update")
-    .description(`Update the globally installed ${NPM_PACKAGE_NAME} to the latest npm release`)
+    .description("Update the globally installed flavor-code package to the latest npm release")
     .action(async () => {
+      const { NPM_PACKAGE_NAME } = await import("./update/check.js");
       try {
-        const outcome = await (dependencies.runUpdate ?? runUpdate)();
+        const outcome = await (dependencies.runUpdate ?? (await import("./update/apply.js")).runUpdate)();
         switch (outcome.status) {
           case "up-to-date":
             process.stdout.write(`${NPM_PACKAGE_NAME} is already up to date (v${outcome.current}).\n`);
@@ -108,11 +125,12 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
     .option("--json", "print the report as JSON")
     .action(async (directory: string | undefined, command: { json?: boolean }) => {
       try {
-        const report = await (dependencies.runDoctor ?? runDoctor)({
+        const doctor = await import("./doctor.js");
+        const report = await (dependencies.runDoctor ?? doctor.runDoctor)({
           workspace: resolve(directory ?? process.cwd()),
           home: homedir(),
         });
-        process.stdout.write(command.json ? `${JSON.stringify(report, null, 2)}\n` : formatDoctorReport(report));
+        process.stdout.write(command.json ? `${JSON.stringify(report, null, 2)}\n` : doctor.formatDoctorReport(report));
         if (!report.ok) process.exitCode = 1;
       } catch (error) {
         process.stderr.write(`doctor: ${safeError(error)}\n`);
@@ -123,6 +141,7 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
   const skills = program.command("skills").description("List and enable or disable project skills");
   skills.command("list", { isDefault: true }).description("List skills visible in the current project").action(async () => {
     try {
+      const { SkillManager } = await import("./skills/manager.js");
       const entries = await new SkillManager({ workspace: process.cwd(), home: homedir() }).list();
       if (entries.length === 0) process.stdout.write("No skills found.\n");
       else for (const skill of entries) {
@@ -137,6 +156,7 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
     const action = enabled ? "enable" : "disable";
     skills.command(`${action} <name>`).description(`${enabled ? "Enable" : "Disable"} a skill for this project`).action(async (name: string) => {
       try {
+        const { SkillManager } = await import("./skills/manager.js");
         await new SkillManager({ workspace: process.cwd(), home: homedir() }).setEnabled(name, enabled);
         process.stdout.write(`${enabled ? "Enabled" : "Disabled"} ${name}.\n`);
       } catch (error) {
@@ -152,17 +172,20 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
     .option("--output <path>", "write the JSON report to a file")
     .description("run a repeatable coding-agent evaluation")
     .action(async (spec: string, command: { output?: string }) => {
+      const { runEvaluationFile } = await import("./eval/cli.js");
       process.exitCode = await runEvaluationFile(spec, command.output);
     });
 
   program.action(async (options: {
-    print?: string; resume?: string | boolean; mode?: string; workspace?: string; trace?: string; rpcApprovals?: boolean; rpcStreamedWrites?: boolean;
+    print?: string | boolean; outputFormat?: string; permissionMode?: string; allowedTools?: string; model?: string;
+    resume?: string | boolean; mode?: string; workspace?: string; trace?: string; rpcApprovals?: boolean; rpcStreamedWrites?: boolean;
     palName?: string; palsBroker?: string; memoryRestart?: boolean;
   }) => {
     if (options.palsBroker !== undefined) {
       if (!isLocalPalBrokerAddress(options.palsBroker, process.platform)) {
         throw new Error("Invalid local pals broker address");
       }
+      const { runPalBroker } = await import("./pals/broker-cli.js");
       const broker = await (dependencies.runBroker ?? runPalBroker)({ address: options.palsBroker });
       await broker.closed;
       return;
@@ -184,7 +207,36 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
       return;
     }
     if (options.print !== undefined) {
-      process.exitCode = await runPrint(options.print, {}, resumeSession, options.memoryRestart === true);
+      const outputFormat = options.outputFormat ?? "text";
+      if (!(OUTPUT_FORMATS as readonly string[]).includes(outputFormat)) {
+        process.stderr.write(`Unsupported output format: ${outputFormat}\n`);
+        process.exitCode = 2;
+        return;
+      }
+      let permissionMode: PermissionMode | undefined;
+      if (options.permissionMode !== undefined) {
+        if (!(PRINT_PERMISSION_MODES as readonly string[]).includes(options.permissionMode)) {
+          process.stderr.write(`Unsupported permission mode: ${options.permissionMode}\n`);
+          process.exitCode = 2;
+          return;
+        }
+        permissionMode = options.permissionMode as PermissionMode;
+      }
+      const prompt = typeof options.print === "string" ? options.print : await readStdinPrompt();
+      if (prompt.trim().length === 0) {
+        process.stderr.write("No prompt provided. Pass --print <prompt> or pipe text via stdin.\n");
+        process.exitCode = 2;
+        return;
+      }
+      const allowedTools = options.allowedTools === undefined
+        ? undefined
+        : options.allowedTools.split(",").map((pattern) => pattern.trim()).filter((pattern) => pattern.length > 0);
+      process.exitCode = await runPrint(prompt, {}, resumeSession, options.memoryRestart === true, {
+        outputFormat: outputFormat as OutputFormat,
+        ...(permissionMode === undefined ? {} : { permissionMode }),
+        ...(allowedTools === undefined ? {} : { allowedTools }),
+        ...(options.model === undefined ? {} : { model: options.model }),
+      });
       return;
     }
     if (!(dependencies.isTTY?.() ?? process.stdin.isTTY)) {
@@ -213,15 +265,25 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
 
 async function runInteractiveCli(props: InteractiveCliProps): Promise<void> {
   const disposeUserTimingSweeper = installUiUserTimingSweeper();
+  let endedSessionId: string | undefined;
   try {
-    const [{ render, AlternateScreen }, { createElement }, { App }] = await Promise.all([
+    // React is CommonJS. When tsup bundles it (noExternal) the dynamic-import
+    // namespace only carries `default` (esbuild cannot statically analyze
+    // React's conditional `module.exports = require(...)`), so named
+    // destructuring like `{ createElement }` would be undefined. Read the
+    // default export instead, which is the module.exports object in both the
+    // bundled and external cases.
+    const [{ render, AlternateScreen }, { default: React }, { App }] = await Promise.all([
       import("./claude-ink/index.js"), import("react"), import("./ui/app.js"),
     ]);
-    const instance = await render(createElement(AlternateScreen, { mouseTracking: true },
-      createElement(App, props)), { exitOnCtrlC: false });
+    const instance = await render(React.createElement(AlternateScreen, { mouseTracking: true },
+      React.createElement(App, { ...props, onSessionEnd: (sessionId: string) => { endedSessionId = sessionId; } })), { exitOnCtrlC: false });
     await instance.waitUntilExit();
   } finally {
     disposeUserTimingSweeper();
+  }
+  if (endedSessionId !== undefined) {
+    process.stdout.write(`Resume later with: ${chalk.cyan(`flavor --resume ${endedSessionId}`)}\n`);
   }
 }
 
@@ -252,6 +314,9 @@ export async function runRpcMode(options: {
   interactiveApprovals?: boolean;
   streamedWrites?: boolean;
 }): Promise<number> {
+  const [{ FlavorRpcServer }, { RpcWriteStreamBridge }, { TraceRecorder: Recorder }, { createProductionRuntime }] = await Promise.all([
+    import("./rpc/server.js"), import("./rpc/write-stream.js"), import("./trace/recorder.js"), import("./production.js"),
+  ]);
   let recorder: TraceRecorder | undefined;
   try {
     const server = new FlavorRpcServer({
@@ -281,7 +346,7 @@ export async function runRpcMode(options: {
         activeRuntime = runtime;
         Object.defineProperty(runtime, "rpcApprovals", { value: options.interactiveApprovals === true, enumerable: true });
         if (streamedWrites !== undefined) Object.defineProperty(runtime, "rpcWrites", { value: streamedWrites, enumerable: true });
-        if (options.trace !== undefined) recorder = new TraceRecorder({
+        if (options.trace !== undefined) recorder = new Recorder({
           path: options.trace, sessionId: runtime.sessionId,
         });
         return runtime;
@@ -303,9 +368,107 @@ export function setInteractiveProcessTitle(target: { title: string } = process):
 }
 
 export interface PrintDependencies {
-  createRuntime?: typeof createProductionRuntime;
+  createRuntime?: typeof import("./production.js").createProductionRuntime;
   stdout?(text: string): void;
   stderr?(text: string): void;
+}
+
+/** Reads a piped prompt so `cat notes.txt | flavor -p "summarize"` works. */
+async function readStdinPrompt(): Promise<string> {
+  if (process.stdin.isTTY === true) return "";
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+interface PrintUsageSummary {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+}
+
+/**
+ * Routes session output for --print. `text` keeps the historical plain-text
+ * contract; `stream-json` emits one JSON line per event for live consumers;
+ * `json` stays silent and emits a single result object at the end.
+ */
+function createPrintReporter(
+  format: OutputFormat,
+  stdout: (text: string) => void,
+  stderr: (text: string) => void,
+  onError?: () => void,
+): {
+  event(event: SessionOutput): void;
+  startupError(text: string): void;
+  finish(input: { sessionId?: string; code: number; restarting: boolean }): void;
+} {
+  let text = "";
+  let usage: PrintUsageSummary | undefined;
+  const errors: string[] = [];
+  let sessionId: string | undefined;
+  const safeJson = (value: unknown): string => JSON.stringify(value, (_key, item: unknown) =>
+    item instanceof Error ? { name: item.name, message: item.message } : item) ?? "null";
+  const writeLine = (value: unknown): void => stdout(`${safeJson(value)}\n`);
+
+  const event = (incoming: SessionOutput): void => {
+    if (incoming.type === "text") text += incoming.text;
+    else if (incoming.type === "usage") {
+      usage = {
+        inputTokens: incoming.totalInputTokens,
+        outputTokens: incoming.totalOutputTokens,
+        ...(incoming.cacheReadTokens === undefined ? {} : { cacheReadTokens: incoming.cacheReadTokens }),
+        ...(incoming.cacheCreationTokens === undefined ? {} : { cacheCreationTokens: incoming.cacheCreationTokens }),
+      };
+    } else if (incoming.type === "error") {
+      errors.push(`${incoming.error.code}: ${incoming.error.message}`);
+      onError?.();
+    }
+    if (format === "text") {
+      if (incoming.type === "text") stdout(incoming.text);
+      else if (incoming.type === "notice") stdout(`${incoming.message}\n`);
+      else if (incoming.type === "tasks") {
+        for (const line of staticTaskLines(incoming.snapshot)) stdout(`${line}\n`);
+      } else if (incoming.type === "error") stderr(`${incoming.error.code}: ${incoming.error.message}\n`);
+      return;
+    }
+    if (format === "stream-json") writeLine(incoming);
+  };
+
+  const startupError = (detail: string): void => {
+    errors.push(detail);
+    if (format === "text") stderr(`${detail}\n`);
+    else if (format === "stream-json") writeLine({ type: "error", error: { code: "startup", message: detail } });
+  };
+
+  const finish = (input: { sessionId?: string; code: number; restarting: boolean }): void => {
+    sessionId = input.sessionId ?? sessionId;
+    if (format === "json") {
+      writeLine({
+        type: "result",
+        subtype: input.code === 0 ? "success" : "error",
+        ...(sessionId === undefined ? {} : { sessionId }),
+        result: text,
+        ...(usage === undefined ? {} : { usage }),
+        ...(errors.length === 0 ? {} : { errors }),
+        exitCode: input.code,
+      });
+      return;
+    }
+    if (format === "stream-json") {
+      writeLine({
+        type: "result",
+        subtype: input.code === 0 ? "success" : "error",
+        ...(sessionId === undefined ? {} : { sessionId }),
+        ...(usage === undefined ? {} : { usage }),
+        exitCode: input.code,
+      });
+      return;
+    }
+    if (input.code === 0 && !input.restarting) stdout("\n");
+  };
+
+  return { event, startupError, finish };
 }
 
 export async function runPrint(
@@ -313,26 +476,27 @@ export async function runPrint(
   dependencies: PrintDependencies = {},
   resumeSession?: string | true,
   memoryRestart = false,
+  printOptions: PrintOptions = {},
 ): Promise<number> {
   let code = 0;
   let runtime: ProductionRuntime;
   const stdout = dependencies.stdout ?? ((text: string) => process.stdout.write(text));
   const stderr = dependencies.stderr ?? ((text: string) => process.stderr.write(text));
+  const format = printOptions.outputFormat ?? "text";
+  const reporter = createPrintReporter(format, stdout, stderr, () => { code = 1; });
   try {
-    runtime = await (dependencies.createRuntime ?? createProductionRuntime)({
+    const createRuntime = dependencies.createRuntime ?? (await import("./production.js")).createProductionRuntime;
+    runtime = await createRuntime({
       workspace: process.cwd(), home: homedir(), approvalPolicy: "deny",
       ...(resumeSession === undefined ? {} : { resumeSession }),
-      output(event) {
-        if (event.type === "text") stdout(event.text);
-        else if (event.type === "notice") stdout(`${event.message}\n`);
-        else if (event.type === "tasks") {
-          for (const line of staticTaskLines(event.snapshot)) stdout(`${line}\n`);
-        }
-        else if (event.type === "error") { stderr(`${event.error.code}: ${event.error.message}\n`); code = 1; }
-      },
+      ...(printOptions.permissionMode === undefined ? {} : { permissionMode: printOptions.permissionMode }),
+      ...(printOptions.allowedTools === undefined ? {} : { headlessToolAllowlist: printOptions.allowedTools }),
+      ...(printOptions.model === undefined ? {} : { modelOverride: printOptions.model }),
+      output: reporter.event,
     });
   } catch (error) {
-    stderr(`startup: ${safeError(error)}\n`);
+    reporter.startupError(`startup: ${safeError(error)}`);
+    reporter.finish({ code: 2, restarting: false });
     return 2;
   }
   try {
@@ -345,16 +509,17 @@ export async function runPrint(
       await runtime.session.submit(prompt);
     }
   } catch (error) {
-    stderr(`runtime: ${safeError(error)}\n`); code = 1;
+    reporter.startupError(`runtime: ${safeError(error)}`); code = 1;
   } finally {
     try { await runtime.session.close(); }
-    catch (error) { stderr(`runtime: ${safeError(error)}\n`); code = 1; }
+    catch (error) { reporter.startupError(`runtime: ${safeError(error)}`); code = 1; }
     try { await runtime.dispose(); }
-    catch (error) { stderr(`runtime: ${safeError(error)}\n`); code = 1; }
+    catch (error) { reporter.startupError(`runtime: ${safeError(error)}`); code = 1; }
   }
   const restarting = process.exitCode === MEMORY_RESTART_EXIT_CODE;
-  if (code === 0 && !restarting) stdout("\n");
-  return restarting ? MEMORY_RESTART_EXIT_CODE : code;
+  const finalCode = restarting ? MEMORY_RESTART_EXIT_CODE : code;
+  reporter.finish({ sessionId: runtime.sessionId, code: finalCode, restarting });
+  return finalCode;
 }
 
 function safeError(error: unknown): string {

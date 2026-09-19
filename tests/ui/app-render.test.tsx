@@ -68,19 +68,91 @@ describe("TerminalLayout", () => {
     expect(source.blocks).toHaveLength(3);
   });
 
-  it("keeps the conversation render window fixed when tool output is expanded", () => {
+  it("keeps the compact render window viewport-sized", () => {
     const compact = cliRenderBudget(18, 80);
-    const expanded = cliRenderBudget(18, 80);
 
     expect(compact.turns).toBeLessThan(40);
     expect(compact.blocks).toBeLessThan(320);
     expect(compact.textChars).toBeLessThan(16_000);
-    expect(expanded).toEqual(compact);
+  });
 
-    const turns = Array.from({ length: 42 }, (_, index) => turn(index + 1, `prompt ${index + 1}`, ""));
-    const expandedWindow = cliTranscriptWindow(turns, expanded.turns, expanded.blocks, expanded.textChars);
-    expect(expandedWindow.hiddenTurns).toBeGreaterThan(2);
-    expect(expandedWindow.turns[0]?.id).toBeGreaterThan(3);
+  it("uncaps the render window when output is expanded", () => {
+    const expanded = cliRenderBudget(18, 80, true);
+
+    expect(expanded).toEqual({
+      turns: Number.POSITIVE_INFINITY,
+      blocks: Number.POSITIVE_INFINITY,
+      blocksPerTurn: Number.POSITIVE_INFINITY,
+      textChars: Number.POSITIVE_INFINITY,
+    });
+  });
+
+  it("keeps every turn, block, and character inside the expanded transcript window", () => {
+    const completed = Array.from({ length: 50 }, (_, index): TranscriptTurn => ({
+      id: index + 1,
+      prompt: `prompt ${index + 1}`,
+      assistantText: "",
+      statusLines: [],
+      blocks: Array.from({ length: 90 }, (_unused, blockIndex) => ({
+        kind: "status" as const,
+        id: `tool:${index}:${blockIndex}`,
+        state: "completed" as const,
+        text: `tool ${index}:${blockIndex}`,
+      })),
+    }));
+    const expanded = cliRenderBudget(18, 80, true);
+
+    const window = cliTranscriptWindow(
+      completed, expanded.turns, expanded.blocks, expanded.textChars, expanded.blocksPerTurn,
+    );
+
+    expect(window.turns).toHaveLength(50);
+    expect(window.hiddenTurns).toBe(0);
+    expect(window.hiddenBlocks).toBe(0);
+    expect(window.turns[0]?.blocks).toHaveLength(90);
+  });
+
+  it("keeps full text, tool details, and prompts when the text budget is uncapped", () => {
+    const source: TranscriptTurn = {
+      id: 1,
+      prompt: "p".repeat(20_000),
+      assistantText: "",
+      statusLines: [],
+      blocks: [
+        { kind: "text", text: "x".repeat(40_000) },
+        {
+          kind: "status", id: "tool", state: "completed", text: "tool",
+          tool: { name: "Inspect", input: {} },
+          details: "d".repeat(40_000),
+        },
+      ],
+    };
+
+    const bounded = boundedCliTurn(source, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+
+    expect(bounded.hiddenBlocks).toBe(0);
+    expect(bounded.turn.prompt).toHaveLength(20_000);
+    expect((bounded.turn.blocks[0] as { text: string }).text).toHaveLength(40_000);
+    expect((bounded.turn.blocks[1] as { details?: string }).details).toHaveLength(40_000);
+  });
+
+  it("points the per-turn hidden-items notice at the expand shortcut", () => {
+    const source: TranscriptTurn = {
+      id: 1,
+      prompt: "work",
+      assistantText: "",
+      statusLines: [],
+      blocks: [
+        { kind: "status", id: "old", state: "completed", text: "old" },
+        { kind: "status", id: "mid", state: "completed", text: "mid" },
+        { kind: "status", id: "new", state: "completed", text: "new" },
+      ],
+    };
+
+    const bounded = boundedCliTurn(source, 1);
+
+    expect((bounded.turn.blocks[0] as { text: string }).text)
+      .toContain(`${outputToggleShortcut()} to view all`);
   });
 
   it("passes the CLI instance identity into the production runtime", () => {
@@ -1505,8 +1577,29 @@ describe("TerminalLayout", () => {
     expect(plain).toContain("src/file-10.ts");
     expect(plain).not.toContain("lines hidden");
     expect(plain).not.toContain("earlier turns");
-    expect(plain).toContain(`${outputToggleShortcut()} collapse tools`);
+    expect(plain).toContain(`${outputToggleShortcut()} collapse all output`);
     expect(plain).not.toContain("collapse tool output");
+  });
+
+  it("reveals the whole session when output is expanded on a long transcript", () => {
+    const label = (index: number) => `prompt-${String(index + 1).padStart(2, "0")}`;
+    const completed = Array.from({ length: 30 }, (_unused, index) => turn(index + 1, label(index), ""));
+    const render = (expandedOutput: boolean) => stripAnsi(renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={completed}
+      input="" promptCursor={0} columns={90} rows={200} activeSession={false}
+      expandedOutput={expandedOutput}
+    />, { columns: 90 }));
+
+    const compact = render(false).replace(/\s+/gu, " ");
+    expect(compact).toContain("hidden to keep the terminal responsive");
+    expect(compact).toContain(`${outputToggleShortcut()} to view all`);
+    expect(compact).not.toContain(label(0));
+    expect(compact).toContain(label(29));
+
+    const expanded = render(true).replace(/\s+/gu, " ");
+    expect(expanded).not.toContain("hidden to keep the terminal responsive");
+    expect(expanded).toContain(label(0));
+    expect(expanded).toContain(label(29));
   });
 
   it("folds generic tool details without ever folding assistant conversation", () => {

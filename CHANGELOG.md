@@ -6,16 +6,36 @@
 
 ## [1.4.3-beta.2] - 2026-09-19
 
+### 新增
+- 交互式 CLI 退出后打印会话恢复提示 `Resume later with: flavor --resume <sessionId>`，仅在本次运行确实生成了 sessionId 时输出。
+- `shutdownRuntime` 接受 `onSessionEnd` 回调，在清理动作开始前交出当前 sessionId；优雅关闭与看门狗强退路径都只触发一次，回调抛错只上报而不阻断退出流程。
+- `flavor --print` 无头模式增强：新增 `--output-format`（`text`/`json`/`stream-json`）、`--permission-mode`、`--allowed-tools`、`--model` 四个选项；`--print` 的提示词改为可选参数，未提供时从 stdin 管道读取，便于脚本化与 CI 调用。`json` 格式在结束时输出单个 result 对象（含 sessionId、result、usage、errors、exitCode），`stream-json` 每个事件输出一行 JSON；`--allowed-tools` 支持 `Read`（精确）、`mcp__docs__*`（前缀）、`Shell(npm test:*)`（命令前缀）三类自动放行模式，非法标识符会被拒绝。
+
 ### 改进
+- `Ctrl+O` 展开输出模式解除 CLI 视口渲染上限（回合数、输出项总量、每回合输出项与文本字符均不再截断），长会话也能完整回看；收起后恢复按终端尺寸的响应性预算。此前展开态仍受硬上限约束（见 1.4.1-beta.2）。
+- 折叠态的隐藏提示现在直接指向展开快捷键：逐回合的「N earlier output items hidden…」与会话顶部的「… N earlier turns and M output items hidden…」均追加「· Ctrl+O to view all」。
+- 底部快捷键说明由「expand/collapse tools」改为「expand all output / collapse all output」，与该开关的实际作用范围一致。
 - `ApplyPatch` 接受无行号的 `@@` 裸 hunk 头：无坐标时按上下文在整个文件内唯一精确匹配重定位，匹配歧义则在写入前报错并列出候选行号。
 - 带行号的 hunk 在声明行漂移超过 100 行搜索半径后，仍会依据唯一精确上下文自动重定位（此前直接失败），错误信息区分「漂移后歧义」与「不匹配」。
 - 自动剥离模型输出中包裹补丁的 ```` ```diff ```` Markdown 围栏，包括围栏后的多余空行；CRLF 补丁体同样被规范化。
 - 应用后回写的 hunk 行号基于实际匹配位置重算，工具回执中的增删行号与文件真实位置一致。
 - 工具描述、输入 schema 与系统提示词同步说明新的 `@@` 头与全文件重定位行为。
+- CLI 冷启动性能：将纯 JS 依赖打包进 dist chunk（tsup `noExternal`），消除 Node ESM loader 对 node_modules 中数百个小文件的逐个 stat/read/parse（Windows Defender 逐文件扫描是冷启动主因，实测冷态 17s+、暖态 0.35s）；`node-pty`、`@vscode/ripgrep`、`web-tree-sitter`、`tree-sitter-wasms` 等需从自身目录解析原生二进制或 WASM 资源的模块保持 `external`。
+- 轻量命令免进程重启：`init`/`update`/`doctor`/`skills`/`memory`/`mcp`/`eval`/`help`/`completion` 以及 `--version`/`--help` 等命令跳过带 V8 诊断 flag（`--heap-prof`、`--report-on-fatalerror` 等）的 relaunch 直接执行，`--version` 与 `doctor --json` 约 107ms 返回，且不再生成 heapprofile 产物。
+- CLI 重模块懒加载：入口顶部改为 type-only 导入，`production`/`doctor`/`update`/`skills`/`eval`/`rpc`/`trace` 等运行时模块改为在命令 action 内按需 `await import()`；`flavor doctor` 等命令不再加载庞大的 production 依赖图。
+
+### 修复
+- 修复滚轮偶发「滚不动 / 滚不到会话底部」：鼠标悬停在任务面板上时若面板整体重建布局（如双栏与单栏随子代理数量切换），旧节点已被卸载就不再补发 `onMouseLeave`，滚轮路由状态卡在任务面板上，之后所有滚动都被送进没有溢出内容的任务栏、transcript 一动不动。现在 hover 集合清理时对已卸载节点同样补发 leave，下一次鼠标移动（哪怕只是移向输入框的几格）就会把滚轮路由归还 transcript。
 
 ### 测试与维护
+- 新增展开态预算解除、展开态窗口保留全部回合与输出项、无限文本预算不截断 prompt/正文/工具明细、隐藏提示指向 `Ctrl+O`、长会话展开后首个回合可见等回归测试。
+- 新增 `onSessionEnd` 四条路径（优雅关闭、看门狗超时强退、无 runtime、回调抛错）与退出恢复提示输出（含无 sessionId 时不输出）的回归测试。
 - 新增裸头多 hunk、越半径重定位、歧义/无上下文拒绝、围栏与尾部空行剥离、CRLF 补丁、`/dev/null` 裸头建文件及跨 hunk 行号编号等回归测试。
 - 压测验证：10 万行文件 800 个漂移 hunk 重定位 197ms、5000 hunk 补丁 70ms；600 个随机畸形补丁 fuzz 全部保持失败不写入的原子性；路径逃逸补丁被拒绝。
+- 新增滚轮回归测试：长会话上滚后下滚到底、CJK 宽字符换行内容、流式输出期间滚轮追底、批量滚轮合并、触控板上下抖动五种场景均能抵达真实底部；另新增 hover 节点被卸载时仍补发 `onMouseLeave` 的回归测试。
+- 压测验证（滚轮与 hover）：5000 轮「悬停中卸载重建」循环 enter/leave 计数完全平衡、零状态残留（约 0.29ms/轮）；572 行大 transcript 上 1500 个随机混合滚轮事件期间 scrollTop 始终处于合法区间，停止乱滚后纯下滚 5 步即回到底部并恢复 sticky 跟随。
+- 新增 CLI P0 优化回归测试：launcher 轻量命令识别（`isLightCommand`/`isStaticUsageError`）、`--print` 三种输出格式与选项透传、headless 工具白名单编译与匹配（`compileHeadlessToolAllowlist`/`matchesHeadlessAllowlist`，含非法标识符拒绝）；`tsc --noEmit` 通过，全仓 2282 个用例通过。
+- e2e 冒烟（真实模型调用）验证 `flavor --print --output-format json` 返回 `{"result":"OK",...,"exitCode":0}`、`stream-json` 输出逐行事件加末尾 result；`build:cli` 与 production-cli-check 通过。
 - `package.json` 与 `package-lock.json` 的项目版本更新为 `1.4.3-beta.2`。
 
 ## [1.4.3-beta.1] - 2026-09-18
@@ -936,7 +956,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
-| 1.4.3-beta.2 | 2026-09-19 | ApplyPatch 加固：接受裸 `@@` 头并按唯一上下文全文件重定位、行号大幅漂移自动重定位、剥离 Markdown 围栏与尾部空行、回执行号按实际位置重算；fuzz 与压测保证失败原子性与毫秒级性能 |
+| 1.4.3-beta.2 | 2026-09-19 | ApplyPatch 加固：接受裸 `@@` 头并按唯一上下文全文件重定位、行号大幅漂移自动重定位、剥离 Markdown 围栏与尾部空行、回执行号按实际位置重算；fuzz 与压测保证失败原子性与毫秒级性能。CLI 退出打印 `--resume` 恢复提示；`Ctrl+O` 展开解除渲染上限；修复任务面板 hover 残留劫持滚轮导致滚不到底部 |
 | 1.4.3-beta.1 | 2026-09-18 | Electron 桌面端新增 Agent 可操作的内置浏览器（八个 Browser 工具、快照元素引用、操作可视化覆盖层与 SSRF/脱敏安全策略）；新增 shell-doctor 守护插件；修复 zh-CN PowerShell 7 命令未找到识别与测试环境 NODE_ENV 问题 |
 | 1.4.2 | 2026-09-17 | 斜杠/文件补全菜单悬浮化避免输入行错乱；macOS 剪贴板复制粘贴与图片读取修复；未命中 `/文本` 按普通消息发送；工具输出折叠跨平台统一 `Ctrl+O` 并与普通对话解耦 |
 | 1.4.1 | 2026-09-11 | Esc 中断、历史草稿恢复/持久化与跨平台反向搜索、可审阅审批参数及 acceptEdits 入口、跨平台完整输出模式 |

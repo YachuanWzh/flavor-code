@@ -173,3 +173,46 @@ it("does not force-exit when disposal finishes within the watchdog", async () =>
   await new Promise((resolve) => setTimeout(resolve, 400));
   expect(forceExit).not.toHaveBeenCalled();
 });
+
+it("notifies onSessionEnd exactly once with the runtime sessionId on graceful shutdown", async () => {
+  const exit = vi.fn();
+  const onSessionEnd = vi.fn();
+  const runtime = { sessionId: "session-abc", session: { close: async () => undefined }, dispose: async () => undefined } as unknown as ProductionRuntime;
+  await shutdownRuntime(runtime, exit, () => undefined, { onSessionEnd });
+  expect(onSessionEnd).toHaveBeenCalledTimes(1);
+  expect(onSessionEnd).toHaveBeenCalledWith("session-abc");
+  expect(exit).toHaveBeenCalledOnce();
+});
+
+it("notifies onSessionEnd exactly once even when disposal hangs past the shutdown watchdog", async () => {
+  const exit = vi.fn();
+  const forceExit = vi.fn();
+  const onSessionEnd = vi.fn();
+  const hangingClose = vi.fn(() => new Promise<void>(() => undefined));
+  const runtime = { sessionId: "session-abc", session: { close: hangingClose }, dispose: vi.fn(async () => undefined) } as unknown as ProductionRuntime;
+  await shutdownRuntime(runtime, exit, () => undefined, { shutdownTimeoutMs: 25, forceExit, onSessionEnd });
+  expect(onSessionEnd).toHaveBeenCalledTimes(1);
+  expect(onSessionEnd).toHaveBeenCalledWith("session-abc");
+  expect(exit).toHaveBeenCalledOnce();
+  await vi.waitFor(() => expect(forceExit).toHaveBeenCalledOnce());
+  expect(onSessionEnd).toHaveBeenCalledTimes(1);
+});
+
+it("does not notify onSessionEnd when no runtime was created", async () => {
+  const exit = vi.fn();
+  const onSessionEnd = vi.fn();
+  await shutdownRuntime(undefined, exit, () => undefined, { onSessionEnd });
+  expect(onSessionEnd).not.toHaveBeenCalled();
+  expect(exit).toHaveBeenCalledOnce();
+});
+
+it("does not let a throwing onSessionEnd callback break shutdown", async () => {
+  const exit = vi.fn();
+  const errors: string[] = [];
+  const onSessionEnd = vi.fn(() => { throw new Error("callback failed"); });
+  const runtime = { sessionId: "session-abc", session: { close: async () => undefined }, dispose: async () => undefined } as unknown as ProductionRuntime;
+  await shutdownRuntime(runtime, exit, (message) => errors.push(message), { onSessionEnd });
+  expect(onSessionEnd).toHaveBeenCalledTimes(1);
+  expect(errors.join(" ")).toContain("callback failed");
+  expect(exit).toHaveBeenCalledOnce();
+});

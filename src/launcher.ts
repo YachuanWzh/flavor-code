@@ -28,6 +28,60 @@ export function needsRelaunch(runtime: LauncherRuntime): boolean {
   return !runtime.execArgv.some((argument) => argument === "--expose-gc");
 }
 
+/**
+ * Short-lived commands that never create a production runtime. They do not
+ * need the heap-watermark flags or a crash scene, so skipping the relaunch
+ * saves one Node startup (and the stray heap-profile artifact a nonzero
+ * `doctor`/`eval` exit would otherwise retain).
+ */
+const LIGHT_CLI_COMMANDS = new Set([
+  "init", "update", "doctor", "skills", "memory", "mcp", "eval", "help", "completion",
+]);
+
+/** True when argv selects a light subcommand instead of the runtime-bearing default action. */
+export function isLightCommand(argv: readonly string[]): boolean {
+  for (const argument of argv) {
+    if (argument === "--") break;
+    if (argument.startsWith("-") && argument !== "-") {
+      // Long-lived broker runs keep the full diagnostic relaunch.
+      if (argument === "--pals-broker" || argument.startsWith("--pals-broker=")) return false;
+      if (/^-(?:[vh]|.*version\b|.*help\b)/u.test(argument)) return true;
+      continue;
+    }
+    // The first positional argument decides: a known light subcommand never
+    // creates a runtime; anything else (or no argument at all) enters the
+    // runtime-bearing default action and keeps the full relaunch.
+    return LIGHT_CLI_COMMANDS.has(argument);
+  }
+  return false;
+}
+
+const OUTPUT_FORMAT_VALUES = new Set(["text", "json", "stream-json"]);
+const PERMISSION_MODE_VALUES = new Set(["default", "plan", "acceptEdits", "bypassPermissions"]);
+
+/**
+ * True for statically detectable --print usage errors (bad --output-format or
+ * --permission-mode values). The CLI rejects them before creating a runtime,
+ * so the heavy relaunch — and the heap-profile artifact a nonzero exit would
+ * retain — is pure waste.
+ */
+export function isStaticUsageError(argv: readonly string[]): boolean {
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    const value = (flag: string, allowed: Set<string>): boolean | undefined => {
+      if (argument === flag) {
+        const next = argv[index + 1];
+        return next !== undefined && !next.startsWith("-") && !allowed.has(next);
+      }
+      if (argument?.startsWith(`${flag}=`)) return !allowed.has(argument.slice(flag.length + 1));
+      return undefined;
+    };
+    if (value("--output-format", OUTPUT_FORMAT_VALUES) === true) return true;
+    if (value("--permission-mode", PERMISSION_MODE_VALUES) === true) return true;
+  }
+  return false;
+}
+
 /** Machines with room to spare get a larger heap: longer rotation cycles, fewer restarts per day. */
 const HEAP_HEADROOM_MB = 8192;
 const HEAP_HEADROOM_MIN_TOTALMEM = 12 * 1024 * 1024 * 1024;
@@ -84,7 +138,7 @@ export async function launchCli(): Promise<void> {
     execArgv: process.execArgv,
   };
 
-  if (!needsRelaunch(runtime)) {
+  if (isLightCommand(process.argv.slice(2)) || isStaticUsageError(process.argv.slice(2)) || !needsRelaunch(runtime)) {
     const cli = await import(mainUrl.href) as typeof import("./cli.js");
     await cli.runCli(process.argv);
     return;

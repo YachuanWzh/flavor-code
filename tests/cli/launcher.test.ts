@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { cliMainArguments, needsRelaunch } from "../../src/launcher.js";
+import { cliMainArguments, isLightCommand, isStaticUsageError, needsRelaunch } from "../../src/launcher.js";
 
 const GB = 1024 * 1024 * 1024;
 const totalmem = vi.hoisted(() => vi.fn(() => 8 * 1024 * 1024 * 1024));
@@ -59,5 +59,38 @@ describe("CLI runtime launcher", () => {
     // Below the headroom floor the default V8 limit stands.
     totalmem.mockReturnValue(8 * GB);
     expect(cliMainArguments("/opt/flavor/cli-main.js", [])).not.toContain("--max-old-space-size=8192");
+  });
+});
+
+describe("light command detection", () => {
+  it("skips the relaunch for short-lived subcommands that never create a runtime", () => {
+    for (const argv of [
+      ["--version"], ["-v"], ["--help"], ["-h"], ["help"],
+      ["doctor"], ["doctor", "--json", "C:\\work"], ["init"], ["init", "subdir"],
+      ["update"], ["skills"], ["skills", "list"], ["memory", "list"], ["mcp", "list"],
+      ["eval", "spec.json"], ["completion", "bash"],
+    ]) {
+      expect(isLightCommand(argv), argv.join(" ")).toBe(true);
+    }
+  });
+
+  it("keeps the full diagnostic relaunch for runtime-bearing invocations", () => {
+    for (const argv of [
+      [], ["--print", "hello"], ["-p"], ["--resume", "session-1"], ["--mode", "rpc"],
+      ["--pal-name", "buddy"], ["--pals-broker", "\\\\.\\pipe\\flavor-code-pals-u-0123456789abcdef-v1"],
+      ["unknown-command"],
+    ]) {
+      expect(isLightCommand(argv), argv.join(" ")).toBe(false);
+    }
+  });
+
+  it("detects static --print usage errors so they never pay for the relaunch", () => {
+    expect(isStaticUsageError(["--print", "hi", "--output-format", "bogus"])).toBe(true);
+    expect(isStaticUsageError(["-p", "hi", "--output-format=xml"])).toBe(true);
+    expect(isStaticUsageError(["-p", "hi", "--permission-mode", "yolo"])).toBe(true);
+    expect(isStaticUsageError(["-p", "hi", "--output-format", "json"])).toBe(false);
+    expect(isStaticUsageError(["-p", "hi", "--permission-mode", "acceptEdits"])).toBe(false);
+    expect(isStaticUsageError(["--print", "hi"])).toBe(false);
+    expect(isStaticUsageError([])).toBe(false);
   });
 });

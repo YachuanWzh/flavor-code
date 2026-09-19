@@ -116,10 +116,12 @@ export function dispatchHover(
   for (const old of hovered) {
     if (!next.has(old)) {
       hovered.delete(old)
-      // Skip handlers on detached nodes (removed between mouse events)
-      if (old.parentNode) {
-        ;(old._eventHandlers as EventHandlerProps | undefined)?.onMouseLeave?.()
-      }
+      // Fire leave on detached nodes too (removed between mouse events):
+      // consumers mirror hover into app state (e.g. the CLI's wheel-scroll
+      // routing to the task panel), and skipping the callback here strands
+      // that shadow state on a node the pointer already left. Handlers run
+      // without geometry reads, so a detached node is safe to notify.
+      ;(old._eventHandlers as EventHandlerProps | undefined)?.onMouseLeave?.()
     }
   }
   for (const n of next) {

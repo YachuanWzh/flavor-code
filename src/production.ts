@@ -47,7 +47,7 @@ import { OAuthCallbackAuthProvider } from "./auth/oauth.js";
 import { createFileTokenStore, retainOnlyCredentials } from "./auth/store.js";
 import { oauthCredentialId } from "./auth/oauth-config.js";
 import type { AuthResult, OAuthLlmConfig } from "./auth/types.js";
-import type { PermissionProfile, PermissionRequest } from "./permissions/engine.js";
+import type { PermissionMode, PermissionProfile, PermissionRequest } from "./permissions/engine.js";
 import { loadPermissionPolicy } from "./permissions/policy.js";
 import { buildCurrentDateSection, buildRuntimeEnvironmentSection, buildSubagentDirective, buildSystemPrompt, type PromptEnvironment } from "./prompts/system.js";
 import type { ApprovalDecision } from "./tools/runtime.js";
@@ -213,6 +213,12 @@ export interface ProductionRuntimeOptions {
   onToolsChange?(): void;
   /** Non-interactive callers must deny requests instead of waiting for input. */
   approvalPolicy?: "prompt" | "deny";
+  /** Override the resolved permission mode for this runtime (CLI --permission-mode). Takes precedence over recovered and configured modes. */
+  permissionMode?: PermissionMode;
+  /** Override the main model for this runtime (CLI --model), validated against the registry and any PKCE allowlist. */
+  modelOverride?: string;
+  /** Tool patterns auto-approved when approvalPolicy is "deny" (CLI --allowed-tools), e.g. "Read", "mcp__docs__*", "Shell(npm test:*)". */
+  headlessToolAllowlist?: readonly string[];
   /** Allow a protocol host to resolve tool approvals without enabling other interactive UI bridges. */
   rpcToolApprovals?: boolean;
   /** Optional pre-commit gate used by protocol hosts to stream a proposed text write before it reaches disk. */
@@ -486,9 +492,14 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   });
   diagnostics.push(...permissionPolicy.diagnostics);
   const approvals = new ApprovalBridge(options.onApprovalChange);
-  const resolveToolApproval = options.approvalPolicy === "deny" && options.rpcToolApprovals !== true
-    ? () => "deny" as ApprovalDecision
-    : (request: PermissionRequest & { reason?: string }, signal: AbortSignal) => approvals.request(request, signal);
+  const headlessAllowlist = options.approvalPolicy === "deny" && options.rpcToolApprovals !== true
+    ? compileHeadlessToolAllowlist(options.headlessToolAllowlist ?? [])
+    : undefined;
+  const resolveToolApproval = headlessAllowlist === undefined
+    ? (request: PermissionRequest & { reason?: string }, signal: AbortSignal) => approvals.request(request, signal)
+    : (request: PermissionRequest & { reason?: string }) => matchesHeadlessAllowlist(headlessAllowlist, request)
+      ? "allow" as ApprovalDecision
+      : "deny" as ApprovalDecision;
   const relayQuestions = async (qs: Parameters<AskUserQuestionHandler>[0], signal: AbortSignal) => {
     if (options.approvalPolicy === "deny") throw new Error("AskUserQuestion is not available in non-interactive mode");
     // Hook-relayed UIs (e.g. the Flavor Island desktop app) get first refusal:
@@ -799,6 +810,20 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const selectedModels = selectModels(config, registeredProviders, diagnostics);
   let mainModel = effectiveLlm === undefined ? (recovered?.models.main ?? selectedModels.main) : selectedModels.main;
   let childModel = effectiveLlm === undefined ? (recovered?.models.subagent ?? selectedModels.child) : selectedModels.child;
+  if (options.modelOverride !== undefined) {
+    const override = options.modelOverride;
+    // Same guard as services.setModel: a PKCE login restricts the usable models.
+    if (effectiveLlm !== undefined) {
+      const parsed = parseModelId(override);
+      if (parsed.provider !== effectiveLlm.providerId || !effectiveLlm.models.includes(parsed.model)) {
+        throw new Error(`Model "${override}" is not allowed by the current PKCE configuration.`);
+      }
+    }
+    // Throws on an unknown or malformed id so a bad --model fails fast at startup.
+    registry.get(override);
+    mainModel = override;
+  }
+  const initialPermissionMode = options.permissionMode ?? recovered?.permissionMode ?? config.permissionMode;
   let taskPlan: TaskPlan | undefined = recovered?.tasks.plan;
   let taskGraph: TaskGraph | undefined = recovered?.tasks.graph;
   let taskStates: Record<string, "pending" | "running" | "completed" | "failed" | "blocked" | "cancelled"> = { ...(recovered?.tasks.states ?? {}) };
@@ -1011,8 +1036,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         buildRuntimeEnvironmentSection({
           model: agent === "main" && harnessCreated ? harness.mainModelId : contextModelId,
           permissionMode: agent === "subagent"
-            ? ((harnessCreated ? harness.permissionMode : (recovered?.permissionMode ?? config.permissionMode)) === "plan" ? "plan" : "bubble")
-            : (harnessCreated ? harness.permissionMode : (recovered?.permissionMode ?? config.permissionMode)),
+            ? ((harnessCreated ? harness.permissionMode : initialPermissionMode) === "plan" ? "plan" : "bubble")
+            : (harnessCreated ? harness.permissionMode : initialPermissionMode),
         }),
       ],
       ...(flavor === undefined ? {} : { flavor }),
@@ -1045,7 +1070,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   harness = new LocalHarness({
     registry, hooks, workspace, mainModelId: mainModel, subagentModelId: childModel,
     hallucinationGuard,
-    tools, createContext, permissionMode: recovered?.permissionMode ?? config.permissionMode,
+    tools, createContext, permissionMode: initialPermissionMode,
     permissionPolicy,
     maxIterationsMain: config.maxIterations.main,
     maxIterationsSubagent: config.maxIterations.subagent,
@@ -3087,6 +3112,64 @@ function providerCheapDefault(type: string | undefined): string | undefined {
 }
 function safeProvider(modelId: string): string {
   try { return parseModelId(modelId).provider; } catch { return modelId.split(":", 1)[0] ?? modelId; }
+}
+
+interface HeadlessAllowlistEntry {
+  /** Exact tool name match. */
+  tool?: string;
+  /** `pattern*` matches any tool name starting with the pattern. */
+  prefix?: string;
+  /** `Shell(prefix:*)` additionally requires the raw shell command to start with prefix. */
+  command?: string;
+}
+
+/**
+ * Compiles CLI --allowed-tools patterns for headless runs. Supported forms:
+ * `Read` (exact tool), `mcp__docs__*` (name prefix), `Shell(npm test:*)`
+ * (shell command prefix). Malformed patterns are ignored.
+ */
+export function compileHeadlessToolAllowlist(patterns: readonly string[]): readonly HeadlessAllowlistEntry[] {
+  const entries: HeadlessAllowlistEntry[] = [];
+  for (const raw of patterns) {
+    const pattern = raw.trim();
+    if (pattern.length === 0) continue;
+    const shell = /^(?:Shell|Bash|Command|Exec)\((.+)\)$/u.exec(pattern);
+    if (shell !== null) {
+      const spec = shell[1] ?? "";
+      const tool = pattern.slice(0, shell[0].indexOf("("));
+      if (spec.endsWith(":*")) entries.push({ tool, command: spec.slice(0, -2) });
+      continue;
+    }
+    const name = pattern.endsWith("*") ? pattern.slice(0, -1) : pattern;
+    // Tool names are identifier-shaped; reject anything else (e.g. "Broken(").
+    if (name.length === 0 || !/^[\w.:-]+$/u.test(name)) continue;
+    if (pattern.endsWith("*")) entries.push({ prefix: name });
+    else entries.push({ tool: pattern });
+  }
+  return entries;
+}
+
+/**
+ * Decides whether an "ask" permission request is pre-approved by the headless
+ * allowlist. Monotonic denials from the permission engine never reach here,
+ * and wrapped/opaque shell commands are never auto-approved.
+ */
+export function matchesHeadlessAllowlist(
+  entries: readonly HeadlessAllowlistEntry[],
+  request: Pick<PermissionRequest, "tool" | "command" | "args">,
+): boolean {
+  for (const entry of entries) {
+    if (entry.prefix !== undefined) {
+      if (request.tool.startsWith(entry.prefix)) return true;
+      continue;
+    }
+    if (entry.tool !== request.tool) continue;
+    if (entry.command === undefined) return true;
+    if (request.args !== undefined || request.command === undefined) return false;
+    if (/\b(?:sh|bash|zsh|cmd|powershell|pwsh|call)\b/i.test(request.command)) return false;
+    if (request.command.startsWith(entry.command)) return true;
+  }
+  return false;
 }
 
 function promptEnvironmentValue(value: string | undefined): string {
