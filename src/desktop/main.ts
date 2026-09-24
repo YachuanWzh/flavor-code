@@ -370,6 +370,15 @@ function createDesktopController(workspace?: string, owner?: ManagedDesktopTask)
     },
     createRuntime: async (runtimeOptions) => createProductionRuntime({
       ...runtimeOptions,
+      islandSessionTitle: (sessionId) => {
+        const project = workspace ?? runtimeOptions.workspace;
+        if (project === undefined) return undefined;
+        const custom = workbench.sessionMeta[sessionMetaKey(project, sessionId)]?.title?.trim();
+        if (custom) return custom;
+        const summary = owner?.snapshot.sessions.find((item) => item.sessionId === sessionId)
+          ?? managedProjects.get(project)?.snapshot.sessions.find((item) => item.sessionId === sessionId);
+        return summary?.preview?.trim();
+      },
       islandControl: {
         focus: () => {
           const target = mainWindow;

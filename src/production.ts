@@ -237,6 +237,8 @@ export interface ProductionRuntimeOptions {
   pluginSandbox?: boolean;
   /** Optional host affordance exposed to the local Flavor Island control channel. */
   islandControl?: { focus?(): void | Promise<void> };
+  /** Current desktop task title for the companion island; read on every hook. */
+  islandSessionTitle?: (sessionId: string) => string | undefined;
   /** Explicitly opt into CLI-local collaboration. Omit for print/RPC/eval callers. */
   collaboration?: {
     instanceId: string;
@@ -459,6 +461,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       protocolVersion: 2,
       workspace,
       ...(hookSessionId === undefined ? {} : { sessionId: hookSessionId }),
+      ...(hookSessionId === undefined || options.islandSessionTitle === undefined
+        ? {} : { sessionTitle: options.islandSessionTitle(hookSessionId) }),
       ...(islandControlMetadata === undefined ? {} : {
         islandControlEndpoint: islandControlMetadata.endpoint,
         islandControlToken: islandControlMetadata.token,
