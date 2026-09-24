@@ -2,7 +2,12 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.3 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.4-beta.1 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.4-beta.1] - 2026-09-25
+
+### 修复
+- 修复 CLI 审批 / 提问 / 队列面板弹出时替换整个界面的问题：1.4.3 引入的全屏 `FocusedCliPanel` 在审批等待期间会隐藏上方的对话 transcript、任务面板与输入行，短内容时标题钉顶、快捷键钉底、中间撑出大片空白（如未知工具审批仅一行理由时），长会话中用户完全看不到待审批操作对应的上下文。现在面板恢复 1.4.3 前底部固定区的定位方式——按内容计算高度（含折行估算，上限为半屏与终端行数-3 的较小值）、嵌入 prompt 上方紧凑渲染，transcript 照常可见并自然让出空间；内容超高时面板内滚动区仍可翻阅，超短终端下标题与快捷键提示保持可见；面板同时恢复 1.4.3 前的 `┌─ / │ / └─` 边框前缀（与记忆确认卡、变更回执同一视觉惯例），与上方 transcript 内容明确区分。
 
 ## [1.4.3] - 2026-09-24
 

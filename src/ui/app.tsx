@@ -1669,7 +1669,14 @@ export function TerminalLayout({
   );
 
   const memoryReviewRows = memoryReviews.length === 0 ? 0 : 5;
-  const fixedBottomRows = memoryReviewRows
+  const focusedOpen = approval !== undefined || (questions !== undefined && questions.length > 0) || queueOpen;
+  const focusedRows = focusedOpen
+    ? Math.min(
+      focusedPanelNaturalRows({ approval, approvalExpanded, questions, questionIndex, queueOpen, pendingPrompts, columns, rows }),
+      Math.min(Math.max(4, rows - 3), Math.max(6, Math.floor(rows / 2))),
+    )
+    : 0;
+  const fixedBottomRows = focusedRows + memoryReviewRows
     + (pendingPrompts.length === 0 ? 0 : 1) + imageAttachments.length
     + (clipboardNotice === undefined ? 0 : 1) + (activeSession ? 1 : 0) + 2;
   const taskPanelRows = taskPanelViewportRows(rows, fixedBottomRows, activeTaskBlocks.length > 0);
@@ -1699,18 +1706,8 @@ export function TerminalLayout({
   } else {
     footerHint = `Enter send · ↑↓/Ctrl/Cmd+R history · ${outputShortcut} ${expandedOutput ? "collapse all output" : "expand all output"} · Ctrl+C exit`;
   }
-  if (approval !== undefined || (questions !== undefined && questions.length > 0) || queueOpen) {
-    return <FocusedCliPanel
-      rows={rows} columns={columns} input={input} promptCursor={promptCursor}
-      {...(approval === undefined ? {} : { approval })} approvalExpanded={approvalExpanded}
-      {...(questions === undefined ? {} : { questions })} questionIndex={questionIndex} customQuestionActive={customQuestionActive}
-      pendingPrompts={pendingPrompts} queueSelection={queueSelection}
-      {...(onQueueSelectionChange === undefined ? {} : { onQueueSelectionChange })}
-      {...(focusScrollRef === undefined ? {} : { focusScrollRef })}
-    />;
-  }
   return <Box height={rows} width="100%" flexDirection="column" overflow="hidden">
-    {showWelcome ? <Box flexGrow={1} flexShrink={1} flexDirection="column" overflow="hidden">
+    {showWelcome && !focusedOpen ? <Box flexGrow={1} flexShrink={1} flexDirection="column" overflow="hidden">
       <WelcomeCard model={model} {...(serviceName === undefined ? {} : { serviceName })} workspaceName={workspaceName} {...(updateTo === undefined ? {} : { updateTo })} columns={columns} availableRows={Math.max(0, rows - taskPanelRows - fixedBottomRows - 1)} />
     </Box> : <ScrollBox {...(scrollRef === undefined ? {} : { ref: scrollRef })} flexGrow={1} flexDirection="column" stickyScroll>
       <Text dimColor>{"flavor · "}{model}{" · "}{workspaceName}</Text>
@@ -1755,6 +1752,14 @@ export function TerminalLayout({
         </Box>
       )}
       <Box flexDirection="column" flexShrink={0} maxHeight={bottomMaxRows} width="100%" overflowY="hidden">
+        {!focusedOpen ? null : <FocusedCliPanel
+          rows={rows} panelRows={focusedRows} columns={columns}
+          {...(approval === undefined ? {} : { approval })} approvalExpanded={approvalExpanded}
+          {...(questions === undefined ? {} : { questions })} questionIndex={questionIndex} customQuestionActive={customQuestionActive}
+          pendingPrompts={pendingPrompts} queueSelection={queueSelection}
+          {...(onQueueSelectionChange === undefined ? {} : { onQueueSelectionChange })}
+          {...(focusScrollRef === undefined ? {} : { focusScrollRef })}
+        />}
         {memoryReviews.length === 0 ? null : <MemoryReviewCards reviews={memoryReviews} autoDismissSeconds={memoryAutoDismissSeconds} />}
         {!activeSession ? null : <Text color="cyan" wrap="truncate-end">
           {columns < 48 ? "Running · Enter queues · /queue list" : "Running · /queue manage · Enter queues next · /steer acts now"}
@@ -1826,14 +1831,49 @@ export function ideFooterPresentation(context: IdeEditorContext | undefined): st
   return `${count} ${count === 1 ? "line" : "lines"} selected`;
 }
 
+// Height budget for the focused panel block, mirroring the branch order and
+// chrome rows of FocusedCliPanel so the bottom area reserves exactly what the
+// panel renders (capped by the caller against half the terminal height).
+function focusedPanelNaturalRows({
+  approval, approvalExpanded, questions, questionIndex, queueOpen, pendingPrompts, columns, rows,
+}: {
+  approval: SessionApprovalRequest | undefined;
+  approvalExpanded: boolean;
+  questions: readonly Question[] | undefined;
+  questionIndex: number;
+  queueOpen: boolean;
+  pendingPrompts: readonly QueuedPrompt[];
+  columns: number;
+  rows: number;
+}): number {
+  if (approval !== undefined) {
+    const allowAlways = !isDestructiveTool(approval.tool) && approval.allowAlways !== false;
+    const detail = approvalExpanded ? approvalDetailLines(approval) : [];
+    const contentRows = wrappedRows(approval.reason ?? "This action needs permission.", columns)
+      + detail.reduce((total, line) => total + wrappedRows(line, columns), 0);
+    return 1 + Math.max(contentRows, 1) + 2 + (allowAlways && columns < 36 && rows >= 5 ? 1 : 0);
+  }
+  const question = questions?.[Math.min(questionIndex, questions.length - 1)];
+  if (question !== undefined) {
+    const contentRows = wrappedRows(question.question, columns)
+      + question.options.reduce((total, option) => total + wrappedRows(`${option.label}${option.description ? `  ${option.description}` : ""}`, columns), 0)
+      + 1;
+    return 1 + Math.max(contentRows, 1) + 1;
+  }
+  if (queueOpen) return 1 + Math.max(1, pendingPrompts.length) + 2;
+  return 0;
+}
+
+// The focused panel renders as a compact block inside the fixed bottom area —
+// like the pre-1.4.3 `┌─ approval ─` block — so the transcript stays visible
+// above it; height follows content rows and its content scrolls when capped.
 function FocusedCliPanel({
-  rows, columns, input, promptCursor, approval, approvalExpanded, questions, questionIndex,
+  rows, panelRows, columns, approval, approvalExpanded, questions, questionIndex,
   customQuestionActive, pendingPrompts, queueSelection, onQueueSelectionChange, focusScrollRef,
 }: {
   rows: number;
+  panelRows: number;
   columns: number;
-  input: string;
-  promptCursor: number;
   approval?: SessionApprovalRequest;
   approvalExpanded: boolean;
   questions?: readonly Question[];
@@ -1843,50 +1883,56 @@ function FocusedCliPanel({
   queueSelection: number;
   onQueueSelectionChange?: (index: number) => void;
   focusScrollRef?: React.RefObject<ScrollBoxHandle | null>;
-}): React.JSX.Element {
+}): React.JSX.Element | null {
   if (approval !== undefined) {
     const allowAlways = !isDestructiveTool(approval.tool) && approval.allowAlways !== false;
     const narrow = columns < 36;
-    return <Box height={rows} width="100%" flexDirection="column" overflow="hidden">
-      <Text bold color="magenta" wrap="truncate-end">Approval · {approval.tool}</Text>
-      <ScrollBox {...(focusScrollRef === undefined ? {} : { ref: focusScrollRef })} flexGrow={1} flexDirection="column">
-        <Text color="magentaBright" wrap="wrap">{approval.reason ?? "This action needs permission."}</Text>
-        {approvalExpanded ? approvalDetailLines(approval).map((line, index) => (
-          <Text key={`${approval.id}:detail:${index}`} color="magentaBright" wrap="wrap">{line}</Text>
+    const detailLines = approvalExpanded ? approvalDetailLines(approval) : [];
+    const chromeRows = 3 + (allowAlways && narrow && rows >= 5 ? 1 : 0);
+    const thirdHint = allowAlways && narrow && rows >= 5;
+    return <Box width="100%" height={panelRows} flexDirection="column" flexShrink={0} overflow="hidden">
+      <Text bold color="magenta" wrap="truncate-end">{"┌─ "}Approval · {approval.tool}</Text>
+      <ScrollBox {...(focusScrollRef === undefined ? {} : { ref: focusScrollRef })} height={Math.max(1, panelRows - chromeRows)} flexDirection="column">
+        <Text color="magentaBright" wrap="wrap">{"│ "}{approval.reason ?? "This action needs permission."}</Text>
+        {approvalExpanded ? detailLines.map((line, index) => (
+          <Text key={`${approval.id}:detail:${index}`} color="magentaBright" wrap="wrap">{"│ "}{line}</Text>
         )) : null}
       </ScrollBox>
-      <Text bold color="magenta" wrap="truncate-end">{narrow ? "y once · n deny" : "y=once · n=deny · Esc=deny"}</Text>
-      <Text color="magenta" wrap="truncate-end">{narrow ? "v details · e edits" : "v=details · e=accept edits"}{allowAlways && !narrow ? " · a=same-type" : ""}</Text>
-      {allowAlways && narrow && rows >= 5 ? <Text color="magenta" wrap="truncate-end">a same-type · Esc deny</Text> : null}
+      <Text bold color="magenta" wrap="truncate-end">{"│ "}{narrow ? "y once · n deny" : "y=once · n=deny · Esc=deny"}</Text>
+      <Text color="magenta" wrap="truncate-end">{thirdHint ? "│ " : "└─ "}{narrow ? "v details · e edits" : "v=details · e=accept edits"}{allowAlways && !narrow ? " · a=same-type" : ""}</Text>
+      {thirdHint ? <Text color="magenta" wrap="truncate-end">{"└─ "}a same-type · Esc deny</Text> : null}
     </Box>;
   }
   const question = questions?.[Math.min(questionIndex, questions.length - 1)];
   if (question !== undefined) {
-    return <Box height={rows} width="100%" flexDirection="column" overflow="hidden">
-      <Text bold color="cyan" wrap="truncate-end">Question {questionIndex + 1}/{questions!.length} · {question.header}</Text>
-      <ScrollBox {...(focusScrollRef === undefined ? {} : { ref: focusScrollRef })} flexGrow={1} flexDirection="column">
-        <Text color="cyanBright" wrap="wrap">{question.question}</Text>
+    return <Box width="100%" height={panelRows} flexDirection="column" flexShrink={0} overflow="hidden">
+      <Text bold color="cyan" wrap="truncate-end">{"┌─ "}Question {questionIndex + 1}/{questions!.length} · {question.header}</Text>
+      <ScrollBox {...(focusScrollRef === undefined ? {} : { ref: focusScrollRef })} height={Math.max(1, panelRows - 2)} flexDirection="column">
+        <Text color="cyanBright" wrap="wrap">{"│ "}{question.question}</Text>
         {question.options.map((option, index) => <Text key={index} color="cyan" wrap="wrap">
-          <Text bold color="green">{index + 1}. {option.label}</Text>{option.description ? `  ${option.description}` : ""}
+          <Text bold color="green">{"│ "}{index + 1}. {option.label}</Text>{option.description ? `  ${option.description}` : ""}
         </Text>)}
-        <Text color="cyan">{question.options.length + 1}. Custom input</Text>
+        <Text color="cyan">{"│ "}{question.options.length + 1}. Custom input</Text>
       </ScrollBox>
-      {customQuestionActive ? <PromptLine input={input} pastedBlocks={[]} cursor={promptCursor} columns={columns} maxVisibleLines={Math.max(1, Math.min(3, Math.floor(rows / 3)))} /> : null}
-      <Text color="cyan" wrap="truncate-end">{customQuestionActive
+      <Text color="cyan" wrap="truncate-end">{"└─ "}{customQuestionActive
         ? columns < 40 ? "Enter answer · Esc choices" : "Enter=answer · Esc=choices · PgUp/PgDn=scroll"
         : columns < 40 ? `1-${question.options.length + 1} choose · Esc cancel` : `1-${question.options.length + 1}=choose · Esc=cancel · PgUp/PgDn=scroll`}</Text>
     </Box>;
   }
-  return <Box height={rows} width="100%" flexDirection="column" overflow="hidden">
-    <Text bold color="yellow" wrap="truncate-end">Queued messages ({pendingPrompts.length})</Text>
-    <ScrollBox {...(focusScrollRef === undefined ? {} : { ref: focusScrollRef })} flexGrow={1} flexDirection="column">
+  return <Box width="100%" height={panelRows} flexDirection="column" flexShrink={0} overflow="hidden">
+    <Text bold color="yellow" wrap="truncate-end">{"┌─ "}Queued messages ({pendingPrompts.length})</Text>
+    <ScrollBox {...(focusScrollRef === undefined ? {} : { ref: focusScrollRef })} height={Math.max(1, panelRows - 3)} flexDirection="column">
       <QueueItems items={pendingPrompts} selection={queueSelection}
         {...(focusScrollRef === undefined ? {} : { scrollRef: focusScrollRef })}
         {...(onQueueSelectionChange === undefined ? {} : { onSelect: onQueueSelectionChange })} />
     </ScrollBox>
-    <Text bold color="yellow" wrap="truncate-end">{columns < 48 ? "Enter edit · d cancel" : "Enter=edit selected · d=cancel selected"}</Text>
-    <Text color="yellow" wrap="truncate-end">{columns < 48 ? "↑↓ select · Esc close" : "↑/↓=select · PgUp/PgDn=jump · Esc=close"}</Text>
+    <Text bold color="yellow" wrap="truncate-end">{"│ "}{columns < 48 ? "Enter edit · d cancel" : "Enter=edit selected · d=cancel selected"}</Text>
+    <Text color="yellow" wrap="truncate-end">{"└─ "}{columns < 48 ? "↑↓ select · Esc close" : "↑/↓=select · PgUp/PgDn=jump · Esc=close"}</Text>
   </Box>;
+}
+
+function wrappedRows(text: string, columns: number): number {
+  return Math.max(1, Math.ceil(stringWidth(text) / Math.max(20, columns)));
 }
 
 function QueueItems({ items, selection, scrollRef, onSelect }: {
