@@ -9,6 +9,7 @@ export interface WelcomeCardProps {
   workspaceName: string;
   updateTo?: string;
   columns: number;
+  availableRows?: number;
 }
 
 const WIDE_WELCOME_COLUMNS = 72;
@@ -20,9 +21,17 @@ const FLAVOR_WORDMARK = [
 ].join("\n");
 
 export function WelcomeCard({
-  model, serviceName, workspaceName, updateTo, columns,
+  model, serviceName, workspaceName, updateTo, columns, availableRows = Number.POSITIVE_INFINITY,
 }: WelcomeCardProps): React.JSX.Element {
-  const wide = Math.max(1, Math.floor(columns)) >= WIDE_WELCOME_COLUMNS;
+  const wide = Math.max(1, Math.floor(columns)) >= WIDE_WELCOME_COLUMNS
+    && availableRows >= 9 + Math.max(serviceName === undefined ? 0 : 1, updateTo === undefined ? 0 : 1);
+  const minimal = availableRows < 6 + (updateTo === undefined ? 0 : 2);
+  if (minimal) {
+    return <Box width="100%" flexDirection="column">
+      <Text bold color={FLAVOR_ACCENT} wrap="truncate-end">◆ Flavor Code</Text>
+      {availableRows >= 2 ? <Text dimColor wrap="truncate-end">{updateTo === undefined ? "/help · /init" : `▲ Update v${updateTo} · flavor update`}</Text> : null}
+    </Box>;
+  }
   const updateHint = updateTo === undefined ? null : (
     <Text color="yellowBright" wrap="wrap">
       {"▲ "}Update available: v{packageVersion()} {"\u2192"} v{updateTo}

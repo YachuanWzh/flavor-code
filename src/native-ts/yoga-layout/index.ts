@@ -1112,7 +1112,13 @@ function layoutNode(
     // Same-generation check covers fresh-mounted (dirty) nodes during
     // virtual scroll — the dirty chain invokes them ≥2^depth times, first
     // call writes cache, rest hit: 105k visits → ~10k for 1593-node tree.
-    if (node._cN > 0 && (sameGen || !node.isDirty_)) {
+    // The multi-entry cache stores dimensions, not child positions. Reusing
+    // an older layout entry after A→B→A restores the parent's width/height
+    // but leaves its children at B's coordinates, causing overlapping text
+    // after a resize or a panel height change. Measure passes need only the
+    // dimensions; layout passes may reuse only the latest _hasL entry above
+    // (or a leaf, which has no child positions to restore).
+    if (node._cN > 0 && (sameGen || !node.isDirty_) && (!performLayout || node.children.length === 0)) {
       const cIn = node._cIn!
       for (let i = 0; i < node._cN; i++) {
         const o = i * 8

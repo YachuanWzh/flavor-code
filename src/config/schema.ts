@@ -91,6 +91,9 @@ export const FlavorConfigSchema = z.object({
   skills: z.object({
     disabled: z.array(SkillNameSchema).max(1_000).default([]),
   }).prefault({}),
+  globalInstructions: z.object({
+    enabled: z.boolean().default(true),
+  }).prefault({}),
   agents: z
     .object({
       main: z.object({ model: z.string() }).optional(),

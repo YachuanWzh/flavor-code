@@ -147,6 +147,28 @@ OpenAI-protocol providers default `thinkingEffort` to `high`. Supported values a
 
 Runtime behavior and configuration conventions for OAuth PKCE are described in the [PKCE spec](./docs/specs/pkce-runtime-config.md). The [config schema](./src/config/schema.ts) is the source of truth for all fields.
 
+### Global coding instructions
+
+Coding rules shared across projects are stored in `~/.flavor-code/GLOBAL.md`. You can edit the file manually or use explicit commands to manage single-line Markdown list items. Flavor Code never extracts or writes global rules automatically from conversation. The limit is 64 KiB. Main agents, subagents, and loop workers receive the rules. Edits or deletion are read before the next model call and appended to the current conversation without rewriting its existing prompt-cache prefix.
+
+```text
+/global                         show the path and all rules
+/global remember Keep tests focused  add one rule
+/global forget Keep tests focused    remove one matching list item
+```
+
+`forget` tries an exact text match first, then a unique partial match. It refuses ambiguous matches and preserves other hand-written Markdown.
+
+This feature is enabled by default. Disable it in global or project `flavor.json`:
+
+```json
+{
+  "globalInstructions": { "enabled": false }
+}
+```
+
+When disabled, `GLOBAL.md` is neither read nor injected, and `/global` cannot write it. The default local Shell and terminal still run with the current user's filesystem permissions; use an isolated execution environment if agent-run commands must be unable to modify this file.
+
 ## Entry Points
 
 | Entry point | Best for | How to start |
@@ -184,6 +206,9 @@ Common commands:
 | `/audit` | View tool failure audits |
 
 You can submit steering or queue follow-ups while a run is in progress; once the current model response finishes, the task picks up new instructions at safe boundaries.
+While a run is active, Enter queues the text for the next turn; `/steer <message>` changes the current turn. Type `/queue` to inspect all queued messages, use Up/Down to select one, Enter to move it back to the draft, or `d` to cancel it. Escape closes the queue; outside that view it restores the latest queued message for editing.
+
+When reading older output, a status line indicates if new output has arrived. Press End to return to the latest output, Home to jump to the top, or Ctrl+Up/Down to move between visible turns. Approval and question views keep their action keys visible while their details scroll with PageUp/PageDown or the mouse wheel.
 
 During planned work, a wide CLI shows the main task plan and sub-agent exploration side by side; if only one track exists it uses the full row, and narrow terminals stack both tracks. Long streamed responses keep a live `Writing response` activity below the latest output. LSP tools locate the nearest nested project configuration for each target file, so monorepos and sandbox/worktree projects do not need a `tsconfig.json` or `jsconfig.json` at the Flavor workspace root; JavaScript and CommonJS files are supported by the bundled TypeScript server as well.
 

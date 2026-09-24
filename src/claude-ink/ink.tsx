@@ -309,8 +309,12 @@ export default class Ink {
   // blank→paint flicker). useVirtualScroll's height scaling already bounds
   // the per-resize cost; synchronous handling keeps dimensions consistent.
   private handleResize = () => {
-    const cols = this.options.stdout.columns || 80;
-    const rows = this.options.stdout.rows || 24;
+    const cols = this.options.stdout.columns ?? 80;
+    const rows = this.options.stdout.rows ?? 24;
+    // Integrated terminals can report zero cells while their panel is
+    // hidden. Rendering a 24-row fallback into that viewport scrolls the
+    // alternate buffer and makes the next diff start at the wrong row.
+    if (cols < 1 || rows < 1) return;
     // Terminals often emit 2+ resize events for one user action (window
     // settling). Same-dimension events are no-ops; skip to avoid redundant
     // frame resets and renders.
@@ -344,13 +348,12 @@ export default class Ink {
     // layout is updated, causing a mismatch between viewport and content dimensions.
     if (this.currentNode !== null) {
       this.render(this.currentNode);
-      // A columns-only resize can produce no host mutations when the tree is
-      // entirely percentage-width. React then skips resetAfterCommit, so the
-      // Yoga root keeps its old width even though terminalColumns changed.
-      // Detect that no-op commit and perform the same layout + paint fallback
-      // synchronously; otherwise memoized transcript rows retain stale widths
-      // until some unrelated state update happens.
-      if (this.rootNode.yogaNode?.getComputedWidth() !== this.terminalColumns) {
+      // React can skip the host commit when a resize changes only available
+      // space. Width alone misses row-only changes; in the alternate screen
+      // the root must match both terminal dimensions before we can paint.
+      const layout = this.rootNode.yogaNode;
+      if (layout?.getComputedWidth() !== cols ||
+          (this.altScreenActive && layout?.getComputedHeight() !== rows)) {
         this.rootNode.onComputeLayout?.();
         this.onRender();
       }
@@ -433,6 +436,10 @@ export default class Ink {
     if (this.isUnmounted || this.isPaused) {
       return;
     }
+    if (this.options.stdout.isTTY &&
+      ((this.options.stdout.columns ?? 80) < 1 || (this.options.stdout.rows ?? 24) < 1)) {
+      return;
+    }
     // Entering a render cancels any pending drain tick — this render will
     // handle the drain (and re-schedule below if needed). Prevents a
     // wheel-event-triggered render AND a drain-timer render both firing.
@@ -447,8 +454,11 @@ export default class Ink {
     // an extra React re-render cycle.
     flushInteractionTime();
     const renderStart = performance.now();
-    const terminalWidth = this.options.stdout.columns || 80;
-    const terminalRows = this.options.stdout.rows || 24;
+    // handleResize updates these together with TerminalSizeContext. Reading
+    // stdout directly here can pair the new viewport with the old Yoga tree
+    // between the terminal's resize event and React's commit.
+    const terminalWidth = this.terminalColumns;
+    const terminalRows = this.terminalRows;
     const frame = this.renderer({
       frontFrame: this.frontFrame,
       backFrame: this.backFrame,

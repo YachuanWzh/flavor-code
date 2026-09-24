@@ -155,9 +155,10 @@ export function isXtermJs(): boolean {
 // accepts modifyOtherKeys and doesn't forward the kitty sequence to the outer
 // terminal.
 const EXTENDED_KEYS_TERMINALS = [
-  'iTerm.app',
+  // env.terminal is normalized to lowercase in utils/env.ts.
+  'iterm.app',
   'kitty',
-  'WezTerm',
+  'wezterm',
   'ghostty',
   'tmux',
   'windows-terminal',
@@ -165,8 +166,8 @@ const EXTENDED_KEYS_TERMINALS = [
 
 /** True if this terminal correctly handles extended key reporting
  *  (Kitty keyboard protocol + xterm modifyOtherKeys). */
-export function supportsExtendedKeys(): boolean {
-  return EXTENDED_KEYS_TERMINALS.includes(env.terminal ?? '')
+export function supportsExtendedKeys(terminal = env.terminal): boolean {
+  return EXTENDED_KEYS_TERMINALS.includes(terminal?.toLowerCase() ?? '')
 }
 
 /** True if the terminal scrolls the viewport when it receives cursor-up

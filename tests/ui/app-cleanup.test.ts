@@ -39,6 +39,18 @@ it("queues multiple pending CLI prompts and returns the latest one for editing o
   expect(pending.size).toBe(0);
 });
 
+it("removes a selected queued message without changing the order of the others", () => {
+  const pending = new PendingPromptQueue();
+  pending.queue("first");
+  pending.queue("second");
+  pending.queue("third");
+
+  expect(pending.removeAt(1)?.text).toBe("second");
+  expect(pending.values.map(({ text }) => text)).toEqual(["first", "third"]);
+  expect(pending.removeAt(4)).toBeUndefined();
+  expect(pending.values.map(({ text }) => text)).toEqual(["first", "third"]);
+});
+
 it("undoes and redoes recent prompt edits while clearing redo after a new edit", () => {
   const history = new PromptEditHistory();
   const empty = { text: "", cursor: 0, pastedBlocks: [], imageAttachments: [] };

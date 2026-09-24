@@ -534,6 +534,27 @@ describe("OpenAIModelAdapter", () => {
     expect(JSON.stringify(body).match(/prompt_cache_breakpoint/g)).toHaveLength(3);
   });
 
+  it("keeps the OpenAI cache route and stable breakpoint when global instructions change", async () => {
+    const stream = vi.fn((_body?: unknown) => events());
+    const adapter = new OpenAIModelAdapter({ client: asOpenAIClient({ responses: { stream } }) });
+    const messages = (rule: string) => [
+      { role: "system" as const, content: "stable rules", cacheBreakpoint: true },
+      { role: "system" as const, content: `Global instructions\n${rule}` },
+      { role: "user" as const, content: "first", cacheBreakpoint: true },
+      { role: "assistant" as const, content: "reply", cacheBreakpoint: true },
+      { role: "user" as const, content: "second", cacheBreakpoint: true },
+    ];
+
+    await collect(adapter.stream({ ...request, messages: messages("Rule A") }));
+    await collect(adapter.stream({ ...request, messages: messages("Rule B") }));
+
+    const first = stream.mock.calls[0]?.[0] as { prompt_cache_key?: string; input?: unknown };
+    const second = stream.mock.calls[1]?.[0] as { prompt_cache_key?: string; input?: unknown };
+    expect(second.prompt_cache_key).toBe(first.prompt_cache_key);
+    expect(JSON.stringify(first.input)).toContain('"text":"stable rules","prompt_cache_breakpoint"');
+    expect(JSON.stringify(second.input)).toContain('"text":"stable rules","prompt_cache_breakpoint"');
+  });
+
   it("downgrades once when an OpenAI-compatible endpoint rejects explicit cache controls", async () => {
     let attempt = 0;
     const stream = vi.fn((_body?: unknown) => {

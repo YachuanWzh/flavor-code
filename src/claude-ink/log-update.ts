@@ -144,7 +144,7 @@ export class LogUpdate {
       next.viewport.height < prev.viewport.height ||
       (prev.viewport.width !== 0 && next.viewport.width !== prev.viewport.width)
     ) {
-      return fullResetSequence_CAUSES_FLICKER(next, 'resize', stylePool)
+      return fullResetSequence_CAUSES_FLICKER(next, 'resize', stylePool, altScreen)
     }
 
     // DECSTBM scroll optimization: when a ScrollBox's scrollTop changed,
@@ -216,7 +216,7 @@ export class LogUpdate {
       logForDebugging(
         `Full reset (shrink->below): prevHeight=${prev.screen.height}, nextHeight=${next.screen.height}, viewport=${prev.viewport.height}`,
       )
-      return fullResetSequence_CAUSES_FLICKER(next, 'offscreen', stylePool)
+      return fullResetSequence_CAUSES_FLICKER(next, 'offscreen', stylePool, altScreen)
     }
 
     if (
@@ -240,7 +240,7 @@ export class LogUpdate {
       if (scrollbackChangeY >= 0) {
         const prevLine = readLine(prev.screen, scrollbackChangeY)
         const nextLine = readLine(next.screen, scrollbackChangeY)
-        return fullResetSequence_CAUSES_FLICKER(next, 'offscreen', stylePool, {
+        return fullResetSequence_CAUSES_FLICKER(next, 'offscreen', stylePool, altScreen, {
           triggerY: scrollbackChangeY,
           prevLine,
           nextLine,
@@ -268,6 +268,7 @@ export class LogUpdate {
           next,
           'offscreen',
           this.options.stylePool,
+          altScreen,
         )
       }
 
@@ -381,7 +382,7 @@ export class LogUpdate {
       }
     })
     if (needsFullReset) {
-      return fullResetSequence_CAUSES_FLICKER(next, 'offscreen', stylePool, {
+      return fullResetSequence_CAUSES_FLICKER(next, 'offscreen', stylePool, altScreen, {
         triggerY: resetTriggerY,
         prevLine: readLine(prev.screen, resetTriggerY),
         nextLine: readLine(next.screen, resetTriggerY),
@@ -401,7 +402,8 @@ export class LogUpdate {
       undefined,
     )
 
-    // Handle growth: render new rows directly (they naturally scroll the terminal)
+    // Main-screen growth creates rows with LF. Alternate-screen rows already
+    // exist, so moving to them must never scroll the viewport.
     if (growing) {
       renderFrameSlice(
         screen,
@@ -409,6 +411,7 @@ export class LogUpdate {
         prev.screen.height,
         next.screen.height,
         stylePool,
+        !altScreen,
       )
     }
 
@@ -505,11 +508,12 @@ function fullResetSequence_CAUSES_FLICKER(
   frame: Frame,
   reason: FlickerReason,
   stylePool: StylePool,
+  altScreen: boolean,
   debug?: { triggerY: number; prevLine: string; nextLine: string },
 ): Diff {
   // After clearTerminal, cursor is at (0, 0)
   const screen = new VirtualScreen({ x: 0, y: 0 }, frame.viewport.width)
-  renderFrame(screen, frame, stylePool)
+  renderFrame(screen, frame, stylePool, !altScreen)
   return [{ type: 'clearTerminal', reason, debug }, ...screen.diff]
 }
 
@@ -517,13 +521,15 @@ function renderFrame(
   screen: VirtualScreen,
   frame: Frame,
   stylePool: StylePool,
+  allowScroll: boolean,
 ): void {
-  renderFrameSlice(screen, frame, 0, frame.screen.height, stylePool)
+  renderFrameSlice(screen, frame, 0, frame.screen.height, stylePool, allowScroll)
 }
 
 /**
  * Render a slice of rows from the frame's screen.
- * Each row is rendered followed by a newline. Cursor ends at (0, endY).
+ * Main-screen rows end with LF to create scrollback. Alternate-screen rows
+ * use cursor movement only, so painting the final row cannot scroll it.
  */
 function renderFrameSlice(
   screen: VirtualScreen,
@@ -531,6 +537,7 @@ function renderFrameSlice(
   startY: number,
   endY: number,
   stylePool: StylePool,
+  allowScroll = true,
 ): VirtualScreen {
   let currentStyleId = stylePool.none
   let currentHyperlink: Hyperlink = undefined
@@ -548,7 +555,11 @@ function renderFrameSlice(
     // when the cursor is at the viewport bottom, moveCursorTo's
     // cursor-down silently fails, creating a permanent off-by-one
     // between the virtual cursor and the real terminal cursor.
-    if (screen.cursor.y < y) {
+    if (!allowScroll) {
+      // Alternate-screen rows already exist. LF at the last row scrolls the
+      // whole screen and leaves the physical cursor one row out of sync.
+      moveCursorTo(screen, 0, y)
+    } else if (screen.cursor.y < y) {
       const rowsToAdvance = y - screen.cursor.y
       screen.txn(prev => {
         const patches: Diff = new Array<Diff[number]>(1 + rowsToAdvance)
@@ -595,8 +606,8 @@ function renderFrameSlice(
         lastRenderedStyleId = cell.styleId
       }
     }
-    // Reset styles/hyperlinks before newline so background color doesn't
-    // bleed into the next line when the terminal scrolls. The old code
+    // Reset styles/hyperlinks before advancing so background color doesn't
+    // bleed into the next line. The old code
     // reset implicitly by writing trailing unstyled spaces; now that we
     // skip empty cells, we must reset explicitly.
     currentStyleId = transitionStyle(
@@ -613,7 +624,9 @@ function renderFrameSlice(
     // CR+LF at end of row — \r resets to column 0, \n moves to next line.
     // Without \r, the terminal cursor stays at whatever column content ended
     // (since we skip trailing spaces, this can be mid-row).
-    screen.txn(prev => [[CARRIAGE_RETURN, NEWLINE], { dx: -prev.x, dy: 1 }])
+    if (allowScroll) {
+      screen.txn(prev => [[CARRIAGE_RETURN, NEWLINE], { dx: -prev.x, dy: 1 }])
+    }
   }
 
   // Reset any open style/hyperlink at end of slice

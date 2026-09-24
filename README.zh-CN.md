@@ -147,6 +147,28 @@ OpenAI 协议 Provider 的 `thinkingEffort` 默认值为 `high`，支持 `minima
 
 OAuth PKCE 的运行时行为与配置约定见 [PKCE 规范](./docs/specs/pkce-runtime-config.md)。完整配置字段以 [配置 Schema](./src/config/schema.ts) 为准。
 
+### 全局编程规范
+
+跨项目编程规范存放在 `~/.flavor-code/GLOBAL.md`。可以手动编辑文件，也可以使用明确的命令管理单行 Markdown 列表项；Flavor Code 不会从对话自动提取或写入全局规范。文件大小上限为 64 KiB。主 Agent、子 Agent 和 loop worker 都会收到这些规范。编辑或删除文件后，下一次模型调用会读取新内容，并把变更追加到当前会话，不改写已有的 prompt cache 前缀。
+
+```text
+/global                         显示文件路径和全部规范
+/global remember 保持测试聚焦    添加一条规范
+/global forget 保持测试聚焦      删除唯一匹配的列表项
+```
+
+`forget` 优先按完整文本匹配，其次按唯一的部分文本匹配；匹配到多条时不会删除。文件中的其他手写 Markdown 会保留。
+
+默认启用。可在全局或项目 `flavor.json` 中关闭：
+
+```json
+{
+  "globalInstructions": { "enabled": false }
+}
+```
+
+关闭时不会读取或注入 `GLOBAL.md`，`/global` 修改命令也不会写入。默认本地 Shell 和终端仍以当前用户权限运行；若需要阻止 Agent 执行的命令修改该文件，需另行使用隔离执行环境。
+
 ## 使用入口
 
 | 入口 | 适合场景 | 启动方式 |
@@ -184,6 +206,9 @@ OAuth PKCE 的运行时行为与配置约定见 [PKCE 规范](./docs/specs/pkce-
 | `/audit` | 查看工具失败审计 |
 
 运行中可以提交 steering 或排队 follow-up；当前模型响应结束后，任务会在安全边界处接收新指令。
+运行中按 Enter 会把输入排到下一轮；输入 `/steer <内容>` 会影响当前回合。输入 `/queue` 可查看全部待发送消息，用上下键选中，按 Enter 移回输入框编辑，或按 `d` 取消。Esc 关闭队列视图；在普通输入界面则会取回最后一条待发送消息供编辑。
+
+查看较早输出时，状态栏会提示是否有新内容。按 End 回到最新输出，Home 跳到顶部，Ctrl+上下键在当前可见的回合间跳转。审批和提问界面的操作键固定显示，详情可用 PageUp/PageDown 或鼠标滚轮翻阅。
 
 有任务规划时，宽终端会把主任务计划与子 Agent 探索左右并排展示；只有一类工作时占满整行，窄终端则自动纵向排列。长内容流式输出期间，最新内容下方会持续显示 `Writing response` 动作。LSP 工具会从目标文件向上寻找最近的嵌套项目配置，因此 monorepo、sandbox 或 worktree 项目无需在 Flavor 工作区根部额外放置 `tsconfig.json` / `jsconfig.json`；内置 TypeScript 服务也支持 JavaScript 与 CommonJS 文件。
 

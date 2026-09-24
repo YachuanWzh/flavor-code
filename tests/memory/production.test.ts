@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -67,6 +67,84 @@ async function workspace(memory: Record<string, unknown>, config: Record<string,
 }
 
 describe("production long-term memory", () => {
+  it("supports /global show, remember, and forget in one running session", async () => {
+    const root = await workspace({ enabled: false });
+    const notices: string[] = [];
+    const runtime = await createProductionRuntime({
+      workspace: root, home: root, environment: {},
+      output: (event) => { if (event.type === "notice") notices.push(event.message); },
+    });
+    const path = join(root, ".flavor-code", "GLOBAL.md");
+
+    await runtime.session.submit("/global");
+    expect(notices.at(-1)).toContain("No global instructions stored.");
+    await runtime.session.submit("/global remember Keep tests focused.");
+    expect(await readFile(path, "utf8")).toContain("- Keep tests focused.");
+    await runtime.session.submit("/global");
+    expect(notices.at(-1)).toContain("Keep tests focused.");
+    await runtime.session.submit("Check global rule after remember");
+    const requests = (globalThis as { __flavorMemoryRequests?: Array<Array<{ content: string }>> })
+      .__flavorMemoryRequests ?? [];
+    const first = requests.find((messages) => messages.some((message) => message.content === "Check global rule after remember"))!;
+    expect(first.some((message) => message.content.includes("Keep tests focused."))).toBe(true);
+
+    await runtime.session.submit("/global forget Keep tests focused.");
+    expect(notices.at(-1)).toContain("Forgot global rule.");
+    await runtime.session.submit("Check global rule after forget");
+    const second = requests.find((messages) => messages.some((message) => message.content === "Check global rule after forget"))!;
+    expect(second.some((message) => message.content.includes("disregard all earlier global instructions"))).toBe(true);
+    await runtime.dispose();
+  });
+
+  it("loads user-written global instructions by default and refreshes edits without rewriting the epoch", async () => {
+    const root = await workspace({ enabled: false });
+    const path = join(root, ".flavor-code", "GLOBAL.md");
+    await mkdir(join(root, ".flavor-code"));
+    await writeFile(path, "Use explicit names.");
+    const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
+
+    await runtime.session.submit("First global-rules check");
+    await writeFile(path, "Keep tests focused.");
+    await runtime.session.submit("Second global-rules check");
+
+    const requests = (globalThis as { __flavorMemoryRequests?: Array<Array<{ role: string; content: string; cacheBreakpoint?: boolean }>> })
+      .__flavorMemoryRequests ?? [];
+    const first = requests.find((messages) => messages.some((message) => message.content === "First global-rules check"))!;
+    const second = requests.find((messages) => messages.some((message) => message.content === "Second global-rules check"))!;
+    expect(first.some((message) => message.content === "Global instructions\nUse explicit names.")).toBe(true);
+    expect(second.some((message) => message.content.includes("These replace all earlier global instructions.\nKeep tests focused."))).toBe(true);
+    const prefix = (messages: typeof first) => {
+      let boundary = -1;
+      messages.forEach((message, index) => { if (message.cacheBreakpoint) boundary = index; });
+      return JSON.stringify(messages.slice(0, boundary + 1));
+    };
+    expect(prefix(second)).toBe(prefix(first));
+    await runtime.dispose();
+  });
+
+  it("does not read or inject global instructions when disabled", async () => {
+    const root = await workspace({ enabled: false }, { globalInstructions: { enabled: false } });
+    await mkdir(join(root, ".flavor-code"));
+    const path = join(root, ".flavor-code", "GLOBAL.md");
+    const original = "x".repeat(65 * 1024);
+    await writeFile(path, original);
+    const notices: string[] = [];
+    const runtime = await createProductionRuntime({
+      workspace: root, home: root, environment: {},
+      output: (event) => { if (event.type === "notice") notices.push(event.message); },
+    });
+
+    await runtime.session.submit("/global remember Should not be stored");
+    expect(notices.at(-1)).toContain("Global instructions are disabled.");
+    expect(await readFile(path, "utf8")).toBe(original);
+    await runtime.session.submit("Disabled global-rules check");
+    const requests = (globalThis as { __flavorMemoryRequests?: Array<Array<{ content: string }>> })
+      .__flavorMemoryRequests ?? [];
+    const main = requests.find((messages) => messages.some((message) => message.content === "Disabled global-rules check"))!;
+    expect(main.some((message) => message.content.startsWith("Global instructions\n"))).toBe(false);
+    await runtime.dispose();
+  });
+
   it("directly analyzes and stores an explicit remember request without waiting for task finish", async () => {
     const root = await workspace({ autoExtract: true });
     const notices: string[] = [];

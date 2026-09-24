@@ -34,6 +34,7 @@ export interface LocalHarnessOptions {
   softLimitFactor?: number;
   extendIterations?: number;
   hasActiveProgress?(): boolean;
+  beforeModelCall?: AgentLoopOptions["beforeModelCall"];
   hallucinationGuard?: HallucinationGuard;
   /** When true, non-destructive tools skip the approval callback. Destructive tools still require confirmation. */
   loopMode?: boolean;
@@ -231,6 +232,7 @@ export class LocalHarness {
         ...(this.#options.softLimitFactor === undefined ? {} : { softLimitFactor: this.#options.softLimitFactor }),
         ...(this.#options.extendIterations === undefined ? {} : { extendIterations: this.#options.extendIterations }),
         ...(isMain && this.#options.hasActiveProgress !== undefined ? { hasActiveProgress: this.#options.hasActiveProgress } : {}),
+        ...(this.#options.beforeModelCall === undefined ? {} : { beforeModelCall: this.#options.beforeModelCall }),
         ...(isMain && this.#options.hallucinationGuard !== undefined ? { hallucinationGuard: this.#options.hallucinationGuard } : {}),
         ...(this.#options.modelJournal === undefined ? {} : { modelJournal: this.#options.modelJournal }),
       });

@@ -29,6 +29,13 @@ it("keeps project sleep review opt-in", () => {
   expect(() => FlavorConfigSchema.parse({ sleep: "yes" })).toThrow();
 });
 
+it("enables user-maintained global instructions by default and validates the switch", () => {
+  expect(FlavorConfigSchema.parse({}).globalInstructions).toEqual({ enabled: true });
+  expect(FlavorConfigSchema.parse({ globalInstructions: { enabled: false } }).globalInstructions)
+    .toEqual({ enabled: false });
+  expect(() => FlavorConfigSchema.parse({ globalInstructions: { enabled: "false" } })).toThrow();
+});
+
 it("uses bounded long-term-memory defaults and validates overrides", () => {
   expect(FlavorConfigSchema.parse({}).memory).toEqual({
     enabled: true,

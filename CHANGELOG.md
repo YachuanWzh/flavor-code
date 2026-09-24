@@ -2,9 +2,9 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.3-beta.2 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.3 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
 
-## [未发布] / Unreleased
+## [1.4.3] - 2026-09-24
 
 ### 新增
 - 新增 `flavor sessions` 子命令族，把已有的会话持久化能力暴露到命令行：`list`（默认，最新在前，`--json`）、`show [session-id]`（会话摘要，省略 id 取最新，`--json`）、`delete <session-id>`、`export <session-id> [--format md|json] [--output <path>]`、`path`。复用 `SessionStore` 的 `list/load/delete`，摘要与导出从时间线轮次提取 prompt/assistantText。
@@ -12,6 +12,7 @@
 - 新增 `setProjectConfigValue` / `unsetProjectConfigValue`：写入项目配置前先用合并态 `loadConfig` 做完整 Schema 校验，非法值（错误枚举、类型、越界）在写盘前抛错并保留原文件与备份不变；`configPathSegments` 拒绝未知顶层键以防拼写错误。
 - 新增 `flavor usage` 子命令，复用 `parseUsageEntries`/`summarizeUsage`/`formatUsageSummary` 汇总当前会话 `usage.jsonl` 的 token 与缓存命中率，支持 `--json` 与 `--path`。
 - Anthropic provider 新增可选 `cacheTtl: "5m" | "1h"`；省略时维持兼容性更广的服务商默认 TTL，长间隔工作流可显式选择一小时缓存。
+- 新增 `/global` 全局编码规范命令：`/global remember <规范>` 写入 `~/.flavor-code/GLOBAL.md`（重复条目自动去重）、`/global forget <规范>` 按子串模糊删除、单独 `/global` 打印当前全部规范及文件路径。规范作为提示缓存断点之后的稳定上下文源注入系统提示，编辑/删除即时广播替换或撤回通知（超出缓存窗口时附带提示），fork 子会话自动继承，可通过 `globalInstructions.enabled` 配置整体禁用；每次模型调用前自动热刷新，磁盘编辑无需重启即生效。
 
 ### 改进
 - 三条新命令均注册为轻量入口（`LIGHT_CLI_COMMANDS`），跳过带 V8 诊断 flag 的 relaunch，与 `init`/`doctor`/`mcp` 一样保持快速冷启动；入口静态导入均为轻量模块（`sessions` 仅类型导入、`config` 校验工具置于 `schema.ts`），重活在 action 内按需 `await import()`。
@@ -26,6 +27,7 @@
 - 新增 `tests/session/cli.test.ts`、`tests/config/cli.test.ts`、`tests/usage/cli.test.ts` 共 17 项单测（注入 fake store/deps），覆盖人读与 `--json` 输出、点路径读取、未知键拒绝、值解析、导出格式校验与路径打印。
 - 在 `tests/config/load.test.ts` 补 `setProjectConfigValue`/`unsetProjectConfigValue` 的真实落盘集成测试，验证合法值持久化、非法值写前拒绝且文件原样保留、以及 `unset` 移除；`tests/cli/launcher.test.ts` 纳入新命令的轻量判定。`tsc --noEmit`、`build:cli` 与 `tests/cli` 全量通过。
 - 新增 OpenAI 稳定路由键、显式断点数量上限、兼容端点自动降级与官方 usage 口径，以及 Anthropic 首轮滚动标记、动态 system 顺序、1 小时 TTL、context epoch append-only 恢复的回归测试。
+- 新增 `tests/context/global-instructions.test.ts` 覆盖 `GLOBAL.md` 的增删、去重与禁用路径，`tests/context/manager.test.ts` 覆盖全局规范在缓存断点后的注入、按序替换、撤回与 fork 继承；修复模型重试审计测试中每次模型调用前的真实文件系统刷新与 fake timers 互锁导致的挂死（改为假时钟推进与真实事件循环让位交替）。
 
 ## [1.4.3-beta.2] - 2026-09-19
 
@@ -979,6 +981,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.4.3 | 2026-09-24 | 新增 `flavor sessions` / `flavor config` / `flavor usage` 三组轻量 CLI 子命令（含 `setProjectConfigValue`/`unsetProjectConfigValue` 写前 Schema 校验）与 `/global` 全局编码规范命令（`GLOBAL.md` 作为缓存断点后的稳定源注入、模型调用前热刷新、可配置禁用）；Anthropic 新增 `cacheTtl: "5m" \| "1h"` 与首轮滚动尾部缓存标记；OpenAI 新增 `prompt_cache_key`、30 分钟隐式缓存与最多三个显式断点并支持兼容端点自动降级；修正 OpenAI usage 统计口径；epoch 动态源改为追加式不可变快照，修复缓存前缀整体失效 |
 | 1.4.3-beta.2 | 2026-09-19 | ApplyPatch 加固：接受裸 `@@` 头并按唯一上下文全文件重定位、行号大幅漂移自动重定位、剥离 Markdown 围栏与尾部空行、回执行号按实际位置重算；fuzz 与压测保证失败原子性与毫秒级性能。CLI 退出打印 `--resume` 恢复提示；`Ctrl+O` 展开解除渲染上限；修复任务面板 hover 残留劫持滚轮导致滚不到底部 |
 | 1.4.3-beta.1 | 2026-09-18 | Electron 桌面端新增 Agent 可操作的内置浏览器（八个 Browser 工具、快照元素引用、操作可视化覆盖层与 SSRF/脱敏安全策略）；新增 shell-doctor 守护插件；修复 zh-CN PowerShell 7 命令未找到识别与测试环境 NODE_ENV 问题 |
 | 1.4.2 | 2026-09-17 | 斜杠/文件补全菜单悬浮化避免输入行错乱；macOS 剪贴板复制粘贴与图片读取修复；未命中 `/文本` 按普通消息发送；工具输出折叠跨平台统一 `Ctrl+O` 并与普通对话解耦 |

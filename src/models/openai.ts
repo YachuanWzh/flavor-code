@@ -395,21 +395,31 @@ function selectExplicitBreakpointIndexes(messages: readonly ModelMessage[]): Set
     .filter((index) => index >= 0);
   const tail = messages.length - 1;
   if (tail >= 0 && indexes.at(-1) !== tail) indexes.push(tail);
-  return new Set(indexes.slice(-MAX_EXPLICIT_CACHE_BREAKPOINTS));
+  const firstNonSystem = messages.findIndex((message) => message.role !== "system");
+  const leadingSystemEnd = firstNonSystem < 0 ? tail : firstNonSystem - 1;
+  const stable = indexes.filter((index) => index <= leadingSystemEnd).at(-1);
+  if (stable === undefined) return new Set(indexes.slice(-MAX_EXPLICIT_CACHE_BREAKPOINTS));
+  return new Set([
+    stable,
+    ...indexes.filter((index) => index !== stable).slice(-(MAX_EXPLICIT_CACHE_BREAKPOINTS - 1)),
+  ]);
 }
 
 function promptCacheKey(request: ModelRequest, sortedTools: readonly ModelRequest["tools"][number][]): string {
-  let stableEnd = -1;
-  request.messages.forEach((message, index) => {
-    if (message.cacheBreakpoint) stableEnd = index;
-  });
   const firstNonSystem = request.messages.findIndex((message) => message.role !== "system");
   const leadingSystemEnd = firstNonSystem < 0 ? request.messages.length - 1 : firstNonSystem - 1;
-  // Dynamic context pinned at the start of an epoch is part of the byte-stable
-  // leading system run even when the provider-neutral breakpoint deliberately
-  // sits earlier. Include it in the routing key to avoid mixing unrelated
-  // prefixes onto the same cache shard.
-  stableEnd = Math.max(stableEnd, leadingSystemEnd);
+  // Dynamic context follows the last stable system breakpoint. Keep its edits
+  // out of the routing key so the reusable prefix stays on the same shard.
+  let stableEnd = -1;
+  for (let index = 0; index <= leadingSystemEnd; index += 1) {
+    if (request.messages[index]?.cacheBreakpoint) stableEnd = index;
+  }
+  if (stableEnd < 0) {
+    request.messages.forEach((message, index) => {
+      if (message.cacheBreakpoint) stableEnd = index;
+    });
+    stableEnd = Math.max(stableEnd, leadingSystemEnd);
+  }
   const stableMessages = stableEnd < 0 ? [] : request.messages.slice(0, stableEnd + 1);
   const digest = createHash("sha256")
     .update(JSON.stringify({ model: request.model, messages: stableMessages, tools: sortedTools }))

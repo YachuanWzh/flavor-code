@@ -1,19 +1,21 @@
 import { basename } from "node:path";
 import { homedir } from "node:os";
-import React, { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import React, { useContext, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import {
   Box,
   ScrollBox,
   Text,
   useApp,
   useInput,
-  useStdout,
   type Key,
   type ScrollBoxHandle,
 } from "../claude-ink/index.js";
+import { TerminalSizeContext } from "../claude-ink/components/TerminalSizeContext.js";
+import type { DOMElement } from "../claude-ink/dom.js";
 import { useAnimationFrame } from "../claude-ink/hooks/use-animation-frame.js";
 import { useHasSelection, useSelection } from "../claude-ink/hooks/use-selection.js";
 import { useTerminalTitle } from "../claude-ink/hooks/use-terminal-title.js";
+import { stringWidth } from "../claude-ink/stringWidth.js";
 import type { ClickEvent } from "../claude-ink/events/click-event.js";
 
 import { createProductionRuntime, type ProductionRuntime, type ProductionRuntimeOptions } from "../production.js";
@@ -84,7 +86,10 @@ import { PromptHistoryStore } from "./prompt-history.js";
 
 export const HISTORY_CAP = 200;
 const CLIPBOARD_SHORTCUT_FALLBACK_MS = 300;
-const BUILTIN_SLASH_CANDIDATES = MVP_COMMANDS.map((name) => ({ name, description: COMMAND_DESCRIPTIONS[name] }));
+const BUILTIN_SLASH_CANDIDATES = [
+  ...MVP_COMMANDS.map((name) => ({ name, description: COMMAND_DESCRIPTIONS[name] })),
+  { name: "queue", description: "Review, edit, or cancel queued follow-ups" },
+];
 const PROMPT_HORIZONTAL_PADDING = 1;
 
 export interface PastedBlock {
@@ -181,6 +186,16 @@ export function isOutputToggleShortcut(
 
 export function outputToggleShortcut(_platform: NodeJS.Platform = process.platform): "Ctrl+O" {
   return "Ctrl+O";
+}
+
+function fitFooterActions(columns: number, actions: readonly string[]): string {
+  let hint = "";
+  for (const action of actions) {
+    const next = hint.length === 0 ? action : `${hint} · ${action}`;
+    if (stringWidth(next) > columns) break;
+    hint = next;
+  }
+  return hint || actions[0] || "";
 }
 
 export function removeLastCliImageOnBackspace(
@@ -331,6 +346,11 @@ export class PendingPromptQueue {
     const value = this.#values.pop();
     return value === undefined ? undefined : cloneQueuedPrompt(value);
   }
+  removeAt(index: number): QueuedPrompt | undefined {
+    if (!Number.isInteger(index) || index < 0 || index >= this.#values.length) return undefined;
+    const value = this.#values.splice(index, 1)[0];
+    return value === undefined ? undefined : cloneQueuedPrompt(value);
+  }
 
   take(): QueuedPrompt | undefined {
     const value = this.#values.shift();
@@ -460,7 +480,7 @@ export function appRuntimeOptions(
 
 export function App({ workspace, home, resumeSession, instanceId, palAlias, onSessionEnd }: FlavorAppProps): React.JSX.Element {
   const { exit } = useApp();
-  const { stdout } = useStdout();
+  const terminalSize = useContext(TerminalSizeContext);
   const [runtime, setRuntime] = useState<ProductionRuntime>();
   const [input, setInput] = useState("");
   const [pastedBlocks, setPastedBlocks] = useState<PastedBlock[]>([]);
@@ -480,16 +500,22 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias, onSe
   const [mentionSelection, setMentionSelection] = useState(0);
   const [dismissedMentionInput, setDismissedMentionInput] = useState<string>();
   const [pendingPrompts, setPendingPrompts] = useState<QueuedPrompt[]>([]);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [queueSelection, setQueueSelection] = useState(0);
+  const queueSelectionRef = useRef(0);
+  const [scrollPosition, setScrollPosition] = useState({ behind: false, newOutput: false });
   const [revision, setRevision] = useState(0);
   const [ideContext, setIdeContext] = useState<IdeEditorContext>();
   const [questionIndex, setQuestionIndex] = useState(0);
   const [questionAnswers, setQuestionAnswers] = useState<Record<number, string>>({});
   const [customQuestionActive, setCustomQuestionActive] = useState(false);
-  const [columns, setColumns] = useState(stdout?.columns ?? 80);
-  const [rows, setRows] = useState(stdout?.rows ?? 24);
+  const columns = terminalSize?.columns ?? 80;
+  const rows = terminalSize?.rows ?? 24;
   const [updateTo, setUpdateTo] = useState<string>();
   const [transcript, dispatch] = useReducer(transcriptReducer, undefined, createTranscriptState);
   const scrollRef = useRef<ScrollBoxHandle>(null);
+  const focusScrollRef = useRef<ScrollBoxHandle>(null);
+  const turnElementsRef = useRef(new Map<number, DOMElement>());
   const mainTaskScrollRef = useRef<ScrollBoxHandle>(null);
   const subagentTaskScrollRef = useRef<ScrollBoxHandle>(null);
   const hoveredTaskTrack = useRef<TaskPanelTrack | null>(null);
@@ -569,6 +595,9 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias, onSe
     const t = textBuf.current;
     if (t.timer !== null) { clearTimeout(t.timer); t.timer = null; }
     if (t.pending.length > 0) {
+      if (scrollRef.current !== null && !scrollRef.current.isSticky()) {
+        setScrollPosition((previous) => previous.newOutput ? previous : { behind: true, newOutput: true });
+      }
       dispatch({ type: "session", event: { type: "text", text: t.pending } });
       t.pending = "";
     }
@@ -618,6 +647,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias, onSe
       if (event.type === "clear") {
         flushStreamBuffers();
         dispatch({ type: "clear" });
+        setScrollPosition({ behind: false, newOutput: false });
         return;
       }
       if (event.type === "text") {
@@ -633,6 +663,9 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias, onSe
         return;
       }
       flushStreamBuffers();
+      if (scrollRef.current !== null && !scrollRef.current.isSticky()) {
+        setScrollPosition((previous) => previous.newOutput ? previous : { behind: true, newOutput: true });
+      }
       dispatch({ type: "session", event });
     };
     void createProductionRuntime(appRuntimeOptions({
@@ -752,20 +785,37 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias, onSe
     };
   }, [workspace]);
 
-  useEffect(() => {
-    if (!stdout || typeof stdout.on !== "function") return;
-    const onResize = (): void => {
-      setColumns(stdout.columns ?? 80);
-      setRows(stdout.rows ?? 24);
-    };
-    stdout.on("resize", onResize);
-    onResize();
-    return (): void => { stdout.off("resize", onResize); };
-  }, [stdout]);
-
   const approval = runtime?.approvals.pending;
   const questions = runtime?.services.questions.pending;
   const memoryReviews = runtime?.memoryReviews.pending ?? [];
+  const focusedDecision = approval !== undefined || (questions !== undefined && questions.length > 0);
+  const transcriptVisible = runtime !== undefined
+    && (transcript.completed.length > 0 || transcript.active !== undefined)
+    && !focusedDecision && !queueOpen;
+  useEffect(() => {
+    if (!transcriptVisible) return;
+    const scroll = scrollRef.current;
+    if (scroll === null) return;
+    const update = (): void => {
+      const behind = !scroll.isSticky();
+      setScrollPosition((previous) => previous.behind === behind && (behind || !previous.newOutput)
+        ? previous
+        : { behind, newOutput: behind && previous.newOutput });
+    };
+    update();
+    return scroll.subscribe(update);
+  }, [transcriptVisible]);
+  useEffect(() => {
+    if (pendingPrompts.length === 0) setQueueOpen(false);
+    setQueueSelection((previous) => {
+      const next = Math.max(0, Math.min(previous, pendingPrompts.length - 1));
+      queueSelectionRef.current = next;
+      return next;
+    });
+  }, [pendingPrompts.length]);
+  useEffect(() => {
+    if (focusedDecision) focusScrollRef.current?.scrollTo(0);
+  }, [focusedDecision, approval?.id, questionIndex]);
   const memoryAutoDismissSeconds = runtime?.memoryReviews.autoDismissSeconds ?? 0;
   useEffect(() => {
     setQuestionIndex(0);
@@ -864,15 +914,64 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias, onSe
   };
 
   useInput((character, key, event) => {
+    if (queueOpen && !focusedDecision) {
+      const queue = pendingPromptRef.current!;
+      if (key.escape) { setQueueOpen(false); return; }
+      if (key.upArrow || key.downArrow || key.pageUp || key.pageDown || key.wheelUp || key.wheelDown || key.home || key.end) {
+        const delta = key.upArrow ? -1 : key.downArrow ? 1 : key.pageUp ? -5 : key.pageDown ? 5 : key.wheelUp ? -3 : 3;
+        const target = key.home ? 0 : key.end ? queue.size - 1 : queueSelectionRef.current + delta;
+        const next = Math.max(0, Math.min(queue.size - 1, target));
+        queueSelectionRef.current = next;
+        setQueueSelection(next);
+        return;
+      }
+      if (key.ctrl && character.toLowerCase() === "c") { interrupt(); return; }
+      if (key.return || (!key.ctrl && !key.meta && character.toLowerCase() === "d")) {
+        const removed = queue.removeAt(queueSelectionRef.current);
+        if (removed === undefined) return;
+        setPendingPrompts([...queue.values]);
+        if (key.return) {
+          const restoredDraft = restoreQueuedPrompt(removed);
+          promptEditHistory.current.reset();
+          commitPromptDraft(restoredDraft, false);
+          setQueueOpen(false);
+          setClipboardNotice("Queued message moved to draft; sending it again puts it at the end of the queue.");
+        } else if (queue.size === 0) {
+          setQueueOpen(false);
+          setClipboardNotice("Queued message cancelled.");
+        }
+        const next = Math.max(0, Math.min(queueSelectionRef.current, queue.size - 1));
+        queueSelectionRef.current = next;
+        setQueueSelection(next);
+        return;
+      }
+      return;
+    }
     // Keep completion-menu arrows available while streaming. Outside an open
     // menu, arrows during an active turn are a safe fallback for terminals
     // that encode wheel input as alternate-scroll arrow sequences.
+    const focusScroll = focusedDecision || queueOpen ? focusScrollRef.current : null;
+    if (key.home || key.end) {
+      const scroll = focusScroll ?? scrollRef.current;
+      if (scroll !== null) {
+        if (key.end) scroll.scrollToBottom();
+        else scroll.scrollTo(0);
+      }
+      return;
+    }
+    if (!focusedDecision && !queueOpen && slashCompletion === null && mentionCompletion === null
+      && key.ctrl && (key.upArrow || key.downArrow)) {
+      if (jumpToAdjacentTurn(scrollRef.current, turnElementsRef.current, key.upArrow ? "previous" : "next")) {
+        setScrollPosition({ behind: true, newOutput: false });
+      }
+      return;
+    }
     const terminalAction = classifyTerminalInput(
       key,
-      transcript.active !== undefined && slashCompletion === null && mentionCompletion === null,
+      (transcript.active !== undefined || focusedDecision) && slashCompletion === null && mentionCompletion === null,
     );
     if (terminalAction?.type === "scroll") {
-      const scroll = selectWheelScrollTarget(
+      const scroll = focusScroll ?? selectWheelScrollTarget(
         scrollRef.current,
         mainTaskScrollRef.current,
         subagentTaskScrollRef.current,
@@ -885,7 +984,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias, onSe
       return;
     }
     if (terminalAction?.type === "page") {
-      const scroll = scrollRef.current;
+      const scroll = focusScroll ?? scrollRef.current;
       if (scroll !== null) jumpScroll(scroll, Math.floor(scroll.getViewportHeight() * terminalAction.fraction));
       return;
     }
@@ -1079,6 +1178,20 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias, onSe
       return;
     }
     if (key.return) {
+      if (/^\/queue\s*$/iu.test(input)) {
+        if (imageAttachments.length > 0) {
+          setClipboardNotice("Send or remove image attachments before opening /queue.");
+          return;
+        }
+        setInput(""); setPromptCursor(0);
+        if (pendingPromptRef.current!.size > 0) {
+          queueSelectionRef.current = 0;
+          setQueueSelection(0);
+          setQueueOpen(true);
+          setClipboardNotice(undefined);
+        } else setClipboardNotice("No queued messages.");
+        return;
+      }
       if (/^\/paste-image\s*$/iu.test(input)) {
         setInput("");
         setPromptCursor(0);
@@ -1108,7 +1221,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias, onSe
         })) return;
         setPendingPrompts([...pendingPromptRef.current!.values]);
       }
-      scrollRef.current?.scrollToBottom();
+      if (delivery === "prompt" || scrollRef.current?.isSticky()) scrollRef.current?.scrollToBottom();
       const nextHistory = [...historyRef.current, submittedText].slice(-HISTORY_CAP);
       historyRef.current = nextHistory;
       historyCursorRef.current = nextHistory.length;
@@ -1245,6 +1358,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias, onSe
     {...(ideContext === undefined ? {} : { ideContext })}
     completedSlashTokenLength={completedTokenLength}
     scrollRef={scrollRef}
+    focusScrollRef={focusScrollRef}
     mainTaskScrollRef={mainTaskScrollRef}
     subagentTaskScrollRef={subagentTaskScrollRef}
     onTaskPanelHoverChange={(track) => { hoveredTaskTrack.current = track; }}
@@ -1257,6 +1371,16 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias, onSe
     memoryReviews={memoryReviews}
     memoryAutoDismissSeconds={memoryAutoDismissSeconds}
     pendingPrompts={pendingPrompts}
+    queueOpen={queueOpen}
+    queueSelection={queueSelection}
+    onQueueSelectionChange={(index) => { queueSelectionRef.current = index; setQueueSelection(index); }}
+    scrollBehind={scrollPosition.behind}
+    newOutput={scrollPosition.newOutput}
+    onJumpToLatest={() => scrollRef.current?.scrollToBottom()}
+    onTurnElement={(id, element) => {
+      if (element === null) turnElementsRef.current.delete(id);
+      else turnElementsRef.current.set(id, element);
+    }}
     questionIndex={questionIndex}
     questionAnswers={questionAnswers}
     customQuestionActive={customQuestionActive}
@@ -1299,6 +1423,13 @@ export interface TerminalLayoutProps {
   activeSession: boolean;
   ideContext?: IdeEditorContext;
   pendingPrompts?: readonly QueuedPrompt[];
+  queueOpen?: boolean;
+  queueSelection?: number;
+  onQueueSelectionChange?: (index: number) => void;
+  scrollBehind?: boolean;
+  newOutput?: boolean;
+  onJumpToLatest?: () => void;
+  onTurnElement?: (id: number, element: DOMElement | null) => void;
   completedSlashTokenLength?: number;
   completion?: SlashCompletion;
   mentionCompletion?: MentionCompletion;
@@ -1313,6 +1444,7 @@ export interface TerminalLayoutProps {
   questionAnswers?: Readonly<Record<number, string>>;
   customQuestionActive?: boolean;
   scrollRef?: React.Ref<ScrollBoxHandle>;
+  focusScrollRef?: React.RefObject<ScrollBoxHandle | null>;
   mainTaskScrollRef?: React.Ref<ScrollBoxHandle>;
   subagentTaskScrollRef?: React.Ref<ScrollBoxHandle>;
   onTaskPanelHoverChange?: (track: TaskPanelTrack | null) => void;
@@ -1506,7 +1638,8 @@ export function TerminalLayout({
   promptCursor, columns, rows = 24, activeSession, pendingPrompts = [], approval,
   approvalExpanded = false, expandedOutput = false,
   questions, memoryReviews = [], memoryAutoDismissSeconds = 0, questionIndex = 0, questionAnswers = {}, customQuestionActive = false,
-  completion, mentionCompletion, onMentionSelect, completedSlashTokenLength: tokenLength = 0, scrollRef,
+  queueOpen = false, queueSelection = 0, onQueueSelectionChange, scrollBehind = false, newOutput = false,
+  onJumpToLatest, onTurnElement, completion, mentionCompletion, onMentionSelect, completedSlashTokenLength: tokenLength = 0, scrollRef, focusScrollRef,
   mainTaskScrollRef, subagentTaskScrollRef, onTaskPanelHoverChange, onPromptCursorChange, ideContext,
 }: TerminalLayoutProps): React.JSX.Element {
   const dividerWidth = Math.max(1, columns - 1);
@@ -1535,40 +1668,74 @@ export function TerminalLayout({
     [completed, budget],
   );
 
-  const questionRows = questions === undefined ? 0
-    : 4 + (questions[questionIndex]?.options.length ?? 0) + questions.length * 2;
   const memoryReviewRows = memoryReviews.length === 0 ? 0 : 5;
-
-  const approvalRows = approval === undefined ? 0 : 3 + (approvalExpanded ? approvalDetailLines(approval).length : 0);
-  const fixedBottomRows = approvalRows + questionRows + memoryReviewRows
+  const fixedBottomRows = memoryReviewRows
     + (pendingPrompts.length === 0 ? 0 : 1) + imageAttachments.length
-    + (clipboardNotice === undefined ? 0 : 1) + 2;
+    + (clipboardNotice === undefined ? 0 : 1) + (activeSession ? 1 : 0) + 2;
   const taskPanelRows = taskPanelViewportRows(rows, fixedBottomRows, activeTaskBlocks.length > 0);
   const availableBottomRows = Math.max(1, rows - taskPanelRows - 1);
   const bottomMaxRows = Math.min(availableBottomRows, Math.max(Math.floor(rows / 2), fixedBottomRows + 1));
   const promptMaxLines = Math.max(1, bottomMaxRows - fixedBottomRows);
+  let footerHint: string;
+  if (completion !== undefined || mentionCompletion !== undefined) {
+    footerHint = columns < 48
+      ? "↑↓ select · Tab choose · Esc close"
+      : mentionCompletion !== undefined
+        ? "↑/↓ select · Tab complete · click choose · Esc close"
+        : "↑/↓ select · Tab complete · Esc close";
+  } else if (activeSession) {
+    footerHint = fitFooterActions(columns, [
+      "Enter queue",
+      `Esc ${pendingPrompts.length > 0 ? "edit" : "stop"}`,
+      "Ctrl+C cancel",
+      "/steer now",
+      "/queue manage",
+      `${outputShortcut} ${expandedOutput ? "collapse" : "expand"}`,
+    ]);
+  } else if (columns < 48) {
+    footerHint = "Enter send · Ctrl+C exit";
+  } else if (columns < 96) {
+    footerHint = `Enter send · Ctrl+C exit · ↑↓ history · ${outputShortcut} output`;
+  } else {
+    footerHint = `Enter send · ↑↓/Ctrl/Cmd+R history · ${outputShortcut} ${expandedOutput ? "collapse all output" : "expand all output"} · Ctrl+C exit`;
+  }
+  if (approval !== undefined || (questions !== undefined && questions.length > 0) || queueOpen) {
+    return <FocusedCliPanel
+      rows={rows} columns={columns} input={input} promptCursor={promptCursor}
+      {...(approval === undefined ? {} : { approval })} approvalExpanded={approvalExpanded}
+      {...(questions === undefined ? {} : { questions })} questionIndex={questionIndex} customQuestionActive={customQuestionActive}
+      pendingPrompts={pendingPrompts} queueSelection={queueSelection}
+      {...(onQueueSelectionChange === undefined ? {} : { onQueueSelectionChange })}
+      {...(focusScrollRef === undefined ? {} : { focusScrollRef })}
+    />;
+  }
   return <Box height={rows} width="100%" flexDirection="column" overflow="hidden">
-    <ScrollBox {...(scrollRef === undefined ? {} : { ref: scrollRef })} flexGrow={1} flexDirection="column" stickyScroll>
-      {showWelcome
-        ? <WelcomeCard model={model} {...(serviceName === undefined ? {} : { serviceName })} workspaceName={workspaceName} {...(updateTo === undefined ? {} : { updateTo })} columns={columns} />
-        : <Text dimColor>{"flavor · "}{model}{" · "}{workspaceName}</Text>}
+    {showWelcome ? <Box flexGrow={1} flexShrink={1} flexDirection="column" overflow="hidden">
+      <WelcomeCard model={model} {...(serviceName === undefined ? {} : { serviceName })} workspaceName={workspaceName} {...(updateTo === undefined ? {} : { updateTo })} columns={columns} availableRows={Math.max(0, rows - taskPanelRows - fixedBottomRows - 1)} />
+    </Box> : <ScrollBox {...(scrollRef === undefined ? {} : { ref: scrollRef })} flexGrow={1} flexDirection="column" stickyScroll>
+      <Text dimColor>{"flavor · "}{model}{" · "}{workspaceName}</Text>
       <Box height={1} />
       {completedWindow.hiddenTurns > 0 || completedWindow.hiddenBlocks > 0
         ? <Text dimColor>… {completedWindow.hiddenTurns} earlier turns and {completedWindow.hiddenBlocks} output items hidden to keep the terminal responsive · {outputShortcut} to view all</Text>
         : null}
       {completedWindow.turns.map((turn, index) => (
-        <Box key={turn.id} flexDirection="column">
+        <Box key={turn.id} ref={(element: DOMElement | null) => onTurnElement?.(turn.id, element)} flexDirection="column">
           {index > 0 ? <TurnSeparator width={columns} /> : null}
           <TurnView turn={turn} interactive={false} workspaceName={workspaceName} expandedOutput={expandedOutput} />
         </Box>
       ))}
       {activeWithoutTasks === undefined ? null : (
-        <Box flexDirection="column">
+        <Box ref={(element: DOMElement | null) => onTurnElement?.(activeWithoutTasks.id, element)} flexDirection="column">
           {completedWindow.turns.length > 0 ? <TurnSeparator width={columns} /> : null}
           <TurnView turn={activeWithoutTasks} interactive={activeSession} workspaceName={workspaceName} expandedOutput={expandedOutput} />
         </Box>
       )}
-    </ScrollBox>
+    </ScrollBox>}
+    {!scrollBehind || showWelcome ? null : <Box width="100%" onClick={onJumpToLatest}>
+      <Text color="yellow" wrap="truncate-end">
+        {newOutput ? "↓ New output" : "↑ Reading earlier output"}{" · End latest"}{columns >= 72 ? " · Ctrl+↑/↓ turns" : ""}
+      </Text>
+    </Box>}
     <TaskProgressPanel
       blocks={activeTaskBlocks}
       interactive={activeSession}
@@ -1588,24 +1755,13 @@ export function TerminalLayout({
         </Box>
       )}
       <Box flexDirection="column" flexShrink={0} maxHeight={bottomMaxRows} width="100%" overflowY="hidden">
-        {approval === undefined ? null : <Box flexDirection="column" marginBottom={1}>
-          <Text color="magenta">┌─ approval · {approval.tool}</Text>
-          <Text wrap="truncate-end" color="magentaBright">│ {approval.reason ?? "This action needs permission."}</Text>
-          {approvalExpanded ? approvalDetailLines(approval).map((line, index) => (
-            <Text key={`${approval.id}:detail:${index}`} color="magentaBright" wrap="truncate-end">│ {line}</Text>
-          )) : null}
-          {isDestructiveTool(approval.tool) || approval.allowAlways === false
-                  ? <Text bold color="magenta">└─ <Text color="cyan">v</Text>=details / <Text color="green">y</Text>=once / <Text color="cyan">e</Text>=accept edits / <Text color="red">n</Text>=deny</Text>
-                  : <Text bold color="magenta">└─ <Text color="cyan">v</Text>=details / <Text color="green">y</Text>=once / <Text color="yellow">a</Text>=same-type / <Text color="cyan">e</Text>=accept edits / <Text color="red">n</Text>=deny</Text>
-                }
-        </Box>}
-        {!questions || questions.length === 0 ? null : (
-          <QuestionCards questions={questions} activeIndex={questionIndex} answers={questionAnswers} customActive={customQuestionActive} />
-        )}
         {memoryReviews.length === 0 ? null : <MemoryReviewCards reviews={memoryReviews} autoDismissSeconds={memoryAutoDismissSeconds} />}
+        {!activeSession ? null : <Text color="cyan" wrap="truncate-end">
+          {columns < 48 ? "Running · Enter queues · /queue list" : "Running · /queue manage · Enter queues next · /steer acts now"}
+        </Text>}
         {pendingPrompts.length === 0 ? null : (
           <Text color="yellow" wrap="truncate-end">
-            Pending ({pendingPrompts.length}) · {queuedPromptLabel(pendingPrompts.at(-1)!)} · Esc edit latest
+            Pending ({pendingPrompts.length}) · /queue manage · {queuedPromptLabel(pendingPrompts.at(-1)!)} · Esc edit latest
           </Text>
         )}
         <Text dimColor>{"─".repeat(dividerWidth)}</Text>
@@ -1627,13 +1783,8 @@ export function TerminalLayout({
           {...(onPromptCursorChange === undefined ? {} : { onCursorChange: onPromptCursorChange })}
         />
         <FooterStatus
-          hint={completion !== undefined
-            ? "↑/↓ select · Tab complete · Esc close"
-            : mentionCompletion !== undefined
-              ? "↑/↓ select · Tab complete · click choose · Esc close"
-              : activeSession
-                ? `Esc ${pendingPrompts.length > 0 ? "edit latest" : "stop"} · Ctrl+C cancel · Enter queue · Ctrl/Cmd+R history · ${outputShortcut} ${expandedOutput ? "collapse all output" : "expand all output"}`
-                : `Enter send · ↑↓/Ctrl/Cmd+R history · ${outputShortcut} ${expandedOutput ? "collapse all output" : "expand all output"} · Ctrl+C exit`}
+          hint={footerHint}
+          columns={columns}
           {...(ideContext === undefined ? {} : { ideContext })}
         />
       </Box>
@@ -1643,17 +1794,20 @@ export function TerminalLayout({
 
 export function FooterStatus({
   hint,
+  columns,
   ideContext,
 }: {
   hint: string;
+  columns?: number;
   ideContext?: IdeEditorContext;
 }): React.JSX.Element {
   const ide = ideFooterPresentation(ideContext);
+  const showIde = ide !== undefined && (columns === undefined || stringWidth(hint) + stringWidth(ide) + 3 <= columns);
   return <Box flexDirection="row" width="100%" justifyContent="space-between">
     <Box flexGrow={1} flexShrink={1}>
       <Text dimColor wrap="truncate-end">{hint}</Text>
     </Box>
-    {ide === undefined ? null : (
+    {!showIde ? null : (
       <Box flexShrink={0} marginLeft={1}>
         <Text color="cyan" wrap="truncate-end">⧉ {ide}</Text>
       </Box>
@@ -1672,34 +1826,87 @@ export function ideFooterPresentation(context: IdeEditorContext | undefined): st
   return `${count} ${count === 1 ? "line" : "lines"} selected`;
 }
 
-function QuestionCards({ questions, activeIndex, answers, customActive }: {
-  questions: readonly Question[];
-  activeIndex: number;
-  answers: Readonly<Record<number, string>>;
-  customActive: boolean;
+function FocusedCliPanel({
+  rows, columns, input, promptCursor, approval, approvalExpanded, questions, questionIndex,
+  customQuestionActive, pendingPrompts, queueSelection, onQueueSelectionChange, focusScrollRef,
+}: {
+  rows: number;
+  columns: number;
+  input: string;
+  promptCursor: number;
+  approval?: SessionApprovalRequest;
+  approvalExpanded: boolean;
+  questions?: readonly Question[];
+  questionIndex: number;
+  customQuestionActive: boolean;
+  pendingPrompts: readonly QueuedPrompt[];
+  queueSelection: number;
+  onQueueSelectionChange?: (index: number) => void;
+  focusScrollRef?: React.RefObject<ScrollBoxHandle | null>;
 }): React.JSX.Element {
-  return (
-    <Box flexDirection="column" marginBottom={1}>
-      {questions.map((q, qi) => (
-        <Box key={qi} flexDirection="column" marginBottom={qi < questions.length - 1 ? 1 : 0}>
-          <Text bold color="cyan">┌─ {q.header}</Text>
-          <Text wrap="truncate-end" color="cyanBright">│ {q.question}</Text>
-          {qi < activeIndex ? <Text color="green">│  ✓ {answers[qi]}</Text> : qi > activeIndex ? null : q.options.map((opt, oi) => (
-            <Text key={oi} color="cyan">
-              │  <Text bold color="green">{oi + 1}</Text>. {opt.label}
-              <Text dimColor>  {opt.description}</Text>
-            </Text>
-          ))}
-          {qi === activeIndex ? <>
-            <Text color="cyan">│  <Text bold color="green">{q.options.length + 1}</Text>. Custom input<Text dimColor>  Type your own answer</Text></Text>
-            <Text dimColor color="cyan">└─ {customActive
-              ? "Type below and press Enter; Esc returns to choices"
-              : `Press 1-${q.options.length + 1} to choose; Esc dismisses`}</Text>
-          </> : null}
-        </Box>
-      ))}
-    </Box>
-  );
+  if (approval !== undefined) {
+    const allowAlways = !isDestructiveTool(approval.tool) && approval.allowAlways !== false;
+    const narrow = columns < 36;
+    return <Box height={rows} width="100%" flexDirection="column" overflow="hidden">
+      <Text bold color="magenta" wrap="truncate-end">Approval · {approval.tool}</Text>
+      <ScrollBox {...(focusScrollRef === undefined ? {} : { ref: focusScrollRef })} flexGrow={1} flexDirection="column">
+        <Text color="magentaBright" wrap="wrap">{approval.reason ?? "This action needs permission."}</Text>
+        {approvalExpanded ? approvalDetailLines(approval).map((line, index) => (
+          <Text key={`${approval.id}:detail:${index}`} color="magentaBright" wrap="wrap">{line}</Text>
+        )) : null}
+      </ScrollBox>
+      <Text bold color="magenta" wrap="truncate-end">{narrow ? "y once · n deny" : "y=once · n=deny · Esc=deny"}</Text>
+      <Text color="magenta" wrap="truncate-end">{narrow ? "v details · e edits" : "v=details · e=accept edits"}{allowAlways && !narrow ? " · a=same-type" : ""}</Text>
+      {allowAlways && narrow && rows >= 5 ? <Text color="magenta" wrap="truncate-end">a same-type · Esc deny</Text> : null}
+    </Box>;
+  }
+  const question = questions?.[Math.min(questionIndex, questions.length - 1)];
+  if (question !== undefined) {
+    return <Box height={rows} width="100%" flexDirection="column" overflow="hidden">
+      <Text bold color="cyan" wrap="truncate-end">Question {questionIndex + 1}/{questions!.length} · {question.header}</Text>
+      <ScrollBox {...(focusScrollRef === undefined ? {} : { ref: focusScrollRef })} flexGrow={1} flexDirection="column">
+        <Text color="cyanBright" wrap="wrap">{question.question}</Text>
+        {question.options.map((option, index) => <Text key={index} color="cyan" wrap="wrap">
+          <Text bold color="green">{index + 1}. {option.label}</Text>{option.description ? `  ${option.description}` : ""}
+        </Text>)}
+        <Text color="cyan">{question.options.length + 1}. Custom input</Text>
+      </ScrollBox>
+      {customQuestionActive ? <PromptLine input={input} pastedBlocks={[]} cursor={promptCursor} columns={columns} maxVisibleLines={Math.max(1, Math.min(3, Math.floor(rows / 3)))} /> : null}
+      <Text color="cyan" wrap="truncate-end">{customQuestionActive
+        ? columns < 40 ? "Enter answer · Esc choices" : "Enter=answer · Esc=choices · PgUp/PgDn=scroll"
+        : columns < 40 ? `1-${question.options.length + 1} choose · Esc cancel` : `1-${question.options.length + 1}=choose · Esc=cancel · PgUp/PgDn=scroll`}</Text>
+    </Box>;
+  }
+  return <Box height={rows} width="100%" flexDirection="column" overflow="hidden">
+    <Text bold color="yellow" wrap="truncate-end">Queued messages ({pendingPrompts.length})</Text>
+    <ScrollBox {...(focusScrollRef === undefined ? {} : { ref: focusScrollRef })} flexGrow={1} flexDirection="column">
+      <QueueItems items={pendingPrompts} selection={queueSelection}
+        {...(focusScrollRef === undefined ? {} : { scrollRef: focusScrollRef })}
+        {...(onQueueSelectionChange === undefined ? {} : { onSelect: onQueueSelectionChange })} />
+    </ScrollBox>
+    <Text bold color="yellow" wrap="truncate-end">{columns < 48 ? "Enter edit · d cancel" : "Enter=edit selected · d=cancel selected"}</Text>
+    <Text color="yellow" wrap="truncate-end">{columns < 48 ? "↑↓ select · Esc close" : "↑/↓=select · PgUp/PgDn=jump · Esc=close"}</Text>
+  </Box>;
+}
+
+function QueueItems({ items, selection, scrollRef, onSelect }: {
+  items: readonly QueuedPrompt[];
+  selection: number;
+  scrollRef?: React.RefObject<ScrollBoxHandle | null>;
+  onSelect?: (index: number) => void;
+}): React.JSX.Element {
+  const selectedElement = useRef<DOMElement | null>(null);
+  useEffect(() => {
+    if (selectedElement.current !== null) scrollRef?.current?.scrollToElement(selectedElement.current);
+  }, [selection, items.length, scrollRef]);
+  return <Box flexDirection="column" width="100%">
+    {items.map((item, index) => <Box key={`${index}:${item.text}`} ref={index === selection ? selectedElement : undefined}
+      onClick={() => onSelect?.(index)}>
+      <Text color={index === selection ? "yellowBright" : undefined} bold={index === selection} wrap="wrap">
+        {index === selection ? "❯" : " "} {index + 1}. {queuedPromptLabel(item)}
+      </Text>
+    </Box>)}
+  </Box>;
 }
 
 function MemoryReviewCards({ reviews, autoDismissSeconds }: {
@@ -1801,6 +2008,25 @@ export function jumpScroll(scroll: ScrollBoxHandle, delta: number): void {
   } else {
     scroll.scrollTo(Math.max(0, target));
   }
+}
+
+export function jumpToAdjacentTurn(
+  scroll: ScrollBoxHandle | null,
+  elements: ReadonlyMap<number, DOMElement>,
+  direction: "previous" | "next",
+): boolean {
+  if (scroll === null) return false;
+  const top = scroll.getScrollTop() + scroll.getPendingDelta();
+  const positions = [...elements.values()]
+    .map((element) => ({ element, top: element.yogaNode?.getComputedTop() }))
+    .filter((item): item is { element: DOMElement; top: number } => item.top !== undefined)
+    .sort((left, right) => left.top - right.top);
+  const target = direction === "previous"
+    ? positions.filter((item) => item.top < top - 1).at(-1)
+    : positions.find((item) => item.top > top + 1);
+  if (target === undefined) return false;
+  scroll.scrollToElement(target.element);
+  return true;
 }
 
 export function selectWheelScrollTarget(

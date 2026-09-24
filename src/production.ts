@@ -18,6 +18,7 @@ import { updatePlanTask, type TaskPlan } from "./agent/task-plan.js";
 import type { AgentEvent, TaskSnapshot } from "./agent/types.js";
 import { loadConfig, setProjectMcpServerDisabled } from "./config/load.js";
 import { ContextManager, type CompactProgressCallback, type ContextSnapshot } from "./context/manager.js";
+import { GlobalInstructions } from "./context/global-instructions.js";
 import { WorkspaceInstructions } from "./context/workspace-instructions.js";
 import { summarizeWithModel } from "./context/summarizer.js";
 import { LocalHarness } from "./harness/local.js";
@@ -329,6 +330,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const gitRepository = detectGitRepository(workspace);
   const loaded = await loadConfig({ cwd: workspace, home, environment });
   const config = loaded.config;
+  const globalInstructions = config.globalInstructions.enabled ? new GlobalInstructions(home) : undefined;
+  await globalInstructions?.refresh();
   const mcpReady = connectMcpServers({
     servers: config.mcpServers,
     workspace,
@@ -483,6 +486,18 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
 
   const registry = new ModelRegistry();
   const diagnostics: string[] = [];
+  let lastGlobalInstructionError: string | undefined;
+  const refreshGlobalInstructions = async (): Promise<void> => {
+    if (globalInstructions === undefined) return;
+    try {
+      await globalInstructions.refresh();
+      lastGlobalInstructionError = undefined;
+    } catch (error) {
+      const diagnostic = `Global instructions could not be refreshed: ${message(error)}`;
+      if (diagnostic !== lastGlobalInstructionError) diagnostics.push(diagnostic);
+      lastGlobalInstructionError = diagnostic;
+    }
+  };
   const permissionPolicy = await loadPermissionPolicy({
     workspace,
     home,
@@ -1045,6 +1060,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       ...(memoryContext === undefined ? {} : { memory: memoryContext }),
       ...(taskState === undefined ? {} : { taskState }),
       userMemory: () => userMemoryContext ?? "",
+      ...(globalInstructions === undefined ? {} : { globalInstructions: () => globalInstructions.content ?? "" }),
       ...(compactAtChars === undefined ? {} : { compactAtChars }),
       toolOutputChars,
       compaction,
@@ -1077,6 +1093,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     softLimitFactor: config.maxIterations.softLimitFactor,
     extendIterations: config.maxIterations.extendBy,
     hasActiveProgress,
+    ...(globalInstructions === undefined ? {} : { beforeModelCall: refreshGlobalInstructions }),
     afterToolSuccess: async (_tool, paths, _input, _output, context) => workspaceInstructions.discover(paths, context.ownerId ?? context.agent),
     toolJournal: {
       start: (tool, input, retrySafe) => harnessJournal.startTool(tool, input, retrySafe),
@@ -1447,6 +1464,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         ...(loopInstructionBaseline === "" ? {} : { workspaceInstructions: loopInstructionBaseline }),
         ...(memoryContext === undefined ? {} : { memory: memoryContext }),
         userMemory: () => userMemoryContext ?? "",
+        ...(globalInstructions === undefined ? {} : { globalInstructions: () => globalInstructions.content ?? "" }),
         ...(compactAtChars === undefined ? {} : { compactAtChars }),
         toolOutputChars,
         compaction,
@@ -1472,6 +1490,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       softLimitFactor: config.maxIterations.softLimitFactor,
       extendIterations: config.maxIterations.extendBy,
       loopMode: true,
+      ...(globalInstructions === undefined ? {} : { beforeModelCall: refreshGlobalInstructions }),
       afterToolSuccess: async (_tool, paths, _input, _output, context) => loopInstructions.discover(paths, context.ownerId ?? context.agent),
       toolJournal: {
         start: (tool, input, retrySafe) => harnessJournal.startTool(tool, input, retrySafe),
@@ -1991,6 +2010,26 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       return entries.length === 0
         ? `No long-term memories stored.\nPath: ${memoryStore.path}`
         : `Path: ${memoryStore.path}\n\n${renderMemoryDocument(entries)}`;
+    },
+    global: async (command) => {
+      const path = join(home, ".flavor-code", "GLOBAL.md");
+      if (globalInstructions === undefined) return `Global instructions are disabled.\nPath: ${path}`;
+      if (command.action === "show") {
+        await globalInstructions.refresh();
+        return globalInstructions.content === undefined
+          ? `No global instructions stored.\nPath: ${path}`
+          : `Global instructions (enabled)\nPath: ${path}\n\n${globalInstructions.content}`;
+      }
+      if (command.action === "remember") {
+        const result = await globalInstructions.remember(command.text);
+        return result === "added"
+          ? `Remembered global rule.\nPath: ${path}`
+          : `Global rule already exists.\nPath: ${path}`;
+      }
+      const result = await globalInstructions.forget(command.text);
+      return result === "removed" ? `Forgot global rule.\nPath: ${path}`
+        : result === "ambiguous" ? "Multiple global rules match. Use the full text of one rule."
+          : "No matching global rule found.";
     },
     refreshMemory: refreshMemoryState,
     remember: async (type, text) => {

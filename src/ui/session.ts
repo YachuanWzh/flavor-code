@@ -3,7 +3,7 @@ import { redactConfig } from "../config/load.js";
 import type { HookBus } from "../hooks/bus.js";
 import type { PermissionMode } from "../permissions/engine.js";
 import type { SkillMetadata } from "../skills/registry.js";
-import { parseSlashCommand, type McpSlashCommand, type ModelRole, type SlashCommand } from "./commands.js";
+import { parseSlashCommand, type GlobalSlashCommand, type McpSlashCommand, type ModelRole, type SlashCommand } from "./commands.js";
 import type { QuestionBridge } from "../tools/ask-user-question.js";
 import { message } from "../utils/error.js";
 import type { MemoryRestartContinuation } from "../utils/memory-restart.js";
@@ -136,6 +136,7 @@ export interface SessionServices {
   unrevert?(): Promise<void>;
   fork?(nodeId: string): Promise<void>;
   memory(): Promise<string>;
+  global?(command: GlobalSlashCommand): Promise<string>;
   refreshMemory?(): Promise<void>;
   remember(type: MemoryType, text: string): Promise<string>;
   forget(query: string): Promise<string>;
@@ -192,6 +193,7 @@ const HELP = [
   "/logout                                 clear stored OAuth credentials",
   "/init  /config  /skills  /plugins  /hooks  /tasks  /doctor",
   "/memory  /remember [type] <text>  /forget <text-or-id>  /forget-cold  /finish",
+  "/global  /global remember <rule>  /global forget <rule>",
   "/checkpoint [label]  /tree  /rewind <node>  /unrevert  /fork <node>",
   "/compact  /clear  /paste-image  /help  /exit",
   "/loop <goal>                            run a verified autonomous loop",
@@ -666,6 +668,8 @@ export class FlavorSession {
       this.#notice(await required(this.#services.ide, "ide")());
     } else if (command.name === "memory") {
       this.#notice(await this.#services.memory());
+    } else if (command.name === "global") {
+      this.#notice(await required(this.#services.global, "global")(command));
     } else if (command.name === "remember") {
       this.#notice(await this.#services.remember(command.type, command.text));
     } else if (command.name === "forget") {

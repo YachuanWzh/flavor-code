@@ -8,6 +8,7 @@ import {
   editPromptWithPastedBlocks,
   isCopyShortcut,
   isPlatformShortcut,
+  jumpToAdjacentTurn,
   navigateHistory,
   navigatePromptHistory,
   prepareCliSubmission,
@@ -20,6 +21,7 @@ import {
   runningEscapeAction,
 } from "../../src/ui/app.js";
 import type { ScrollBoxHandle } from "../../src/claude-ink/index.js";
+import type { DOMElement } from "../../src/claude-ink/dom.js";
 import type { SlashCompletion } from "../../src/ui/slash-completion.js";
 import { installSigintHandler } from "../../src/ui/signals.js";
 
@@ -76,6 +78,26 @@ it("uses Escape to recover a queued prompt first and interrupt otherwise", () =>
   expect(runningEscapeAction(true, 2)).toBe("restore-pending");
   expect(runningEscapeAction(true, 0)).toBe("interrupt");
   expect(runningEscapeAction(false, 0)).toBeNull();
+});
+
+it("jumps between transcript turns using their laid-out positions", () => {
+  const selected: DOMElement[] = [];
+  const elementAt = (top: number): DOMElement => ({
+    yogaNode: { getComputedTop: () => top },
+  }) as unknown as DOMElement;
+  const first = elementAt(0);
+  const second = elementAt(12);
+  const third = elementAt(30);
+  const scroll = {
+    getScrollTop: () => 20,
+    getPendingDelta: () => 0,
+    scrollToElement: (element: DOMElement) => selected.push(element),
+  } as unknown as ScrollBoxHandle;
+  const elements = new Map([[1, first], [2, second], [3, third]]);
+
+  expect(jumpToAdjacentTurn(scroll, elements, "previous")).toBe(true);
+  expect(jumpToAdjacentTurn(scroll, elements, "next")).toBe(true);
+  expect(selected).toEqual([second, third]);
 });
 
 it("backspace removes the latest pasted block when the cursor is directly after it", () => {

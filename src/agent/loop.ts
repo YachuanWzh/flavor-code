@@ -71,6 +71,7 @@ export interface AgentLoopOptions {
   extendIterations?: number;
   maxExtensions?: number;
   hasActiveProgress?(): boolean;
+  beforeModelCall?(signal?: AbortSignal): Promise<void>;
   agent?: "main" | "subagent";
   ownerId?: string;
   hallucinationGuard?: HallucinationGuard;
@@ -137,6 +138,8 @@ export class AgentLoop {
     // Dynamic context is sampled at a provider boundary before the user turn.
     // This keeps the epoch prefix byte-stable while preserving chronological
     // source updates in the durable conversation.
+    try { await this.#options.beforeModelCall?.(request.signal); }
+    catch (error) { yield { type: "error", error: normalizeProviderError(error) }; return; }
     this.#options.context.refreshContextSources();
     this.#options.context.append(request.initialUserMessage ?? { role: "user", content: request.prompt });
     let totalInputTokens = 0;
@@ -212,6 +215,7 @@ export class AgentLoop {
       }
 
       try {
+        await this.#options.beforeModelCall?.(request.signal);
         if (await this.#options.context.prepareForModelCall(request.signal)) yield { type: "compacted" };
       } catch (error) {
         yield { type: "error", error: normalizeProviderError(error) };

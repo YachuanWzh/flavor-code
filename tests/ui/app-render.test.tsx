@@ -11,7 +11,7 @@ import {
 import type { SlashCompletion } from "../../src/ui/slash-completion.js";
 import type { MentionCompletion } from "../../src/ui/mention-completion.js";
 import { createTranscriptState, transcriptReducer, type TranscriptTurn } from "../../src/ui/transcript.js";
-import { limitTaskTextSegments, TaskProgressPanel, type TaskBlock } from "../../src/ui/task-progress.js";
+import { limitTaskTextSegments, TaskProgressPanel, TaskStatusLine, type TaskBlock } from "../../src/ui/task-progress.js";
 import { WelcomeCard } from "../../src/ui/welcome.js";
 import { packageVersion } from "../../src/utils/version.js";
 
@@ -229,6 +229,24 @@ describe("TerminalLayout", () => {
     expect(output).toContain("⧉ In flavor.json");
   });
 
+  it("keeps send and exit hints visible when the terminal is narrow", () => {
+    const output = stripAnsi(renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={[]}
+      input="" promptCursor={0} columns={40} rows={12} activeSession={false}
+      ideContext={{
+        ideName: "Visual Studio Code", workspaceFolders: ["/work"],
+        filePath: "/work/an-extremely-long-active-filename.ts",
+        selection: {
+          start: { line: 0, character: 0 }, end: { line: 0, character: 0 },
+          active: { line: 0, character: 0 }, isEmpty: true,
+        },
+      }}
+    />, { columns: 40 }));
+
+    expect(output).toContain("Enter send · Ctrl+C exit");
+    expect(output).not.toContain("an-extremely-long-active-filename");
+  });
+
   it("formats single-line and multi-line IDE selections like Claude Code", () => {
     const base = {
       ideName: "Visual Studio Code",
@@ -306,6 +324,41 @@ describe("TerminalLayout", () => {
     expect(output).toContain("e=accept edits");
   });
 
+  it("keeps approval decisions visible in a six-row terminal while details scroll", () => {
+    const output = stripAnsi(renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={[]}
+      input="" promptCursor={0} columns={44} rows={6} activeSession
+      approval={{
+        id: "short", agent: "main", tool: "Shell", reason: "Review this long shell command carefully",
+        command: "node", args: ["script.js"], cwd: "/work", paths: ["/work/a", "/work/b"],
+      }} approvalExpanded
+    />, { columns: 44 }));
+
+    expect(output).toContain("Approval · Shell");
+    expect(output).toContain("y=once · n=deny");
+    expect(output).toContain("v=details · e=accept edits");
+    expect(output.split("\n").length).toBeLessThanOrEqual(6);
+    expect(output).not.toContain("❯");
+  });
+
+  it("keeps the active question and choice instructions visible in a short terminal", () => {
+    const output = stripAnsi(renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={[]}
+      input="" promptCursor={0} columns={44} rows={6} activeSession
+      questions={[
+        { header: "First", question: "First question?", options: [{ label: "Yes", description: "Continue" }] },
+        { header: "Second", question: "Second question?", options: [{ label: "A", description: "First" }, { label: "B", description: "Second" }] },
+      ]}
+      questionIndex={1}
+    />, { columns: 44 }));
+
+    expect(output).toContain("Question 2/2 · Second");
+    expect(output).toContain("Second question?");
+    expect(output).toContain("1-3=choose · Esc=cancel");
+    expect(output).not.toContain("First question?");
+    expect(output.split("\n").length).toBeLessThanOrEqual(6);
+  });
+
   it("covers every approval detail branch", () => {
     expect(approvalDetailLines({ id: "a1", agent: "main", tool: "Test" })).toEqual(["No additional parameters were supplied."]);
 
@@ -361,9 +414,39 @@ describe("TerminalLayout", () => {
       ]}
     />, { columns: 90 }));
 
-    expect(output).toContain("Pending (2) · then add docs · 1 image");
+    expect(output).toContain("Pending (2) · /queue manage · then add docs · 1 image");
     expect(output.indexOf("Pending (2)")).toBeLessThan(output.lastIndexOf("❯"));
     expect(output).toContain("Esc edit latest");
+  });
+
+  it("shows an individually manageable pending queue", () => {
+    const output = stripAnsi(renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={[]}
+      input="" promptCursor={0} columns={60} rows={8} activeSession
+      pendingPrompts={[
+        { text: "add tests", displayText: "add tests" },
+        { text: "write docs", displayText: "write docs" },
+      ]}
+      queueOpen queueSelection={1}
+    />, { columns: 60 }));
+
+    expect(output).toContain("Queued messages (2)");
+    expect(output).toContain("1. add tests");
+    expect(output).toContain("❯ 2. write docs");
+    expect(output).toContain("Enter=edit selected · d=cancel selected");
+    expect(output).toContain("Esc=close");
+  });
+
+  it("marks new output without replacing the transcript and gives a jump-back action", () => {
+    const output = stripAnsi(renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={[turn(1, "inspect", "result")]}
+      input="" promptCursor={0} columns={80} rows={12} activeSession={false}
+      scrollBehind newOutput
+    />, { columns: 80 }));
+
+    expect(output).toContain("result");
+    expect(output).toContain("↓ New output · End latest");
+    expect(output).toContain("Ctrl+↑/↓ turns");
   });
 
   it("renders model-generated memory as pending confirmation instead of stored state", () => {
@@ -445,6 +528,22 @@ describe("TerminalLayout", () => {
     expect(output).toContain(`v${packageVersion()}`);
     expect(output).not.toContain("Tips for getting started");
     expect(Math.max(...output.split("\n").map((line) => [...line].length))).toBeLessThanOrEqual(48);
+  });
+
+  it("reduces the welcome card as the terminal becomes short", () => {
+    const renderAt = (rows: number) => stripAnsi(renderToString(<TerminalLayout
+      model="model" workspaceName="workspace" completed={[]}
+      input="" promptCursor={0} columns={96} rows={rows} activeSession={false}
+    />, { columns: 96 }));
+    const compact = renderAt(10);
+    const minimal = renderAt(6);
+
+    expect(compact).toContain("◆ Flavor Code");
+    expect(compact).not.toContain("Tips for getting started");
+    expect(minimal).toContain("◆ Flavor Code");
+    expect(minimal).not.toContain("Welcome back!");
+    expect(minimal).toContain("❯");
+    expect(minimal.split("\n").length).toBeLessThanOrEqual(6);
   });
 
   it("shows a yellow update hint in the welcome card when a newer npm version exists", () => {
@@ -637,6 +736,19 @@ describe("TerminalLayout", () => {
     // it does not look like editable input with a second caret.
     expect(output).toContain("│ Considering how the transcript reducer folds events.");
     expect(output).not.toContain("▌");
+  });
+
+  it("keeps a thinking preview within its task track instead of the terminal width", () => {
+    const block: TaskBlock = {
+      kind: "status", id: "model:split", state: "running", text: "Flavoring",
+      activity: "model", thinkingText: "A long thought that should scroll inside a narrow task track.",
+    };
+    const lines = stripAnsi(renderToString(<TaskStatusLine
+      block={block} interactive={false} textWidth={12} maxTextLines={2}
+    />, { columns: 80 })).split("\n");
+    const preview = lines.find((line) => line.startsWith("│ "))?.trimEnd();
+    expect(preview).toBeDefined();
+    expect([...preview!].length).toBeLessThanOrEqual(12);
   });
 
   it("renders compact progress as three blue and seven gray cells at thirty percent", () => {

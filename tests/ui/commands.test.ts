@@ -30,6 +30,9 @@ describe("parseSlashCommand", () => {
     ["/remember Prefer Chinese responses", { name: "remember", type: "project", text: "Prefer Chinese responses" }],
     ["/forget obsolete convention", { name: "forget", query: "obsolete convention" }],
     ["/forget-cold", { name: "forget-cold" }],
+    ["/global", { name: "global", action: "show" }],
+    ["/global remember Keep tests focused", { name: "global", action: "remember", text: "Keep tests focused" }],
+    ["/global forget Keep tests focused", { name: "global", action: "forget", text: "Keep tests focused" }],
     ["/loop fix all tests", { name: "loop", goal: "fix all tests" }],
     ["/checkpoint before refactor", { name: "checkpoint", label: "before refactor" }],
     ["/checkpoint", { name: "checkpoint" }],
@@ -100,6 +103,9 @@ describe("parseSlashCommand", () => {
     expect(parseSlashCommand("/forget")).toEqual({
       name: "invalid", command: "forget", message: "Use /forget <text-or-id>.",
     });
+    expect(parseSlashCommand("/global remember")).toMatchObject({ name: "invalid", command: "global" });
+    expect(parseSlashCommand("/global forget")).toMatchObject({ name: "invalid", command: "global" });
+    expect(parseSlashCommand("/global remove x")).toMatchObject({ name: "invalid", command: "global" });
     expect(parseSlashCommand("/mcp tools")).toEqual({
       name: "invalid", command: "mcp", message: "Use /mcp [status|tools <server>|reconnect <server>|enable [server|all]|disable [server|all]].",
     });

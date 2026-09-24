@@ -997,6 +997,8 @@ describe("production runtime", () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-loop-")); roots.push(workspace);
     const pluginRoot = join(workspace, ".flavor", "plugins", "loop-model");
     await mkdir(pluginRoot, { recursive: true });
+    await mkdir(join(workspace, ".flavor-code"));
+    await writeFile(join(workspace, ".flavor-code", "GLOBAL.md"), "Keep loop changes small.");
     await writeFile(join(workspace, "package.json"), JSON.stringify({
       name: "loop-fixture", private: true,
       scripts: { test: "node -e \"require('node:fs').accessSync('package.json')\"" },
@@ -1032,6 +1034,7 @@ describe("production runtime", () => {
 
     expect(globalState.__flavorLoopRequests).toHaveLength(1);
     expect(JSON.stringify(globalState.__flavorLoopRequests)).toContain("Built-in Loop Skill");
+    expect(JSON.stringify(globalState.__flavorLoopRequests)).toContain("Global instructions\\nKeep loop changes small.");
     expect(outputs).toContainEqual(expect.objectContaining({
       type: "loop-progress", phase: "terminal", state: "completed",
     }));
@@ -1485,10 +1488,18 @@ describe("production runtime", () => {
       workspace, home: workspace, environment: {}, output: (event) => outputs.push(event),
     });
 
+    const realSetTimeout = setTimeout;
     vi.useFakeTimers();
     try {
       const submission = runtime.session.submit("retry safely");
-      await vi.runAllTimersAsync();
+      // Each model-call savepoint refreshes global instructions through real
+      // filesystem IO between the fake retry-backoff timers. A single drain
+      // can never observe those macrotask completions, so alternate fake-clock
+      // advancement with a real-event-loop yield until all attempts ran.
+      while (((globalThis as { __flavorRetryModels?: string[] }).__flavorRetryModels?.length ?? 0) < 5) {
+        await vi.advanceTimersByTimeAsync(2_000);
+        await new Promise((resolve) => realSetTimeout(resolve, 0));
+      }
       await submission;
     } finally {
       vi.useRealTimers();

@@ -25,6 +25,8 @@ export interface ContextManagerOptions {
   taskState?: string;
   /** Stable user preferences, emitted as the final system section for prompt caching. */
   userMemory?: SystemPromptSource;
+  /** User-authored global rules, placed after the stable cache breakpoint. */
+  globalInstructions?: SystemPromptSource;
   /** @deprecated Prefer token-based compaction policy. */
   compactAtChars?: number;
   toolOutputChars: number;
@@ -98,6 +100,7 @@ export class ContextManager {
   readonly #workspaceInstructions: string | undefined;
   readonly #memory: string | undefined;
   readonly #userMemory: SystemPromptSource | undefined;
+  readonly #globalInstructions: SystemPromptSource | undefined;
   readonly #compactAtChars: number;
   readonly #toolOutputChars: number;
   readonly #recentTurns: number | undefined;
@@ -144,6 +147,7 @@ export class ContextManager {
     this.#workspaceInstructions = options.workspaceInstructions;
     this.#memory = options.memory;
     this.#userMemory = options.userMemory;
+    this.#globalInstructions = options.globalInstructions;
     this.#taskState = options.taskState;
     this.#compactAtChars = options.compactAtChars ?? Number.POSITIVE_INFINITY;
     this.#toolOutputChars = options.toolOutputChars;
@@ -185,6 +189,7 @@ export class ContextManager {
       ...(this.#memory === undefined ? {} : { memory: this.#memory }),
       ...(this.#taskState === undefined ? {} : { taskState: this.#taskState }),
       ...(userMemory === undefined ? {} : { userMemory }),
+      ...(this.#globalInstructions === undefined ? {} : { globalInstructions: this.#globalInstructions }),
       compactAtChars: this.#compactAtChars,
       toolOutputChars: this.#toolOutputChars,
       compaction: this.#compaction,
@@ -273,12 +278,17 @@ export class ContextManager {
     for (const key of DYNAMIC_SOURCE_ORDER) {
       const value = next[key];
       if (value === undefined || value === this.#epoch.sources[key]) continue;
-      updates.push(contextUpdateMessage(key, deltaSourceValue(this.#epoch.sources[key], displaySourceValue(key, value))));
+      const display = key === "global-instructions"
+        ? (this.#epoch.sources[key] === undefined ? value : `These replace all earlier global instructions.\n${value}`)
+        : deltaSourceValue(this.#epoch.sources[key], displaySourceValue(key, value));
+      updates.push(contextUpdateMessage(key, display));
       this.#epoch.sources[key] = value;
     }
     for (const key of DYNAMIC_SOURCE_ORDER) {
       if (key in next || !(key in this.#epoch.sources)) continue;
-      updates.push(contextUpdateMessage(key, "(removed)"));
+      updates.push(contextUpdateMessage(key, key === "global-instructions"
+        ? "Global instructions were removed; disregard all earlier global instructions."
+        : "(removed)"));
       delete this.#epoch.sources[key];
     }
     if (updates.length === 0) return false;
@@ -304,9 +314,19 @@ export class ContextManager {
       ? (legacySummary === undefined ? undefined : { summary: legacySummary, compactedAt: new Date(0).toISOString() })
       : { ...snapshot.compact };
     if (snapshot.epoch !== undefined) this.#epoch = cloneEpoch(snapshot.epoch);
+    const globalInstructions = tryResolveOptionalSystemSections(this.#globalInstructions);
+    const globalInstructionsAbsent = globalInstructions.available
+      && (globalInstructions.sections?.length ?? 0) === 0;
+    if (globalInstructionsAbsent) {
+      delete this.#epoch.sources["global-instructions"];
+      if (this.#epoch.pinnedSources !== undefined) delete this.#epoch.pinnedSources["global-instructions"];
+    }
     this.#visibilityLog = boundVisibilityLog(snapshot.visibilityLog);
     this.#activeTransientSystem.clear();
-    this.#messages = messages.map((message) => message.role === "tool"
+    this.#messages = (globalInstructionsAbsent
+      ? messages.filter((message) => message.role !== "system"
+        || !modelContentText(message.content).startsWith("Context update [global-instructions]\n"))
+      : messages).map((message) => message.role === "tool"
       ? { ...message, content: truncateToolOutput(message.content, this.#toolOutputChars) }
       : cloneMessage(message));
     this.#lastRecordedInputTokens = undefined;
@@ -553,6 +573,12 @@ export class ContextManager {
 
   #resolvedDynamicSources(previous: Readonly<Record<string, string>> = {}): Record<string, string> {
     const result: Record<string, string> = {};
+    const globalInstructions = tryResolveOptionalSystemSections(this.#globalInstructions);
+    if (!globalInstructions.available && previous["global-instructions"] !== undefined) {
+      result["global-instructions"] = previous["global-instructions"];
+    } else if (globalInstructions.sections !== undefined && globalInstructions.sections.length > 0) {
+      result["global-instructions"] = globalInstructions.sections.join("\n\n");
+    }
     if (this.#memory !== undefined) result["long-term-memory"] = this.#memory;
     if (this.#taskState !== undefined) result["task-state"] = this.#taskState;
     const volatile = tryResolveOptionalSystemSections(this.#volatileSystem);
@@ -562,7 +588,7 @@ export class ContextManager {
   }
 }
 
-const DYNAMIC_SOURCE_ORDER = ["long-term-memory", "task-state", "runtime"] as const;
+const DYNAMIC_SOURCE_ORDER = ["global-instructions", "long-term-memory", "task-state", "runtime"] as const;
 
 function sourceMessages(sources: Readonly<Record<string, string>>): ModelMessage[] {
   return DYNAMIC_SOURCE_ORDER.flatMap((key) => {
@@ -576,8 +602,9 @@ function sourceMessages(sources: Readonly<Record<string, string>>): ModelMessage
         }
       } catch { /* A malformed restored source remains visible below. */ }
     }
-    const label = key === "long-term-memory" ? "Long-term memory"
-        : key === "task-state" ? "Task state" : "Runtime";
+    const label = key === "global-instructions" ? "Global instructions"
+      : key === "long-term-memory" ? "Long-term memory"
+      : key === "task-state" ? "Task state" : "Runtime";
     return [{
       role: "system" as const,
       content: `${label}\n${content}`,

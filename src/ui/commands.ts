@@ -4,7 +4,7 @@ export const MVP_COMMANDS = [
   "loop", "goal", "evolve", "mcp",
   "commit", "review", "explain",
   "ide",
-  "memory", "remember", "forget", "forget-cold",
+  "memory", "remember", "forget", "forget-cold", "global",
   "checkpoint", "tree", "rewind", "unrevert", "fork",
   "pals", "chat", "co-work",
   "tool",
@@ -42,6 +42,7 @@ export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string>
   remember: "Add a long-term memory",
   forget: "Remove matching long-term memories",
   "forget-cold": "Remove all cold long-term memories and their files",
+  global: "Show or edit global coding instructions",
   checkpoint: "Create a workspace and context checkpoint",
   tree: "Show the session history tree",
   rewind: "Restore a prior session node",
@@ -59,6 +60,10 @@ export type McpSlashCommand =
   | { name: "mcp"; action: "status" }
   | { name: "mcp"; action: "tools" | "reconnect"; target: string }
   | { name: "mcp"; action: "enable" | "disable"; target: string };
+
+export type GlobalSlashCommand =
+  | { name: "global"; action: "show" }
+  | { name: "global"; action: "remember" | "forget"; text: string };
 
 export type PalsSlashCommand =
   | { name: "pals"; action: "list"; verbose: boolean }
@@ -83,13 +88,14 @@ export type SlashCommand =
   | { name: "explain"; query?: string; focus?: string }
   | { name: "remember"; type: MemoryType; text: string }
   | { name: "forget"; query: string }
+  | GlobalSlashCommand
   | { name: "checkpoint"; label?: string }
   | { name: "rewind" | "fork"; nodeId: string }
   | McpSlashCommand
   | PalsSlashCommand
   | { name: "chat"; target: string; goal: string }
   | CoWorkSlashCommand
-  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop" | "goal" | "evolve" | "commit" | "review" | "explain" | "mcp" | "remember" | "forget" | "checkpoint" | "rewind" | "fork" | "pals" | "chat" | "co-work" | "tool"> }
+  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop" | "goal" | "evolve" | "commit" | "review" | "explain" | "mcp" | "remember" | "forget" | "global" | "checkpoint" | "rewind" | "fork" | "pals" | "chat" | "co-work" | "tool"> }
   | { name: "audit"; toolFilter?: string | undefined }
   | { name: "evolve"; args: string[] }
   | { name: "invalid"; command: string; message: string };
@@ -190,6 +196,13 @@ export function parseSlashCommand(
     return query.length === 0
       ? { name: "invalid", command: name, message: "Use /forget <text-or-id>." }
       : { name, query };
+  }
+  if (name === "global") {
+    const [action, ...parts] = args;
+    if (action === undefined) return { name, action: "show" };
+    const text = parts.join(" ").trim();
+    if ((action === "remember" || action === "forget") && text.length > 0) return { name, action, text };
+    return { name: "invalid", command: name, message: "Use /global [remember <rule>|forget <rule>]." };
   }
   if (name === "checkpoint") {
     const label = args.join(" ").trim();

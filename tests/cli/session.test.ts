@@ -1129,6 +1129,24 @@ describe("FlavorSession", () => {
     expect(outputs).toContain("Forgot 1 memory entry.");
   });
 
+  it("dispatches global instruction commands without invoking the model", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const global = vi.fn(async () => "Global instructions updated.");
+    Object.assign(base, { global });
+    base.run = async function* () { throw new Error("ordinary run must not be called"); };
+    const session = new FlavorSession(base);
+
+    await session.submit("/global");
+    await session.submit("/global remember Keep tests focused");
+    await session.submit("/global forget Keep tests focused");
+
+    expect(global).toHaveBeenNthCalledWith(1, { name: "global", action: "show" });
+    expect(global).toHaveBeenNthCalledWith(2, { name: "global", action: "remember", text: "Keep tests focused" });
+    expect(global).toHaveBeenNthCalledWith(3, { name: "global", action: "forget", text: "Keep tests focused" });
+    expect(outputs).toContain("Global instructions updated.");
+  });
+
   it("dispatches the explicit finish command to the task finalizer", async () => {
     const events: string[] = []; const outputs: string[] = [];
     const base = services(events, outputs);

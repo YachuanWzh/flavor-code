@@ -61,7 +61,12 @@ export function TaskStatusLine({
   const thinkingLine = thinkingVisible ? (() => {
     const previous = thinkingScroll.current;
     const state = thinkingWindow(thinking!, previous.start, {
-      width: Math.max(8, (stdout.columns ?? 80) - 8),
+      // Split task tracks are narrower than the terminal. The rail takes
+      // two cells; measuring against stdout.columns hides the tail behind
+      // the track clip instead of letting the preview advance.
+      width: textWidth === undefined
+        ? Math.max(8, (stdout.columns ?? 80) - 8)
+        : Math.max(1, textWidth - 2),
       dtMs: time - previous.lastTime,
     });
     thinkingScroll.current = { start: state.start, lastTime: time };

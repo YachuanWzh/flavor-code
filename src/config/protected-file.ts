@@ -70,6 +70,39 @@ export async function updateProtectedFile<T>(options: ProtectedFileUpdate<T>): P
   }, options.lockTimeoutMs ?? LOCK_TIMEOUT_MS, options.staleLockMs ?? STALE_LOCK_MS);
 }
 
+/** Lock and atomically update user-authored text without backup recovery or rewriting unchanged content. */
+export async function updatePlainTextFile(
+  path: string,
+  update: (current: string | undefined) => string | undefined | Promise<string | undefined>,
+  maxBytes?: number,
+): Promise<string | undefined> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  return withFileLock(path, async () => {
+    const current = await readOptionalPlainText(path, maxBytes);
+    const next = await update(current);
+    if (next === undefined || next === current) return current;
+    if (await readOptionalPlainText(path, maxBytes) !== current) {
+      throw new Error(`Text file changed while the update was prepared: ${path}`);
+    }
+    await writeAtomic(path, next, defaultFileOperations);
+    return next;
+  }, LOCK_TIMEOUT_MS, STALE_LOCK_MS);
+}
+
+async function readOptionalPlainText(path: string, maxBytes?: number): Promise<string | undefined> {
+  try {
+    if (maxBytes !== undefined && (await stat(path)).size > maxBytes) {
+      throw new Error(`Text file exceeds ${maxBytes} bytes: ${path}`);
+    }
+    const bytes = await readFile(path);
+    if (maxBytes !== undefined && bytes.length > maxBytes) {
+      throw new Error(`Text file exceeds ${maxBytes} bytes: ${path}`);
+    }
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  }
+  catch (error) { if (isCode(error, "ENOENT")) return undefined; throw error; }
+}
+
 async function withFileLock<T>(
   path: string,
   operation: () => Promise<T>,

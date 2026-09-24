@@ -97,6 +97,46 @@ describe("ContextManager", () => {
     expect(cachedPrefix(context.messagesForModel())).toBe(before);
   });
 
+  it("places global instructions after the cache breakpoint and replaces edits chronologically", () => {
+    let rules = "Use explicit names.";
+    const context = createContext({ globalInstructions: () => rules });
+    const before = context.messagesForModel();
+    let boundary = -1;
+    before.forEach((message, index) => { if (message.cacheBreakpoint === true) boundary = index; });
+    expect(before[boundary + 1]?.content).toBe("Global instructions\nUse explicit names.");
+    const prefix = JSON.stringify(before.slice(0, boundary + 1));
+
+    rules = "Keep tests focused.";
+    expect(context.refreshContextSources()).toBe(true);
+    expect(JSON.stringify(context.messagesForModel().slice(0, boundary + 1))).toBe(prefix);
+    expect(context.snapshot().messages.at(-1)?.content).toBe(
+      "Context update [global-instructions]\nThese replace all earlier global instructions.\nKeep tests focused.",
+    );
+
+    const child = context.fork();
+    expect(child.messagesForModel().some((message) =>
+      modelContentText(message.content).includes("Keep tests focused."))).toBe(true);
+
+    rules = "";
+    expect(context.refreshContextSources()).toBe(true);
+    expect(context.snapshot().messages.at(-1)?.content).toContain("disregard all earlier global instructions");
+  });
+
+  it("drops saved global instructions when they are disabled on restore", () => {
+    let rules = "Use explicit names.";
+    const previous = createContext({ globalInstructions: () => rules });
+    rules = "Prefer focused tests.";
+    previous.refreshContextSources();
+    const saved = previous.snapshot();
+    const restored = createContext();
+    restored.restore(saved);
+
+    expect(restored.messagesForModel().some((message) =>
+      modelContentText(message.content).includes("Global instructions"))).toBe(false);
+    expect(restored.snapshot().epoch?.sources["global-instructions"]).toBeUndefined();
+    expect(restored.snapshot().epoch?.pinnedSources?.["global-instructions"]).toBeUndefined();
+  });
+
   it("keeps the epoch cache prefix byte-identical while admitting volatile updates", () => {
     let runtime = ["Date: one", "Model: alpha"] as readonly string[];
     const context = createContext({ volatileSystem: () => runtime });
