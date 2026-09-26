@@ -2,7 +2,16 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.4-beta.2 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.4-beta.3 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.4-beta.3] - 2026-09-26
+
+### 修复
+- 修复 CLI 输出的文件路径过长、换行后无法通过 Ctrl+点击（macOS 上为 Command+点击）打开的问题：Markdown 链接、行内代码和正文中的文件路径现在附带完整的终端超链接，换行后的各行仍指向同一文件；相对路径按当前工作区解析，带空格的路径正确编码，并保留行号引用。
+
+### 测试与维护
+- 新增长路径换行回归测试，覆盖 Markdown 链接、行内代码、普通文本、加粗文本、带空格的绝对路径及行号；相关 17 项测试与 TypeScript 类型检查通过。
+- `package.json` 与 `package-lock.json` 的项目版本更新为 `1.4.4-beta.3`。
 
 ## [1.4.4-beta.2] - 2026-09-25
 
@@ -991,6 +1000,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.4.4-beta.3 | 2026-09-26 | 修复 CLI 长文件路径换行后无法 Ctrl/Command+点击跳转：为路径附加完整终端链接，并覆盖相对路径、空格路径与行号 |
 | 1.4.4-beta.2 | 2026-09-25 | 桌面端 Flavor Island 协作新增会话标题上报：`createProductionRuntime` 新增 `islandSessionTitle` 回调，优先取工作台自定义任务名、回退会话 preview，Hook 载荷随之携带 `sessionTitle` 且重命名即时生效 |
 | 1.4.4-beta.1 | 2026-09-25 | 修复 CLI 审批/提问/队列面板全屏替换整个界面的问题：恢复 1.4.3 前底部固定区按内容计算高度的紧凑渲染与 `┌─ / │ / └─` 边框前缀，transcript 照常可见 |
 | 1.4.3 | 2026-09-24 | 新增 `flavor sessions` / `flavor config` / `flavor usage` 三组轻量 CLI 子命令（含 `setProjectConfigValue`/`unsetProjectConfigValue` 写前 Schema 校验）与 `/global` 全局编码规范命令（`GLOBAL.md` 作为缓存断点后的稳定源注入、模型调用前热刷新、可配置禁用）；Anthropic 新增 `cacheTtl: "5m" \| "1h"` 与首轮滚动尾部缓存标记；OpenAI 新增 `prompt_cache_key`、30 分钟隐式缓存与最多三个显式断点并支持兼容端点自动降级；修正 OpenAI usage 统计口径；epoch 动态源改为追加式不可变快照，修复缓存前缀整体失效 |

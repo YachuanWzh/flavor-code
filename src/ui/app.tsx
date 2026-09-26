@@ -21,6 +21,7 @@ import type { ClickEvent } from "../claude-ink/events/click-event.js";
 import { createProductionRuntime, type ProductionRuntime, type ProductionRuntimeOptions } from "../production.js";
 import { isDestructiveTool } from "../permissions/engine.js";
 import { AssistantText } from "./assistant-text.js";
+import { FileLinkWorkspaceContext } from "./markdown.js";
 import type { SessionApprovalRequest, SessionOutput } from "./session.js";
 import type { Question } from "../tools/ask-user-question.js";
 import type { MemoryReviewItem } from "../memory/review.js";
@@ -1330,16 +1331,16 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias, onSe
     }
   });
 
-  if (runtime === undefined) return <StartingLayout
+  if (runtime === undefined) return <FileLinkWorkspaceContext.Provider value={workspace}><StartingLayout
     workspaceName={basename(workspace)}
     completed={transcript.completed}
     {...(transcript.active === undefined ? {} : { active: transcript.active })}
     {...(updateTo === undefined ? {} : { updateTo })}
     columns={columns}
     rows={rows}
-  />;
+  /></FileLinkWorkspaceContext.Provider>;
   const llmServiceName = runtime.services.llmServiceName?.();
-  return <TerminalLayout
+  return <FileLinkWorkspaceContext.Provider value={workspace}><TerminalLayout
     model={runtime.services.mainModel()}
     {...(llmServiceName === undefined ? {} : { serviceName: llmServiceName })}
     workspaceName={basename(workspace)}
@@ -1384,7 +1385,7 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias, onSe
     questionIndex={questionIndex}
     questionAnswers={questionAnswers}
     customQuestionActive={customQuestionActive}
-  />;
+  /></FileLinkWorkspaceContext.Provider>;
 }
 
 function StartingLayout({

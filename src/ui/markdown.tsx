@@ -1,10 +1,14 @@
-import React, { useMemo, useRef } from "react";
+import React, { createContext, useContext, useMemo, useRef } from "react";
 import { Box, Text, useStdout } from "../claude-ink/index.js";
+import Link from "../claude-ink/components/Link.js";
 import chalk from "chalk";
 import { marked } from "marked";
 import type { Token, Tokens } from "marked";
 
 import { highlightCode } from "./highlight.js";
+import { fileLinkUrl, looksLikeFilePath, splitFilePaths } from "./file-links.js";
+
+export const FileLinkWorkspaceContext = createContext<string | undefined>(undefined);
 
 const CODE_BLOCK_BORDER = {
   top: "─",
@@ -316,24 +320,33 @@ function InlineTokens({ tokens }: { tokens: Token[] }): React.JSX.Element {
 }
 
 function InlineToken({ token }: { token: Token }): React.JSX.Element | null {
+  const workspace = useContext(FileLinkWorkspaceContext);
   switch (token.type) {
     case "text":
-      return <Text>{(token as Tokens.Text).raw ?? token.text}</Text>;
+      return <Text>{splitFilePaths((token as Tokens.Text).raw ?? token.text, workspace).map((part, index) =>
+        part.url ? <Link key={index} url={part.url}>{part.text}</Link> : <Text key={index}>{part.text}</Text>,
+      )}</Text>;
     case "strong":
-      return <Text bold>{renderInlineText((token as Tokens.Strong).tokens)}</Text>;
+      return <Text bold><InlineTokens tokens={(token as Tokens.Strong).tokens} /></Text>;
     case "em":
-      return <Text italic>{renderInlineText((token as Tokens.Em).tokens)}</Text>;
+      return <Text italic><InlineTokens tokens={(token as Tokens.Em).tokens} /></Text>;
     case "del":
-      return <Text strikethrough>{renderInlineText((token as Tokens.Del).tokens)}</Text>;
-    case "codespan":
-      return <Text color="black" backgroundColor="gray">{(token as Tokens.Codespan).text}</Text>;
+      return <Text strikethrough><InlineTokens tokens={(token as Tokens.Del).tokens} /></Text>;
+    case "codespan": {
+      const value = (token as Tokens.Codespan).text;
+      const url = looksLikeFilePath(value) ? fileLinkUrl(value, workspace) : undefined;
+      return <Text color="black" backgroundColor="gray">{url ? <Link url={url}>{value}</Link> : value}</Text>;
+    }
     case "link": {
       const link = token as Tokens.Link;
       const inner = renderInlineText(link.tokens);
+      const url = /^(?:https?:\/\/|mailto:|file:\/\/)/iu.test(link.href)
+        ? link.href
+        : looksLikeFilePath(link.href) ? fileLinkUrl(link.href, workspace) : undefined;
       return (
         <Text>
-          {inner}
-          <Text dimColor color="blue"> ({link.href})</Text>
+          {url ? <Link url={url}>{inner}</Link> : inner}
+          <Text dimColor color="blue"> {url ? <Link url={url}>({link.href})</Link> : `(${link.href})`}</Text>
         </Text>
       );
     }
