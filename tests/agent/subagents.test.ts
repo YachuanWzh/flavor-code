@@ -368,6 +368,49 @@ describe("SubagentScheduler", () => {
 });
 
 describe("LocalHarness", () => {
+  it("enforces an expert's tool allowlist, model, iteration budget, and read-only mode", async () => {
+    const hooks = new HookBus();
+    const adapter: ModelAdapter = { async *stream() { yield { type: "done", usage: { inputTokens: 0, outputTokens: 0 } }; } };
+    const registry = new ModelRegistry().register("fake", adapter);
+    const tools: ToolDefinition<{ path: string }>[] = ["Read", "Write", "Shell"].map((name) => ({
+      name, description: name, inputSchema: z.object({ path: z.string() }),
+      paths: (input) => [input.path], execute: async () => name,
+    }));
+    const contexts: Array<{ model: string; tools: string[] }> = [];
+    const harness = new LocalHarness({
+      registry, hooks, workspace: process.cwd(), mainModelId: "fake:main", subagentModelId: "fake:child", tools,
+      permissionMode: "bypassPermissions", loopMode: true,
+      createContext: (_agent, definitions, model) => {
+        contexts.push({ model, tools: definitions.map((tool) => tool.name) });
+        return contextFixture(hooks);
+      },
+    });
+    harness.setPermissionProfile("d2c");
+    const expert = {
+      name: "reviewer", description: "Review code", instructions: "Find bugs.",
+      source: "project" as const, path: "reviewer.md", model: "fake:review",
+      permission: "readOnly" as const, maxIterations: 30, tools: ["Read"],
+    };
+    const child = harness.createSubagent({ ...node("review"), agent: "reviewer" }, harness.main.context, expert);
+    expect(child.modelId).toBe("fake:review");
+    expect(child.loop.maxIterations).toBe(30);
+    expect(contexts.at(-1)).toEqual({ model: "fake:review", tools: ["Read"] });
+    await expect(child.runtime.execute(
+      { name: "Read", input: { path: process.cwd() } }, { agent: "subagent" },
+    )).resolves.toMatchObject({ ok: true });
+    await expect(child.runtime.execute(
+      { name: "Write", input: { path: process.cwd() } }, { agent: "subagent" },
+    )).resolves.toMatchObject({ ok: false });
+    child.dispose();
+    const defaultTools = harness.createSubagent({ ...node("default-tools"), agent: "reviewer" }, harness.main.context,
+      { ...expert, tools: undefined });
+    expect(defaultTools.tools.map((tool) => tool.name)).toEqual(["Read"]);
+    defaultTools.dispose();
+    expect(() => harness.createSubagent({ ...node("bad"), agent: "reviewer" }, harness.main.context,
+      { ...expert, tools: ["Shell"] })).toThrow("cannot use tool: Shell");
+    harness.dispose();
+  });
+
   it("disposes runtime hook schemas when profile construction fails", async () => {
     const hooks = new HookBus();
     const invalidTool = {

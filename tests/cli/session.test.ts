@@ -48,6 +48,38 @@ function services(events: string[], outputs: string[]): SessionServices {
 }
 
 describe("FlavorSession", () => {
+  it("lists and runs expert agents through the slash command", async () => {
+    const events: string[] = []; const outputs: string[] = [];
+    const base = services(events, outputs);
+    const runs: Array<{ name: string; prompt: string }> = [];
+    const creates: Array<{ name: string; template: string; description?: string; readOnly?: boolean }> = [];
+    base.agents = async () => [{ name: "reviewer", description: "Review code" }];
+    base.createAgent = async (name, template, description, readOnly) => {
+      creates.push({ name, template, ...(description === undefined ? {} : { description }),
+        ...(readOnly === undefined ? {} : { readOnly }) });
+      return { name, path: `/work/.flavor/agents/${name}.md`, permission: "readOnly" };
+    };
+    base.runAgent = async function* (name, prompt) {
+      runs.push({ name, prompt });
+      yield { type: "text", text: "Review complete" };
+    };
+    base.run = async function* () { throw new Error("main model should not run"); };
+    const session = new FlavorSession(base);
+    await session.submit("/agent list");
+    await session.submit("/agent templates");
+    await session.submit("/agent create api-reviewer reviewer Check API compatibility");
+    await session.submit("/agent create db-auditor --read-only inspect migrations");
+    await session.submit("/agent reviewer inspect auth");
+    expect(creates).toEqual([
+      { name: "api-reviewer", template: "reviewer", description: "Check API compatibility" },
+      { name: "db-auditor", template: "custom", description: "inspect migrations", readOnly: true },
+    ]);
+    expect(runs).toEqual([{ name: "reviewer", prompt: "inspect auth" }]);
+    expect(outputs.join("\n")).toContain("Review code");
+    expect(outputs.join("\n")).toContain("Created api-reviewer");
+    expect(outputs.join("\n")).toContain("Review complete");
+  });
+
   it("sends unmatched slash-prefixed input to the model as ordinary text", async () => {
     const events: string[] = []; const outputs: string[] = [];
     const base = services(events, outputs);

@@ -48,6 +48,21 @@ describe("parseSlashCommand", () => {
     ["/explain cancelOrder", { name: "explain", query: "cancelOrder" }],
     ["/explain src/order.ts#cancelOrder 错误处理", { name: "explain", query: "src/order.ts#cancelOrder", focus: "错误处理" }],
     ["/help", { name: "help" }], ["/exit", { name: "exit" }],
+    ["/agent", { name: "agent", action: "list" }],
+    ["/agent list", { name: "agent", action: "list" }],
+    ["/agent templates", { name: "agent", action: "templates" }],
+    ["/agent create reviewer", { name: "agent", action: "create", agent: "reviewer", template: "reviewer" }],
+    ["/agent create api-reviewer explorer trace API calls", {
+      name: "agent", action: "create", agent: "api-reviewer", template: "explorer", description: "trace API calls",
+    }],
+    ["/agent create api-reviewer Check API compatibility", {
+      name: "agent", action: "create", agent: "api-reviewer", template: "custom", description: "Check API compatibility",
+    }],
+    ["/agent create db-auditor --read-only inspect migrations", {
+      name: "agent", action: "create", agent: "db-auditor", template: "custom",
+      description: "inspect migrations", readOnly: true,
+    }],
+    ["/agent reviewer inspect the parser", { name: "agent", action: "run", agent: "reviewer", prompt: "inspect the parser" }],
   ])("parses %s", (input, expected) => expect(parseSlashCommand(input)).toEqual(expected));
 
   it("returns null for ordinary prompts", () => expect(parseSlashCommand("explain this")).toBeNull());
@@ -96,6 +111,9 @@ describe("parseSlashCommand", () => {
   it("reports invalid arguments without throwing", () => {
     expect(parseSlashCommand("/permissions reckless")).toMatchObject({ name: "invalid", command: "permissions" });
     expect(parseSlashCommand("/model sidekick foo:bar")).toMatchObject({ name: "invalid", command: "model" });
+    expect(parseSlashCommand("/agent ../other task")).toMatchObject({ name: "invalid", command: "agent" });
+    expect(parseSlashCommand("/agent create")).toMatchObject({ name: "invalid", command: "agent" });
+    expect(parseSlashCommand("/agent create my-agent")).toMatchObject({ name: "invalid", command: "agent" });
     expect(parseSlashCommand("/loop")).toEqual({ name: "invalid", command: "loop", message: "Use /loop <goal>." });
     expect(parseSlashCommand("/remember")).toEqual({
       name: "invalid", command: "remember", message: "Use /remember [user|feedback|project|reference] <text>.",

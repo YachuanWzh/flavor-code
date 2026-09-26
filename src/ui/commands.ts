@@ -1,5 +1,5 @@
 export const MVP_COMMANDS = [
-  "model", "init", "config", "login", "logout", "permissions", "skills", "plugins", "hooks",
+  "model", "init", "config", "login", "logout", "permissions", "skills", "agent", "plugins", "hooks",
   "tasks", "finish", "compact", "clear", "paste-image", "help", "exit", "audit", "usage", "doctor",
   "loop", "goal", "evolve", "mcp",
   "commit", "review", "explain",
@@ -18,6 +18,7 @@ export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string>
   logout: "Clear stored OAuth credentials and restore configured models",
   permissions: "Change the tool permission mode",
   skills: "List discovered skills",
+  agent: "List, create, or run an expert agent",
   plugins: "List loaded plugins",
   hooks: "Show plugin hook status",
   tasks: "Show task planning status",
@@ -80,6 +81,10 @@ export type SlashCommand =
   | { name: "permissions"; mode: PermissionCommandMode }
   | { name: "plugin"; command: string; args: string[] }
   | { name: "skill"; skill: string; prompt: string }
+  | { name: "agent"; action: "list" }
+  | { name: "agent"; action: "templates" }
+  | { name: "agent"; action: "create"; agent: string; template: ExpertAgentCreationKind; description?: string; readOnly?: boolean }
+  | { name: "agent"; action: "run"; agent: string; prompt: string }
   | { name: "managed-tool"; tool: string; input: string }
   | { name: "loop"; goal: string }
   | { name: "goal"; goal: string }
@@ -95,7 +100,7 @@ export type SlashCommand =
   | PalsSlashCommand
   | { name: "chat"; target: string; goal: string }
   | CoWorkSlashCommand
-  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "audit" | "loop" | "goal" | "evolve" | "commit" | "review" | "explain" | "mcp" | "remember" | "forget" | "global" | "checkpoint" | "rewind" | "fork" | "pals" | "chat" | "co-work" | "tool"> }
+  | { name: Exclude<(typeof MVP_COMMANDS)[number], "model" | "permissions" | "agent" | "audit" | "loop" | "goal" | "evolve" | "commit" | "review" | "explain" | "mcp" | "remember" | "forget" | "global" | "checkpoint" | "rewind" | "fork" | "pals" | "chat" | "co-work" | "tool"> }
   | { name: "audit"; toolFilter?: string | undefined }
   | { name: "evolve"; args: string[] }
   | { name: "invalid"; command: string; message: string };
@@ -140,6 +145,36 @@ export function parseSlashCommand(
       return { name: "invalid", command: name, message: `Use /permissions <${PERMISSION_MODES.join("|")}>.` };
     }
     return { name, mode: normalized as PermissionMode };
+  }
+  if (name === "agent") {
+    const [agent, ...promptParts] = args;
+    if (agent === undefined || (agent === "list" && promptParts.length === 0)) return { name, action: "list" };
+    if (agent === "templates" && promptParts.length === 0) return { name, action: "templates" };
+    if (agent === "create") {
+      const [newName, ...parts] = promptParts;
+      if (newName === undefined || newName.length > 64 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(newName)) {
+        return { name: "invalid", command: name, message: "Use /agent create <name> [preset|custom|--read-only] [description]." };
+      }
+      const readOnly = parts[0] === "--read-only";
+      const remaining = readOnly ? parts.slice(1) : parts;
+      const first = remaining[0];
+      const explicitTemplate = EXPERT_AGENT_TEMPLATE_NAMES.find((candidate) => candidate === first);
+      const explicitCustom = first === "custom";
+      const description = remaining.slice(explicitTemplate !== undefined || explicitCustom ? 1 : 0).join(" ").trim();
+      const template: ExpertAgentCreationKind | undefined = explicitTemplate ?? (explicitCustom || readOnly
+        ? "custom"
+        : EXPERT_AGENT_TEMPLATE_NAMES.find((candidate) => candidate === newName) ?? (description ? "custom" : undefined));
+      if (template === undefined || (template === "custom" && !description) || (readOnly && template !== "custom")) {
+        return { name: "invalid", command: name,
+          message: "Custom agents need a description. Use /agent create <name> [preset|custom|--read-only] [description]." };
+      }
+      return { name, action: "create", agent: newName, template,
+        ...(description === "" ? {} : { description }), ...(readOnly ? { readOnly: true } : {}) };
+    }
+    if (agent.length > 64 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(agent)) {
+      return { name: "invalid", command: name, message: "Use /agent [list|templates|create <name> [template] [description]|<name> [task]]." };
+    }
+    return { name, action: "run", agent, prompt: promptParts.join(" ") };
   }
   if (name === "tool") {
     const [requested] = args;
@@ -283,3 +318,4 @@ function validText(value: string): boolean {
 import { normalizePermissionMode, PERMISSION_MODES, type PermissionMode } from "../config/schema.js";
 import { MEMORY_TYPES, type MemoryType } from "../memory/types.js";
 import { MAX_ALIAS_LENGTH, MAX_MESSAGE_BYTES } from "../pals/protocol.js";
+import { EXPERT_AGENT_TEMPLATE_NAMES, type ExpertAgentCreationKind } from "../agent/expert-templates.js";

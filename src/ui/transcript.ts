@@ -489,12 +489,13 @@ function applyTaskSnapshot(turn: TranscriptTurn, snapshot: TaskSnapshot, include
     const elapsedMs = state !== "running" && startedAt !== undefined
       ? prior?.elapsedMs ?? snapshotElapsedMs ?? Math.max(0, now - startedAt)
       : prior?.elapsedMs;
+    const label = `${node.agent === undefined ? "" : `[${node.agent}] `}${node.description}`;
     taskBlocks.push({
       kind: "status",
       id,
       state,
-      text: `${state === "completed" ? "✓" : state === "failed" || state === "cancelled" ? "×" : "·"} subagent: ${node.description} · ${status}`,
-      task: { subject: node.description, activeForm: node.description, role: "subagent" },
+      text: `${state === "completed" ? "✓" : state === "failed" || state === "cancelled" ? "×" : "·"} subagent: ${label} · ${status}`,
+      task: { subject: label, activeForm: label, role: "subagent" },
       ...(startedAt === undefined ? {} : { startedAt }),
       ...(elapsedMs === undefined ? {} : { elapsedMs }),
     });

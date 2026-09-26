@@ -1,9 +1,10 @@
 import { AgentLoop, type AgentLoopOptions } from "../agent/loop.js";
 import { MAIN_TASK_TOOL_NAMES } from "../agent/task-tools.js";
 import type { TaskNode } from "../agent/planner.js";
+import type { ExpertAgent } from "../agent/expert-agents.js";
 import type { HallucinationGuard } from "../hallucination/guard.js";
 import type { PermissionMode, PermissionProfile } from "../permissions/engine.js";
-import { PermissionEngine } from "../permissions/engine.js";
+import { PermissionEngine, getToolCategory } from "../permissions/engine.js";
 import type { CompiledPermissionPolicy } from "../permissions/policy.js";
 import { createPermissionClassifier } from "../permissions/classifier.js";
 import type { ContextManager } from "../context/manager.js";
@@ -119,12 +120,31 @@ export class LocalHarness {
     modelTools.splice(0, modelTools.length, ...nextModelTools);
   }
 
-  createSubagent(task: TaskNode, parentContext: ContextManager = this.main.context): SubagentHarness {
+  createSubagent(task: TaskNode, parentContext: ContextManager = this.main.context, expert?: ExpertAgent): SubagentHarness {
     if (this.#disposed) throw new Error("LocalHarness is disposed");
-    const tools = this.#toolsForAgent("subagent").filter((tool) => !MAIN_TASK_TOOL_NAMES.has(tool.name));
-    const context = this.#options.createContext("subagent", tools, this.#subagentModelId, parentContext);
+    if (task.agent !== undefined && expert?.name !== task.agent) throw new Error(`Unresolved expert agent: ${task.agent}`);
+    const available = this.#toolsForAgent("subagent").filter((tool) => !MAIN_TASK_TOOL_NAMES.has(tool.name));
+    if (expert?.tools !== undefined) {
+      for (const name of expert.tools) {
+        const requested = available.find((tool) => tool.name === name);
+        if (requested === undefined) throw new Error(`Agent ${expert.name} requests unavailable tool: ${name}`);
+        if (expert.permission === "readOnly" && !isExpertReadTool(requested)) {
+          throw new Error(`Read-only agent ${expert.name} cannot use tool: ${name}`);
+        }
+      }
+    }
+    const tools = available.filter((tool) =>
+      (expert?.tools === undefined || expert.tools.includes(tool.name))
+      && (expert?.permission !== "readOnly" || isExpertReadTool(tool)));
+    if (expert !== undefined && new Set(tools.map((tool) => tool.name)).size !== tools.length) {
+      throw new Error(`Agent ${expert.name} has ambiguous duplicate tool names`);
+    }
+    const modelId = expert?.model ?? this.#subagentModelId;
+    this.#options.registry.get(modelId);
+    const context = this.#options.createContext("subagent", tools, modelId, parentContext);
     this.#claimContext(context);
-    const profile = this.#createProfile(this.#subagentModelId, tools, "subagent", context, this.#options.approve, undefined, `subagent:${task.id}`);
+    const profile = this.#createProfile(modelId, tools, "subagent", context, this.#options.approve, undefined,
+      `subagent:${task.id}`, expert);
     let disposed = false;
     const child: SubagentHarness = {
       ...profile,
@@ -148,9 +168,10 @@ export class LocalHarness {
     execute: (harness: SubagentHarness, signal: AbortSignal) => Promise<T>,
     signal: AbortSignal = new AbortController().signal,
     parentContext: ContextManager = this.main.context,
+    expert?: ExpertAgent,
   ): Promise<T> {
     if (this.#disposed) throw new Error("LocalHarness is disposed");
-    const child = this.createSubagent(task, parentContext);
+    const child = this.createSubagent(task, parentContext, expert);
     try {
       signal.throwIfAborted();
       return await execute(child, signal);
@@ -187,13 +208,14 @@ export class LocalHarness {
     approve?: ApprovalCallback,
     fallbackModelId?: string,
     ownerId: string = agent,
+    expert?: ExpertAgent,
   ): HarnessProfile {
     const permissions = new PermissionEngine({
       workspace: this.#options.workspace,
       ...(this.#options.afterToolSuccess === undefined ? {} : { afterSuccess: this.#options.afterToolSuccess }),
-      profile: this.#permissionProfile,
+      profile: expert?.permission === "readOnly" ? "standard" : this.#permissionProfile,
       ...(this.#options.permissionPolicy === undefined ? {} : { policy: this.#options.permissionPolicy }),
-      mode: this.#options.loopMode
+      mode: expert?.permission === "readOnly" ? "plan" : this.#options.loopMode
         ? "bypassPermissions"
         : (agent === "subagent"
           ? (this.#mainPermissions.mode === "plan" ? "plan" : "bubble")
@@ -217,7 +239,7 @@ export class LocalHarness {
     try {
       const tools = definitions.map(toModelTool);
       const isMain = agent === "main";
-      const maxIterations = isMain ? this.#options.maxIterationsMain : this.#options.maxIterationsSubagent;
+      const maxIterations = expert?.maxIterations ?? (isMain ? this.#options.maxIterationsMain : this.#options.maxIterationsSubagent);
       const loop = new AgentLoop({
         registry: this.#options.registry,
         modelId,
@@ -256,4 +278,11 @@ function toModelTool(tool: ToolDefinition<unknown>): ModelTool {
   }
   const modelTool = modelToolFromZod(tool.name, tool.description, tool.inputSchema);
   return tool.modelStrict === undefined ? modelTool : { ...modelTool, strict: tool.modelStrict };
+}
+
+export function isExpertReadTool(tool: ToolDefinition<unknown>): boolean {
+  if (tool.name === "TaskOutput") return true;
+  const category = getToolCategory(tool.name);
+  if (category === "write" || category === "destructive" || category === "shell" || category === "control") return false;
+  return category === "read" || tool.readOnly === true;
 }

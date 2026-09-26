@@ -188,6 +188,7 @@ OAuth PKCE 的运行时行为与配置约定见 [PKCE 规范](./docs/specs/pkce-
 | `/init` | 生成或更新 `FLAVOR.md` |
 | `/doctor` | 诊断本地运行时、配置、工具、插件和 npm 连通性 |
 | `/model` | 查看或切换主/子 Agent 模型 |
+| `/agent` | 查看、快速创建或运行专家 Agent |
 | `/permissions` | 切换权限模式 |
 | `/tasks` | 查看任务计划和子 Agent 状态 |
 | `/compact` | 手动压缩长会话上下文 |
@@ -322,6 +323,40 @@ flavor mcp disable docs
 </details>
 
 Skill 是带有 YAML 头信息的 `SKILL.md`，放在 `.flavor/skills/<name>/` 或 `~/.flavor-code/skills/<name>/`。Flavor 会按任务渐进加载，也支持通过 `/<skill-name>` 显式调用。Skill 正文支持 `$ARGUMENTS`、`$ARGUMENTS[N]` 和 `$N` 参数占位符；运行中的组合 Skill 可以使用只读 `Skill` 工具继续加载依赖 Skill，插件限定名称（如 `superharness:test-driven-development`）会安全解析到已发现的 Skill。
+
+### 专家 Agent
+
+用预设一条命令创建项目角色，无需手写 Markdown：
+
+```text
+/agent templates
+/agent create reviewer
+/agent create api-reviewer reviewer 检查 API 兼容性和回归风险
+/agent create worker implementer 处理指定模块的实现任务
+/agent create test-writer 补齐认证模块的单元测试
+/agent create db-auditor --read-only 审查数据库迁移风险
+/agent list
+/agent api-reviewer 检查认证接口
+```
+
+Agent 名称和职责不受这三个预设限制。`reviewer`（只读审查）、`explorer`（只读探索）和 `implementer`（按现有审批规则修改代码）是无需调用模型的快捷模板。`/agent create <名称> <职责描述>` 会调用当前主模型，生成针对该职责的工作步骤、交付内容、边界、工具和权限；加 `--read-only` 可强制只读，纯审查职责也会自动设为只读。生成或校验失败时不会写入文件。命令会生成 `.flavor/agents/<名称>.md`，已存在的文件不会被覆盖。生成后可直接运行，也可编辑文件细调。
+
+角色定义也可以手动放在项目的 `.flavor/agents/<name>.md` 或全局的 `~/.flavor-code/agents/<name>.md`；同名时项目定义优先。定义文件的名称必须与 `name` 一致。格式示例：
+
+```markdown
+---
+name: reviewer
+description: Review code for correctness and regression risks
+model: openai:gpt-5-mini
+tools: [Read, Glob, Grep, LspFindRefs, TaskOutput]
+permission: readOnly
+maxIterations: 30
+---
+
+检查边界条件、错误处理和测试缺口，按严重程度报告具体文件与行号。
+```
+
+使用 `/agent list` 查看角色，使用 `/agent reviewer 检查认证模块` 单独运行。主 Agent 也能在 `Task` 的节点里设置 `"agent": "reviewer"`。`model`、`tools`、`maxIterations` 可省略，分别使用子 Agent 模型、所有可用的子 Agent 工具和全局子 Agent 迭代上限。`permission` 默认为 `standard`，遵守现有子 Agent 权限；`readOnly` 仅提供只读工具并在运行时使用只读权限，Shell 和写入工具不可用。`Task` 节点的 `files` 仍用于并行写冲突调度，不是文件写入沙箱。
 
 插件放在 `.flavor/plugins/`，可以注册命令、工具、Hook、Skill 根目录和模型适配器。官方插件可通过插件管理器安装：`npx --yes @flavor-code/plugin-manager`。`SessionStart` 与 `UserPromptSubmit` Hook 返回的 `additionalContext` 会进入当前任务上下文，可用于注入项目级工程规则。插件加载会记录内容指纹与声明的能力。可通过嵌入 API 的 `pluginSandbox: true` 启用 Worker/vm 隔离；由于内置插件和已有插件依赖沙箱尚未代理的 Node.js API，当前兼容默认值仍为进程内运行。
 

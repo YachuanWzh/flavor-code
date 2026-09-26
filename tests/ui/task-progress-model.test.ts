@@ -109,6 +109,18 @@ describe("task progress presentation", () => {
     ]);
   });
 
+  it("shows the selected expert name in delegated task progress", () => {
+    expect(staticTaskLines({
+      subagents: {
+        graph: { nodes: [{
+          id: "review", agent: "reviewer", description: "Inspect parser", dependencies: [],
+          expectedOutputs: [], verification: [],
+        }] },
+        states: { review: "running" },
+      },
+    })).toEqual(["· subagent: [reviewer] Inspect parser · running"]);
+  });
+
   it("appends elapsed time from snapshot for terminal subagents", () => {
     expect(staticTaskLines({
       subagents: {

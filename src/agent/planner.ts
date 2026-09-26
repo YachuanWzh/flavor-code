@@ -5,6 +5,9 @@ import type { HookBus } from "../hooks/bus.js";
 export const TaskNodeSchema = z.object({
   id: z.string().trim().min(1),
   description: z.string().trim().min(1),
+  agent: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).optional().describe(
+    "Optional expert agent name from .flavor/agents or ~/.flavor-code/agents.",
+  ),
   dependencies: z.array(z.string().trim().min(1)),
   expectedOutputs: z.array(z.string().trim().min(1)),
   verification: z.array(z.string().trim().min(1)),

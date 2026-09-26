@@ -2,7 +2,27 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.4-beta.3 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.4 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.4] - 2026-09-26
+
+1.4.4 正式版，合并 1.4.4-beta.1 ~ beta.3 的全部改动（审批面板布局回退、Flavor Island 会话标题上报、CLI 长文件路径换行后可点击跳转，详见对应 beta 条目）。
+
+### 新增
+- 专家子代理（Expert Agent）体系：新增 `/agent` 命令族——`/agent list` 查看已配置角色、`/agent templates` 查看内置模板、`/agent create <name> [模板|custom|--read-only] [描述]` 创建角色、`/agent <name> <任务>` 直接运行某个角色。角色定义是带 YAML frontmatter 的 Markdown 文件，放在全局 `~/.flavor-code/agents/<name>.md` 或项目 `.flavor/agents/<name>.md`（同名时项目覆盖全局），字段含 `name`、`description`、可选 `model`、可选 `tools` 白名单、`permission`（`standard`/`readOnly`）与可选 `maxIterations`；写入使用不覆盖策略（同名角色已存在时报错），非法定义（越界、符号链接逃逸、超 64 KiB）在发现阶段记录诊断而不是中断会话。
+- 内置三个免模型即时创建的模板：`reviewer`（只读审查代码正确性、回归风险与测试缺口）、`explorer`（只读追踪调用路径并定位相关文件）、`implementer`（在既有审批规则下做有界修改与验证）。自定义角色由 `/agent create <name> <描述>` 经当前配置的主模型生成：产出包含目的、不少于三步的工作流、交付物、操作边界、工具选择与权限档位的完整定义；生成结果先通过结构校验（工具必须对子代理可用、只读角色不得申请写工具、指令不得空洞过短），校验失败则不落盘任何文件。纯审查/分析类请求自动强制 `readOnly`，`--read-only` 可显式要求只读。
+- `Task` 图节点新增可选 `agent` 字段：主 Agent 把角色名分配给节点后，子代理运行时注入该角色的指令（system 消息）、模型、工具白名单与迭代上限；`readOnly` 角色按工具类别只暴露只读工具（Shell/Write/Edit 等一律不可用），并把该子代理的权限模式钉在 `plan`；声明了未定义角色、不可用工具或重名歧义工具时在执行前直接报错。主 Agent 每轮上下文自动注入可用角色清单（名称/描述/权限），便于在 Task 节点中直接选用。
+- `/agent <name> <任务>` 手动运行的专家子代理会作为对话回合持久化：结束后把 `/agent …` 请求与角色完整回复写回会话上下文，恢复会话可见。
+- CLI 任务进度行与 transcript 子代理行在有角色时显示 `[角色名]` 前缀；`flavor doctor` / `/doctor` 诊断输出并入 agent 定义文件的解析诊断。
+- 中英文 README 新增 Expert agents 章节与 `/agent` 命令表项，覆盖模板创建、自定义生成、手工定义格式与 Task 节点用法。
+
+### 改进
+- 子代理上下文压缩（summarize）改用该子代理实际生效的模型：带 `model` 覆盖的专家角色压缩时不再借用全局 subagent 模型。
+- Task 执行不再因全局子代理模型（child model）配置错误整体失败：节点所用角色显式声明了 `model` 时照常运行，仅在该节点仍要回落到未配置子代理模型时抛出原错误。
+
+### 测试与维护
+- 新增 `tests/agent/expert-agents.test.ts` 与 `tests/agent/expert-generator.test.ts`；扩充 `tests/agent/subagents.test.ts`、`tests/cli/production.test.ts`、`tests/cli/session.test.ts`、`tests/ui/commands.test.ts`、`tests/ui/task-progress-model.test.ts`，覆盖角色发现与项目覆盖全局、创建不覆盖与只读强制、生成定义的结构校验与失败不落盘、Task 节点角色解析、`/agent` 命令语法解析、UI 前缀展示。
+- `package.json` 与 `package-lock.json` 的项目版本由 `1.4.4-beta.3` 更新为正式版 `1.4.4`。
 
 ## [1.4.4-beta.3] - 2026-09-26
 
@@ -1000,6 +1020,7 @@ Flavor Code 1.0.0 正式发布。以下能力为 1.0.0 发布时已包含的功�
 
 | 版本 | 发布日期 | 摘要 |
 | --- | --- | --- |
+| 1.4.4 | 2026-09-26 | 正式版：合并 beta.1~3 修复；新增专家子代理体系——`/agent list/templates/create/<name> <任务>`、reviewer/explorer/implementer 内置模板与主模型生成的自定义角色（校验失败不落盘、审查类自动只读）、`Task` 节点 `agent` 字段为子代理注入指令/模型/工具白名单/迭代上限、`readOnly` 只暴露只读工具并在运行时钉住 plan 权限、doctor 诊断与 UI `[角色名]` 前缀、README 双语文档 |
 | 1.4.4-beta.3 | 2026-09-26 | 修复 CLI 长文件路径换行后无法 Ctrl/Command+点击跳转：为路径附加完整终端链接，并覆盖相对路径、空格路径与行号 |
 | 1.4.4-beta.2 | 2026-09-25 | 桌面端 Flavor Island 协作新增会话标题上报：`createProductionRuntime` 新增 `islandSessionTitle` 回调，优先取工作台自定义任务名、回退会话 preview，Hook 载荷随之携带 `sessionTitle` 且重命名即时生效 |
 | 1.4.4-beta.1 | 2026-09-25 | 修复 CLI 审批/提问/队列面板全屏替换整个界面的问题：恢复 1.4.3 前底部固定区按内容计算高度的紧凑渲染与 `┌─ / │ / └─` 边框前缀，transcript 照常可见 |

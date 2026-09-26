@@ -3,6 +3,7 @@ import { redactConfig } from "../config/load.js";
 import type { HookBus } from "../hooks/bus.js";
 import type { PermissionMode } from "../permissions/engine.js";
 import type { SkillMetadata } from "../skills/registry.js";
+import { EXPERT_AGENT_TEMPLATES, EXPERT_AGENT_TEMPLATE_NAMES, type ExpertAgentCreationKind } from "../agent/expert-templates.js";
 import { parseSlashCommand, type GlobalSlashCommand, type McpSlashCommand, type ModelRole, type SlashCommand } from "./commands.js";
 import type { QuestionBridge } from "../tools/ask-user-question.js";
 import { message } from "../utils/error.js";
@@ -97,6 +98,9 @@ export interface SessionServices {
     },
   ): AsyncIterable<AgentEvent>;
   runSkill(skill: string, prompt: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
+  agents?(): Promise<readonly unknown[]>;
+  createAgent?(name: string, template: ExpertAgentCreationKind, description?: string, readOnly?: boolean, signal?: AbortSignal): Promise<{ name: string; path: string; permission: string }>;
+  runAgent?(name: string, prompt: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
   runLoop(goal: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
   runGoal(goal: string, signal: AbortSignal): AsyncIterable<AgentEvent>;
   /** Resume a /loop interrupted by a heap rotation, keyed by its persisted id. */
@@ -192,6 +196,7 @@ const HELP = [
   "/login                                  authenticate via OAuth PKCE",
   "/logout                                 clear stored OAuth credentials",
   "/init  /config  /skills  /plugins  /hooks  /tasks  /doctor",
+  "/agent list | templates | create <name> [preset|--read-only] [description] | <name> [task]",
   "/memory  /remember [type] <text>  /forget <text-or-id>  /forget-cold  /finish",
   "/global  /global remember <rule>  /global forget <rule>",
   "/checkpoint [label]  /tree  /rewind <node>  /unrevert  /fork <node>",
@@ -630,6 +635,17 @@ export class FlavorSession {
       this.#notice(format(await this.#services.runManagedTool(command.tool, command.input, signal)));
     } else if (command.name === "skill") {
       for await (const event of this.#services.runSkill(command.skill, command.prompt, signal)) this.#services.output(event);
+    } else if (command.name === "agent") {
+      if (command.action === "list") this.#notice(format(await required(this.#services.agents, "agent")()));
+      else if (command.action === "templates") this.#notice(EXPERT_AGENT_TEMPLATE_NAMES
+        .map((name) => `${name}: ${EXPERT_AGENT_TEMPLATES[name].description}`).join("\n"));
+      else if (command.action === "create") {
+        if (command.template === "custom") this.#notice(`Generating ${command.agent}...`);
+        const created = await required(this.#services.createAgent, "agent")(
+          command.agent, command.template, command.description, command.readOnly, signal,
+        );
+        this.#notice(`Created ${created.name} (${command.template}, ${created.permission}) at ${created.path}. Run /agent ${created.name} <task>.`);
+      } else for await (const event of required(this.#services.runAgent, "agent")(command.agent, command.prompt, signal)) this.#services.output(event);
     } else if (command.name === "loop") {
       for await (const event of this.#services.runLoop(command.goal, signal)) this.#services.output(event);
     } else if (command.name === "goal") {

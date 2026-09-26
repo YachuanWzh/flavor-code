@@ -119,6 +119,96 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 describe("production runtime", () => {
+  it("discovers project expert agents for the CLI", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-experts-")); roots.push(workspace);
+    const agentRoot = join(workspace, ".flavor", "agents");
+    await mkdir(agentRoot, { recursive: true });
+    await writeFile(join(agentRoot, "reviewer.md"), [
+      "---", "name: reviewer", "description: Review project code", "permission: readOnly", "---", "Find bugs.",
+    ].join("\n"));
+    const outputs: unknown[] = [];
+    const runtime = await createProductionRuntime({ workspace, home: workspace, environment: {}, output: (event) => outputs.push(event) });
+    try {
+      expect(await runtime.services.agents?.()).toEqual([expect.objectContaining({
+        name: "reviewer", source: "project", permission: "readOnly",
+      })]);
+      await runtime.session.submit("/agent create explorer");
+      await runtime.session.submit("/agent create test-writer implementer 补齐认证模块测试");
+      expect(outputs).toContainEqual(expect.objectContaining({
+        type: "notice", message: expect.stringContaining("Created explorer"),
+      }));
+      expect((await runtime.services.agents?.() ?? []).map((agent) => (agent as { name: string }).name).sort())
+        .toEqual(["explorer", "reviewer", "test-writer"]);
+      expect(await readFile(join(agentRoot, "test-writer.md"), "utf8")).toContain("补齐认证模块测试");
+    } finally { await runtime.dispose(); }
+  });
+
+  it("generates a custom review agent through the configured model", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-production-generated-agent-")); roots.push(workspace);
+    const gateway = createServer((request, response) => {
+      let raw = "";
+      request.on("data", (chunk: Buffer) => { raw += chunk.toString("utf8"); });
+      request.on("end", () => {
+        const draft = {
+          description: "审查代码正确性、回归风险及缺失的测试场景",
+          permission: "readOnly", tools: ["Read", "Glob", "Grep", "TaskOutput"], maxIterations: 30,
+          purpose: "独立审查代码改动，识别有证据支撑的缺陷和遗漏的测试。",
+          workflow: [
+            "定位相关改动、调用关系与现有测试，确认预期行为。",
+            "追踪边界输入、错误处理和主要分支，验证潜在缺陷。",
+            "按严重程度汇总问题，记录对应文件行号与触发条件。",
+          ],
+          deliverables: [
+            "逐条给出严重程度、文件行号、失败机制和复现条件。",
+            "指出缺失的测试；没有发现时说明审查范围与剩余风险。",
+          ],
+          boundaries: [
+            "只读取文件，不修改代码或执行会改变工作区的命令。",
+            "没有代码证据的问题不得当作已确认缺陷报告。",
+          ],
+        };
+        const content = JSON.stringify(draft);
+        const item = { type: "message", id: "msg_agent", role: "assistant", status: "completed",
+          content: [{ type: "output_text", text: content, annotations: [] }] };
+        response.writeHead(200, { "Content-Type": "text/event-stream" });
+        response.end([
+          { type: "response.created", response: { id: "resp_agent", object: "response", created_at: 1,
+            status: "in_progress", model: "gpt-main", output: [] } },
+          { type: "response.output_item.added", output_index: 0,
+            item: { type: "message", id: "msg_agent", role: "assistant", status: "in_progress", content: [] } },
+          { type: "response.content_part.added", item_id: "msg_agent", output_index: 0, content_index: 0,
+            part: { type: "output_text", text: "", annotations: [] } },
+          { type: "response.output_text.delta", item_id: "msg_agent", output_index: 0, content_index: 0, delta: content },
+          { type: "response.output_item.done", output_index: 0, item },
+          { type: "response.completed", response: { id: "resp_agent", object: "response", created_at: 1,
+            status: "completed", model: "gpt-main", output: [item], usage: { input_tokens: 1, output_tokens: 1 } } },
+        ].map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""));
+      });
+    });
+    await new Promise<void>((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+    const port = (gateway.address() as AddressInfo).port;
+    await mkdir(join(workspace, ".flavor"));
+    await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
+      providers: { openai: { type: "openai", baseURL: `http://127.0.0.1:${port}/v1`, apiKey: "test-key" } },
+      agents: { main: { model: "openai:gpt-main" }, subagent: { model: "openai:gpt-child" } },
+      memory: { enabled: false }, hallucination: { showWarnings: false }, sleep: false,
+    }));
+    const outputs: unknown[] = [];
+    try {
+      const runtime = await createProductionRuntime({ workspace, home: workspace, environment: {},
+        output: (event) => outputs.push(event) });
+      try {
+        await runtime.session.submit("/agent create cr-agent 创建一个用于code review的agent");
+        const content = await readFile(join(workspace, ".flavor", "agents", "cr-agent.md"), "utf8");
+        expect(content).toContain("permission: readOnly");
+        expect(content).toContain("## Workflow");
+        expect(content).toContain("文件行号");
+        expect(outputs).toContainEqual(expect.objectContaining({ type: "notice",
+          message: expect.stringContaining("Created cr-agent") }));
+      } finally { await runtime.dispose(); }
+    } finally { await new Promise<void>((resolve) => gateway.close(() => resolve())); }
+  }, 15_000);
+
   it("loads legacy Node plugins and their skill roots by default", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-plugin-compat-")); roots.push(workspace);
     const plugin = join(workspace, ".flavor", "plugins", "legacy-default");
@@ -725,6 +815,9 @@ describe("production runtime", () => {
           const graph = { nodes: [{
             id: "child", description: "Inspect without changing files", dependencies: [],
             expectedOutputs: ["summary"], verification: ["report result"], files: [],
+          }, {
+            id: "expert", agent: "reviewer", description: "Review the parser", dependencies: [],
+            expectedOutputs: ["review"], verification: ["report result"], files: [],
           }] };
           const startedCall = {
             type: "function_call", id: "fc_task", call_id: "call_task", name: "Task",
@@ -748,8 +841,9 @@ describe("production runtime", () => {
           ]);
           return;
         }
-        const text = body.model === "gpt-child" ? JSON.stringify({
-          taskId: "child", status: "completed", summary: "checked", filesChanged: [], commandsRun: [],
+        const text = body.model === "gpt-child" || body.model === "gpt-review" ? JSON.stringify({
+          taskId: body.model === "gpt-review" ? "expert" : "child",
+          status: "completed", summary: "checked", filesChanged: [], commandsRun: [],
           verification: [], artifacts: [], risks: [], suggestedNextSteps: [],
         }) : "done";
         const model = String(body.model);
@@ -780,6 +874,12 @@ describe("production runtime", () => {
     const port = (gateway.address() as AddressInfo).port;
     const workspace = await mkdtemp(join(tmpdir(), "flavor-production-subagent-effort-")); roots.push(workspace);
     await mkdir(join(workspace, ".flavor"), { recursive: true });
+    await mkdir(join(workspace, ".flavor", "agents"));
+    await writeFile(join(workspace, ".flavor", "agents", "reviewer.md"), [
+      "---", "name: reviewer", "description: Review the parser", "model: openai:gpt-review",
+      "tools: [Read, Grep]", "permission: readOnly", "maxIterations: 30", "---",
+      "Check the parser's edge cases.",
+    ].join("\n"));
     await writeFile(join(workspace, ".flavor", "flavor.json"), JSON.stringify({
       providers: { openai: {
         type: "openai", baseURL: `http://127.0.0.1:${port}/v1`, apiKey: "test-key", thinkingEffort: "low",
@@ -803,6 +903,17 @@ describe("production runtime", () => {
       ]);
       const childRequest = requests.find((body) => body.model === "gpt-child");
       expect(childRequest?.reasoning).toEqual({ effort: "low" });
+      const expertRequest = requests.find((body) => body.model === "gpt-review");
+      expect(expertRequest?.reasoning).toEqual({ effort: "low" });
+      expect((expertRequest?.tools as Array<{ name: string }>).map((tool) => tool.name).sort()).toEqual(["Grep", "Read"]);
+      expect(JSON.stringify(expertRequest?.input)).toContain("Check the parser's edge cases.");
+      const directEvents: unknown[] = [];
+      for await (const event of runtime.services.runAgent!("reviewer", "manual check", new AbortController().signal)) {
+        directEvents.push(event);
+      }
+      expect(directEvents).toContainEqual(expect.objectContaining({ type: "text" }));
+      expect(requests.filter((body) => body.model === "gpt-review")).toHaveLength(2);
+      expect(JSON.stringify(requests.at(-1)?.input)).toContain("manual check");
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
       await runtime.dispose();

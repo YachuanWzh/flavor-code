@@ -13,6 +13,8 @@ import {
   type SubagentResult,
 } from "./agent/subagents.js";
 import { TaskGraphSchema, TaskPlanner, type TaskGraph, type TaskNode } from "./agent/planner.js";
+import { ExpertAgentRegistry, type ExpertAgent } from "./agent/expert-agents.js";
+import { generateExpertAgent } from "./agent/expert-generator.js";
 import { createTaskPlanTools } from "./agent/task-tools.js";
 import { updatePlanTask, type TaskPlan } from "./agent/task-plan.js";
 import type { AgentEvent, TaskSnapshot } from "./agent/types.js";
@@ -808,6 +810,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     disabledNames: config.skills.disabled,
   });
   const skillsReady = skills.discover();
+  const expertAgents = new ExpertAgentRegistry(home, workspace);
   skillsReady.catch(() => undefined); // Re-surfaced at the await before harness creation.
   tools.push(createSkillTool(skills), createSkillResourceTool(skills));
   if (options.extraTools !== undefined) tools.push(...options.extraTools);
@@ -966,13 +969,21 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const taskTool: ToolDefinition<unknown> = {
     name: "Task",
     description: "Validate a task graph and execute its nodes with isolated child agents. " +
+      "Set a node's optional `agent` to a configured expert name to select its instructions, model, tools, and permission. " +
       "Declare each node's `files` (the workspace files it may create or modify) whenever a task writes files; " +
       "nodes with overlapping files are serialized automatically to prevent concurrent write conflicts.",
     inputSchema: TaskGraphSchema,
     paths: () => [],
     execute: async (input, signal) => {
-      if (recovered === undefined && selectedModels.childError !== undefined) throw new Error(selectedModels.childError);
       const graph = await new TaskPlanner({ hooks }).plan(input, signal);
+      const resolvedExperts = new Map<string, ExpertAgent>();
+      for (const node of graph.nodes) {
+        const expert = node.agent === undefined ? undefined : await expertAgents.get(node.agent);
+        if (expert !== undefined) resolvedExperts.set(node.id, expert);
+        if (recovered === undefined && selectedModels.childError !== undefined && expert?.model === undefined) {
+          throw new Error(selectedModels.childError);
+        }
+      }
       // Merge new graph nodes into the accumulated task graph so that
       // sub-agent statuses from prior Task calls are preserved instead of
       // being overwritten.
@@ -999,6 +1010,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         },
         execute: (task, execution) => runChild(
           harness, skills, task, execution.attempt, execution.signal, subagentParentContext,
+          resolvedExperts.get(task.id),
         ),
       });
       return scheduler.run(graph, signal);
@@ -1028,7 +1040,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     } = config.context;
     const summarize = (messages: readonly ModelMessage[], signal: AbortSignal, onProgress?: CompactProgressCallback) => summarizeWithModel({
       registry,
-      modelId: () => agent === "main" ? harness.mainModelId : harness.subagentModelId,
+      modelId: () => agent === "main" ? harness.mainModelId : contextModelId,
       messages,
       signal,
       ...(onProgress === undefined ? {} : { onProgress }),
@@ -1760,7 +1772,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       });
       const turnId = harnessJournal.startTurn(turnConfig, { prompt, initialUserMessage: runOptions?.initialUserMessage });
       return monitorTurnMemory(durableTurn(persistAfter(runMain(
-        harness, skills, prompt, signal, selectedModels.mainError,
+        harness, skills, expertAgents, prompt, signal, selectedModels.mainError,
         memoryStore === undefined || (!memoryHasRoutableEntries && userMemoryContext === undefined) ? undefined : {
           store: memoryStore, taskId: memoryLifecycle.taskId ?? sessionId,
           topK: config.memory.retrievalTopK, maxChars: config.memory.maxPromptChars,
@@ -1775,6 +1787,28 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     },
     runSkill: (skill, prompt, signal) => persistAfter(
       runExplicitSkill(harness, skills, skill, prompt, signal, selectedModels.mainError), persist,
+    ),
+    agents: async () => (await expertAgents.discover()).map(({ name, description, source, model, tools, permission, maxIterations }) =>
+      ({ name, description, source, model, tools, permission, maxIterations })),
+    createAgent: async (name, template, description, readOnly, signal) => {
+      let agent: ExpertAgent;
+      if (template === "custom") {
+        if (!description?.trim()) throw new Error("Custom agents need a description");
+        await expertAgents.assertAvailable(name);
+        if (selectedModels.mainError) throw new Error(`Cannot generate custom agent: ${selectedModels.mainError}`);
+        const generated = await generateExpertAgent({
+          registry, modelId: mainModel, name, request: description, tools,
+          ...(readOnly ? { forceReadOnly: true } : {}),
+          ...(signal === undefined ? {} : { signal }),
+        });
+        agent = await expertAgents.createGenerated(name, generated);
+      } else {
+        agent = await expertAgents.create(name, template, description, readOnly);
+      }
+      return { name: agent.name, path: agent.path, permission: agent.permission };
+    },
+    runAgent: (name, prompt, signal) => persistAfter(
+      runExplicitAgent(harness, expertAgents, name, prompt, signal, selectedModels.childError), persist,
     ),
     runLoop: (goal, signal) => monitorLongTaskRestart(
       runLoopSession(loopOrchestrator, hooks, goal, signal),
@@ -1850,7 +1884,8 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       ...config, sources: loaded.sources,
       ...(effectiveLlm === undefined ? {} : { effectiveLlm: publicEffectiveLlm(effectiveLlm) }),
       diagnostics: [...diagnostics, ...pluginHost.diagnostics.map((item) => `${item.plugin}: ${item.message}`),
-        ...skills.diagnostics.map((item) => `${item.path}: ${item.message}`)].map((item) => redactSecrets(item, secrets)),
+        ...skills.diagnostics.map((item) => `${item.path}: ${item.message}`),
+        ...expertAgents.diagnostics.map((item) => `${item.path}: ${item.message}`)].map((item) => redactSecrets(item, secrets)),
     }),
     skills: () => skills.discover(),
     reloadSkills: async () => {
@@ -2502,7 +2537,8 @@ async function workspaceFingerprint(workspace: string): Promise<string> {
 }
 
 async function* runMain(
-  harness: LocalHarness, skills: SkillRegistry, prompt: string, signal: AbortSignal, setupError?: string,
+  harness: LocalHarness, skills: SkillRegistry, expertAgents: ExpertAgentRegistry,
+  prompt: string, signal: AbortSignal, setupError?: string,
   memory?: { store: MemoryStore; taskId: string; topK: number; maxChars: number },
   getSteeringMessages?: () => readonly string[],
   initialUserMessage?: Extract<ModelMessage, { role: "user" }>,
@@ -2517,6 +2553,9 @@ async function* runMain(
       return;
     }
     if (promptContext !== undefined) contexts.push(promptContext);
+    const availableAgents = await expertAgents.discover();
+    if (availableAgents.length > 0) contexts.push("Available expert agents for Task nodes (`agent` field):\n" +
+      availableAgents.map(({ name, description, permission }) => `- ${name} (${permission}): ${description}`).join("\n"));
     if (memory !== undefined) {
       try {
         const recalled = await memory.store.recall(prompt, {
@@ -2583,6 +2622,50 @@ async function* runExplicitSkill(
   } catch (error) {
     yield { type: "error", error: { code: "unknown", message: message(error) } };
   }
+}
+
+async function* runExplicitAgent(
+  harness: LocalHarness,
+  agents: ExpertAgentRegistry,
+  name: string,
+  prompt: string,
+  signal: AbortSignal,
+  setupError?: string,
+): AsyncIterable<AgentEvent> {
+  try {
+    const expert = await agents.get(name);
+    if (setupError !== undefined && expert.model === undefined) throw new Error(setupError);
+    const task: TaskNode = {
+      id: `manual-${randomUUID()}`,
+      agent: name,
+      description: prompt,
+      dependencies: [],
+      expectedOutputs: [],
+      verification: [],
+    };
+    const child = harness.createSubagent(task, harness.main.context, expert);
+    const request = prompt || `Apply the ${name} expert agent to the current workspace.`;
+    const response: string[] = [];
+    try {
+      child.context.append({ role: "system", content: `${buildSubagentDirective()}\n\n${expertInstruction(expert, child.modelId, child.tools.map((tool) => tool.name))}` });
+      for await (const event of child.loop.run({ prompt: request, signal })) {
+        if (event.type === "text") response.push(event.text);
+        yield event;
+      }
+    } finally {
+      child.dispose();
+      harness.main.context.append({ role: "user", content: `/agent ${name} ${request}` });
+      if (response.length > 0) harness.main.context.append({ role: "assistant", content: response.join("") });
+    }
+  } catch (error) {
+    yield { type: "error", error: { code: "unknown", message: message(error) } };
+  }
+}
+
+function expertInstruction(expert: ExpertAgent, modelId: string, toolNames: readonly string[]): string {
+  return `Expert agent: ${expert.name}\n${expert.description}\n` +
+    `Model: ${modelId}\nPermission: ${expert.permission}\nAvailable tools: ${toolNames.join(", ") || "none"}\n\n` +
+    expert.instructions;
 }
 
 async function* persistAfter<T>(source: AsyncIterable<T>, persist: () => Promise<void>): AsyncIterable<T> {
@@ -2818,9 +2901,10 @@ async function runGitReview(deps: GitCommandDeps, focus: string | undefined, sig
 
 async function runChild(
   harness: LocalHarness, skills: SkillRegistry, task: TaskNode, attempt: 1 | 2, signal: AbortSignal,
-  parentContext: ContextManager,
+  parentContext: ContextManager, expert?: ExpertAgent,
 ): Promise<unknown> {
   return harness.runSubagent(task, async (child, childSignal) => {
+    if (expert !== undefined) child.context.append({ role: "system", content: expertInstruction(expert, child.modelId, child.tools.map((tool) => tool.name)) });
     const skill = await skills.match(task.description);
     const skillContext = skill === undefined ? undefined : `Matched skill: ${skill.name}\n${await skills.loadBody(skill)}`;
     const repair = attempt === 2 ? " Your previous response was invalid. Return only one strict JSON object." : "";
@@ -2843,7 +2927,7 @@ async function runChild(
       }
     }
     return parseFinalSubagentMessage(child.context.snapshot().messages);
-  }, signal, parentContext);
+  }, signal, parentContext, expert);
 }
 
 async function registerConfiguredAdapters(

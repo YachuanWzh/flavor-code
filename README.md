@@ -188,6 +188,7 @@ Common commands:
 | `/init` | Generate or update `FLAVOR.md` |
 | `/doctor` | Diagnose the local runtime, configuration, tools, plugins, and npm access |
 | `/model` | View or switch main/sub-agent models |
+| `/agent` | List, create, or run expert agents |
 | `/permissions` | Switch permission modes |
 | `/tasks` | View task plans and sub-agent status |
 | `/compact` | Manually compact long session context |
@@ -322,6 +323,40 @@ flavor mcp disable docs
 </details>
 
 A Skill is a `SKILL.md` with YAML frontmatter, placed in `.flavor/skills/<name>/` or `~/.flavor-code/skills/<name>/`. Flavor loads skills progressively based on the task, and you can invoke one explicitly with `/<skill-name>`. Skill bodies support `$ARGUMENTS`, `$ARGUMENTS[N]`, and `$N` substitutions. A running composite Skill can load a dependency through the read-only `Skill` tool; plugin-qualified names such as `superharness:test-driven-development` resolve to discovered skills.
+
+### Expert agents
+
+Create a project role from a preset without writing Markdown:
+
+```text
+/agent templates
+/agent create reviewer
+/agent create api-reviewer reviewer Check API compatibility and regressions
+/agent create worker implementer Implement the assigned module
+/agent create test-writer Add unit tests for authentication
+/agent create db-auditor --read-only Review database migration risks
+/agent list
+/agent api-reviewer inspect authentication
+```
+
+Agent names and responsibilities are not limited to the three presets. `reviewer` (read-only review), `explorer` (read-only code tracing), and `implementer` (edits under existing approval rules) are instant shortcuts. `/agent create <name> <description>` uses the configured main model to generate a role-specific workflow, deliverables, boundaries, tools, and permission; add `--read-only` to require a read-only role. A review-only description is read-only automatically. If generation or validation fails, no file is written. The command writes `.flavor/agents/<name>.md` without overwriting an existing file. You can edit the generated file later.
+
+You can also place a role definition manually in `.flavor/agents/<name>.md` or `~/.flavor-code/agents/<name>.md`. Project definitions take precedence over global ones. The filename must match `name`:
+
+```markdown
+---
+name: reviewer
+description: Review code for correctness and regression risks
+model: openai:gpt-5-mini
+tools: [Read, Glob, Grep, LspFindRefs, TaskOutput]
+permission: readOnly
+maxIterations: 30
+---
+
+Check edge cases, error handling, and test gaps. Report concrete files and lines by severity.
+```
+
+Use `/agent list` to inspect roles and `/agent reviewer inspect authentication` to run one directly. The main agent can select a role in a `Task` node with `"agent": "reviewer"`. `model`, `tools`, and `maxIterations` are optional; they default to the subagent model, all available subagent tools, and the global subagent iteration limit. `permission` defaults to `standard` and follows existing subagent permissions. `readOnly` exposes only read tools and enforces read-only mode at runtime; Shell and write tools are unavailable. A `Task` node's `files` field schedules conflicting writes; it does not sandbox file access.
 
 Plugins live in `.flavor/plugins/` and can register commands, tools, hooks, Skill roots, and model adapters. Official plugins can be installed with the plugin manager: `npx --yes @flavor-code/plugin-manager`. `additionalContext` returned by `SessionStart` and `UserPromptSubmit` hooks is added to the current task context, enabling reliable project-level engineering policy injection. Plugin loads record a content fingerprint plus declared capabilities. Worker/vm isolation is available through the embedding API's `pluginSandbox: true` option; the compatibility default remains in-process because bundled and existing plugins use Node.js APIs that the isolated runtime does not yet mediate.
 
