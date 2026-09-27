@@ -387,7 +387,7 @@ Project runtime data lives under `.flavor/`:
 └── plugins/          # Project plugins
 ```
 
-Long-term memory distinguishes user preferences, behavioral feedback, project conventions, and external references. Automatically extracted project facts and external references enter a review inbox that survives restarts; a high model score alone cannot save them. Review cards show whether an exact user quote supports a candidate. Use `Ctrl+Y` to save or `Ctrl+N` to ignore; `/memory` shows pending and decision counts. Explicit `/remember` still saves directly. Secrets, tokens, and raw tool output are rejected.
+Long-term memory distinguishes user preferences, behavioral feedback, project conventions, and external references. Automatically extracted project facts and external references enter a review inbox that survives restarts; a high model score alone cannot save them. Review cards show whether an exact user quote supports a candidate. Use `Ctrl+Y` to save or `Ctrl+N` to ignore; on macOS, `Command+Y` and `Command+N` also work when the terminal passes those keys through. `/memory` shows pending and decision counts. Explicit `/remember` still saves directly. Secrets, tokens, and raw tool output are rejected.
 
 Image prompts support PNG, JPEG, and WebP, with a 5 MiB per-image maximum and up to 5 images per prompt. The desktop app supports picking or drag-and-drop; CLI clipboard images currently work on Windows and macOS. Standard CLI paste prefers clipboard text and creates an image attachment only when no usable text flavor is available; use `/paste-image` when both flavors exist and the image is intended.
 

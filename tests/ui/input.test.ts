@@ -9,6 +9,8 @@ import {
   isCopyShortcut,
   isPlatformShortcut,
   jumpToAdjacentTurn,
+  memoryReviewAction,
+  memoryReviewModifierHint,
   navigateHistory,
   navigatePromptHistory,
   prepareCliSubmission,
@@ -145,6 +147,18 @@ it("supports platform-native history and output shortcuts on macOS, Windows, and
   expect(isPlatformShortcut("o", { ctrl: true, super: false }, "o", "darwin")).toBe(true);
   expect(isPlatformShortcut("x", { ctrl: false, super: true }, "o", "darwin")).toBe(false);
   expect(isPlatformShortcut("o", { ctrl: false, super: true }, "o", "win32")).toBe(false);
+});
+
+it("accepts Ctrl and macOS Command for memory review without catching unmodified keys", () => {
+  expect(memoryReviewAction("y", { ctrl: true, super: false }, "win32")).toBe("accept");
+  expect(memoryReviewAction("n", { ctrl: true, super: false }, "linux")).toBe("dismiss");
+  expect(memoryReviewAction("Y", { ctrl: false, super: true }, "darwin")).toBe("accept");
+  expect(memoryReviewAction("N", { ctrl: false, super: true }, "darwin")).toBe("dismiss");
+  expect(memoryReviewAction("n", { ctrl: true, super: false }, "darwin")).toBe("dismiss");
+  expect(memoryReviewAction("n", { ctrl: false, super: true }, "win32")).toBeNull();
+  expect(memoryReviewAction("y", { ctrl: false, super: false }, "darwin")).toBeNull();
+  expect(memoryReviewModifierHint("darwin")).toBe("Ctrl/Cmd");
+  expect(memoryReviewModifierHint("win32")).toBe("Ctrl");
 });
 
 it("maps platform-native undo and redo shortcuts", () => {

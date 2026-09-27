@@ -178,6 +178,20 @@ export function isPlatformShortcut(
   return platform === "darwin" ? key.super || key.ctrl : key.ctrl;
 }
 
+export function memoryReviewAction(
+  character: string,
+  key: Pick<Key, "ctrl" | "super">,
+  platform: NodeJS.Platform = process.platform,
+): "accept" | "dismiss" | null {
+  if (isPlatformShortcut(character, key, "y", platform)) return "accept";
+  if (isPlatformShortcut(character, key, "n", platform)) return "dismiss";
+  return null;
+}
+
+export function memoryReviewModifierHint(platform: NodeJS.Platform = process.platform): string {
+  return platform === "darwin" ? "Ctrl/Cmd" : "Ctrl";
+}
+
 export function isOutputToggleShortcut(
   character: string,
   key: Pick<Key, "ctrl" | "super">,
@@ -1049,8 +1063,9 @@ export function App({ workspace, home, resumeSession, instanceId, palAlias, onSe
       return;
     }
     const pendingMemory = active?.memoryReviews.pending[0];
-    if (pendingMemory !== undefined && key.ctrl && (character.toLowerCase() === "y" || character.toLowerCase() === "n")) {
-      if (character.toLowerCase() === "y") {
+    const reviewAction = pendingMemory === undefined ? null : memoryReviewAction(character, key);
+    if (pendingMemory !== undefined && reviewAction !== null) {
+      if (reviewAction === "accept") {
         void active!.memoryReviews.accept(pendingMemory.id).catch((error) => {
           dispatch({ type: "submit-error", message: safeUiError(error) });
         });
@@ -1961,6 +1976,7 @@ function MemoryReviewCards({ reviews, autoDismissSeconds }: {
   autoDismissSeconds: number;
 }): React.JSX.Element {
   const review = reviews[0]!;
+  const modifier = memoryReviewModifierHint();
   const [remaining, setRemaining] = useState(autoDismissSeconds);
   useEffect(() => {
     if (autoDismissSeconds <= 0) return;
@@ -1973,7 +1989,7 @@ function MemoryReviewCards({ reviews, autoDismissSeconds }: {
     <Text color="yellowBright" wrap="truncate-end">│ [{review.type}] {review.content}</Text>
     <Text dimColor wrap="truncate-end">│ {review.evidence === undefined ? "No verified user quote; check before saving." : `User said: “${review.evidence}”`}</Text>
     <Text dimColor>│ Model-generated content is not stored until you approve it.</Text>
-    <Text color="yellow">└─ <Text bold>Ctrl+Y</Text> save / <Text bold>Ctrl+N</Text> ignore{autoDismissSeconds > 0
+    <Text color="yellow">└─ <Text bold>{modifier}+Y</Text> save / <Text bold>{modifier}+N</Text> ignore{autoDismissSeconds > 0
       ? <Text bold color="cyanBright">{` (auto-dismiss in ${remaining}s)`}</Text>
       : " (stays pending until reviewed)"}</Text>
   </Box>;

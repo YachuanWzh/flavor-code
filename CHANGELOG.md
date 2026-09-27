@@ -2,7 +2,13 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.5-beta.1 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.5-beta.2 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.5-beta.2] - 2026-09-27
+
+### 修复与改进
+- macOS CLI 记忆审核卡支持终端传入的 `Command+Y` 保存、`Command+N` 忽略，同时保留 `Ctrl+Y` / `Ctrl+N`；提示按平台显示，补充快捷键测试与文档。
+- `package.json` 与 `package-lock.json` 更新为 `1.4.5-beta.2`。
 
 ## [1.4.5-beta.1] - 2026-09-26
 

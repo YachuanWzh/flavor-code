@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import { INITIAL_STATE, parseMultipleKeypresses, type ParsedKey } from "../../src/claude-ink/parse-keypress.js";
 import { InputEvent } from "../../src/claude-ink/events/input-event.js";
 import { supportsExtendedKeys } from "../../src/claude-ink/terminal.js";
-import { promptHistoryAction } from "../../src/ui/app.js";
+import { memoryReviewAction, promptHistoryAction } from "../../src/ui/app.js";
 
 it("enables extended key reporting for normalized macOS terminal names", () => {
   expect(supportsExtendedKeys("iTerm.app")).toBe(true);
@@ -23,4 +23,17 @@ it("maps macOS Command+Z CSI-u input to undo and redo", () => {
 
   const redo = parseEvent("\x1b[122;10u");
   expect(promptHistoryAction(redo.input, redo.key, "darwin")).toBe("redo");
+});
+
+it("maps macOS Command+Y/N CSI-u input to memory review decisions", () => {
+  const eventFor = (sequence: string): InputEvent => {
+    const [items] = parseMultipleKeypresses({ ...INITIAL_STATE }, sequence);
+    expect(items).toHaveLength(1);
+    return new InputEvent(items[0] as ParsedKey);
+  };
+
+  const save = eventFor("\x1b[121;9u");
+  const ignore = eventFor("\x1b[110;9u");
+  expect(memoryReviewAction(save.input, save.key, "darwin")).toBe("accept");
+  expect(memoryReviewAction(ignore.input, ignore.key, "darwin")).toBe("dismiss");
 });
