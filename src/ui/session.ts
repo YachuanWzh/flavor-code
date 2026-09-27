@@ -205,7 +205,7 @@ const HELP = [
   "/goal <objective>                       run a goal pipeline with adversarial verification",
   "/commit [hint]                          draft a commit message for staged changes and commit",
   "/review [focus]                         review uncommitted changes before committing",
-  "/evolve <signals|suggest|improve <id>|verify <name>|reload <name>|test|revert <name>|done <id>>  self-improvement loop",
+  "/evolve <status|signals|suggest|improve <id>|verify <name>|test|reload <name>|revert <name>|rule list|accept <id>|preference list|drop <id>|restore <id>>",
   "/mcp [status|tools|reconnect|enable|disable]  manage MCP servers",
   "/tool <registered-tool> [JSON object]      run a registered tool (or use /<tool-name>)",
   "/ide                                     show VS Code connection and cursor/selection",

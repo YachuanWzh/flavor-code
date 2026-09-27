@@ -448,6 +448,17 @@ describe("PluginHost", () => {
     expect(host.diagnostics.map(({ message }) => message).join(" ")).toMatch(/entry|unrecognized|unexpected/i);
   });
 
+  it("rejects fix plugin names that differ from their project directory", async () => {
+    const f = await fixture();
+    await plugin(f.project, "fix-read", "export function activate() {}", { name: "ordinary" });
+    await plugin(f.project, "alias", "export function activate() {}", { name: "fix-alias" });
+    const host = new PluginHost({ projectPluginDirs: [f.project], registrations: registrations().callbacks });
+    await host.loadAll();
+    expect(host.loadedPlugins).toEqual([]);
+    expect(host.diagnostics).toHaveLength(2);
+    expect(host.diagnostics.every(({ message }) => message.includes("must match its manifest name"))).toBe(true);
+  });
+
   it("reloads a plugin created after initial discovery", async () => {
     const f = await fixture();
     const r = registrations();
@@ -455,7 +466,7 @@ describe("PluginHost", () => {
     await host.loadAll();
     expect(host.loadedPlugins).toEqual([]);
 
-    await plugin(f.project, "fix-read", "export function activate(ctx) { ctx.registerCommand('read-fix', {}); }", {
+    await plugin(f.project, "fix-read", "export function activate(ctx) { ctx.registerCommand('read-fix', () => 'ok'); }", {
       contributes: { ...baseManifest.contributes, commands: [{ name: "read-fix" }] },
     });
     const result = await host.reload("fix-read");
@@ -466,7 +477,7 @@ describe("PluginHost", () => {
 
   it("reload replaces a broken version after the source is fixed", async () => {
     const f = await fixture();
-    const root = await plugin(f.project, "fix-shell", "export function activate(ctx) { ctx.registerCommand('shell-fix', {}); }", {
+    const root = await plugin(f.project, "fix-shell", "export function activate(ctx) { ctx.registerCommand('shell-fix', () => 'ok'); }", {
       contributes: { ...baseManifest.contributes, commands: [{ name: "shell-fix" }] },
     });
     const r = registrations();
@@ -481,7 +492,7 @@ describe("PluginHost", () => {
     expect(host.loadedPlugins.map(({ name }) => name)).toEqual([]);
     expect(r.active).toEqual([]);
 
-    await writeFile(join(root, "index.mjs"), "export function activate(ctx) { ctx.registerCommand('shell-fix-v2', {}); }\n");
+    await writeFile(join(root, "index.mjs"), "export function activate(ctx) { ctx.registerCommand('shell-fix-v2', () => 'ok'); }\n");
     await writeFile(join(root, "flavor-plugin.json"), JSON.stringify({
       ...baseManifest, name: "fix-shell",
       contributes: { ...baseManifest.contributes, commands: [{ name: "shell-fix-v2" }] },

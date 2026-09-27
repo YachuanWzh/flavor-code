@@ -8,13 +8,13 @@
 //               scaffold a fix-<tool>/ plugin dir + PLAN.md. Implementation
 //               happens through the normal tool loop (Write/Edit + reload),
 //               which goes through the permission system. Alternatively a
-//               suggestion can be closed as a prompt guardrail rule that is
-//               injected into future system prompts (kind: prompt_rule).
+//               suggestion can be proposed as a prompt guardrail rule for
+//               review (kind: prompt_rule); only accepted rules are injected.
 //   4. VERIFY   /evolve verify dry-runs the plugin in a shadow PluginHost
 //               sandbox; /evolve test runs the suite; /evolve revert restores
 //               the last good snapshot; /evolve done closes a suggestion.
-//   5. REPEAT   loop end appends a reflection with a signalDelta so whether a
-//               fix actually reduced failures is measurable across runs.
+//   5. REPEAT   ordinary and loop runs record comparable per-tool failure rates. These are
+//               observations, not automatic proof that a fix worked.
 //
 // The loop is never fully autonomous: suggestions are proposals, and every
 // modification still flows through the normal permission system.
@@ -29,17 +29,19 @@ import { PluginHost } from "../plugins/host.js";
 import type { ToolDefinition } from "../tools/types.js";
 import {
   fixPluginDir,
-  revertFixPlugin,
+  restoreFixPluginSnapshot,
   sanitizePluginName,
   scaffoldFixPlugin,
   snapshotFixPlugin,
   verifyFixPlugin,
 } from "./loader.js";
 import { EvolveStore, type EvolveSuggestion, type ToolTrend } from "./store.js";
+import { EvolveVerificationStore, hashFixPlugin, hashFixPluginSnapshot } from "./verification.js";
 
 export interface EvolveServiceOptions {
   workspace: string;
   hooks: HookBus;
+  store?: EvolveStore;
   /** Real host plugin loader; required only for the reload subcommand. */
   pluginHost?: PluginHost;
   config?: {
@@ -57,13 +59,15 @@ export interface EvolveServiceOptions {
 
 export interface EvolveService {
   readonly store: EvolveStore;
+  /** Load persisted suggestions and guardrails before the first model call. */
+  initialize(): Promise<void>;
   suggestions(): Promise<EvolveSuggestion[]>;
   /** Synchronous system-prompt section (cached after every capture). */
   promptSection(): string | undefined;
-  /** Reset per-run counters; call when a loop worker starts. */
+  /** Reset per-run counters at the start of a foreground task or loop worker. */
   beginRun(): void;
-  /** Append a reflection, emit LoopEnd, and reset counters. */
-  endRun(reason?: string): Promise<void>;
+  /** Append a reflection and reset counters; emit LoopEnd only for /loop. */
+  endRun(reason?: string, emitLoopEnd?: boolean, taskId?: string): Promise<void>;
   handleCommand(args: readonly string[]): Promise<string>;
   toolDefinition(): ToolDefinition<unknown>;
   dispose(): void;
@@ -87,18 +91,20 @@ Follow them unless the current task or the user explicitly contradicts one.
 `;
 
 const USAGE = [
-  "usage: /evolve <signals|suggest|improve <id>|verify <name>|reload <name>|test|revert <name>|done <id>|verified|trends [n]|rule <list|add|remove>|clear>",
+  "usage: /evolve <signals|suggest|improve <id>|verify <name>|test|reload <name>|revert <name>|done <id>|verified|trends [n]|outcomes|comparisons|rule <list|add|accept|remove>|preference <list|drop|restore>|clear>",
   "  signals   list recent failing tool results",
   "  suggest   aggregate repeated failures into fix suggestions (trend-aware ordering)",
   "  improve   scaffold a fix-<tool>/ plugin dir + PLAN.md for one suggestion",
-  "  verify    sandbox dry-run a plugin before activating it (snapshots on success)",
-  "  reload    hot-reload a fix plugin into the running host",
-  "  test      run the test suite",
+  "  verify    sandbox dry-run a plugin and record its exact content hash",
+  "  test      run the test suite and record which verified hashes passed",
+  "  reload    activate only the exact verified and tested fix plugin, with rollback",
   "  revert    restore the last good snapshot of a plugin",
   "  done      mark a suggestion as handled (no longer proposed)",
-  "  verified  list suggestions auto-verified by improving failure trends",
-  "  trends    cross-run dashboard: tool calls, failures, signalDelta, per-tool movement",
-  "  rule      manage learned guardrails injected into system prompts (list/add <text>/remove <id>)",
+  "  verified  show legacy verification markers (not proof of a working fix)",
+  "  trends    cross-run dashboard: tool calls and comparable failure rates",
+  "  outcomes  recent candidate exposures, task results, and attributed feedback",
+  "  comparisons  local baseline/candidate eval summaries",
+  "  rule      review proposed guardrails; accept <id> activates one (add <text> activates a manual rule)",
   "  clear     reset signals, done markers, and verified markers",
 ].join("\n");
 
@@ -145,8 +151,8 @@ function buildPlan(suggestion: EvolveSuggestion, name: string, implementation: s
     "",
     "- implement index.js (flavor-plugin contract: activate(context), every contribution declared in contributes)",
     `- /evolve verify ${name} (sandbox dry-run must pass before activation)`,
-    `- /evolve reload ${name} (hot-load into the running host)`,
     "- /evolve test",
+    `- /evolve reload ${name} (hot-load the exact verified and tested version)`,
     `- /evolve done ${suggestion.id} after tests pass`,
     `- on failure: /evolve revert ${name} restores the last good snapshot`,
     "",
@@ -162,8 +168,18 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
   const logger = options.logger ?? { warn: (message: string) => console.warn(`[evolve] ${message}`) };
   const notify = (message: string) => (logger.notice ?? logger.warn)(message);
 
-  const store = new EvolveStore({ workspace });
+  const store = options.store ?? new EvolveStore({ workspace });
+  const verifications = new EvolveVerificationStore(workspace);
   const disposers: Array<() => void> = [];
+
+  async function restoreKnownGood(name: string, snapshot: string): Promise<void> {
+    const digest = (await verifications.list())[name]?.activeDigest;
+    if (digest === undefined || await hashFixPluginSnapshot(workspace, name, snapshot) !== digest) {
+      throw new Error("Known-good plugin snapshot no longer matches its approved version");
+    }
+    await restoreFixPluginSnapshot(workspace, name, snapshot);
+    if (await hashFixPlugin(workspace, name) !== digest) throw new Error("Plugin changed while restoring its snapshot");
+  }
 
   // Per-run counters (loop stats), reset by beginRun.
   let modelCalls = 0;
@@ -171,6 +187,7 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
   let toolErrors = 0;
   /** Per-tool failure counts for the current run (used for trend analysis). */
   let runToolErrors: Record<string, number> = {};
+  let runToolCalls: Record<string, number> = {};
   let promptCache: string | undefined;
 
   /**
@@ -187,10 +204,15 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
       return base;
     }
     const previousPerTool = previous.perTool ?? {};
-    const tools = new Set([...Object.keys(previousPerTool), ...Object.keys(runToolErrors)]);
+    const tools = new Set([...Object.keys(previousPerTool), ...Object.keys(runToolCalls)]);
     const trends: Record<string, number> = {};
     for (const tool of tools) {
-      trends[tool] = (runToolErrors[tool] ?? 0) - (previousPerTool[tool]?.failures ?? 0);
+      const calls = runToolCalls[tool] ?? 0;
+      const before = previousPerTool[tool];
+      const previousCalls = before?.calls ?? 0;
+      // A run without an invocation supplies no evidence about this tool.
+      if (calls === 0 || previousCalls === 0) continue;
+      trends[tool] = ((runToolErrors[tool] ?? 0) / calls - before!.failures / previousCalls) * 100;
     }
     return trends;
   }
@@ -204,8 +226,9 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
     try {
       const [suggestions, rules] = await Promise.all([openWithTrends(promptTop), store.listRules()]);
       const sections: string[] = [];
-      if (rules.length > 0) {
-        sections.push(`${GUARDRAILS_SECTION_HEADER}${rules.map((rule) => `- ${rule.text}`).join("\n")}\n`);
+      const activeRules = rules.filter((rule) => rule.status !== "proposed");
+      if (activeRules.length > 0) {
+        sections.push(`${GUARDRAILS_SECTION_HEADER}${activeRules.map((rule) => `- ${rule.text}`).join("\n")}\n`);
       }
       if (suggestions.length > 0) {
         sections.push(`${SUGGEST_SECTION_HEADER}${suggestions.map((suggestion) => `- [${suggestion.id}] ${suggestion.hint}`).join("\n")}\n`);
@@ -241,6 +264,8 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
     const payload = event.payload as Record<string, unknown>;
     try {
       const tool = String(payload.tool ?? "unknown");
+      toolCalls += 1;
+      runToolCalls[tool] = (runToolCalls[tool] ?? 0) + 1;
       const error = (payload.error ?? {}) as Record<string, unknown>;
       await captureFailure(
         tool,
@@ -262,6 +287,7 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
     const payload = event.payload as Record<string, unknown>;
     toolCalls += 1;
     const tool = String(payload.tool ?? "unknown");
+    runToolCalls[tool] = (runToolCalls[tool] ?? 0) + 1;
     if (tool === "Shell" && payload.output !== null && typeof payload.output === "object") {
       const shell = payload.output as Record<string, unknown>;
       const exitCode = typeof shell.exitCode === "number" ? shell.exitCode : undefined;
@@ -300,6 +326,8 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
   return {
     store,
 
+    initialize: refreshPromptCache,
+
     suggestions: () => openWithTrends(promptTop),
 
     promptSection: () => promptCache,
@@ -309,9 +337,10 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
       toolCalls = 0;
       toolErrors = 0;
       runToolErrors = {};
+      runToolCalls = {};
     },
 
-    async endRun(reason = "finished") {
+    async endRun(reason = "finished", emitLoopEnd = true, taskId?: string) {
       try {
         const signals = await store.signals();
         const totalFailures = signals.reduce((sum, signal) => sum + signal.count, 0);
@@ -322,8 +351,9 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
         const signalDelta = previous === undefined ? 0 : totalFailures - previous.totalFailures;
         const trends = await currentTrends();
         const perTool: Record<string, ToolTrend> = {};
-        for (const [tool, delta] of Object.entries(trends)) {
-          perTool[tool] = { failures: runToolErrors[tool] ?? 0, delta };
+        for (const tool of Object.keys(runToolCalls)) {
+          const calls = runToolCalls[tool] ?? 0;
+          perTool[tool] = { calls, failures: runToolErrors[tool] ?? 0, delta: trends[tool] ?? 0 };
         }
         await store.appendReflection({
           iterations: modelCalls,
@@ -336,18 +366,11 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
           failedTools,
           perTool,
         });
-        // Closed loop: a tool that failed less than last run means the fix is
-        // working — auto-verify its open suggestions so they stop being proposed.
-        const verifiedTools = new Set<string>();
-        for (const [tool, trend] of Object.entries(perTool)) {
-          if (trend.delta < 0) {
-            const suggestions = await store.openSuggestions({ threshold: minRepeats, limit: 100, trends });
-            for (const suggestion of suggestions.filter((item) => item.tool === tool)) {
-              await store.markSuggestionVerified(suggestion.id);
-            }
-            verifiedTools.add(tool);
-          }
+        if (taskId !== undefined) {
+          await store.appendOutcomeEvent({ kind: "task_finished", taskId,
+            outcome: reason, modelCalls, toolCalls, toolErrors });
         }
+        // A lower rate is a trend, not proof that any particular fix caused it.
         // User-facing run summary: only meaningful lines, quiet when nothing happened.
         const sign = (value: number) => (value > 0 ? `+${value}` : String(value));
         const meaningful = Object.entries(perTool).filter(([, trend]) => trend.failures > 0 || trend.delta !== 0);
@@ -356,17 +379,14 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
           lines.push(`run ${reason}: no tool errors`);
         } else {
           const previousTotal = previous?.totalFailures ?? 0;
-          lines.push(`run ${reason}: toolErrors ${toolErrors}, failures ${previousTotal}→${totalFailures} (delta ${sign(signalDelta)})`);
+          lines.push(`run ${reason}: toolErrors ${toolErrors}/${toolCalls} calls, cumulative failures ${previousTotal}→${totalFailures} (+${signalDelta})`);
           for (const [tool, trend] of meaningful) {
             if (trend.delta === 0) continue;
-            const note = trend.delta < 0
-              ? (verifiedTools.has(tool) ? " — suggestion auto-verified" : "")
-              : " — suggestion reopened";
-            lines.push(`  - ${tool}: ${trend.delta < 0 ? "improved" : "worsening"} (${sign(trend.delta)})${note}`);
+            lines.push(`  - ${tool}: ${trend.delta < 0 ? "lower" : "higher"} failure rate (${sign(Math.round(trend.delta))} percentage points; ${trend.calls} calls), pending evaluation`);
           }
         }
-        notify(lines.join("\n"));
-        await hooks.emit({
+        if (emitLoopEnd || meaningful.length > 0) notify(lines.join("\n"));
+        if (emitLoopEnd) await hooks.emit({
           version: 1,
           type: "LoopEnd",
           payload: {
@@ -388,19 +408,21 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
         toolCalls = 0;
         toolErrors = 0;
         runToolErrors = {};
+        runToolCalls = {};
       }
     },
 
     async handleCommand(args) {
       const arg = String(args.join(" ").trim());
 
-      if (arg === "" || arg === "help") {
+      if (arg === "" || arg === "help" || arg === "status") {
         const signals = await store.signals();
         const open = await openWithTrends(100);
         const verified = await store.verifiedIds();
         const [latest] = await store.reflections(1);
+        const pendingRules = (await store.listRules()).filter((rule) => rule.status === "proposed");
         return [
-          `evolve status: ${signals.length} signals, ${open.length} open suggestions, ${verified.length} verified, ${latest === undefined ? "no reflections yet" : `${latest.totalFailures} total failures`}`,
+          `evolve status: ${signals.length} signals, ${open.length} open suggestions, ${pendingRules.length} proposed rules, ${verified.length} legacy markers, ${latest === undefined ? "no reflections yet" : `${latest.totalFailures} cumulative failures`}`,
           `latest signals: ${signals.slice(0, 5).map((signal) => `${signal.tool} x${signal.count}`).join(", ") || "(none)"}`,
           USAGE,
         ].join("\n");
@@ -420,14 +442,14 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
 
       if (arg === "verified") {
         const verified = await store.verifiedIds();
-        if (verified.length === 0) return "no verified suggestions yet";
+        if (verified.length === 0) return "no legacy verified markers";
         const signals = await store.signals();
         const byId = new Map(signals.map((signal) => [signal.id, signal]));
         return verified.map((id) => {
           const signal = byId.get(id);
           return signal === undefined
             ? `[${id}] (signal no longer recorded)`
-            : `[${id}] ${signal.tool} x${signal.count} — ${signal.error} (verified)`;
+            : `[${id}] ${signal.tool} x${signal.count} — ${signal.error} (legacy marker; not proof of benefit)`;
         }).join("\n");
       }
 
@@ -442,26 +464,53 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
           lines.push(`${reflection.at.replace("T", " ").slice(0, 19)}  ${reflection.reason}: model calls ${reflection.iterations}, tool calls ${reflection.toolCalls} (${reflection.toolErrors} failed), failures ${reflection.totalFailures} (delta ${sign(reflection.signalDelta)})`);
           const moved = Object.entries(reflection.perTool ?? {}).filter(([, trend]) => trend.delta !== 0);
           for (const [tool, trend] of moved) {
-            lines.push(`    - ${tool}: ${trend.failures} failure(s) this run (${sign(trend.delta)} vs previous)`);
+            lines.push(`    - ${tool}: ${trend.failures}/${trend.calls ?? "?"} failed (${sign(Math.round(trend.delta))} percentage points vs comparable previous run)`);
           }
         }
         return lines.join("\n");
       }
 
+      if (arg === "outcomes") {
+        const events = (await store.outcomeEvents(30)).reverse();
+        if (events.length === 0) return "no outcome events recorded yet";
+        return events.map((event) => {
+          const task = event.taskId.slice(0, 20);
+          if (event.kind === "candidate_exposed") return `${event.at} ${task}: exposed ${event.candidateIds.join(", ")}`;
+          if (event.kind === "candidate_feedback") return `${event.at} ${task}: ${event.sentiment} feedback for ${event.candidateIds.join(", ")}`;
+          return `${event.at} ${task}: ${event.outcome}; ${event.toolErrors}/${event.toolCalls} tool calls failed`;
+        }).join("\n");
+      }
+
+      if (arg === "comparisons") {
+        const comparisons = await store.comparisons(10);
+        if (comparisons.length === 0) return "no paired evaluations recorded yet — use flavor eval <spec> --baseline <workspace>";
+        return comparisons.map((item) => `${item.at} ${item.caseName}: ${item.verdict}; `
+          + `checks ${item.baseline.checksPassed}/${item.baseline.checksTotal} → ${item.candidate.checksPassed}/${item.candidate.checksTotal}; `
+          + `tokens ${item.baseline.tokens} → ${item.candidate.tokens}`).join("\n");
+      }
+
       if (arg === "rule" || arg === "rule list") {
         const rules = await store.listRules();
         if (rules.length === 0) return "no guardrail rules yet — add one with /evolve rule add <text>";
-        return rules.map((rule) => `[${rule.id}] ${rule.text}`).join("\n");
+        return rules.map((rule) => `[${rule.id}] ${rule.status ?? "active"} ${rule.text}`).join("\n");
+      }
+
+      if (arg.startsWith("rule accept ")) {
+        const id = arg.slice(12).trim();
+        if (!await store.activateRule(id)) return `no guardrail with id "${id}"`;
+        await refreshPromptCache();
+        return `activated guardrail ${id}`;
       }
 
       if (arg.startsWith("rule add ")) {
         const text = arg.slice(9).trim();
         if (text === "") return "usage: /evolve rule add <text>";
-        const { added, rule } = await store.addRule({ text });
+        const { added, activated, rule } = await store.addRule({ text });
         await refreshPromptCache();
         return added
           ? `added guardrail [${rule.id}]: ${rule.text}`
-          : `guardrail already exists [${rule.id}]: ${rule.text}`;
+          : activated ? `activated existing guardrail [${rule.id}]: ${rule.text}`
+            : `guardrail already exists [${rule.id}]: ${rule.text}`;
       }
 
       if (arg.startsWith("rule remove ")) {
@@ -484,7 +533,7 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
         return [
           `suggestion ${suggestion.id}: ${suggestion.tool} x${suggestion.count} — ${suggestion.error}`,
           `scaffolded fix plugin at ${dir}`,
-          `edit index.js to implement the fix, then run /evolve verify ${name}, /evolve reload ${name} and /evolve test`,
+          `edit index.js, then run /evolve verify ${name}, /evolve test and /evolve reload ${name}`,
           `mark the suggestion handled with /evolve done ${suggestion.id} once tests pass`,
         ].join("\n");
       }
@@ -492,13 +541,16 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
       if (arg.startsWith("verify ")) {
         const name = arg.slice(7).trim();
         if (name === "") return "usage: /evolve verify <plugin>";
+        let digest: string;
+        try { digest = await hashFixPlugin(workspace, name); }
+        catch (error) { return `verify FAILED: ${name}\n  ${error instanceof Error ? error.message : String(error)}`; }
         const report = await verifyFixPlugin(workspace, name);
         if (!report.ok) return `verify FAILED: ${name}\n  ${report.error ?? "unknown error"}`;
-        await snapshotFixPlugin(workspace, name).catch((error: unknown) => {
-          logger.warn(`snapshot failed — ${error instanceof Error ? error.message : String(error)}`);
-        });
+        if (report.registrations === 0) return `verify FAILED: ${name}\n  plugin registered no tools, commands, hooks, skills, or model adapters; implement the fix first`;
+        if (await hashFixPlugin(workspace, name) !== digest) return `verify FAILED: ${name}\n  plugin changed during verification`;
+        await verifications.markVerified(name, digest);
         return [
-          `verify OK: ${name} (sandbox dry-run, host untouched)`,
+          `verify OK: ${name} (${digest.slice(0, 12)}, sandbox dry-run, host untouched)`,
           `  provides: ${report.provided.join(", ") || "-"}`,
           `  tools: ${report.tools.join(", ") || "-"}`,
           `  commands: ${report.commands.join(", ") || "-"}`,
@@ -509,15 +561,59 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
         const name = arg.slice(7).trim();
         if (name === "") return "usage: /evolve reload <plugin>";
         if (pluginHost === undefined) return "error: plugin reload is unavailable in this context";
+        const digest = await hashFixPlugin(workspace, name);
+        if (!await verifications.eligible(name, digest)) {
+          return `reload BLOCKED: ${name} must pass /evolve verify and /evolve test for its current contents`;
+        }
+        const previous = await verifications.goodSnapshot(name);
+        // Prepare a recoverable copy before touching the running host. If
+        // copying fails, the previous plugin remains active.
+        const snapshot = await snapshotFixPlugin(workspace, name);
+        if (await hashFixPlugin(workspace, name) !== digest
+          || await hashFixPluginSnapshot(workspace, name, snapshot) !== digest) {
+          return `reload FAILED: ${name}\n  plugin changed while preparing its snapshot`;
+        }
         const result = await pluginHost.reload(name);
-        return result.ok ? `reloaded ${name}` : `reload FAILED: ${name}\n  ${result.error ?? "unknown error"}`;
+        if (!result.ok) {
+          if (previous !== undefined) {
+            try {
+              await restoreKnownGood(name, previous);
+              const rollback = await pluginHost.reload(name);
+              if (!rollback.ok) return `reload FAILED: ${name}\n  ${result.error ?? "unknown error"}\n  rollback FAILED: ${rollback.error ?? "unknown error"}`;
+            } catch (error) {
+              return `reload FAILED: ${name}\n  ${result.error ?? "unknown error"}\n  rollback FAILED: ${error instanceof Error ? error.message : String(error)}`;
+            }
+          }
+          return `reload FAILED: ${name}\n  ${result.error ?? "unknown error"}`;
+        }
+        if (await hashFixPlugin(workspace, name) !== digest) {
+          if (previous !== undefined) {
+            try {
+              await restoreKnownGood(name, previous);
+              const rollback = await pluginHost.reload(name);
+              if (!rollback.ok) return `reload FAILED: ${name}\n  plugin changed during activation\n  rollback FAILED: ${rollback.error ?? "unknown error"}`;
+            } catch (error) {
+              return `reload FAILED: ${name}\n  plugin changed during activation\n  rollback FAILED: ${error instanceof Error ? error.message : String(error)}`;
+            }
+          } else await pluginHost.unload(name);
+          return `reload FAILED: ${name}\n  plugin changed during activation`;
+        }
+        await verifications.markActive(name, digest, snapshot);
+        return `reloaded ${name} (${digest.slice(0, 12)}; verified, tested, and snapshotted)`;
       }
 
       if (arg.startsWith("revert ")) {
         const name = arg.slice(7).trim();
         if (name === "") return "usage: /evolve revert <plugin>";
         try {
-          return await revertFixPlugin(workspace, name);
+          const snapshot = await verifications.goodSnapshot(name);
+          if (snapshot === undefined) return `error: ${name} has no known-good active snapshot`;
+          await restoreKnownGood(name, snapshot);
+          if (pluginHost !== undefined) {
+            const result = await pluginHost.reload(name);
+            if (!result.ok) return `revert FAILED: ${name}\n  ${result.error ?? "unknown error"}`;
+          }
+          return `Restored ${name} from its last known-good version.`;
         } catch (error) {
           return `error: ${error instanceof Error ? error.message : String(error)}`;
         }
@@ -532,6 +628,13 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
 
       if (arg === "test") {
         const result = await runCommand(testCommand, workspace, testTimeoutMs);
+        if (result.ok) {
+          for (const [name, entry] of Object.entries(await verifications.list())) {
+            try {
+              if (await hashFixPlugin(workspace, name) === entry.digest) await verifications.markTested(name, entry.digest, testCommand);
+            } catch { /* A removed plugin has no version to approve. */ }
+          }
+        }
         return result.ok
           ? `tests passed (exit 0)${result.stdout.length > 0 ? `\n${result.stdout.slice(-4000)}` : ""}`
           : `tests FAILED (exit ${result.code})${result.stderr.length > 0 ? `\n${result.stderr.slice(-4000)}` : ""}`;
@@ -551,7 +654,7 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
         suggestionId: z.string().min(1).describe("Signal id from the evolve suggestions"),
         implementation: z.string().min(1).describe("Concise description of the fix to implement (plugin plan, or the guardrail rule text when kind is prompt_rule)"),
         kind: z.enum(["plugin", "prompt_rule"]).optional().describe(
-          "plugin (default): scaffold a fix plugin; prompt_rule: store a guardrail rule that is injected into future system prompts",
+          "plugin (default): scaffold a fix plugin; prompt_rule: propose a guardrail for user review",
         ),
       });
       return {
@@ -559,8 +662,8 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
         description:
           "Implement a fix for one repeated tool failure. Default kind=plugin scaffolds the fix-<tool>/ plugin dir and " +
           "writes PLAN.md with instructions for implementing, verifying, reloading, and testing it. " +
-          "kind=prompt_rule instead stores a concise guardrail rule (from `implementation`) that is injected into future " +
-          "system prompts and closes the suggestion. Use when the model proposes a concrete fix for a suggestion in the system prompt.",
+          "kind=prompt_rule stores a proposed guardrail (from `implementation`). It needs /evolve rule accept <id> " +
+          "before it enters future prompts. Use when the model proposes a concrete fix for a repeated failure.",
         inputSchema,
         paths: (input) => [join(workspace, ".flavor", "evolve"), ...((input as { kind?: string }).kind === "prompt_rule" ? [] : [join(workspace, ".flavor", "plugins")])],
         execute: async (input, signal) => {
@@ -572,13 +675,11 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
           if (suggestion === undefined) throw new Error(`No open suggestion with id "${suggestionId}".`);
 
           if (kind === "prompt_rule") {
-            const { added, rule } = await store.addRule({ text: implementation, sourceId: suggestionId });
-            await store.markSuggestionDone(suggestionId);
-            await refreshPromptCache();
+            const { added, rule } = await store.addRule({ text: implementation, sourceId: suggestionId, status: "proposed" });
             return [
-              added ? `Stored guardrail rule [${rule.id}]: ${rule.text}` : `Guardrail already exists [${rule.id}]: ${rule.text}`,
-              `Suggestion [${suggestion.id}] marked done. The rule is injected into the system prompt of future runs.`,
-              "Review rules with /evolve rule list; remove one with /evolve rule remove <id>.",
+              added ? `Proposed guardrail rule [${rule.id}]: ${rule.text}` : `Guardrail already exists [${rule.id}] (${rule.status ?? "active"}): ${rule.text}`,
+              `Suggestion [${suggestion.id}] stays open until its effect is checked.`,
+              `Review with /evolve rule list; activate with /evolve rule accept ${rule.id} or remove with /evolve rule remove ${rule.id}.`,
             ].join("\n");
           }
 
@@ -594,8 +695,8 @@ export function createEvolveService(options: EvolveServiceOptions): EvolveServic
             "Now implement it yourself:",
             "1. Write the plugin entry (index.js) per the flavor-plugin contract — a minimal hook or tool wrapper is enough.",
             `2. Run /evolve verify ${name} — the sandbox dry-run must pass before activation.`,
-            `3. Run /evolve reload ${name} to hot-load it.`,
-            "4. Run /evolve test to verify the suite still passes.",
+            "3. Run /evolve test to verify the suite still passes.",
+            `4. Run /evolve reload ${name} to hot-load the exact tested version.`,
             `5. Run /evolve done ${suggestion.id} to close the suggestion. If anything breaks, /evolve revert ${name} restores the last good snapshot.`,
           ].join("\n");
         },

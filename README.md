@@ -41,7 +41,7 @@ Flavor Code connects to OpenAI, Anthropic, or compatible services and works with
 | 🌿 | **Git-native workflows** | `/commit` drafts a Conventional-Commits message for staged changes and commits after confirmation; `/review` audits uncommitted changes; the read-only `GitHistory` tool explains when and why code changed |
 | 🎨 | **E2E requirement-to-delivery** | From a rough requirement or a design export to a delivered product: PRD, interactive prototype, visual implementation, API integration, autonomous acceptance, and scored delivery (Electron only) |
 | 🌐 | **Agent-driven built-in browser** | The Electron desktop embeds an interactive browser: the agent navigates pages and acts on elements by snapshot reference with `BrowserSnapshot`/`BrowserAct` and friends, every action is annotated in real time via a visual overlay, navigation is guarded against SSRF, and snapshots redact passwords, tokens, and other sensitive fields (Electron only) |
-| 🔁 | **Bounded self-improvement** | Repeated tool failures are captured, deduped, and proposed as suggestions; fixes ship as sandbox-verified plugins or as learned guardrail rules injected into future prompts, with run trends and rule management (`/evolve`) |
+| 🔁 | **Evaluable self-improvement trial** | Explicit preferences take effect, inferred preferences enter a tracked trial and can be dropped; fix plugins require hash-bound sandbox verification and tests before activation, with rollback (`/evolve`) |
 | 🛡️ | **Clear permission boundaries** | Independent control over read, write, Shell, network, and destructive actions; Docker supported |
 
 ## Quick Start
@@ -202,9 +202,11 @@ Common commands:
 | `/commit [hint]` | Draft a Conventional-Commits message for staged changes and commit after confirmation |
 | `/review [focus]` | Review uncommitted changes for bugs and risks before committing |
 | `/explain <symbol \| file.ts#symbol> [focus]` | Explain a symbol for newcomers using the code graph, real source and git history (interactive picker on ambiguity) |
-| `/evolve <signals\|suggest\|improve ...>` | Self-improvement loop: review repeated tool failures, scaffold fix plugins, manage run trends and learned guardrail rules, verify and hot-reload |
+| `/evolve status` | Inspect task trends, tool failures, proposed rules, and learned preferences; use `rule list/accept` to review model rules, `preference list/drop/restore` for preferences, and `verify → test → reload` for implemented fix plugins |
 | `/pals`, `/chat`, `/co-work` | Discover and collaborate with other local CLI instances |
 | `/audit` | View tool failure audits |
+
+Self-improvement starts during ordinary conversations with the default memory settings. Say “From now on, explain changes in Chinese,” then inspect `/evolve preference list`; after another task, inspect `/evolve trends 2`. Use `/evolve preference drop <id>` to stop an unwanted preference. Inferred preferences stay proposed until another independent task supports them and only enter related tasks during trial. See section 50.6 of the technical report for a full check.
 
 You can submit steering or queue follow-ups while a run is in progress; once the current model response finishes, the task picks up new instructions at safe boundaries.
 While a run is active, Enter queues the text for the next turn; `/steer <message>` changes the current turn. Type `/queue` to inspect all queued messages, use Up/Down to select one, Enter to move it back to the draft, or `d` to cancel it. Escape closes the queue; outside that view it restores the latest queued message for editing.
@@ -385,7 +387,7 @@ Project runtime data lives under `.flavor/`:
 └── plugins/          # Project plugins
 ```
 
-Long-term memory distinguishes user preferences, behavioral feedback, project conventions, and external references. Automatic extraction only keeps high-confidence candidates and provides confirm, ignore, and delete actions; secrets, tokens, raw tool output, and model guesses are rejected.
+Long-term memory distinguishes user preferences, behavioral feedback, project conventions, and external references. Automatically extracted project facts and external references enter a review inbox that survives restarts; a high model score alone cannot save them. Review cards show whether an exact user quote supports a candidate. Use `Ctrl+Y` to save or `Ctrl+N` to ignore; `/memory` shows pending and decision counts. Explicit `/remember` still saves directly. Secrets, tokens, and raw tool output are rejected.
 
 Image prompts support PNG, JPEG, and WebP, with a 5 MiB per-image maximum and up to 5 images per prompt. The desktop app supports picking or drag-and-drop; CLI clipboard images currently work on Windows and macOS. Standard CLI paste prefers clipboard text and creates an image attachment only when no usable text flavor is available; use `/paste-image` when both flavors exist and the image is intended.
 
@@ -457,7 +459,10 @@ Run evaluations:
 
 ```bash
 flavor eval eval.json --output report.json
+flavor eval eval.json --baseline ../baseline-worktree --output comparison.json
 ```
+
+The second command runs the same prompt and checks in the spec's candidate workspace and a separate baseline workspace. Both are modified by the agent, so use disposable test copies. Compact results go to the candidate project's `.flavor/evolve/comparisons.jsonl` and are shown by `/evolve comparisons`. Ordinary task outcomes, preference exposures, and attributable feedback go to `.flavor/evolve/outcome-events.jsonl` and are shown by `/evolve outcomes`. These local files are Git-ignored and do not copy full conversations.
 
 Design constraints for RPC, traces, replay, eval, session trees, and Docker are in the [control-plane spec](./docs/specs/2026-07-29-control-plane-sandbox-vscode.md).
 

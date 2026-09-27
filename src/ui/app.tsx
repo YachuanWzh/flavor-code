@@ -1971,10 +1971,11 @@ function MemoryReviewCards({ reviews, autoDismissSeconds }: {
   return <Box flexDirection="column" marginBottom={1}>
     <Text bold color="yellow">┌─ Long-term memory requires confirmation ({reviews.length})</Text>
     <Text color="yellowBright" wrap="truncate-end">│ [{review.type}] {review.content}</Text>
+    <Text dimColor wrap="truncate-end">│ {review.evidence === undefined ? "No verified user quote; check before saving." : `User said: “${review.evidence}”`}</Text>
     <Text dimColor>│ Model-generated content is not stored until you approve it.</Text>
     <Text color="yellow">└─ <Text bold>Ctrl+Y</Text> save / <Text bold>Ctrl+N</Text> ignore{autoDismissSeconds > 0
       ? <Text bold color="cyanBright">{` (auto-dismiss in ${remaining}s)`}</Text>
-      : " (conversation remains available)"}</Text>
+      : " (stays pending until reviewed)"}</Text>
   </Box>;
 }
 

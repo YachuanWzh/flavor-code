@@ -5,6 +5,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createProductionRuntime as createRuntime, type ProductionRuntimeOptions } from "../../src/production.js";
 import { MemoryStore } from "../../src/memory/store.js";
+import { MAX_PENDING_MEMORY_REVIEWS } from "../../src/memory/review.js";
+import { PreferenceEvolution } from "../../src/evolution/preferences.js";
+import { EvolveStore } from "../../src/evolve/store.js";
 
 const createProductionRuntime = (options: ProductionRuntimeOptions) => createRuntime({ ...options, pluginSandbox: false });
 
@@ -67,6 +70,43 @@ async function workspace(memory: Record<string, unknown>, config: Record<string,
 }
 
 describe("production long-term memory", () => {
+  it("records ordinary foreground tasks in evolve trends", async () => {
+    const root = await workspace({ enabled: false });
+    const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
+    await runtime.session.submit("检查普通任务的记录");
+    const [reflection] = await new EvolveStore({ workspace: root }).reflections(1);
+    expect(reflection).toMatchObject({ reason: "finished", iterations: 1, toolCalls: 0 });
+    expect(await new EvolveStore({ workspace: root }).outcomeEvents()).toEqual([
+      expect.objectContaining({ kind: "task_finished", outcome: "finished", modelCalls: 1, toolCalls: 0 }),
+    ]);
+    await runtime.dispose();
+  });
+
+  it("activates an explicit preference, records exposure, and stops injecting it after drop", async () => {
+    const root = await workspace({ autoExtract: false });
+    const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
+    await runtime.session.submit("以后请用中文解释，顺便修复登录模块。");
+    const preferences = new PreferenceEvolution(root);
+    const [saved] = await preferences.list();
+    expect(saved).toMatchObject({ source: "explicit", status: "active", content: "以后请用中文解释" });
+
+    await runtime.session.submit("处理另一个任务");
+    const requests = (globalThis as { __flavorMemoryRequests?: Array<Array<{ role: string; content: string }>> })
+      .__flavorMemoryRequests ?? [];
+    const second = [...requests].reverse().find((messages) => messages.some((message) => message.content === "处理另一个任务"));
+    expect(second?.some((message) => message.content.includes(`- [${saved!.id}] 以后请用中文解释`))).toBe(true);
+    expect((await preferences.list())[0]?.exposures).toHaveLength(1);
+    expect((await new EvolveStore({ workspace: root }).outcomeEvents()).some((event) =>
+      event.kind === "candidate_exposed" && event.candidateIds.includes(saved!.id))).toBe(true);
+
+    await runtime.session.submit(`/evolve preference drop ${saved!.id}`);
+    expect((await preferences.list())[0]?.status).toBe("dropped");
+    await runtime.session.submit("处理第三个任务");
+    const third = [...requests].reverse().find((messages) => messages.some((message) => message.content === "处理第三个任务"));
+    expect(third?.some((message) => message.content.includes(`Preference [${saved!.id}] has been withdrawn`))).toBe(true);
+    await runtime.dispose();
+  });
+
   it("supports /global show, remember, and forget in one running session", async () => {
     const root = await workspace({ enabled: false });
     const notices: string[] = [];
@@ -287,7 +327,7 @@ describe("production long-term memory", () => {
     await runtime.dispose();
   });
 
-  it("invalidates and hides pending reviews when the user sends a new query", async () => {
+  it("keeps pending reviews when the user sends a new query", async () => {
     const root = await workspace({ autoExtract: true });
     const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
     await runtime.session.submit(`First durable task. ${"Useful durable context. ".repeat(12)}`);
@@ -295,8 +335,8 @@ describe("production long-term memory", () => {
 
     await runtime.session.submit(`NO_MEMORY New unrelated query. ${"Transient context. ".repeat(12)}`);
 
-    expect(runtime.memoryReviews.pending).toEqual([]);
-    await expect(runtime.memoryReviews.accept(oldReview.id)).resolves.toBe(false);
+    expect(runtime.memoryReviews.pending[0]?.id).toBe(oldReview.id);
+    await expect(runtime.memoryReviews.accept(oldReview.id)).resolves.toBe(true);
     await runtime.dispose();
   });
 
@@ -310,6 +350,66 @@ describe("production long-term memory", () => {
       .__flavorMemoryRequests ?? [];
     expect(requests.some((messages) => messages.some((message) => message.content.includes("Evaluate this completed coding task")))).toBe(false);
     expect(runtime.memoryReviews.pending).toEqual([]);
+    await runtime.dispose();
+  });
+
+  it("restores a pending project-memory review after a process restart", async () => {
+    const root = await workspace({ autoExtract: true });
+    const first = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
+    await first.session.submit(`Remember our package manager. ${"Useful context. ".repeat(15)}`);
+    const id = first.memoryReviews.pending[0]?.id;
+    expect(id).toBeDefined();
+    await first.dispose();
+
+    const second = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
+    expect(second.memoryReviews.pending[0]?.id).toBe(id);
+    await second.memoryReviews.accept(id!);
+    expect((await new MemoryStore({ workspace: root, maxEntries: 200, maxEntryChars: 1000 }).list())).toHaveLength(1);
+    await second.dispose();
+  });
+
+  it("stops automatic extraction while the durable review inbox is full", async () => {
+    const root = await workspace({ autoExtract: true });
+    const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
+    expect(runtime.memoryReviews.offer(Array.from({ length: MAX_PENDING_MEMORY_REVIEWS }, (_, index) =>
+      ({ type: "project" as const, content: `Durable project convention ${index}.` })))).toBe(MAX_PENDING_MEMORY_REVIEWS);
+    await runtime.memoryReviews.flush();
+
+    await runtime.session.submit(`A new task with durable context. ${"Useful context. ".repeat(15)}`);
+    expect(await runtime.services.finishTask()).toContain("review inbox is full");
+    const requests = (globalThis as { __flavorMemoryRequests?: Array<Array<{ content: string }>> })
+      .__flavorMemoryRequests ?? [];
+    expect(requests.some((messages) => messages.some((message) =>
+      message.content.includes("Evaluate this completed coding task")))).toBe(false);
+    expect(runtime.memoryReviews.pending).toHaveLength(MAX_PENDING_MEMORY_REVIEWS);
+    await runtime.dispose();
+  });
+
+  it("keeps an approved candidate pending when the long-term store is full", async () => {
+    const root = await workspace({ autoExtract: false, maxEntries: 1 });
+    await new MemoryStore({ workspace: root, maxEntries: 1, maxEntryChars: 1000 })
+      .remember({ type: "project", content: "Use npm for scripts." });
+    const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
+    runtime.memoryReviews.offer([{ type: "project", content: "Use pnpm for scripts." }]);
+    const id = runtime.memoryReviews.pending[0]!.id;
+    await expect(runtime.memoryReviews.accept(id)).rejects.toThrow(/memory is full/i);
+    expect(runtime.memoryReviews.pending[0]?.id).toBe(id);
+    await runtime.dispose();
+  });
+
+  it("keeps a conflicting project-memory candidate pending for manual resolution", async () => {
+    const root = await workspace({ autoExtract: true });
+    const store = new MemoryStore({ workspace: root, maxEntries: 200, maxEntryChars: 1000 });
+    await store.rememberForTask("task-original", { type: "project", summary: "Use npm", content: "Use npm for scripts.",
+      topicKey: "project.package-manager", keywords: ["npm"],
+      scores: { durability: 3, futureUtility: 3, authority: 3, nonDerivability: 3 } });
+    const runtime = await createProductionRuntime({ workspace: root, home: root, environment: {}, output: () => {} });
+    await runtime.session.submit(`Remember our package manager. ${"Useful context. ".repeat(15)}`);
+    const id = runtime.memoryReviews.pending[0]?.id;
+    expect(id).toBeDefined();
+    await expect(runtime.memoryReviews.accept(id!)).rejects.toThrow(/conflicts with existing memory/i);
+    expect(runtime.memoryReviews.pending[0]?.id).toBe(id);
+    expect((await store.references()).map((entry) => entry.summary)).toEqual(["Use npm"]);
     await runtime.dispose();
   });
 
@@ -381,7 +481,7 @@ describe("production long-term memory", () => {
     await runtime.dispose();
   });
 
-  it("auto-stores high-confidence candidates and reports the direct write", async () => {
+  it("stages high-confidence project facts instead of writing them directly", async () => {
     const root = await workspace({ autoExtract: true, autoExtractMinChars: 200 });
     const notices: string[] = [];
     const runtime = await createProductionRuntime({
@@ -393,11 +493,11 @@ describe("production long-term memory", () => {
     await runtime.services.finishTask();
 
     const store = new MemoryStore({ workspace: root, maxEntries: 200, maxEntryChars: 1000 });
-    expect(await store.list()).toMatchObject([{ type: "project", content: "Use pnpm for repository scripts" }]);
-    expect(runtime.memoryReviews.pending).toEqual([]);
-    expect(notices.some((notice) => notice.includes("Long-term memory updated. Stored high-confidence entry"))).toBe(true);
+    expect(await store.list()).toEqual([]);
+    expect(runtime.memoryReviews.pending).toMatchObject([{ type: "project", content: "Use pnpm for all repository scripts." }]);
+    expect(notices.some((notice) => notice.includes("Long-term-memory evaluation completed. Review"))).toBe(true);
     expect(notices.every((notice) => !notice.includes("Task completed"))).toBe(true);
-    expect(notices.some((notice) => notice.includes("Use pnpm for all repository scripts."))).toBe(true);
+    expect(notices.every((notice) => !notice.includes("Stored high-confidence entry"))).toBe(true);
     await runtime.dispose();
   });
 

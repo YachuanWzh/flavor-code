@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -6,6 +6,9 @@ import { describe, expect, it } from "vitest";
 
 import { createEvolveService, type EvolveService } from "../../src/evolve/service.js";
 import { HookBus } from "../../src/hooks/bus.js";
+import { scaffoldFixPlugin } from "../../src/evolve/loader.js";
+import { EvolveVerificationStore, hashFixPlugin } from "../../src/evolve/verification.js";
+import type { PluginHost } from "../../src/plugins/host.js";
 
 interface Fixture {
   workspace: string;
@@ -51,6 +54,16 @@ async function modelCall(hooks: HookBus) {
     type: "AfterModelCall",
     payload: { modelId: "test", iteration: 1, messageCount: 2, attempt: 1, maxAttempts: 3 },
   });
+}
+
+async function implementFixHook(workspace: string, name: string): Promise<void> {
+  const dir = join(workspace, ".flavor", "plugins", name);
+  const manifestPath = join(dir, "flavor-plugin.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { contributes: { hooks: { name: string }[] } };
+  manifest.contributes.hooks = [{ name: "PostToolUseFailure" }];
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  await writeFile(join(dir, "index.js"),
+    "export function activate(ctx) { ctx.registerHook('PostToolUseFailure', () => ({ decision: 'allow' })); }\n");
 }
 
 describe("CAPTURE", () => {
@@ -211,22 +224,22 @@ describe("REPEAT (beginRun/endRun)", () => {
     const reflections = await service.store.reflections(5);
     expect(reflections).toHaveLength(2);
     expect(reflections[1]).toMatchObject({
-      iterations: 3, toolCalls: 2, toolErrors: 2, reason: "finished",
+      iterations: 3, toolCalls: 4, toolErrors: 2, reason: "finished",
       totalFailures: 2, signalDelta: 0, failedTools: ["Read"],
     });
     // Second run: totalFailures grows to 3, delta +1 (regression).
     expect(reflections[0]).toMatchObject({ iterations: 1, reason: "error", totalFailures: 3, signalDelta: 1 });
-    // Per-tool trends: per-run failure counts, not cumulative. Tools that
-    // stopped failing keep a delta-0-recorded baseline and show the drop.
-    expect(reflections[1]!.perTool).toEqual({ Read: { failures: 2, delta: 0 } });
-    expect(reflections[0]!.perTool).toEqual({ Read: { failures: 0, delta: -2 }, Glob: { failures: 1, delta: 1 } });
+    // Failures are normalized by calls. A tool not invoked in a run has no
+    // trend and cannot be credited as improved.
+    expect(reflections[1]!.perTool).toEqual({ Glob: { calls: 1, failures: 0, delta: 0 }, Read: { calls: 3, failures: 2, delta: 0 } });
+    expect(reflections[0]!.perTool).toEqual({ Glob: { calls: 1, failures: 1, delta: 100 } });
 
     expect(loopEvents).toHaveLength(2);
-    expect(loopEvents[0]).toMatchObject({ status: "finished", iterations: 3, toolCalls: 2, toolErrors: 2 });
+    expect(loopEvents[0]).toMatchObject({ status: "finished", iterations: 3, toolCalls: 4, toolErrors: 2 });
     expect(loopEvents[1]).toMatchObject({ status: "error" });
   });
 
-  it("auto-verifies suggestions whose tool failures improved and keeps worsening ones open", async () => {
+  it("does not verify a suggestion when a later run never calls its tool", async () => {
     const { hooks, service } = await fixture();
 
     // Run 1: Read fails twice (>= minRepeats) → open suggestion.
@@ -238,25 +251,22 @@ describe("REPEAT (beginRun/endRun)", () => {
     expect(suggestion?.tool).toBe("Read");
     expect(await service.store.verifiedIds()).toEqual([]);
 
-    // Run 2: Read no longer fails (delta -2) → suggestion auto-verified.
+    // Run 2 never invokes Read. This is no evidence of a fix.
     service.beginRun();
     await service.endRun("finished");
-    expect(await service.store.verifiedIds()).toEqual([suggestion!.id]);
-    expect(await service.store.openSuggestions({ threshold: 2, limit: 10 })).toEqual([]);
-    expect((await service.store.reflections(1))[0]?.perTool).toEqual({ Read: { failures: 0, delta: -2 } });
+    expect(await service.store.verifiedIds()).toEqual([]);
+    expect((await service.store.openSuggestions({ threshold: 2, limit: 10 })).map((item) => item.id)).toEqual([suggestion!.id]);
+    expect((await service.store.reflections(1))[0]?.perTool).toEqual({});
 
-    // Run 3 (in progress): Read regresses (fails 2x, delta +2 vs run 2) → the
-    // previously verified suggestion reopens with a worsening annotation.
+    // Calling Read again starts a new comparison baseline.
     service.beginRun();
     await failTool(hooks, "Read", "ENOENT", "missing");
     await failTool(hooks, "Read", "ENOENT", "missing");
     const reopened = await service.handleCommand(["suggest"]);
     expect(reopened).toContain("Read");
-    expect(reopened).toContain("worsening");
     await service.endRun("finished");
-    expect((await service.store.reflections(1))[0]?.perTool).toEqual({ Read: { failures: 2, delta: 2 } });
-    // The verified marker stays; it only hides suggestions while stable/improving.
-    expect(await service.store.verifiedIds()).toEqual([suggestion!.id]);
+    expect((await service.store.reflections(1))[0]?.perTool).toEqual({ Read: { calls: 2, failures: 2, delta: 0 } });
+    expect(await service.store.verifiedIds()).toEqual([]);
   });
 
   it("orders suggestions by worsening trend and annotates deltas in suggest", async () => {
@@ -269,9 +279,10 @@ describe("REPEAT (beginRun/endRun)", () => {
     await failTool(hooks, "Glob", "EACCES", "denied");
     await failTool(hooks, "Read", "ENOENT", "missing");
     await failTool(hooks, "Read", "ENOENT", "missing");
+    await runTool(hooks, "Glob");
+    await runTool(hooks, "Glob");
+    await runTool(hooks, "Glob");
     await service.endRun("finished");
-    const readSuggestionId = (await service.store.openSuggestions({ threshold: 1, limit: 100 }))
-      .find((suggestion) => suggestion.tool === "Read")!.id;
 
     // Run 2 (in progress): Read fails 1x (delta -1, improving), Glob fails 4x
     // (delta +1, worsening). Queries while the run is live reflect live trends.
@@ -281,36 +292,38 @@ describe("REPEAT (beginRun/endRun)", () => {
     await failTool(hooks, "Glob", "EACCES", "denied");
     await failTool(hooks, "Glob", "EACCES", "denied");
     await failTool(hooks, "Read", "ENOENT", "missing");
+    await runTool(hooks, "Read");
 
     const suggestions = await service.suggestions();
     expect(suggestions.map((suggestion) => [suggestion.tool, suggestion.trend, suggestion.delta])).toEqual([
-      ["Glob", "worsening", 1],
-      ["Read", "improving", -1],
+      ["Glob", "worsening", 50],
+      ["Read", "improving", -50],
     ]);
     const output = await service.handleCommand(["suggest"]);
     expect(output).toContain("Glob");
-    expect(output).toContain("worsening");
-    expect(output).toContain("+1");
+    expect(output).toContain("higher observed failure rate");
+    expect(output).toContain("+50");
     expect(output).toContain("Read");
-    expect(output).toContain("improving");
+    expect(output).toContain("lower observed failure rate");
 
-    // endRun closes the live window; the improving Read suggestion gets verified.
+    // A lower rate is useful diagnostic data, not proof of a particular fix.
     await service.endRun("finished");
-    expect(await service.store.verifiedIds()).toEqual([readSuggestionId]);
+    expect(await service.store.verifiedIds()).toEqual([]);
   });
 
-  it("lists verified suggestions", async () => {
+  it("labels old verified markers as historical, without trusting them", async () => {
     const { hooks, service } = await fixture();
     service.beginRun();
     await failTool(hooks, "Read", "ENOENT", "missing");
     await failTool(hooks, "Read", "ENOENT", "missing");
     await service.endRun("finished");
-    service.beginRun();
-    await service.endRun("finished");
+    const [suggestion] = await service.store.openSuggestions({ threshold: 2 });
+    await service.store.markSuggestionVerified(suggestion!.id);
 
     const output = await service.handleCommand(["verified"]);
     expect(output).toContain("Read");
-    expect(output).toContain("verified");
+    expect(output).toContain("legacy marker");
+    expect((await service.suggestions()).map((item) => item.id)).toContain(suggestion!.id);
   });
 
   it("renders a cross-run trends dashboard", async () => {
@@ -326,12 +339,22 @@ describe("REPEAT (beginRun/endRun)", () => {
 
     const output = await service.handleCommand(["trends"]);
     expect(output).toContain("evolve trends (last 2 run(s), newest first)");
-    expect(output).toContain("Read: 0 failure(s) this run (-2 vs previous)");
+    expect(output).not.toContain("Read: 0 failure(s) this run");
     expect(await service.handleCommand(["trends", "1"])).toContain("last 1 run(s)");
   });
 });
 
 describe("GUARDRAILS (prompt rules)", () => {
+  it("lets an explicit rule add activate an identical pending proposal", async () => {
+    const { service } = await fixture();
+    const { rule } = await service.store.addRule({ text: "Check the binary first", status: "proposed" });
+    await service.initialize();
+    expect(service.promptSection()).toBeUndefined();
+    expect(await service.handleCommand(["rule", "add", "Check the binary first"])).toContain("activated existing guardrail");
+    expect((await service.store.listRules())[0]).toMatchObject({ id: rule.id, status: "active" });
+    expect(service.promptSection()).toContain("Check the binary first");
+  });
+
   it("adds, lists, and removes rules and injects them into the prompt section", async () => {
     const { service } = await fixture();
     expect(await service.handleCommand(["rule"])).toContain("no guardrail rules yet");
@@ -398,17 +421,66 @@ describe("COMMANDS", () => {
     expect(stillOpen?.id).toBe(suggestion!.id);
   });
 
-  it("verifies a scaffolded plugin in the sandbox and snapshots on success", async () => {
+  it("rejects an empty scaffold, then verifies a registered fix in the sandbox", async () => {
     const { hooks, service, workspace } = await fixture();
     await failTool(hooks, "Read", "ENOENT", "missing");
     await failTool(hooks, "Read", "ENOENT", "missing");
     const [suggestion] = await service.store.openSuggestions({ threshold: 2, limit: 10 });
     await service.handleCommand(["improve", suggestion!.id]);
 
+    expect(await service.handleCommand(["verify", "fix-read"])).toContain("registered no tools");
+    await implementFixHook(workspace, "fix-read");
     const output = await service.handleCommand(["verify", "fix-read"]);
     expect(output).toContain("verify OK: fix-read");
-    // verify success snapshots the (still scaffolded) plugin.
+    // improve saved a draft snapshot; verification alone does not activate it.
     expect(await stat(join(workspace, ".flavor", "plugins", ".versions", "fix-read"))).toBeDefined();
+  });
+
+  it("blocks reload until the exact bytes pass verification and tests", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-evolve-gate-"));
+    await scaffoldFixPlugin(workspace, "fix-read");
+    await implementFixHook(workspace, "fix-read");
+    let reloads = 0;
+    const pluginHost = { reload: async () => { reloads++; return { ok: true }; }, unload: async () => {} } as unknown as PluginHost;
+    const service = createEvolveService({ workspace, hooks: new HookBus(), pluginHost, config: { testCommand: "echo ok" } });
+    const ledger = new EvolveVerificationStore(workspace);
+    const original = await hashFixPlugin(workspace, "fix-read");
+
+    expect(await service.handleCommand(["reload", "fix-read"])).toContain("reload BLOCKED");
+    expect(reloads).toBe(0);
+    expect(await service.handleCommand(["verify", "fix-read"])).toContain("verify OK");
+    expect(await service.handleCommand(["reload", "fix-read"])).toContain("reload BLOCKED");
+    expect(await service.handleCommand(["test"])).toContain("tests passed");
+    expect(await service.handleCommand(["reload", "fix-read"])).toContain("reloaded fix-read");
+    expect(reloads).toBe(1);
+    expect((await ledger.list())["fix-read"]?.activeDigest).toBe(original);
+
+    const entry = join(workspace, ".flavor", "plugins", "fix-read", "index.js");
+    await writeFile(entry, `${await readFile(entry, "utf8")}\n// edited after tests\n`);
+    expect(await service.handleCommand(["reload", "fix-read"])).toContain("reload BLOCKED");
+    expect(reloads).toBe(1);
+    const snapshot = await ledger.goodSnapshot("fix-read");
+    expect(snapshot).toBeDefined();
+    const snapEntry = join(snapshot!, "index.js");
+    await writeFile(snapEntry, `${await readFile(snapEntry, "utf8")}\n// changed snapshot\n`);
+    expect(await service.handleCommand(["revert", "fix-read"])).toContain("no longer matches its approved version");
+    service.dispose();
+  });
+
+  it("reports a failed reload during revert instead of claiming restoration", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flavor-evolve-revert-"));
+    await scaffoldFixPlugin(workspace, "fix-read");
+    await implementFixHook(workspace, "fix-read");
+    let failReload = false;
+    const pluginHost = { reload: async () => failReload
+      ? { ok: false, error: "activation failed" } : { ok: true }, unload: async () => {} } as unknown as PluginHost;
+    const service = createEvolveService({ workspace, hooks: new HookBus(), pluginHost, config: { testCommand: "echo ok" } });
+    expect(await service.handleCommand(["verify", "fix-read"])).toContain("verify OK");
+    expect(await service.handleCommand(["test"])).toContain("tests passed");
+    expect(await service.handleCommand(["reload", "fix-read"])).toContain("reloaded fix-read");
+    failReload = true;
+    expect(await service.handleCommand(["revert", "fix-read"])).toContain("revert FAILED: fix-read\n  activation failed");
+    service.dispose();
   });
 
   it("verifies a missing plugin reports failure", async () => {
@@ -470,7 +542,7 @@ describe("NOTIFY (user-facing signals)", () => {
     expect(summaries[0]!.split("\n")).toHaveLength(1);
   });
 
-  it("notifies an end-run summary with improvement and auto-verification", async () => {
+  it("does not claim improvement after a run without relevant calls", async () => {
     const { hooks, service, notices } = await fixture();
     service.beginRun();
     await failTool(hooks, "Read", "ENOENT", "missing");
@@ -481,29 +553,27 @@ describe("NOTIFY (user-facing signals)", () => {
     await service.endRun("finished");
 
     const summary = notices.filter((notice) => notice.includes("run finished")).at(-1)!;
-    expect(summary).toContain("improved");
-    expect(summary).toContain("-2");
-    expect(summary).toContain("auto-verified");
+    expect(summary).toContain("no tool errors");
+    expect(await service.store.verifiedIds()).toEqual([]);
   });
 
-  it("notifies a worsening summary that reopens the suggestion", async () => {
+  it("reports an increased failure rate when both runs invoked the tool", async () => {
     const { hooks, service, notices } = await fixture();
     service.beginRun();
     await failTool(hooks, "Read", "ENOENT", "missing");
     await failTool(hooks, "Read", "ENOENT", "missing");
+    await runTool(hooks, "Read");
+    await runTool(hooks, "Read");
     await service.endRun("finished");
-    service.beginRun();
-    await service.endRun("finished"); // auto-verified
-
     service.beginRun();
     await failTool(hooks, "Read", "ENOENT", "missing");
     await failTool(hooks, "Read", "ENOENT", "missing");
     await service.endRun("finished");
 
     const summary = notices.filter((notice) => notice.includes("run finished")).at(-1)!;
-    expect(summary).toContain("worsening");
-    expect(summary).toContain("+2");
-    expect(summary).toContain("reopened");
+    expect(summary).toContain("higher failure rate");
+    expect(summary).toContain("+50 percentage points");
+    expect(await service.store.verifiedIds()).toEqual([]);
   });
 });
 
@@ -531,7 +601,7 @@ describe("evolve_improve TOOL", () => {
     ).rejects.toThrow(/no open suggestion/i);
   });
 
-  it("closes a suggestion as a prompt guardrail with kind=prompt_rule", async () => {
+  it("holds a model-proposed guardrail until it is accepted", async () => {
     const { hooks, service } = await fixture();
     await failTool(hooks, "Shell", "tool_error", "command failed");
     await failTool(hooks, "Shell", "tool_error", "command failed");
@@ -544,15 +614,16 @@ describe("evolve_improve TOOL", () => {
       kind: "prompt_rule",
     }, new AbortController().signal));
 
-    expect(output).toContain("Stored guardrail rule");
-    expect(output).toContain("marked done");
-    // The suggestion is closed and the rule lands in the prompt section.
-    expect(await service.store.openSuggestions({ threshold: 2, limit: 10 })).toEqual([]);
+    expect(output).toContain("Proposed guardrail rule");
+    expect(output).toContain("stays open");
+    expect((await service.store.openSuggestions({ threshold: 2, limit: 10 }))[0]?.id).toBe(suggestion!.id);
     const rules = await service.store.listRules();
     expect(rules).toHaveLength(1);
     expect(rules[0]).toMatchObject({
-      text: "Check that the binary exists before invoking it", sourceId: suggestion!.id,
+      text: "Check that the binary exists before invoking it", sourceId: suggestion!.id, status: "proposed",
     });
+    expect(service.promptSection()).not.toContain("Check that the binary exists before invoking it");
+    expect(await service.handleCommand(["rule", "accept", rules[0]!.id])).toContain("activated guardrail");
     expect(service.promptSection()).toContain("Check that the binary exists before invoking it");
   });
 });

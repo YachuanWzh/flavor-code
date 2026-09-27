@@ -33,7 +33,7 @@ export const COMMAND_DESCRIPTIONS: Record<(typeof MVP_COMMANDS)[number], string>
   doctor: "Diagnose the local runtime, configuration, tools, plugins, and npm access",
   loop: "Run a verified autonomous loop toward a goal",
   goal: "Run a goal pipeline with adversarial verification",
-  evolve: "Self-improvement loop: capture failures, suggest fixes, verify with tests",
+  evolve: "Self-improvement: review failures, verify fix plugins, and manage learned preferences",
   commit: "Generate a commit message for staged changes and commit after confirmation",
   review: "Review uncommitted changes for bugs and risks before committing",
   explain: "Explain a symbol for newcomers (AST graph + source + git history)",

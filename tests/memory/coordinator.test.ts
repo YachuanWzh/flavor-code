@@ -20,6 +20,18 @@ async function fixture(generate: (prompt: string, signal: AbortSignal) => Promis
 }
 
 describe("MemoryCoordinator", () => {
+  it("keeps only user-verifiable quotes on generated candidates", async () => {
+    const generate = async () => JSON.stringify({ memories: [{ type: "project", summary: "Use pnpm", content: "Use pnpm for scripts.",
+      topicKey: "project.package-manager", keywords: ["pnpm"], evidence: "Please use pnpm for scripts",
+      scores: { durability: 3, futureUtility: 3, authority: 3, nonDerivability: 3 } }] });
+    const { review, coordinator } = await fixture(generate);
+    await coordinator.finalize("task-evidence", [
+      { role: "user", content: "Please use pnpm for scripts in this project. " + "More task context. ".repeat(12) },
+      { role: "assistant", content: "Done." },
+    ]);
+    expect(review.mock.calls[0]?.[1][0]?.evidence).toBe("Please use pnpm for scripts");
+  });
+
   it("queues extraction for review without writing and flushes deterministically", async () => {
     const generate = vi.fn(async (_prompt: string, _signal: AbortSignal) => JSON.stringify({ memories: [{
       type: "project", summary: "Use pnpm", content: "Use pnpm.", topicKey: "project.package-manager", keywords: ["pnpm"],
@@ -38,7 +50,7 @@ describe("MemoryCoordinator", () => {
     expect(await store.list()).toEqual([]);
   });
 
-  it("auto-stores high-confidence candidates without entering the review queue", async () => {
+  it("reviews high-confidence project facts instead of trusting model scores", async () => {
     const generate = vi.fn(async (_prompt: string, _signal: AbortSignal) => JSON.stringify({ memories: [{
       type: "project", summary: "Use pnpm", content: "Use pnpm for all repository scripts.",
       topicKey: "project.package-manager", keywords: ["pnpm"],
@@ -49,10 +61,10 @@ describe("MemoryCoordinator", () => {
     expect(await coordinator.finalize("task-high", [
       { role: "user", content: "Remember the package manager." },
       { role: "assistant", content: `The project uses pnpm. ${"Useful completed task context. ".repeat(8)}` },
-    ])).toEqual({ evaluated: true, candidates: true, stored: 1 });
+    ])).toEqual({ evaluated: true, candidates: true, stored: 0 });
 
-    expect(remember).toHaveBeenCalledWith("task-high", [expect.objectContaining({ type: "project", content: "Use pnpm for all repository scripts." })]);
-    expect(review).not.toHaveBeenCalled();
+    expect(remember).not.toHaveBeenCalled();
+    expect(review).toHaveBeenCalledWith("task-high", [expect.objectContaining({ type: "project", content: "Use pnpm for all repository scripts." })]);
     expect(await store.list()).toEqual([]);
   });
 
@@ -71,7 +83,7 @@ describe("MemoryCoordinator", () => {
     // Threshold 9: total 10 is high confidence, stored directly.
     const low = await fixture(generate, 200, 9);
     expect(await low.coordinator.finalize("task-low", messages)).toEqual({ evaluated: true, candidates: true, stored: 1 });
-    expect(low.remember).toHaveBeenCalledWith("task-low", [expect.objectContaining({ type: "feedback", content: "Keep answers concise for the user." })]);
+    expect(low.remember).toHaveBeenCalledWith("task-low", [expect.objectContaining({ type: "feedback", content: "Keep answers concise for the user." })], false, ["Remember the package manager."]);
     expect(low.review).not.toHaveBeenCalled();
 
     // Threshold 12: the same total-10 candidate still needs review.
@@ -121,7 +133,7 @@ describe("MemoryCoordinator", () => {
 
     expect(generate).toHaveBeenCalledOnce();
     expect(generate.mock.calls[0]![0]).toContain("explicitly asked");
-    expect(remember).toHaveBeenCalledWith("task-explicit", [expect.objectContaining({ type: "user" })]);
+    expect(remember).toHaveBeenCalledWith("task-explicit", [expect.objectContaining({ type: "user" })], true, ["请记住我喜欢简洁回答。"]);
     expect(review).not.toHaveBeenCalled();
   });
 });

@@ -70,4 +70,18 @@ describe("memory extraction", () => {
     expect(parseScoredMemoryCandidates(raw, { maxEntryChars: 200, scoreThreshold: 9, maxCandidates: 3 }))
       .toEqual([expect.objectContaining({ type: "project", summary: "Use pnpm", topicKey: "project.package-manager" })]);
   });
+
+  it("drops sensitive candidate metadata and omits sensitive evidence", () => {
+    const scores = { durability: 3, futureUtility: 3, authority: 3, nonDerivability: 2 };
+    const raw = JSON.stringify({ memories: [
+      { type: "project", summary: "password=hunter2", content: "Use pnpm for scripts.",
+        topicKey: "project.package-manager", keywords: ["pnpm"], scores },
+      { type: "project", summary: "Use pnpm", content: "Use pnpm for scripts.",
+        topicKey: "project.package-manager", keywords: ["pnpm"], evidence: "password=hunter2", scores },
+    ] });
+    expect(parseScoredMemoryCandidates(raw, { maxEntryChars: 200, scoreThreshold: 9, maxCandidates: 2 }))
+      .toEqual([expect.objectContaining({ summary: "Use pnpm", content: "Use pnpm for scripts." })]);
+    expect(parseScoredMemoryCandidates(raw, { maxEntryChars: 200, scoreThreshold: 9, maxCandidates: 2 })[0])
+      .not.toHaveProperty("evidence");
+  });
 });

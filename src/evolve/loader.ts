@@ -22,10 +22,12 @@ export function sanitizePluginName(tool: string): string {
 }
 
 export function fixPluginDir(workspace: string, name: string): string {
+  if (!/^fix-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) throw new Error(`Invalid fix plugin name: ${name}`);
   return resolve(workspace, PLUGIN_DIR, name);
 }
 
 function versionsDirFor(workspace: string, name: string): string {
+  if (!/^fix-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) throw new Error(`Invalid fix plugin name: ${name}`);
   return resolve(workspace, VERSIONS_DIR, name);
 }
 
@@ -87,6 +89,7 @@ export interface FixPluginVerifyReport {
   provided: string[];
   tools: string[];
   commands: string[];
+  registrations: number;
   error?: string;
 }
 
@@ -96,9 +99,10 @@ export async function verifyFixPlugin(workspace: string, name: string): Promise<
   try {
     await stat(pluginRoot);
   } catch {
-    return { ok: false, provided: [], tools: [], commands: [], error: `Plugin "${name}" not found.` };
+    return { ok: false, provided: [], tools: [], commands: [], registrations: 0, error: `Plugin "${name}" not found.` };
   }
   const collected = { tools: [] as string[], commands: [] as string[] };
+  let registrations = 0;
   const sandbox = await mkdtemp(join(tmpdir(), "flavor-evolve-verify-"));
   try {
     await cp(pluginRoot, join(sandbox, name), { recursive: true });
@@ -108,11 +112,11 @@ export async function verifyFixPlugin(workspace: string, name: string): Promise<
       config: {},
       activationTimeoutMs: 5_000,
       registrations: {
-        command: (commandName) => { collected.commands.push(commandName); return () => undefined; },
-        tool: (toolName) => { collected.tools.push(toolName); return () => undefined; },
-        hook: () => () => undefined,
-        skillRoot: () => () => undefined,
-        modelAdapter: () => () => undefined,
+        command: (commandName) => { registrations++; collected.commands.push(commandName); return () => undefined; },
+        tool: (toolName) => { registrations++; collected.tools.push(toolName); return () => undefined; },
+        hook: () => { registrations++; return () => undefined; },
+        skillRoot: () => { registrations++; return () => undefined; },
+        modelAdapter: () => { registrations++; return () => undefined; },
       },
       logger: { debug() {}, info() {}, warn() {}, error() {} },
     });
@@ -126,6 +130,7 @@ export async function verifyFixPlugin(workspace: string, name: string): Promise<
       provided: loaded.map((plugin) => `${plugin.name}@${plugin.version}`),
       tools: collected.tools,
       commands: collected.commands,
+      registrations,
       ...(error === undefined ? {} : { error }),
     };
   } catch (error) {
@@ -134,6 +139,7 @@ export async function verifyFixPlugin(workspace: string, name: string): Promise<
       provided: [],
       tools: collected.tools,
       commands: collected.commands,
+      registrations,
       error: error instanceof Error ? error.message : String(error),
     };
   } finally {
@@ -168,8 +174,17 @@ export async function revertFixPlugin(workspace: string, name: string): Promise<
   const snapshots = entries.filter((entry) => !entry.startsWith(".")).sort();
   if (snapshots.length === 0) throw new Error(`Plugin "${name}" has no snapshot to restore.`);
   const latest = join(versionsRoot, snapshots[snapshots.length - 1]!);
+  await restoreFixPluginSnapshot(workspace, name, latest);
+  return `Restored "${name}" from ${snapshots[snapshots.length - 1]}.`;
+}
+
+export async function restoreFixPluginSnapshot(workspace: string, name: string, snapshot: string): Promise<void> {
+  const versionsRoot = versionsDirFor(workspace, name);
+  const target = resolve(snapshot);
+  if (!target.startsWith(`${versionsRoot}${process.platform === "win32" ? "\\" : "/"}`)) throw new Error("Snapshot escapes fix plugin versions");
+  await stat(target);
+  const pluginRoot = fixPluginDir(workspace, name);
   await rm(pluginRoot, { recursive: true, force: true });
   await mkdir(pluginRoot, { recursive: true });
-  await cp(latest, pluginRoot, { recursive: true });
-  return `Restored "${name}" from ${snapshots[snapshots.length - 1]}.`;
+  await cp(target, pluginRoot, { recursive: true });
 }

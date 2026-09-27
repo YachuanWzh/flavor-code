@@ -93,7 +93,14 @@ export class MemoryStore {
   }
 
   async userContext(): Promise<string | undefined> {
-    const references = (await this.references()).filter((reference) => reference.type === "user");
+    const seen = new Set<string>();
+    const references = (await this.references()).filter((reference) => {
+      if (reference.type !== "user") return false;
+      const key = memoryFactKey(reference.type, reference.summary);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
     if (references.length === 0) return undefined;
     const contents = await Promise.all(references.map(async (reference) =>
       this.#readTaskItem(reference).catch(() => reference.summary)));
@@ -115,20 +122,25 @@ export class MemoryStore {
     }, now);
   }
 
-  async rememberForTask(taskId: string, candidate: ScoredMemoryCandidate, now = new Date()): Promise<{ entry: MemoryEntry; added: boolean }> {
+  async rememberForTask(taskId: string, candidate: ScoredMemoryCandidate, now = new Date()): Promise<{ entry: MemoryEntry; added: boolean; conflict?: MemoryReference }> {
     assertTaskId(taskId);
     const entry = validateCandidate(candidate, this.#maxEntryChars);
     const summary = sanitizeSummary(candidate.summary || entry.content);
     const current = await this.references();
     const duplicate = findDuplicate(current, { ...candidate, content: entry.content, summary });
     if (duplicate !== undefined || current.length >= this.#maxEntries) return { entry, added: false };
+    const existingConflict = findTopicConflict(current, candidate);
+    if (existingConflict !== undefined) return { entry, added: false, conflict: existingConflict };
 
     const contentPath = `tasks/${taskId}.md`;
     await this.#writeTaskItem(taskId, contentPath, { ...entry, summary });
     let added = false;
+    let conflict: MemoryReference | undefined;
     await this.#updateIndex((index) => {
       if (findDuplicate(index.references, { ...candidate, content: entry.content, summary }) !== undefined
         || index.references.length >= this.#maxEntries) return index;
+      conflict = findTopicConflict(index.references, candidate);
+      if (conflict !== undefined) return index;
       const timestamp = now.toISOString();
       const reference: MemoryReference = {
         id: entry.id,
@@ -146,7 +158,7 @@ export class MemoryStore {
       added = true;
       return { ...index, references: [...index.references, reference] };
     });
-    return { entry, added };
+    return { entry, added, ...(conflict === undefined ? {} : { conflict }) };
   }
 
   async rememberMany(candidates: readonly MemoryCandidate[]): Promise<{ added: number; skipped: number }> {
@@ -448,12 +460,43 @@ function validateReference(reference: MemoryReference, maxEntryChars: number): M
 
 function findDuplicate(references: readonly MemoryReference[], candidate: ScoredMemoryCandidate & { summary: string }): MemoryReference | undefined {
   const exact = normalizeForSimilarity(candidate.content);
+  const factKeys = new Set([memoryFactKey(candidate.type, candidate.content), memoryFactKey(candidate.type, candidate.summary)]);
   return references.find((reference) => reference.type === candidate.type && (
-    normalizeForSimilarity(reference.summary) === exact
+    factKeys.has(memoryFactKey(reference.type, reference.summary))
+    || compactForEquality(reference.summary) === compactForEquality(candidate.summary)
+    || normalizeForSimilarity(reference.summary) === exact
     || normalizeForSimilarity(reference.summary) === normalizeForSimilarity(candidate.summary)
     || memorySimilarity(reference.summary, candidate.content) >= 0.92
     || memorySimilarity(reference.summary, candidate.summary) >= 0.92
   ));
+}
+
+function findTopicConflict(references: readonly MemoryReference[], candidate: ScoredMemoryCandidate): MemoryReference | undefined {
+  const address = candidate.type === "user" ? preferredAddress(candidate.content) ?? preferredAddress(candidate.summary) : undefined;
+  if (address !== undefined) {
+    const changedAddress = references.find((reference) => reference.type === "user"
+      && preferredAddress(reference.summary) !== undefined && preferredAddress(reference.summary) !== address);
+    if (changedAddress !== undefined) return changedAddress;
+  }
+  const topic = sanitizeTopicKey(candidate.topicKey);
+  if (!topic || topic.endsWith(".manual") || topic.endsWith(".legacy")) return undefined;
+  return references.find((reference) => reference.type === candidate.type && reference.topicKey === topic
+    && memorySimilarity(reference.summary, candidate.summary) < 0.92);
+}
+
+function compactForEquality(value: string): string {
+  return normalizeForSimilarity(value).replace(/\s+/gu, "");
+}
+
+function preferredAddress(value: string): string | undefined {
+  const match = normalizeMemoryContent(value).match(/^(?:always\s+address\s+(?:the\s+)?user\s+as|(?:用户|我)(?:的)?(?:称呼|名字|姓名)(?:是|为|叫)|请(?:叫|称呼)我)\s*[「『“"']?(.+?)[」』”"']?[。.!！]?$/iu);
+  const name = match?.[1] === undefined ? "" : compactForEquality(match[1]);
+  return name || undefined;
+}
+
+function memoryFactKey(type: MemoryType, value: string): string {
+  const address = type === "user" ? preferredAddress(value) : undefined;
+  return address === undefined ? `${type}:text:${compactForEquality(value)}` : `user:preferred-address:${address}`;
 }
 
 function sanitizeSummary(value: string): string {

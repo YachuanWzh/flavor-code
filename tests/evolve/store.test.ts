@@ -19,6 +19,14 @@ describe("normalizeError / fingerprint / argKeys", () => {
     expect(normalizeError(long)).toHaveLength(160);
   });
 
+  it("redacts unquoted credentials and common absolute paths in tool errors", () => {
+    const normalized = normalizeError("failed at C:\\Users\\alice\\private.txt with token=abc123 and Bearer secret456; see /home/alice/config.json");
+    expect(normalized).not.toContain("alice");
+    expect(normalized).not.toContain("abc123");
+    expect(normalized).not.toContain("secret456");
+    expect(normalized).toContain("token=[redacted]");
+  });
+
   it("fingerprints tool + errorCode + normalized message", () => {
     const base = fingerprint("Read", "ENOENT", "no such file");
     expect(base).toMatch(/^[0-9a-f]{12}$/u);
@@ -42,6 +50,22 @@ describe("normalizeError / fingerprint / argKeys", () => {
 });
 
 describe("EvolveStore", () => {
+  it("keeps bounded local outcome events and compact comparison results", async () => {
+    const { workspace, store } = await fixture();
+    await store.appendOutcomeEvent({ kind: "candidate_exposed", taskId: "task-1", candidateIds: ["pref-1"] });
+    await store.appendOutcomeEvent({ kind: "task_finished", taskId: "task-1", outcome: "finished",
+      modelCalls: 2, toolCalls: 3, toolErrors: 0 });
+    await store.appendOutcomeEvent({ kind: "candidate_feedback", taskId: "task-1", candidateIds: ["pref-1"], sentiment: "positive" });
+    expect((await store.outcomeEvents()).map((event) => event.kind))
+      .toEqual(["candidate_exposed", "task_finished", "candidate_feedback"]);
+    const stored = await store.appendComparison({ caseName: "fix parser", verdict: "improved",
+      baseline: { passed: false, durationMs: 100, tokens: 10, checksPassed: 0, checksTotal: 1 },
+      candidate: { passed: true, durationMs: 90, tokens: 9, checksPassed: 1, checksTotal: 1 } });
+    expect((await store.comparisons())[0]).toEqual(stored);
+    expect(await readFile(join(workspace, ".flavor", "evolve", "comparisons.jsonl"), "utf8"))
+      .not.toContain("prompt");
+  });
+
   it("records a new signal and bumps count/lastAt on dedupe", async () => {
     const { workspace, store } = await fixture();
     const first = await store.recordSignal({ tool: "Read", errorCode: "ENOENT", error: "no such file", args: { path: "/x" } });
@@ -143,31 +167,29 @@ describe("EvolveStore", () => {
     expect(await store.openSuggestions({ threshold: 1, limit: 10 })).toHaveLength(1);
   });
 
-  it("marks suggestions verified and excludes them from openSuggestions", async () => {
+  it("keeps legacy verified markers visible until a suggestion is explicitly done", async () => {
     const { store } = await fixture();
     await store.recordSignal({ tool: "Read", errorCode: "ENOENT", error: "missing" });
     await store.recordSignal({ tool: "Read", errorCode: "ENOENT", error: "missing" });
     const [suggestion] = await store.openSuggestions({ threshold: 2, limit: 10 });
     await store.markSuggestionVerified(suggestion!.id);
     expect(await store.verifiedIds()).toEqual([suggestion!.id]);
-    expect(await store.openSuggestions({ threshold: 2, limit: 10 })).toEqual([]);
+    expect((await store.openSuggestions({ threshold: 2, limit: 10 })).map((item) => item.id)).toEqual([suggestion!.id]);
     // Done and verified are independent: a verified id is not a done id.
     await store.markSuggestionDone(suggestion!.id);
     expect(await store.verifiedIds()).toEqual([suggestion!.id]);
     expect(await store.openSuggestions({ threshold: 2, limit: 10 })).toEqual([]);
   });
 
-  it("reopens verified suggestions when the tool is worsening again", async () => {
+  it("does not treat a legacy verified marker as evidence", async () => {
     const { store } = await fixture();
     await store.recordSignal({ tool: "Read", errorCode: "ENOENT", error: "missing" });
     await store.recordSignal({ tool: "Read", errorCode: "ENOENT", error: "missing" });
     const [suggestion] = await store.openSuggestions({ threshold: 2, limit: 10 });
     await store.markSuggestionVerified(suggestion!.id);
 
-    // Stable/unknown trend keeps the verified suggestion hidden.
-    expect(await store.openSuggestions({ threshold: 2, limit: 10, trends: {} })).toEqual([]);
-    expect(await store.openSuggestions({ threshold: 2, limit: 10, trends: { Read: 0 } })).toEqual([]);
-    // A regression reopens it with a worsening annotation.
+    expect((await store.openSuggestions({ threshold: 2, limit: 10, trends: {} })).map((item) => item.id)).toEqual([suggestion!.id]);
+    expect((await store.openSuggestions({ threshold: 2, limit: 10, trends: { Read: 0 } })).map((item) => item.id)).toEqual([suggestion!.id]);
     const reopened = await store.openSuggestions({ threshold: 2, limit: 10, trends: { Read: 1 } });
     expect(reopened.map((item) => item.id)).toEqual([suggestion!.id]);
     expect(reopened[0]?.trend).toBe("worsening");
@@ -204,8 +226,8 @@ describe("EvolveStore", () => {
       ["Write", "improving", -1],
     ]);
     // Hint text carries the trend so the model can act on it.
-    expect(suggestions[0]?.hint).toContain("worsening");
-    expect(suggestions[2]?.hint).toContain("improving");
+    expect(suggestions[0]?.hint).toContain("higher observed failure rate");
+    expect(suggestions[2]?.hint).toContain("lower observed failure rate");
 
     // Without trends the order falls back to count descending and no annotations.
     const plain = await store.openSuggestions({ threshold: 2, limit: 10 });

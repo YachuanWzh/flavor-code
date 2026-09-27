@@ -41,7 +41,7 @@ Flavor Code 接入 OpenAI、Anthropic 或兼容服务，在受控工作区内使
 | 🌿 | **Git 原生工作流** | `/commit` 为暂存改动生成 Conventional Commits 提交信息并确认提交；`/review` 审查未提交改动；只读 `GitHistory` 工具回答“这段代码为什么是这样” |
 | 🎨 | **E2E 需求到交付** | 从粗需求或设计稿到可交付产品：PRD、交互原型、视觉还原、接口联调、自主验收与评分交付（仅 Electron） |
 | 🌐 | **Agent 内置浏览器** | Electron 桌面端内置可交互浏览器：Agent 通过 `BrowserSnapshot`/`BrowserAct` 等工具导航页面、按元素引用点击与输入，操作以可视化覆盖层实时标注；导航受 SSRF 防护约束，快照自动脱敏密码、token 等敏感字段（仅 Electron） |
-| 🔁 | **有界自进化** | 重复的工具失败被捕获、去重并形成建议；修复以沙箱验证过的插件形式落地，或沉淀为注入后续提示词的 guardrail 规则，并支持运行趋势与规则管理（`/evolve`） |
+| 🔁 | **可评价的自进化试用** | 明确偏好直接生效、推断偏好先试用并记录反馈，可查看和 drop；修复插件按内容哈希完成沙箱验证与测试后才能启用，失败可回滚（`/evolve`） |
 | 🛡️ | **明确的权限边界** | 分别控制读、写、Shell、网络和破坏性操作，也可使用 Docker |
 
 ## 快速开始
@@ -202,9 +202,11 @@ OAuth PKCE 的运行时行为与配置约定见 [PKCE 规范](./docs/specs/pkce-
 | `/commit [hint]` | 为暂存改动生成 Conventional Commits 提交信息，确认后提交 |
 | `/review [focus]` | 提交前审查未提交改动的缺陷与风险 |
 | `/explain <符号 \| file.ts#符号> [关注点]` | 面向新人讲解一个符号：结合代码图、真实源码与 Git 历史，歧义时弹卡片选择符号 |
-| `/evolve <signals\|suggest\|improve ...>` | 自进化循环：查看重复工具失败、脚手架修复插件、管理运行趋势与 guardrail 规则、验证并热重载 |
+| `/evolve status` | 查看普通任务与循环任务的趋势、工具故障建议、待审核规则和偏好状态；`preference list/drop/restore` 管理偏好，`rule list/accept` 审核模型规则，`verify → test → reload` 启用非空修复插件 |
 | `/pals`、`/chat`、`/co-work` | 发现并协作其他本机 CLI 实例 |
 | `/audit` | 查看工具失败审计 |
+
+自进化可直接从普通对话开始，无需单独打开开关：输入「以后请用中文解释」，完成一轮后用 `/evolve preference list` 查看 `active`；再执行普通任务，用 `/evolve trends 2` 查看运行记录。不合适时用 `/evolve preference drop <id>` 停用。自动推断的偏好先显示 `proposed`，需要另一个独立任务的用户原话支持才会进入 `canary`。完整验证步骤见《技术方案报告》第 50.6 节。
 
 运行中可以提交 steering 或排队 follow-up；当前模型响应结束后，任务会在安全边界处接收新指令。
 运行中按 Enter 会把输入排到下一轮；输入 `/steer <内容>` 会影响当前回合。输入 `/queue` 可查看全部待发送消息，用上下键选中，按 Enter 移回输入框编辑，或按 `d` 取消。Esc 关闭队列视图；在普通输入界面则会取回最后一条待发送消息供编辑。
@@ -385,7 +387,7 @@ maxIterations: 30
 └── plugins/          # 项目插件
 ```
 
-长期记忆会区分用户偏好、行为反馈、项目约定和外部引用。自动提取只保存高置信候选，并提供确认、忽略和删除入口；密钥、Token、原始工具输出和模型猜测会被拒绝。
+长期记忆会区分用户偏好、行为反馈、项目约定和外部引用。自动提取的项目约定和外部引用会进入可跨会话保留的审核队列，模型自评分再高也不会直接写入；卡片会标明是否有可核对的用户原话。使用 `Ctrl+Y` 保存或 `Ctrl+N` 忽略；`/memory` 显示待审核数量与采纳、忽略统计。明确的 `/remember` 仍直接保存。密钥、Token 和原始工具输出不会作为候选保存。
 
 图片提示支持 PNG、JPEG 和 WebP，单图最大 5 MiB、每次最多 5 张。桌面端支持选择或拖放；CLI 剪贴板图片目前支持 Windows 和 macOS。CLI 标准粘贴会优先使用剪贴板文字，只有没有可用文字时才把剪贴板图像添加为附件；剪贴板同时含有文字和图片但需要图片时，使用 `/paste-image`。
 
@@ -457,7 +459,10 @@ flavor --mode rpc --workspace . --trace .flavor/traces/run.jsonl
 
 ```bash
 flavor eval eval.json --output report.json
+flavor eval eval.json --baseline ../baseline-worktree --output comparison.json
 ```
+
+第二条命令把 `eval.json` 的 `workspace` 作为候选工作区，在独立的基线工作区运行同一提示和验证命令；两个工作区都会被 Agent 修改，应使用可丢弃的测试副本。精简结果保存在候选项目的 `.flavor/evolve/comparisons.jsonl`，可用 `/evolve comparisons` 查看。普通任务的偏好暴露、完成结果和可归因反馈写入 `.flavor/evolve/outcome-events.jsonl`，可用 `/evolve outcomes` 查看；这些本地文件已被 Git 忽略，不复制完整对话。只有脱敏并愿意共享的固定评测题才适合提交到仓库。
 
 RPC、trace、replay、eval、会话树与 Docker 的设计约束见 [控制面规范](./docs/specs/2026-07-29-control-plane-sandbox-vscode.md)。
 

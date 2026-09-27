@@ -44,7 +44,7 @@ it("uses bounded long-term-memory defaults and validates overrides", () => {
     scoreThreshold: 9,
     autoStoreThreshold: 11,
     ignoreStreakLimit: 5,
-    reviewAutoDismissSeconds: 5,
+    reviewAutoDismissSeconds: 0,
     maxCandidatesPerTask: 1,
     retrievalTopK: 5,
     maxEntries: 200,

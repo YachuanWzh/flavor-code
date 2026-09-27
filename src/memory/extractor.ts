@@ -29,8 +29,10 @@ Score every candidate from 0 to 3 on durability, futureUtility, authority, and n
 ${options.outputLanguage === undefined ? "" : `Write summary, content, and keywords in the configured output language ${options.outputLanguage}. Preserve code identifiers, commands, paths, URLs, and proper names in their original form.`}
 ${options.explicitIntent ? "The user explicitly asked to remember something. Extract only the durable information they explicitly asked to persist; do not infer unrelated memories from the surrounding response." : ""}
 
+For each candidate, include evidence as an exact short quote from a USER message that supports it; use an empty string if no such quote exists. Never invent a quote or cite the assistant's own answer as user evidence.
+
 Return strict JSON only in this shape:
-{"memories":[{"type":"project","summary":"short routing summary","content":"complete durable fact","topicKey":"project.topic","keywords":["keyword"],"scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":2}}]}
+{"memories":[{"type":"project","summary":"short routing summary","content":"complete durable fact","topicKey":"project.topic","keywords":["keyword"],"evidence":"exact USER quote or empty","scores":{"durability":3,"futureUtility":3,"authority":3,"nonDerivability":2}}]}
 
 Conversation:
 ${transcript}`;
@@ -55,11 +57,15 @@ export function parseScoredMemoryCandidates(raw: string, options: {
         .map(normalizeMemoryContent).filter(Boolean))].slice(0, 8)
       : [];
     const scores = parseScores(value.scores);
+    const evidence = typeof value.evidence === "string" ? normalizeMemoryContent(value.evidence) : "";
     if (typeof type !== "string" || !(MEMORY_TYPES as readonly string[]).includes(type) || scores === undefined) continue;
-    if (!summary || summary.length > 240 || !content || content.length > options.maxEntryChars || containsSensitiveMemory(content)) continue;
+    if (!summary || summary.length > 240 || !content || content.length > options.maxEntryChars
+      || containsSensitiveMemory(content) || containsSensitiveMemory(summary)
+      || containsSensitiveMemory(topicKey) || keywords.some(containsSensitiveMemory)) continue;
     const total = scores.durability + scores.futureUtility + scores.authority + scores.nonDerivability;
     if (total < options.scoreThreshold || scores.durability < 2 || scores.futureUtility < 2 || scores.authority < 2) continue;
-    const candidate = { type: type as MemoryType, summary, content, topicKey, keywords, scores };
+    const candidate = { type: type as MemoryType, summary, content, topicKey, keywords, scores,
+      ...(evidence === "" || evidence.length > 160 || containsSensitiveMemory(evidence) ? {} : { evidence }) };
     if (!output.some((existing) => existing.type === candidate.type
       && existing.content.toLocaleLowerCase() === candidate.content.toLocaleLowerCase())) output.push(candidate);
     if (output.length >= options.maxCandidates) break;

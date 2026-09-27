@@ -30,6 +30,9 @@ import { HOOK_EVENT_NAMES, type HookDecision, type HookEventName } from "./hooks
 import { createIncidentReporter } from "./incidents/reporter.js";
 import { createIslandControlServer, type IslandControlServer } from "./island/control-server.js";
 import { createEvolveService } from "./evolve/service.js";
+import { EvolveStore } from "./evolve/store.js";
+import { unverifiedFixPlugins } from "./evolve/verification.js";
+import { PreferenceEvolution } from "./evolution/preferences.js";
 import { initializeFlavor } from "./init/project.js";
 import { LoopOrchestrator, type LoopRuntimeEvent } from "./loop/orchestrator.js";
 import { GoalOrchestrator } from "./goal/orchestrator.js";
@@ -138,7 +141,8 @@ import { normalizeToolCallInput } from "./utils/json.js";
 import { MemoryCoordinator } from "./memory/coordinator.js";
 import { isExplicitMemoryIntent } from "./memory/intent.js";
 import { DEFAULT_MEMORY_BEHAVIOR, MemoryStore, renderMemoryDocument } from "./memory/store.js";
-import { MemoryReviewBridge } from "./memory/review.js";
+import { classifyMemoryHeat } from "./memory/retrieval.js";
+import { MAX_PENDING_MEMORY_REVIEWS, MemoryReviewBridge } from "./memory/review.js";
 import { createExecutionEnvironment } from "./execution/factory.js";
 import { FlavorIdeClient } from "./ide/client.js";
 import { JobRegistry, type JobReadResult, type JobSnapshot } from "./jobs/registry.js";
@@ -349,6 +353,15 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     maxEntries: config.memory.maxEntries,
     maxEntryChars: config.memory.maxEntryChars,
   }) : undefined;
+  const outcomeStore = new EvolveStore({ workspace });
+  const preferenceEvolution = config.memory.enabled ? new PreferenceEvolution(workspace, {
+    onExposure: async (taskId, candidateIds) => {
+      await outcomeStore.appendOutcomeEvent({ kind: "candidate_exposed", taskId, candidateIds: [...candidateIds] });
+    },
+    onFeedback: async (taskId, candidateIds, sentiment) => {
+      await outcomeStore.appendOutcomeEvent({ kind: "candidate_feedback", taskId, candidateIds: [...candidateIds], sentiment });
+    },
+  }) : undefined;
   const autoStoredContents = new Map<string, string[]>();
   let memoryBehavior = DEFAULT_MEMORY_BEHAVIOR;
   if (memoryStore !== undefined) {
@@ -372,17 +385,35 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   };
   const memoryReviews = new MemoryReviewBridge({
     autoDismissSeconds: config.memory.reviewAutoDismissSeconds,
+    ...(memoryStore === undefined ? {} : { storagePath: join(workspace, ".flavor", "memory", "review-inbox.json") }),
     remember: async (candidate) => {
       if (memoryStore === undefined) throw new Error("Long-term memory is disabled");
+      if (preferenceEvolution !== undefined && (candidate.type === "user" || candidate.type === "feedback")) {
+        const proposed = await preferenceEvolution.propose({
+          type: candidate.type, content: candidate.content,
+          topicKey: candidate.topicKey ?? `${candidate.type}.review`, keywords: candidate.keywords ?? [],
+        }, candidate.taskId ?? createMemoryTaskId(), true);
+        if (proposed === undefined) throw new Error("The approved preference could not be saved; check its content or the preference limit.");
+        return;
+      }
       if (candidate.taskId !== undefined && candidate.summary !== undefined && candidate.topicKey !== undefined
         && candidate.keywords !== undefined && candidate.scores !== undefined) {
         const result = await memoryStore.rememberForTask(candidate.taskId, {
           type: candidate.type, content: candidate.content, summary: candidate.summary,
           topicKey: candidate.topicKey, keywords: candidate.keywords, scores: candidate.scores,
         });
+        if (result.conflict !== undefined) {
+          throw new Error(`Candidate conflicts with existing memory ${result.conflict.id} on the same topic. Review /memory and use /forget ${result.conflict.id} before replacing it.`);
+        }
+        if (!result.added && (await memoryStore.references()).length >= config.memory.maxEntries) {
+          throw new Error("Long-term memory is full. Remove an unused entry with /forget before saving this candidate.");
+        }
         if (result.added) await refreshMemoryState();
       } else {
         const result = await memoryStore.remember(candidate);
+        if (!result.added && (await memoryStore.references()).length >= config.memory.maxEntries) {
+          throw new Error("Long-term memory is full. Remove an unused entry with /forget before saving this candidate.");
+        }
         if (result.added) await refreshMemoryState();
       }
     },
@@ -408,6 +439,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       },
     }),
   });
+  await memoryReviews.initialize();
   const auditLogger = new AuditLogger(workspace);
   const recovered = options.resumeSession === undefined
     ? undefined
@@ -617,6 +649,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   const pluginHost = new PluginHost({
     globalPluginDirs: [join(home, ".flavor-code", "plugins")],
     projectPluginDirs: [join(workspace, ".flavor", "plugins")],
+    disabledPlugins: await unverifiedFixPlugins(workspace),
     config,
     // Existing project plugins (including astgraph and superharness) use Node.js
     // built-ins. The Worker/vm sandbox deliberately blocks those imports, so it
@@ -656,6 +689,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   await pluginHost.loadAll();
   const evolveService = createEvolveService({
     workspace,
+    store: outcomeStore,
     hooks,
     pluginHost,
     config: config.evolve,
@@ -664,6 +698,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       notice: (message) => emitOutput({ type: "notice", message: `[evolve] ${message}` }),
     },
   });
+  await evolveService.initialize();
   tools.push(evolveService.toolDefinition());
   let sleepScheduler: ProjectSleepScheduler | undefined;
   let collaborationClient: PalClientLike | undefined;
@@ -1166,16 +1201,32 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   });
   const memoryCoordinator = memoryStore !== undefined
     ? new MemoryCoordinator({
-      review: (taskId, candidates) => {
-        // A newer foreground task invalidates review cards from older tasks. An
-        // automatic extraction may finish after that boundary now that it runs
-        // in the background, so do not resurrect a stale review card.
-        if (memoryLifecycle.taskId === taskId) memoryReviews.offer(taskId, candidates);
+      review: async (taskId, candidates) => {
+        memoryReviews.offer(taskId, candidates);
+        await memoryReviews.flush();
       },
-      remember: async (taskId, candidates) => {
+      remember: async (taskId, candidates, explicit = false, userMessages = []) => {
         let stored = 0;
         for (const candidate of candidates) {
+          if (preferenceEvolution !== undefined && (candidate.type === "user" || candidate.type === "feedback")) {
+            const preference = await preferenceEvolution.propose(candidate, taskId, explicit, userMessages);
+            if (preference !== undefined) {
+              stored += 1;
+              const contents = autoStoredContents.get(taskId) ?? [];
+              contents.push(candidate.content);
+              autoStoredContents.set(taskId, contents);
+            } else if (!explicit) {
+              // An unsupported model inference needs a user's review before it can become a preference.
+              memoryReviews.offer(taskId, [candidate]);
+              await memoryReviews.flush();
+            }
+            continue;
+          }
           const result = await memoryStore.rememberForTask(taskId, candidate);
+          if (result.conflict !== undefined && !explicit) {
+            memoryReviews.offer(taskId, [candidate]);
+            await memoryReviews.flush();
+          }
           if (result.added) {
             stored += 1;
             const contents = autoStoredContents.get(taskId) ?? [];
@@ -1218,6 +1269,9 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     };
   };
   const evaluateMemoryTask = async (task: MemoryTaskSnapshot): Promise<string> => {
+    if (memoryReviews.stats.pending >= MAX_PENDING_MEMORY_REVIEWS) {
+      return "Long-term-memory review inbox is full. Accept or dismiss a pending candidate before extracting more.";
+    }
     autoStoredContents.delete(task.taskId);
     const finalization = memoryCoordinator === undefined || !config.memory.autoExtract || options.approvalPolicy === "deny"
       ? { evaluated: true, candidates: false, stored: 0 }
@@ -1294,15 +1348,24 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   let explicitMemoryRequest: { taskId: string; messageStart: number } | undefined;
   let automaticMemoryTask = false;
   let interruptedTaskPlanNeedsReassessment = false;
-  hooks.on("UserPromptSubmit", (event) => {
+  hooks.on("UserPromptSubmit", async (event) => {
     const prompt = String(event.payload.prompt);
+    let preferenceFeedbackHandled = false;
+    if (preferenceEvolution !== undefined && !prompt.startsWith("/")) {
+      try {
+        const feedback = await preferenceEvolution.observeFeedback(prompt);
+        if (feedback !== undefined) {
+          preferenceFeedbackHandled = true;
+          emitOutput({ type: "notice", message: feedback });
+        }
+      } catch (error) { diagnostics.push(`Preference feedback failed: ${message(error)}`); }
+    }
     const reassessInterruptedPlan = interruptedTaskPlanNeedsReassessment && !prompt.startsWith("/");
     timelineState = transcriptReducer(timelineState, { type: "submit", prompt });
     // D2C/E2E prompts are internal artifact-generation jobs. Their often-large PRD and
     // prototype transcripts are already persisted with the task and must not hold the
     // foreground submission open for automatic long-term-memory extraction.
     automaticMemoryTask = !prompt.startsWith("/") && harness.permissionProfile !== "d2c";
-    if (automaticMemoryTask) memoryReviews.dismissAll();
     if (!prompt.startsWith("/")) {
       memoryLifecycle = {
         status: "active",
@@ -1311,6 +1374,10 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
           : memoryLifecycle.taskId ?? createMemoryTaskId(),
         messageStart: harness.main.context.snapshot().messages.length,
       };
+      if (preferenceEvolution !== undefined && !preferenceFeedbackHandled) {
+        try { await preferenceEvolution.observeExplicitPrompt(prompt, memoryLifecycle.taskId!); }
+        catch (error) { diagnostics.push(`Preference capture failed: ${message(error)}`); }
+      }
     }
     if (isExplicitMemoryIntent(prompt)) {
       explicitMemoryRequest = {
@@ -1350,7 +1417,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     }
     if (explicit === undefined && automatic && event.payload.outcome === "completed"
       && memoryCoordinator !== undefined && config.memory.autoExtract && options.approvalPolicy !== "deny"
-      && !memoryBehavior.autoExtractPaused) {
+      && !memoryBehavior.autoExtractPaused && memoryReviews.stats.pending < MAX_PENDING_MEMORY_REVIEWS) {
       scheduleAutomaticMemoryTask();
     }
     if (event.payload.outcome === "cancelled" && (taskPlan !== undefined || taskGraph !== undefined)) {
@@ -1537,7 +1604,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       runReason = input.signal.aborted ? "cancelled" : "error";
       throw error;
     } finally {
-      await evolveService.endRun(runReason);
+      await evolveService.endRun(runReason, true, memoryLifecycle.taskId ?? sessionId);
       loopHarness.dispose();
       await loopExecutionEnvironment?.dispose();
     }
@@ -1771,17 +1838,33 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
         contextEpoch: harness.main.context.snapshot().epoch?.id ?? "legacy",
       });
       const turnId = harnessJournal.startTurn(turnConfig, { prompt, initialUserMessage: runOptions?.initialUserMessage });
-      return monitorTurnMemory(durableTurn(persistAfter(runMain(
+      const trackedRun = async function* (events: AsyncIterable<AgentEvent>): AsyncIterable<AgentEvent> {
+        evolveService.beginRun();
+        let reason = "finished";
+        try {
+          for await (const event of events) {
+            if (event.type === "error") reason = "error";
+            yield event;
+          }
+        } catch (error) {
+          reason = signal.aborted ? "cancelled" : "error";
+          throw error;
+        } finally {
+          await evolveService.endRun(signal.aborted ? "cancelled" : reason, false, memoryLifecycle.taskId ?? turnId);
+        }
+      };
+      return monitorTurnMemory(durableTurn(persistAfter(trackedRun(runMain(
         harness, skills, expertAgents, prompt, signal, selectedModels.mainError,
         memoryStore === undefined || (!memoryHasRoutableEntries && userMemoryContext === undefined) ? undefined : {
           store: memoryStore, taskId: memoryLifecycle.taskId ?? sessionId,
           topK: config.memory.retrievalTopK, maxChars: config.memory.maxPromptChars,
         },
+        preferenceEvolution === undefined ? undefined : { store: preferenceEvolution, taskId: memoryLifecycle.taskId ?? sessionId },
         runOptions?.getSteeringMessages,
         runOptions?.initialUserMessage,
         runOptions?.additionalContext,
         ide,
-      ), persist), harnessJournal, turnId, turnConfig),
+      )), persist), harnessJournal, turnId, turnConfig),
         () => rotateForHeap(undefined, currentPressureReading()),
         () => maybeRotateAtTurnBoundary());
     },
@@ -1896,7 +1979,31 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     plugins: () => pluginHost.loadedPlugins,
     hooksStatus: () => HOOK_EVENT_NAMES.map((name) => ({ name, pluginHandlers: pluginHooks.filter((item) => item === name).length })),
     tasks: () => ({ plan: taskPlan, graph: taskGraph, states: taskStates, results: taskResults }),
-    evolve: (args: readonly string[]) => evolveService.handleCommand(args),
+    evolve: async (args: readonly string[]) => {
+      if (args[0] !== "preference") {
+        const result = await evolveService.handleCommand(args);
+        if (!([undefined, "help", "status"] as Array<string | undefined>).includes(args[0]) || preferenceEvolution === undefined) return result;
+        const entries = await preferenceEvolution.list();
+        const count = (status: string) => entries.filter((entry) => entry.status === status).length;
+        return `${result}\nlearned preferences: ${count("proposed")} proposed, ${count("canary")} in trial, ${count("active")} active, ${count("suspended") + count("dropped")} stopped; /evolve preference list shows details`;
+      }
+      if (preferenceEvolution === undefined) return "Preference evolution is disabled with memory.";
+      const [action, id] = args.slice(1);
+      if (action === undefined || action === "list") {
+        const entries = await preferenceEvolution.list();
+        return entries.length === 0 ? "No learned preferences yet. State one explicitly, such as '以后请用中文解释', to start." : entries.map((entry) => {
+          const next = entry.status === "proposed" ? "needs matching evidence from another task"
+            : entry.status === "canary" ? "trial; give preference-specific feedback to evaluate"
+              : entry.status === "active" ? "in use"
+                : "stopped; restore only if you want to retry";
+          return `[${entry.id}] ${entry.status} (${entry.source}; ${entry.evidenceTasks.length} evidence tasks, ${entry.exposures.length} exposed, ${entry.positiveTasks.length} positive, ${entry.negativeTasks.length} negative) ${entry.content}\n  ${next}`;
+        }).join("\n");
+      }
+      if (id === undefined) return "Use /evolve preference <drop|restore> <id>.";
+      if (action === "drop") return await preferenceEvolution.drop(id) ? `Dropped learned preference ${id}.` : `No preference ${id}.`;
+      if (action === "restore") return await preferenceEvolution.restore(id) ? `Restored preference ${id} for trial.` : `No preference ${id}.`;
+      return "Use /evolve preference <list|drop <id>|restore <id>>.";
+    },
     gitCommit: (hint, signal) => runGitCommit({
       workspace, registry, questions,
       modelId: () => harness.subagentModelId,
@@ -2046,9 +2153,14 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
     memory: async () => {
       if (memoryStore === undefined) return "Long-term memory is disabled.";
       const entries = await memoryStore.list();
+      const references = await memoryStore.references();
+      const reviews = memoryReviews.stats;
+      const cold = references.filter((reference) => classifyMemoryHeat(reference) === "cold").length;
+      const neverRecalled = references.filter((reference) => reference.recallTotal === 0).length;
+      const status = `Review inbox: ${reviews.pending} pending; ${reviews.offered} proposed, ${reviews.accepted} accepted, ${reviews.dismissed} dismissed. Stored: ${references.length}; ${neverRecalled} never recalled, ${cold} cold. Recall counts measure exposure, not usefulness.`;
       return entries.length === 0
-        ? `No long-term memories stored.\nPath: ${memoryStore.path}`
-        : `Path: ${memoryStore.path}\n\n${renderMemoryDocument(entries)}`;
+        ? `No long-term memories stored.\nPath: ${memoryStore.path}\n${status}`
+        : `Path: ${memoryStore.path}\n${status}\n\n${renderMemoryDocument(entries)}`;
     },
     global: async (command) => {
       const path = join(home, ".flavor-code", "GLOBAL.md");
@@ -2315,6 +2427,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
       mcpDiscarded = true;
       if (sleepScheduler !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "sleep-scheduler", sleepScheduler.dispose());
       if (memoryCoordinator !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "memory-flush", flushMemoryTasks());
+      await boundedStep(stepTimeoutMs, diagnostics, "memory-review-flush", memoryReviews.flush());
       await boundedStep(stepTimeoutMs, diagnostics, "persist", persist());
       if (persistTail !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "persist-tail", persistTail);
       if (ideSessionId !== undefined) await boundedStep(stepTimeoutMs, diagnostics, "ide-end-session", ide.endSession(ideSessionId));
@@ -2540,6 +2653,7 @@ async function* runMain(
   harness: LocalHarness, skills: SkillRegistry, expertAgents: ExpertAgentRegistry,
   prompt: string, signal: AbortSignal, setupError?: string,
   memory?: { store: MemoryStore; taskId: string; topK: number; maxChars: number },
+  preferences?: { store: PreferenceEvolution; taskId: string },
   getSteeringMessages?: () => readonly string[],
   initialUserMessage?: Extract<ModelMessage, { role: "user" }>,
   promptContext?: string,
@@ -2565,6 +2679,12 @@ async function* runMain(
       } catch {
         // Memory routing is best effort and must never block the current task.
       }
+    }
+    if (preferences !== undefined) {
+      try {
+        const evolved = await preferences.store.contextForTask(prompt, preferences.taskId);
+        if (evolved !== undefined) contexts.push(evolved);
+      } catch { /* Evolving preferences are best effort. */ }
     }
     const ideContext = await ide?.promptContext();
     if (ideContext !== undefined) contexts.push(ideContext);

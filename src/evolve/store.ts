@@ -8,7 +8,7 @@
 //   rules.json         learned guardrail rules injected into system prompts
 
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 export interface EvolveSignal {
@@ -38,7 +38,9 @@ export interface EvolveSuggestion {
 export interface ToolTrend {
   /** Failure count of this tool in the run (per-run, not cumulative). */
   failures: number;
-  /** Change vs the previous run: negative means the fix is working. */
+  /** Number of invocations; absent on reflections written before 1.4.5. */
+  calls?: number;
+  /** Failure-rate change in percentage points when both runs invoked the tool. */
   delta: number;
 }
 
@@ -59,12 +61,29 @@ export interface EvolveReflection extends EvolveReflectionInput {
   perTool: Record<string, ToolTrend>;
 }
 
+/** Small, local events; no prompt, tool input, or model output is copied here. */
+export type EvolveOutcomeInput =
+  | { kind: "candidate_exposed"; taskId: string; candidateIds: string[] }
+  | { kind: "candidate_feedback"; taskId: string; candidateIds: string[]; sentiment: "positive" | "negative" }
+  | { kind: "task_finished"; taskId: string; outcome: string; modelCalls: number; toolCalls: number; toolErrors: number };
+export type EvolveOutcomeEvent = EvolveOutcomeInput & { at: string };
+
+export interface EvolveComparison {
+  at: string;
+  caseName: string;
+  baseline: { passed: boolean; durationMs: number; tokens: number; checksPassed: number; checksTotal: number };
+  candidate: { passed: boolean; durationMs: number; tokens: number; checksPassed: number; checksTotal: number };
+  verdict: "improved" | "regressed" | "unchanged";
+}
+
 export interface EvolveRule {
   id: string;
   text: string;
   addedAt: string;
   /** Signal id that motivated this rule, when it came from a suggestion. */
   sourceId?: string;
+  /** Older records without a status are active. */
+  status?: "proposed" | "active";
 }
 
 export interface EvolveStoreOptions {
@@ -73,10 +92,14 @@ export interface EvolveStoreOptions {
   maxRules?: number;
 }
 
-/** Collapse whitespace and quoted values so equivalent messages coalesce. */
+/** Keep only a safe failure shape; raw stderr can contain paths and credentials. */
 export function normalizeError(message: unknown): string {
   return String(message ?? "")
     .replace(/\s+/g, " ")
+    .replace(/\bBearer\s+[^\s"']+/giu, "Bearer [redacted]")
+    .replace(/\b(api[_-]?key|access[_-]?token|token|password|secret)\s*[:=]\s*[^\s,;"']+/giu, "$1=[redacted]")
+    .replace(/\b[A-Za-z]:\\[^\s"']+/gu, "…")
+    .replace(/\/(?:Users|home|tmp|etc|var|private|opt|root)\/[^\s"']+/gu, "…")
     .replace(/"[^"]*"/g, '"…"')
     // Backtick-quoted values collapse to the same placeholder as double quotes,
     // so "file one" and `file one` dedupe into one signal.
@@ -145,6 +168,7 @@ async function readRules(file: string): Promise<EvolveRule[]> {
         text: item.text as string,
         addedAt: typeof item.addedAt === "string" ? item.addedAt : "",
         ...(typeof item.sourceId === "string" ? { sourceId: item.sourceId } : {}),
+        ...(item.status === "proposed" || item.status === "active" ? { status: item.status } : {}),
       }));
   } catch {
     return [];
@@ -160,6 +184,8 @@ export class EvolveStore {
   readonly dir: string;
   readonly signalsFile: string;
   readonly reflectionsFile: string;
+  readonly outcomeEventsFile: string;
+  readonly comparisonsFile: string;
   readonly doneFile: string;
   readonly verifiedFile: string;
   readonly rulesFile: string;
@@ -174,6 +200,8 @@ export class EvolveStore {
     this.dir = join(workspace, ".flavor", "evolve");
     this.signalsFile = join(this.dir, "signals.jsonl");
     this.reflectionsFile = join(this.dir, "reflections.jsonl");
+    this.outcomeEventsFile = join(this.dir, "outcome-events.jsonl");
+    this.comparisonsFile = join(this.dir, "comparisons.jsonl");
     this.doneFile = join(this.dir, "done.json");
     this.verifiedFile = join(this.dir, "verified.json");
     this.rulesFile = join(this.dir, "rules.json");
@@ -266,6 +294,35 @@ export class EvolveStore {
     });
   }
 
+  appendOutcomeEvent(event: EvolveOutcomeInput): Promise<EvolveOutcomeEvent> {
+    return this.#enqueue(async () => {
+      await mkdir(this.dir, { recursive: true, mode: 0o700 });
+      const record = { ...event, at: new Date().toISOString() } as EvolveOutcomeEvent;
+      await appendFile(this.outcomeEventsFile, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+      if ((await stat(this.outcomeEventsFile)).size > 5_000_000) {
+        await writeJsonLines(this.outcomeEventsFile, (await readJsonLines(this.outcomeEventsFile)).slice(-5_000));
+      }
+      return record;
+    });
+  }
+
+  outcomeEvents(limit = 100): Promise<EvolveOutcomeEvent[]> {
+    return this.#enqueue(async () => (await readJsonLines(this.outcomeEventsFile)).slice(-limit) as unknown as EvolveOutcomeEvent[]);
+  }
+
+  appendComparison(input: Omit<EvolveComparison, "at">): Promise<EvolveComparison> {
+    return this.#enqueue(async () => {
+      const record: EvolveComparison = { ...input, at: new Date().toISOString() };
+      const previous = await readJsonLines(this.comparisonsFile);
+      await writeJsonLines(this.comparisonsFile, [...previous.slice(-99), record as unknown as Record<string, unknown>]);
+      return record;
+    });
+  }
+
+  comparisons(limit = 20): Promise<EvolveComparison[]> {
+    return this.#enqueue(async () => (await readJsonLines(this.comparisonsFile)).slice(-limit).reverse() as unknown as EvolveComparison[]);
+  }
+
   /** Aggregate open suggestions from repeated failure signals. */
   openSuggestions(input: { threshold?: number; limit?: number; trends?: Readonly<Record<string, number>> } = {}): Promise<EvolveSuggestion[]> {
     const threshold = input.threshold ?? 2;
@@ -274,7 +331,6 @@ export class EvolveStore {
     return this.#enqueue(async () => {
       const signals = await readJsonLines(this.signalsFile);
       const done = new Set(await readJsonArray(this.doneFile));
-      const verified = new Set(await readJsonArray(this.verifiedFile));
       const trendRank = (tool: string): number => {
         const delta = trends[tool];
         if (delta === undefined || delta === 0) return 1; // stable / unknown
@@ -282,12 +338,8 @@ export class EvolveStore {
       };
       const isHidden = (signal: Record<string, unknown>): boolean => {
         if (done.has(signal.id as string)) return true;
-        // Verified suggestions stay hidden unless the tool is worsening again —
-        // a regression means the earlier fix may have stopped working.
-        if (verified.has(signal.id as string)) {
-          const delta = trends[signal.tool as string];
-          if (delta === undefined || delta <= 0) return true;
-        }
+        // Legacy verified.json markers were based on unrelated run counts.
+        // Keep them for audit, but never hide a suggestion because of them.
         return false;
       };
       return signals
@@ -309,9 +361,9 @@ export class EvolveStore {
             suggestion.trend = delta > 0 ? "worsening" : delta < 0 ? "improving" : "stable";
             suggestion.delta = delta;
             suggestion.hint += delta > 0
-              ? ` Trend: worsening (+${delta} failures this run) — consider reverting or reworking the fix.`
+              ? ` Trend: higher observed failure rate (+${delta.toFixed(1)} percentage points); investigate before changing the fix.`
               : delta < 0
-                ? ` Trend: improving (${delta} this run) — likely already fixed.`
+                ? ` Trend: lower observed failure rate (${delta.toFixed(1)} percentage points); evaluate before closing.`
                 : " Trend: stable.";
           }
           return suggestion;
@@ -356,24 +408,43 @@ export class EvolveStore {
    * Add one guardrail rule. Dedupes by fingerprint of the normalized text and
    * keeps at most maxRules entries (oldest dropped first).
    */
-  addRule(input: { text: string; sourceId?: string }): Promise<{ added: boolean; rule: EvolveRule }> {
+  addRule(input: { text: string; sourceId?: string; status?: "proposed" | "active" }): Promise<{ added: boolean; activated?: boolean; rule: EvolveRule }> {
     return this.#enqueue(async () => {
       const text = input.text.replace(/\s+/g, " ").trim().slice(0, 300);
       if (text === "") throw new Error("rule text must not be empty");
       const id = fingerprint("rule", undefined, text);
       const rules = await readRules(this.rulesFile);
       const existing = rules.find((rule) => rule.id === id);
-      if (existing !== undefined) return { added: false, rule: existing };
+      if (existing !== undefined) {
+        if (existing.status === "proposed" && input.status !== "proposed") {
+          existing.status = "active";
+          await writeRules(this.rulesFile, rules);
+          return { added: false, activated: true, rule: existing };
+        }
+        return { added: false, rule: existing };
+      }
       const rule: EvolveRule = {
         id,
         text,
         addedAt: new Date().toISOString(),
         ...(input.sourceId === undefined ? {} : { sourceId: input.sourceId }),
+        ...(input.status === undefined ? {} : { status: input.status }),
       };
       rules.push(rule);
       if (rules.length > this.maxRules) rules.splice(0, rules.length - this.maxRules);
       await writeRules(this.rulesFile, rules);
       return { added: true, rule };
+    });
+  }
+
+  activateRule(id: string): Promise<boolean> {
+    return this.#enqueue(async () => {
+      const rules = await readRules(this.rulesFile);
+      const rule = rules.find((item) => item.id === id);
+      if (rule === undefined) return false;
+      rule.status = "active";
+      await writeRules(this.rulesFile, rules);
+      return true;
     });
   }
 

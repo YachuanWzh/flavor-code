@@ -1,10 +1,11 @@
 import { modelContentText, type ModelMessage } from "../models/types.js";
 import { buildMemoryExtractionPrompt, parseScoredMemoryCandidates } from "./extractor.js";
+import { normalizeMemoryContent } from "./store.js";
 import type { ScoredMemoryCandidate } from "./types.js";
 
 export interface MemoryCoordinatorOptions {
   review(taskId: string, candidates: readonly ScoredMemoryCandidate[]): void | Promise<void>;
-  remember(taskId: string, candidates: readonly ScoredMemoryCandidate[]): number | Promise<number>;
+  remember(taskId: string, candidates: readonly ScoredMemoryCandidate[], explicit?: boolean, userMessages?: readonly string[]): number | Promise<number>;
   generate(prompt: string, signal: AbortSignal): Promise<string>;
   minChars: number;
   maxEntryChars: number;
@@ -63,6 +64,8 @@ export class MemoryCoordinator {
 
   async #evaluate(taskId: string, messages: readonly ModelMessage[], explicit: boolean): Promise<ExplicitMemoryResult> {
     const visible = visibleMessages(messages);
+    const userMessages = visible.filter((message) => message.role === "user")
+      .map((message) => modelContentText(message.content));
     const visibleChars = visible.reduce((total, message) => total + [...modelContentText(message.content).trim()].length, 0);
     if (visibleChars === 0 || (!explicit && visibleChars < this.#options.minChars)) {
       return { evaluated: true, candidates: false, stored: 0 };
@@ -83,14 +86,26 @@ export class MemoryCoordinator {
         maxEntryChars: this.#options.maxEntryChars,
         scoreThreshold: this.#options.scoreThreshold,
         maxCandidates: this.#options.maxCandidates,
+      }).map((candidate) => {
+        const quote = candidate.evidence;
+        if (quote === undefined || quote.length < 6 || !userMessages.some((message) =>
+          normalizeMemoryContent(message).includes(quote))) {
+          const { evidence: _unverified, ...withoutEvidence } = candidate;
+          return withoutEvidence;
+        }
+        return candidate;
       });
       if (candidates.length > 0) {
         if (explicit) {
-          stored = await this.#options.remember(taskId, candidates);
+          stored = await this.#options.remember(taskId, candidates, true, userMessages);
         } else {
-          const autoStored = candidates.filter((candidate) => totalScore(candidate) >= this.#options.autoStoreThreshold);
-          const needsReview = candidates.filter((candidate) => totalScore(candidate) < this.#options.autoStoreThreshold);
-          if (autoStored.length > 0) stored += await this.#options.remember(taskId, autoStored);
+          // Model scores alone cannot establish a project fact or external reference.
+          // Keep those candidates available for review even when scored 12/12.
+          const autoStored = candidates.filter((candidate) =>
+            (candidate.type === "user" || candidate.type === "feedback")
+            && totalScore(candidate) >= this.#options.autoStoreThreshold);
+          const needsReview = candidates.filter((candidate) => !autoStored.includes(candidate));
+          if (autoStored.length > 0) stored += await this.#options.remember(taskId, autoStored, false, userMessages);
           if (needsReview.length > 0) await this.#options.review(taskId, needsReview);
         }
         accepted = true;

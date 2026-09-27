@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { lstat, open, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import type { BigIntStats } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 
@@ -158,6 +158,13 @@ export class PluginHost {
         diagnosticLabel = rawManifest.name;
       }
       const manifest = PluginManifestSchema.parse(rawManifest);
+      // Evolved project plugins are identified by their canonical directory.
+      // A different manifest name would bypass startup's version gate (which
+      // disables by name) or the mandatory fix-plugin sandbox.
+      if (source === "project" && (basename(root).startsWith("fix-") || manifest.name.startsWith("fix-"))
+        && basename(root) !== manifest.name) {
+        throw new Error("Fix plugin directory must match its manifest name");
+      }
       const entry = resolveContained(root, manifest.main, "Plugin entry");
       const entrySnapshot = await snapshotEntry(root, entry);
       const fingerprint = createHash("sha256")
@@ -178,7 +185,9 @@ export class PluginHost {
     const state: ContextState = { active: true, controller: new AbortController() };
     let activation: Promise<unknown> | undefined;
 
-    const useSandbox = this.#options.sandbox === true;
+    // Evolved fix plugins are always loaded in the same restricted realm used
+    // by their verification, even when legacy project plugins run in-process.
+    const useSandbox = this.#options.sandbox === true || (candidate.source === "project" && plugin.startsWith("fix-"));
 
     try {
       await verifyEntry(candidate.root, candidate.entry, candidate.entrySnapshot);

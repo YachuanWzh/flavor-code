@@ -22,6 +22,8 @@ export interface ScoredMemoryCandidate extends MemoryCandidate {
   topicKey: string;
   keywords: string[];
   scores: MemoryScores;
+  /** Exact quote from a user message, when one supports the candidate. */
+  evidence?: string;
 }
 
 export interface MemoryReference {

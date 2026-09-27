@@ -176,10 +176,11 @@ export function createProgram(dependencies: CliDependencies = {}): Command {
   registerUsageCommands(program);
   program.command("eval <spec>")
     .option("--output <path>", "write the JSON report to a file")
+    .option("--baseline <workspace>", "compare against an isolated baseline workspace and save a compact local result")
     .description("run a repeatable coding-agent evaluation")
-    .action(async (spec: string, command: { output?: string }) => {
+    .action(async (spec: string, command: { output?: string; baseline?: string }) => {
       const { runEvaluationFile } = await import("./eval/cli.js");
-      process.exitCode = await runEvaluationFile(spec, command.output);
+      process.exitCode = await runEvaluationFile(spec, command.output, command.baseline);
     });
 
   program.action(async (options: {

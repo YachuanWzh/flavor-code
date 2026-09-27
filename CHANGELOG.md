@@ -2,7 +2,32 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.4 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.5-beta.1 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.5-beta.1] - 2026-09-26
+
+- 本地结果记录新增 `.flavor/evolve/outcome-events.jsonl`：关联偏好实际注入、任务结果和明确反馈；`/evolve outcomes` 查看。`flavor eval <spec> --baseline <workspace>` 可在两个独立工作区运行同一题，精简对照结果写入 `.flavor/evolve/comparisons.jsonl`，`/evolve comparisons` 查看。
+- 长期记忆写入识别标点差异和中英文称呼的同一事实，避免“亚川”称呼反复新增；称呼改变会被视为待处理冲突。历史重复项需审查后清理。
+
+### 新增
+- 加入可追踪的偏好试用：用户明确表达的长期偏好直接生效；自动提取的用户偏好或行为纠正先收集至少两个独立任务的证据，再进入试用。记录实际注入的任务、明确的正负反馈与状态；试用经过足够暴露和多次正面反馈才升级。`/evolve preference list` 可查看证据，`drop <id>` 可停用，`restore <id>` 可重新试用。
+- 用户明确否定已生效的偏好时，推断偏好自动丢弃，明确偏好自动暂停；后续上下文会声明旧偏好已撤回，避免模型继续沿用历史消息中的副本。
+- 自进化修复插件新增内容哈希门禁：`/evolve verify <name>` 在隔离环境中检查，`/evolve test` 记录当前版本测试结果，`/evolve reload <name>` 只启用完全相同且已通过两步检查的版本。启用前保存快照，失败时恢复上一有效版本；重启后未获准的 `fix-*` 插件不会自动加载。
+
+### 修复与改进
+- 长期记忆降噪：模型自动提取的 `project/reference` 候选即使自评分满分，也先进入待审核队列；默认不再 5 秒自动消失或被下一条任务清除，队列跨会话保留，最多 20 条。候选中的用户引文会与真实用户消息核对，审核卡显示有无可核对引文。
+- 同一类型、同一主题的不同项目记忆不会静默并存；保存冲突候选时会指出旧记忆 ID，待用户处理。`/memory` 增加候选提出、采纳、忽略及已存记忆的召回概况；这些是观察指标，不将召回次数当作有用性证明。明确 `/remember` 的直接保存路径保留。
+- 普通对话结束后也会写入 `/evolve trends` 运行记录；模型推断的偏好需要在用户原话中找到支持，试用时只注入相关任务。无关任务不会留下暴露记录，泛泛的“这次很好”也不会被算成偏好好评。
+- 模型通过 `evolve_improve kind=prompt_rule` 提出的护栏先显示为 `proposed`，不会立即注入或关闭故障建议；可用 `/evolve rule list` 检查，再以 `accept <id>` 启用。手动 `/evolve rule add` 仍按明确指令直接启用。
+- 空白的 `fix-*` 插件不能通过 `/evolve verify`；至少要在隔离加载时实际注册一项声明的能力。`/evolve status` 汇总偏好数量和待审核规则，偏好列表显示下一步所需证据。
+- 启动时加载已保存的进化建议与护栏规则，避免重启后提示词缓存为空。
+- 趋势改为比较同一工具的失败调用占比；没有调用该工具的下一轮不再被误判为“修复成功”。旧版自动验证标记不再隐藏建议，也不作为插件启用证据。
+- 进化生成的 `fix-*` 项目插件始终在受限沙箱中运行，和验证时的执行环境一致。
+- 拒绝 `fix-*` 项目插件目录名与清单名称不一致的情况，防止名称变更绕过启动门禁或沙箱；回滚后插件重新加载失败时明确报告失败。
+
+### 测试与文档
+- 扩充偏好生命周期、生产运行时注入与停用、插件版本门禁、错误率口径的测试；新增自进化方案文档，并在《技术方案报告》补充通俗说明。
+- `package.json` 与 `package-lock.json` 更新为 `1.4.5-beta.1`。
 
 ## [1.4.4] - 2026-09-26
 

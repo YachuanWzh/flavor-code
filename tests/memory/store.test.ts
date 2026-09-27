@@ -74,6 +74,34 @@ describe("MemoryStore", () => {
     expect((await memory.references())[0]).toMatchObject({ recallTotal: 1, recalls: { "consumer-task": "2026-07-22T00:00:00.000Z" } });
   });
 
+  it("recognizes punctuation and bilingual variants of the same address preference", async () => {
+    const memory = await store();
+    const scores = { durability: 3, futureUtility: 3, authority: 3, nonDerivability: 3 };
+    expect((await memory.rememberForTask("task-english", { type: "user", summary: "Always address user as 亚川",
+      content: "Always address user as 亚川", topicKey: "user.address", keywords: ["亚川"], scores })).added).toBe(true);
+    expect((await memory.rememberForTask("task-chinese", { type: "user", summary: "用户称呼为「亚川」",
+      content: "用户称呼为「亚川」", topicKey: "user.name", keywords: ["亚川"], scores })).added).toBe(false);
+    expect((await memory.remember({ type: "user", content: "用户称呼为亚川" })).added).toBe(false);
+    const changed = await memory.rememberForTask("task-changed", { type: "user", summary: "用户称呼为小明",
+      content: "用户称呼为小明", topicKey: "user.name", keywords: ["小明"], scores });
+    expect(changed.added).toBe(false);
+    expect(changed.conflict?.summary).toBe("Always address user as 亚川");
+    expect(await memory.userContext()).toContain("Always address user as 亚川");
+    expect(await memory.references()).toHaveLength(1);
+  });
+
+  it("holds a conflicting fact on the same topic instead of silently stacking it", async () => {
+    const memory = await store();
+    const scores = { durability: 3, futureUtility: 3, authority: 3, nonDerivability: 3 };
+    await memory.rememberForTask("task-old", { type: "project", summary: "Use npm", content: "Use npm for scripts.",
+      topicKey: "project.package-manager", keywords: ["npm"], scores });
+    const result = await memory.rememberForTask("task-new", { type: "project", summary: "Use pnpm", content: "Use pnpm for scripts.",
+      topicKey: "project.package-manager", keywords: ["pnpm"], scores });
+    expect(result.added).toBe(false);
+    expect(result.conflict?.summary).toBe("Use npm");
+    expect((await memory.references()).map((entry) => entry.summary)).toEqual(["Use npm"]);
+  });
+
   it("returns every full user preference separately and counts its injection once per task", async () => {
     const memory = await store();
     await memory.rememberForTask("user-profile", {

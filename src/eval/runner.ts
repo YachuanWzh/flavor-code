@@ -19,6 +19,8 @@ export interface EvaluationRuntimeLike {
 export interface EvaluationDependencies {
   createRuntime(options: { workspace: string; output(event: SessionOutput): void }): Promise<EvaluationRuntimeLike>;
   executionEnvironment: ExecutionEnvironment;
+  /** Verification environment for the baseline side of a paired run. */
+  baselineExecutionEnvironment?: ExecutionEnvironment;
   now?: () => number;
 }
 
@@ -26,9 +28,36 @@ export interface EvaluationReport {
   name: string;
   workspace: string;
   passed: boolean;
+  agentError: boolean;
   durationMs: number;
   tokens: { input: number; output: number; total: number; withinBudget: boolean };
   verification: Array<{ command: string; exitCode: number | null; passed: boolean; stdout: string; stderr: string }>;
+}
+
+export interface PairedEvaluationReport {
+  name: string;
+  baseline: EvaluationReport;
+  candidate: EvaluationReport;
+  verdict: "improved" | "regressed" | "unchanged";
+  passed: boolean;
+}
+
+/** Run the same case against two already isolated local workspaces. */
+export async function runPairedEvaluation(
+  spec: Omit<EvaluationSpec, "workspace"> & { baselineWorkspace: string; candidateWorkspace: string },
+  dependencies: EvaluationDependencies,
+): Promise<PairedEvaluationReport> {
+  const baseline = await runEvaluation({ ...spec, workspace: spec.baselineWorkspace }, {
+    ...dependencies, executionEnvironment: dependencies.baselineExecutionEnvironment ?? dependencies.executionEnvironment,
+  });
+  const candidate = await runEvaluation({ ...spec, workspace: spec.candidateWorkspace }, dependencies);
+  const lostCheck = baseline.verification.some((check, index) => check.passed && !candidate.verification[index]?.passed);
+  const gainedCheck = candidate.verification.some((check, index) => check.passed && !baseline.verification[index]?.passed);
+  const verdict = lostCheck || (baseline.tokens.withinBudget && !candidate.tokens.withinBudget)
+    || (!baseline.agentError && candidate.agentError) ? "regressed"
+    : gainedCheck || (!baseline.tokens.withinBudget && candidate.tokens.withinBudget)
+      || (baseline.agentError && !candidate.agentError) ? "improved" : "unchanged";
+  return { name: spec.name, baseline, candidate, verdict, passed: candidate.passed && verdict !== "regressed" };
 }
 
 export async function runEvaluation(spec: EvaluationSpec, dependencies: EvaluationDependencies): Promise<EvaluationReport> {
@@ -36,6 +65,7 @@ export async function runEvaluation(spec: EvaluationSpec, dependencies: Evaluati
   const started = now();
   let input = 0;
   let output = 0;
+  let agentError = false;
   const runtime = await dependencies.createRuntime({
     workspace: spec.workspace,
     output: (event) => {
@@ -45,12 +75,16 @@ export async function runEvaluation(spec: EvaluationSpec, dependencies: Evaluati
       } else if (event.type === "done" && input === 0 && output === 0) {
         input = event.usage.inputTokens;
         output = event.usage.outputTokens;
+      } else if (event.type === "error") {
+        agentError = true;
       }
     },
   });
   try {
     await runtime.session.start();
     await runtime.session.submit(spec.prompt);
+  } catch {
+    agentError = true;
   } finally {
     await runtime.session.close();
     await runtime.dispose();
@@ -76,7 +110,8 @@ export async function runEvaluation(spec: EvaluationSpec, dependencies: Evaluati
   return {
     name: spec.name,
     workspace: spec.workspace,
-    passed: withinBudget && verification.every((item) => item.passed),
+    passed: !agentError && withinBudget && verification.every((item) => item.passed),
+    agentError,
     durationMs: Math.max(0, now() - started),
     tokens: { input, output, total, withinBudget },
     verification,
