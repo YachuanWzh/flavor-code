@@ -2,7 +2,14 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.6 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.7-beta.1 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.7-beta.1] - 2026-11-11
+
+### 修复与改进
+- 修复 GPT 流式响应包含 `response.metadata` 等附加事件时，OpenAI SDK 抛出 `Unhandled response stream event` 并中断输出的问题；改用原始 Responses 事件流，由适配器处理正文、工具调用与完成状态。
+- 保留接口错误、响应失败、输出上限、连接提前结束与请求取消的处理；新增经过真实 OpenAI SDK 的流式传输回归测试。
+- `package.json` 与 `package-lock.json` 的项目版本更新为 `1.4.7-beta.1`。
 
 ## [1.4.6] - 2026-11-11
 

@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type {
+  ResponseCreateParamsStreaming,
   ResponseInputItem,
   ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
@@ -20,7 +21,7 @@ import { appendUsageLog, currentUsageSession } from "../utils/log.js";
 import { createScopedAbortSignal } from "../utils/abort.js";
 import { openAIJsonSchemaObject } from "./structured.js";
 
-type OpenAIStreamRequest = Parameters<OpenAI["responses"]["stream"]>[0];
+type OpenAIStreamRequest = Omit<ResponseCreateParamsStreaming, "stream">;
 export const DEFAULT_THINKING_EFFORT = "high" as const;
 export type ThinkingEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "ultra";
 
@@ -42,6 +43,26 @@ export interface OpenAIModelAdapterOptions {
   /** Reasoning effort requested from the Responses API; defaults to high. */
   thinkingEffort?: ThinkingEffort;
   maxOutputTokens?: number;
+}
+
+function createOpenAIClient(options: OpenAIModelAdapterOptions): OpenAIClient {
+  const client = new OpenAI({
+    ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
+    ...(options.baseURL === undefined ? {} : { baseURL: options.baseURL }),
+    timeout: 20 * 60_000,
+  });
+  return {
+    responses: {
+      async *stream(body, requestOptions) {
+        // The SDK's responses.stream() accumulator rejects unknown events such
+        // as response.metadata before our adapter can ignore them. Consume raw
+        // SSE events instead; this adapter already handles output and completion.
+        const stream = await client.responses.create({ ...body, stream: true }, requestOptions);
+        yield* stream;
+        if (requestOptions?.signal?.aborted) throw new OpenAI.APIUserAbortError();
+      },
+    },
+  };
 }
 
 type PromptCacheMode = "full" | "key-only" | "none";
@@ -170,13 +191,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
   readonly #promptCacheModes = new Map<string, PromptCacheMode>();
 
   constructor(options: OpenAIModelAdapterOptions) {
-    this.client =
-      options.client ??
-      new OpenAI({
-        ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
-        ...(options.baseURL === undefined ? {} : { baseURL: options.baseURL }),
-        timeout: 20 * 60_000,
-      });
+    this.client = options.client ?? createOpenAIClient(options);
     this.debugUsage = options.debugUsage ?? isEnvTruthy(process.env.FLAVOR_DEBUG_USAGE);
     this.thinkingEffort = options.thinkingEffort ?? DEFAULT_THINKING_EFFORT;
     this.maxOutputTokens = options.maxOutputTokens;
