@@ -234,6 +234,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
         ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
         ...(options.baseURL === undefined ? {} : { baseURL: options.baseURL }),
         ...(options.headers === undefined ? {} : { defaultHeaders: options.headers }),
+        timeout: 20 * 60_000,
       });
   }
 

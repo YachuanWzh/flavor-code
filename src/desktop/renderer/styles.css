@@ -177,7 +177,10 @@ kbd { border: 0; background: transparent; color: #96a3af; font-family: inherit; 
 .activity-title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; line-height: 1.45; }
 .activity-title code { max-width: 100%; overflow: hidden; color: #98a2ad; font: 10px/1.4 "Cascadia Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .activity-card[data-activity="model"] .activity-title > span { color: #327ca1; font-weight: 650; }
-.reasoning-preview { max-width: 100%; margin-top: 5px; overflow: hidden; color: #84939e; font: 11px/1.55 "Cascadia Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.reasoning-preview { container-type: inline-size; max-width: 100%; margin-top: 5px; overflow: hidden; color: #84939e; font: 11px/1.55 "Cascadia Code", Consolas, monospace; white-space: nowrap; }
+.reasoning-preview > span { display: inline-block; width: max-content; min-width: 100%; animation: reasoning-slide 12s linear infinite alternate; }
+@keyframes reasoning-slide { to { transform: translateX(min(0px, calc(100cqw - 100%))); } }
+@media (prefers-reduced-motion: reduce) { .reasoning-preview > span { animation: none; } }
 .tool-presentation { display: grid; margin-top: 7px; gap: 4px; }
 .tool-presentation > strong { color: #536370; font-size: 11px; font-weight: 650; }
 .terminal-presentation > small { margin-top: 3px; color: #8a97a2; font: 700 8px "Cascadia Code", Consolas, monospace; letter-spacing: .06em; }

@@ -55,8 +55,8 @@ export type TranscriptBlock =
     text: string;
     hint?: string;
     task?: { subject: string; activeForm: string; role: "main" | "subagent" };
-    activity?: "model";
-    /** Accumulated streamed thinking text while a model activity is running. */
+    activity?: "model" | "reasoning";
+    /** Accumulated provider reasoning text or summary. */
     thinkingText?: string;
     presentation?: ToolPresentation;
     tool?: TranscriptToolDetails;
@@ -174,7 +174,7 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
   });
   if (event.type === "model-end") return {
     ...state,
-    active: withoutModelActivity(state.active, `model:${event.id}`),
+    active: finishModelActivity(state.active, `model:${event.id}`),
   };
   if (event.type === "done") {
     const usage = event.usage;
@@ -579,6 +579,15 @@ function withoutModelActivity(turn: TranscriptTurn, id?: string): TranscriptTurn
   return withBlocks(turn, blocks);
 }
 
+function finishModelActivity(turn: TranscriptTurn, id: string): TranscriptTurn {
+  return withBlocks(turn, turn.blocks.flatMap((block) => {
+    if (block.kind !== "status" || block.id !== id || block.activity !== "model") return [block];
+    return block.thinkingText
+      ? [{ ...block, state: "completed" as const, activity: "reasoning" as const, text: "Reasoning summary" }]
+      : [];
+  }));
+}
+
 export function restoreTranscriptState(state: TranscriptState): TranscriptState {
   const completed = state.completed.map(cloneTurn);
   if (state.active !== undefined) completed.push(normalizeInterruptedTurn(cloneTurn(state.active)));
@@ -741,9 +750,8 @@ function addStreamingText(turn: TranscriptTurn, text: string): TranscriptTurn {
 
   const withoutActivity = withBlocks(turn, turn.blocks.filter((block) => block !== activity));
   const withText = addText(withoutActivity, text);
-  const { thinkingText: _thinkingText, ...writingActivity } = activity;
   return withBlocks(withText, [...withText.blocks, {
-    ...writingActivity,
+    ...activity,
     text: "Writing response",
   }]);
 }

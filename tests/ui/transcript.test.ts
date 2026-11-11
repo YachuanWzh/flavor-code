@@ -315,14 +315,17 @@ describe("transcriptReducer", () => {
       thinkingText: "First part",
     })]);
 
-    // Visible text changes the phase, clears the stale reasoning preview, and
-    // keeps the activity at the bottom where it remains visible during a long response.
+    // Visible text keeps the reasoning preview and the activity at the bottom.
     state = transcriptReducer(state, { type: "session", event: { type: "text", text: "answer" } });
     expect(state.active?.blocks).toEqual([
       { kind: "text", text: "answer" },
       expect.objectContaining({ id: "model:1", text: "Writing response" }),
     ]);
-    expect(state.active?.blocks[1]).not.toHaveProperty("thinkingText");
+    expect(state.active?.blocks[1]).toHaveProperty("thinkingText", "First part");
+    state = transcriptReducer(state, { type: "session", event: { type: "model-end", id: "1" } });
+    expect(state.active?.blocks[1]).toEqual(expect.objectContaining({
+      activity: "reasoning", state: "completed", thinkingText: "First part",
+    }));
   });
 
   it("drops thinking deltas that arrive without a running model activity", () => {

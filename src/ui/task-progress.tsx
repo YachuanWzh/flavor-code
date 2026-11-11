@@ -52,7 +52,7 @@ export function TaskStatusLine({
   // Streaming thinking gets its own fixed-width typewriter line. The shared
   // animation clock drives a rate-limited leftward chase of the newest tail.
   const thinking = block.thinkingText;
-  const thinkingVisible = running && block.activity === "model"
+  const thinkingVisible = (running && block.activity === "model" || block.activity === "reasoning")
     && thinking !== undefined && thinking.length > 0;
   const thinkingScroll = useRef<{ start: number; lastTime: number }>({ start: 0, lastTime: time });
   if (!thinkingVisible) {
@@ -60,7 +60,7 @@ export function TaskStatusLine({
   }
   const thinkingLine = thinkingVisible ? (() => {
     const previous = thinkingScroll.current;
-    const state = thinkingWindow(thinking!, previous.start, {
+    const state = thinkingWindow(thinking!, running ? previous.start : Number.POSITIVE_INFINITY, {
       // Split task tracks are narrower than the terminal. The rail takes
       // two cells; measuring against stdout.columns hides the tail behind
       // the track clip instead of letting the preview advance.

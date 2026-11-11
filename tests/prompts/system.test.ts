@@ -26,17 +26,16 @@ describe("buildSystemPrompt", () => {
     expect(sections.map(heading)).toEqual([
       "Always reply in Simplified Chinese.",
       "# Identity",
-      "# Security and instruction boundaries",
-      "# Doing tasks",
-      "# Reversible and shared actions",
-      "# Using available tools",
-      "# Tone and output",
+      "# Boundaries",
+      "# Work",
+      "# Tools",
       "# Main agent",
       "# Environment",
     ]);
     expect(sections.join("\n\n")).toContain("You are Flavor");
-    expect(sections.join("\n\n")).toContain("verify the result before claiming completion");
-    expect(sections.join("\n\n")).toContain("forked child receives an explicit Subagent directive");
+    expect(sections.join("\n\n")).toContain("verify the result");
+    expect(sections.join("\n\n")).toContain("Respect the active permission mode");
+    expect(sections.join("\n\n").length).toBeLessThan(2_500);
   });
 
   it("emits guidance only for tools that are actually available", () => {
@@ -59,20 +58,13 @@ describe("buildSystemPrompt", () => {
       "Read", "Write", "Edit", "ApplyPatch", "Glob", "Grep", "Shell",
       "AskUserQuestion", "TodoWrite", "TaskPlan", "TaskUpdate", "Task",
       "TaskOutput", "Skill", "SkillResource", "RegisterTool", "RemoveTool", "ListRegisteredTools",
-    ]) expect(allTools).toContain(`\`${name}\``);
-    expect(allTools).toContain("Numbered and bare `@@` hunk headers are accepted");
-    expect(allTools).toContain("exact context has one unique match anywhere in the file");
-    expect(allTools).toContain("never construct paths from memory");
-    expect(allTools).toContain("copy `oldText` verbatim");
-    expect(allTools).toContain("never pass absolute paths outside");
-    expect(allTools).toContain("next model step");
-    expect(allTools).toContain("one-off");
-    expect(allTools).toContain("delete and register again");
-    expect(readOnly).toContain("`Read`");
-    for (const name of ["Shell", "Task", "TodoWrite", "AskUserQuestion"]) {
-      expect(readOnly).not.toContain(`\`${name}\``);
-    }
-    expect(allTools).not.toMatch(/run .* in parallel/i);
+    ]) expect(allTools).toContain(name);
+    expect(allTools).toContain("copy oldText exactly");
+    expect(allTools).toContain("Tool schemas and descriptions are authoritative");
+    expect(readOnly).toContain("Read");
+    expect(readOnly).toContain("Available: Read.");
+    expect(readOnly).not.toContain("Use Shell");
+    expect(allTools.length).toBeLessThan(2_500);
   });
 
   it("gives subagents a self-contained non-delegating handoff contract", () => {
@@ -82,11 +74,11 @@ describe("buildSystemPrompt", () => {
       toolNames: new Set(["Read", "Shell"]),
     }).join("\n\n");
 
-    expect(prompt).toContain("Treat the assigned task as self-contained");
+    expect(prompt).toContain("Work only on the assigned task");
     expect(prompt).toContain("Use absolute paths");
     expect(prompt).toContain("Do not delegate");
     expect(prompt).toContain("concise handoff");
-    expect(prompt).not.toContain("`Task`");
+    expect(prompt).not.toContain("Available: Task");
   });
 
   it("renders environment values as normalized data", () => {

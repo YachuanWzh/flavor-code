@@ -1035,11 +1035,12 @@ function BlockView({ block }: { block: TranscriptBlock }): React.JSX.Element {
   if (block.kind === "text") return <div className="assistant-copy"><MarkdownContent text={boundedDesktopText(block.text)} /></div>;
   const stateSymbol = block.state === "completed" ? "✓" : block.state === "failed" ? "×" : block.state === "cancelled" ? "–" : block.state === "running" ? "" : "·";
   const modelActivity = block.activity === "model";
-  const thinkingPreview = modelActivity && block.thinkingText ? desktopThinkingPreview(block.thinkingText) : undefined;
+  const thinkingPreview = (modelActivity || block.activity === "reasoning") && block.thinkingText
+    ? desktopThinkingPreview(block.thinkingText) : undefined;
   return <div className="activity-card" data-state={block.state} data-tone={block.tone} data-activity={block.activity}>
     <span className="activity-node">{stateSymbol}</span>
     <div className="activity-body"><div className="activity-title"><span>{block.text.replace(/^[·✓×]\s*/, "")}</span>{modelActivity && block.state === "running" && <small>正在思考</small>}{block.hint && <code>{block.hint}</code>}</div>
-      {thinkingPreview && <div className="reasoning-preview">{thinkingPreview}</div>}
+      {thinkingPreview && <div className="reasoning-preview"><span>{thinkingPreview}</span></div>}
       {block.progress !== undefined && <div className="progress-track"><i style={{ width: `${block.progress}%` }} /></div>}
       {block.presentation?.kind === "file-change" && <DiffPreview presentation={block.presentation} />}
       {block.presentation?.kind === "generic" && <div className="tool-presentation"><strong>{block.presentation.title}</strong>{block.presentation.summary && <span>{block.presentation.summary}</span>}</div>}

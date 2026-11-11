@@ -6,7 +6,7 @@ import { stringify } from "yaml";
 
 import { loadConfig, setProjectSkillDisabled } from "../config/load.js";
 import { SkillNameSchema } from "../config/schema.js";
-import { SkillRegistry, type SkillMetadata, type SkillSource } from "./registry.js";
+import { SkillRegistry, projectSkillRoots, type SkillMetadata, type SkillSource } from "./registry.js";
 import { PluginManifestSchema } from "../plugins/types.js";
 
 export interface ManagedSkillSummary {
@@ -130,7 +130,7 @@ export class SkillManager {
     return {
       registry: new SkillRegistry({
         globalRoots: [join(this.#home, ".flavor-code", "skills"), ...globalPluginRoots],
-        projectRoots: [this.#projectRoot(), ...projectPluginRoots],
+        projectRoots: projectSkillRoots(this.#workspace, projectPluginRoots),
       }),
       disabled: new Set(loaded.config.skills.disabled),
     };

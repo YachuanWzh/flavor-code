@@ -88,6 +88,7 @@ export type ProviderErrorCode =
   | "output_limit"
   | "model_not_found"
   | "network"
+  | "incomplete_stream"
   | "cancelled"
   | "invalid_request"
   | "invalid_tool_arguments"

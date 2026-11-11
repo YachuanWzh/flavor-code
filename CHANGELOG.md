@@ -2,7 +2,17 @@
 
 [Flavor Code](https://github.com/YachuanWzh/flavor-code) 是一个本地优先、可审计、可恢复的 AI 编程助手，在终端、Electron 桌面端和 VS Code 中读代码、改文件、运行命令并完成复杂任务。
 
-本文档记录 1.0.0 到 1.4.5-beta.2 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+本文档记录 1.0.0 到 1.4.6 的版本更新，内容与仓库提交历史对应。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。各版本安装包可从 [GitHub Releases](https://github.com/YachuanWzh/flavor-code/releases) 或 npm 获取。
+
+## [1.4.6] - 2026-11-11
+
+### 修复与改进
+- OpenAI Responses 请求启用可用的推理摘要；兼容不支持摘要参数的网关，并正确转发 `maxOutputTokens`，延长长时间推理请求的超时。
+- 流式连接提前结束时明确报错；思考摘要在正文开始后继续显示，并在终端与桌面端保留，桌面端支持横向滚动预览。
+- 自动发现项目 `.claude/skills`、`.agent/skills`、`.agents/skills` 下的技能；同名时优先采用 `.flavor/skills`。
+- 精简内置系统提示词，保留权限、信任边界、工具调用和验证要求。
+- 修复 ApplyPatch 将补丁正文中的 `---`/`+++` 误认成文件头、尾部空行导致解析失败，以及编辑无末尾换行文件时意外补换行的问题。
+- 修复 `AskUserQuestion` 的 hook 载荷被工具审批校验拦截，导致 Flavor Island 收不到选项并回退到本地提问；答案回写也通过同一校验，普通工具审批仍要求类别与会话授权字段。
 
 ## [1.4.5-beta.2] - 2026-09-27
 

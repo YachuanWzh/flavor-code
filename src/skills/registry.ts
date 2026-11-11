@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import type { BigIntStats } from "node:fs";
 import { lstat, open as defaultOpen, readdir, realpath } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { marked } from "marked";
 import { parseDocument } from "yaml";
@@ -53,6 +53,17 @@ export interface SkillRegistryOptions {
   maxResourceBytes?: number;
   openFile?: SkillFileOpener;
   disabledNames?: readonly string[];
+}
+
+/** Project skills take precedence over imported agent and plugin skills. */
+export function projectSkillRoots(workspace: string, pluginRoots: readonly string[] = []): string[] {
+  return [
+    join(workspace, ".flavor", "skills"),
+    join(workspace, ".claude", "skills"),
+    join(workspace, ".agent", "skills"),
+    join(workspace, ".agents", "skills"),
+    ...pluginRoots,
+  ];
 }
 
 interface SkillRecord {
@@ -309,15 +320,16 @@ export class SkillRegistry {
       }
     }
 
-    const counts = new Map<string, number>();
-    for (const record of found) counts.set(record.metadata.name, (counts.get(record.metadata.name) ?? 0) + 1);
-    const duplicates = new Set([...counts].filter(([, count]) => count > 1).map(([name]) => name));
-    for (const name of duplicates) {
-      for (const record of found.filter((candidate) => candidate.metadata.name === name)) {
-        this.#diagnostics.push({ path: record.metadata.root, message: `Duplicate ${source} skill name: ${name}` });
-      }
+    const selected = new Map<string, SkillRecord>();
+    for (const record of found) {
+      const previous = selected.get(record.metadata.name);
+      if (previous === undefined) selected.set(record.metadata.name, record);
+      else this.#diagnostics.push({
+        path: record.metadata.root,
+        message: `Duplicate ${source} skill name: ${record.metadata.name}; using ${previous.metadata.root}`,
+      });
     }
-    return found.filter((record) => !duplicates.has(record.metadata.name));
+    return [...selected.values()];
   }
 
   async #recordFor(skill: SkillMetadata): Promise<SkillRecord> {

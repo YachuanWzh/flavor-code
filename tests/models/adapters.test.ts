@@ -227,9 +227,58 @@ describe("OpenAIModelAdapter", () => {
       { type: "thinking", text: "the request" },
     ]);
     expect(stream).toHaveBeenCalledWith(
-      expect.objectContaining({ reasoning: { effort: "medium" } }),
+      expect.objectContaining({ reasoning: { effort: "medium", summary: "auto" } }),
       { signal },
     );
+  });
+
+  it("uses a completed response summary when a provider omits summary deltas", async () => {
+    const client = { responses: { stream: () => events({
+      type: "response.completed",
+      response: {
+        output: [{ type: "reasoning", summary: [{ type: "summary_text", text: "Checked the plan" }] }],
+        usage: { input_tokens: 2, output_tokens: 3 },
+      },
+    }) } };
+    const output = await collect(new OpenAIModelAdapter({ client: asOpenAIClient(client) }).stream(request));
+    expect(output).toContainEqual({ type: "thinking", text: "Checked the plan" });
+    expect(output.at(-1)?.type).toBe("done");
+  });
+
+  it("uses a summary done event when a provider omits deltas", async () => {
+    const client = { responses: { stream: () => events(
+      { type: "response.reasoning_summary_text.done", item_id: "rs_1", summary_index: 0, text: "Checked the plan" },
+      { type: "response.completed", response: { usage: { input_tokens: 2, output_tokens: 3 } } },
+    ) } };
+    const output = await collect(new OpenAIModelAdapter({ client: asOpenAIClient(client) }).stream(request));
+    expect(output.filter((event) => event.type === "thinking")).toEqual([
+      { type: "thinking", text: "Checked the plan" },
+    ]);
+  });
+
+  it("retries once without summaries for a gateway that rejects the parameter", async () => {
+    const stream = vi.fn((_body?: unknown, _options?: unknown) => stream.mock.calls.length === 1
+      ? events({ type: "error", message: "Unknown parameter: reasoning.summary" })
+      : events({ type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1 } } }));
+    const adapter = new OpenAIModelAdapter({ client: asOpenAIClient({ responses: { stream } }) });
+    expect((await collect(adapter.stream(request))).at(-1)?.type).toBe("done");
+    expect(stream.mock.calls[0]?.[0]).toMatchObject({ reasoning: { summary: "auto" } });
+    expect(stream.mock.calls[1]?.[0]).toMatchObject({ reasoning: { effort: "high" } });
+    expect(stream.mock.calls[1]?.[0]).not.toHaveProperty("reasoning.summary");
+    await collect(adapter.stream(request));
+    expect(stream.mock.calls[2]?.[0]).not.toHaveProperty("reasoning.summary");
+  });
+
+  it("forwards a configured output limit and reports a stream that ends early", async () => {
+    const stream = vi.fn((_body?: unknown, _options?: unknown) => events({ type: "response.output_text.delta", delta: "partial" }));
+    const output = await collect(new OpenAIModelAdapter({
+      client: asOpenAIClient({ responses: { stream } }), maxOutputTokens: 32_000,
+    }).stream(request));
+    expect(stream.mock.calls[0]?.[0]).toMatchObject({ max_output_tokens: 32_000 });
+    expect(output).toEqual([
+      { type: "text", text: "partial" },
+      { type: "error", error: { code: "incomplete_stream", message: "OpenAI response stream ended before completion" } },
+    ]);
   });
 
   it("defaults reasoning effort to high when no effort is configured", async () => {
@@ -238,7 +287,7 @@ describe("OpenAIModelAdapter", () => {
 
     await collect(new OpenAIModelAdapter({ client: asOpenAIClient(client) }).stream(request));
 
-    expect(stream.mock.calls[0]?.[0]).toMatchObject({ reasoning: { effort: "high" } });
+    expect(stream.mock.calls[0]?.[0]).toMatchObject({ reasoning: { effort: "high", summary: "auto" } });
   });
 
   it("forwards the xhigh effort tier to the Responses API", async () => {
@@ -250,7 +299,7 @@ describe("OpenAIModelAdapter", () => {
     );
 
     expect(stream).toHaveBeenCalledWith(
-      expect.objectContaining({ reasoning: { effort: "xhigh" } }),
+      expect.objectContaining({ reasoning: { effort: "xhigh", summary: "auto" } }),
       { signal },
     );
   });
@@ -264,7 +313,7 @@ describe("OpenAIModelAdapter", () => {
     );
 
     expect(stream).toHaveBeenCalledWith(
-      expect.objectContaining({ reasoning: { effort: "ultra" } }),
+      expect.objectContaining({ reasoning: { effort: "ultra", summary: "auto" } }),
       { signal },
     );
   });
@@ -621,7 +670,7 @@ describe("OpenAIModelAdapter", () => {
       { type: "usage", inputTokens: 6, outputTokens: 7, cacheReadTokens: 0, cacheCreationTokens: 0 },
       {
         type: "error",
-        error: { code: "unknown", message: "Response incomplete: max_output_tokens" },
+        error: { code: "output_limit", message: "Response incomplete: max_output_tokens; raise maxOutputTokens for this provider" },
       },
     ]);
   });
@@ -672,7 +721,7 @@ describe("OpenAIModelAdapter", () => {
         ],
         prompt_cache_key: expect.stringMatching(/^flavor-[a-f0-9]{56}$/),
         prompt_cache_options: { mode: "implicit", ttl: "30m" },
-        reasoning: { effort: "high" },
+        reasoning: { effort: "high", summary: "auto" },
         tools: [
           {
             type: "function",

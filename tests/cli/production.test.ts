@@ -225,6 +225,13 @@ describe("production runtime", () => {
     await writeFile(join(skillRoot, "SKILL.md"), [
       "---", "name: go", "description: Run the legacy workflow", "---", "", "Go skill body.", "",
     ].join("\n"), "utf8");
+    for (const [folder, name] of [[".claude", "claude-workflow"], [".agent", "agent-workflow"]] as const) {
+      const imported = join(workspace, folder, "skills", name);
+      await mkdir(imported, { recursive: true });
+      await writeFile(join(imported, "SKILL.md"), [
+        "---", `name: ${name}`, `description: ${folder} workflow`, "---", "", "Follow this workflow.", "",
+      ].join("\n"), "utf8");
+    }
     await writeFile(join(plugin, "index.mjs"), `
       import { readFileSync } from "node:fs";
       import { dirname, join } from "node:path";
@@ -243,7 +250,9 @@ describe("production runtime", () => {
       ]);
       expect(runtime.services.pluginCommands()).toContainEqual(expect.objectContaining({ name: "legacy-read" }));
       await expect(runtime.services.runPluginCommand("legacy-read", [], new AbortController().signal)).resolves.toBe("plugin content");
-      expect((await runtime.services.skills()).map(({ name }) => name)).toContain("go");
+      expect((await runtime.services.skills()).map(({ name }) => name)).toEqual([
+        "agent-workflow", "claude-workflow", "go",
+      ]);
     } finally { await runtime.dispose(); }
   });
 
@@ -746,7 +755,7 @@ describe("production runtime", () => {
       await directRuntime.dispose();
     }
     expect(requests[0]?.url).toBe("/v1/responses");
-    expect(requests[0]?.body.reasoning).toEqual({ effort: "low" });
+    expect(requests[0]?.body.reasoning).toEqual({ effort: "low", summary: "auto" });
     const directTools = requests[0]?.body.tools as Array<Record<string, unknown>>;
     expectPortableOpenAIToolSchemas(directTools);
     expect(directTools.map((tool) => tool.name)).toEqual(expect.arrayContaining([
@@ -790,7 +799,7 @@ describe("production runtime", () => {
       await runtime.session.submit("answer briefly");
       expect(requests).toHaveLength(2);
       expect(requests[1]?.url).toBe("/v1/responses");
-      expect(requests[1]?.body.reasoning).toEqual({ effort: "high" });
+      expect(requests[1]?.body.reasoning).toEqual({ effort: "high", summary: "auto" });
     } finally {
       await runtime.dispose();
       await new Promise<void>((resolve) => gateway.close(() => resolve()));
@@ -902,9 +911,9 @@ describe("production runtime", () => {
         }),
       ]);
       const childRequest = requests.find((body) => body.model === "gpt-child");
-      expect(childRequest?.reasoning).toEqual({ effort: "low" });
+      expect(childRequest?.reasoning).toEqual({ effort: "low", summary: "auto" });
       const expertRequest = requests.find((body) => body.model === "gpt-review");
-      expect(expertRequest?.reasoning).toEqual({ effort: "low" });
+      expect(expertRequest?.reasoning).toEqual({ effort: "low", summary: "auto" });
       expect((expertRequest?.tools as Array<{ name: string }>).map((tool) => tool.name).sort()).toEqual(["Grep", "Read"]);
       expect(JSON.stringify(expertRequest?.input)).toContain("Check the parser's edge cases.");
       const directEvents: unknown[] = [];

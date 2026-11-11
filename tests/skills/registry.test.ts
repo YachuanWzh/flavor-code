@@ -122,7 +122,7 @@ describe("SkillRegistry", () => {
     expect(registry.diagnostics).toEqual([]);
   });
 
-  it("rejects duplicate project names across roots without shadowing global metadata", async () => {
+  it("uses the first project root for duplicate names and reports the shadowed root", async () => {
     const f = await fixture();
     const secondProjectRoot = join(f.root, "project-two"); await mkdir(secondProjectRoot);
     await skill(f.globalRoot, "testing", "name: testing\ndescription: Global testing");
@@ -133,7 +133,7 @@ describe("SkillRegistry", () => {
     });
 
     expect(await registry.discover()).toEqual([
-      expect.objectContaining({ name: "testing", description: "Global testing", source: "global" }),
+      expect.objectContaining({ name: "testing", description: "Project one", source: "project" }),
     ]);
     expect(registry.diagnostics.some((item) => /duplicate/i.test(item.message))).toBe(true);
   });

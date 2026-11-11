@@ -59,7 +59,7 @@ import { buildCurrentDateSection, buildRuntimeEnvironmentSection, buildSubagentD
 import type { ApprovalDecision } from "./tools/runtime.js";
 import { PluginHost } from "./plugins/host.js";
 import type { PluginCommandHandler } from "./plugins/types.js";
-import { SkillRegistry } from "./skills/registry.js";
+import { SkillRegistry, projectSkillRoots } from "./skills/registry.js";
 import { createSkillResourceTool, createSkillTool } from "./skills/tool.js";
 import { expandSkillArguments } from "./skills/arguments.js";
 import { SESSION_VERSION, SessionStore, type SessionDocument, type SessionLease } from "./session/store.js";
@@ -840,7 +840,7 @@ export async function createProductionRuntime(options: ProductionRuntimeOptions)
   });
   const skills = new SkillRegistry({
     globalRoots: [join(home, ".flavor-code", "skills")],
-    projectRoots: [join(workspace, ".flavor", "skills"), ...pluginSkillRoots],
+    projectRoots: projectSkillRoots(workspace, pluginSkillRoots),
     authorizeResource: async () => true,
     disabledNames: config.skills.disabled,
   });

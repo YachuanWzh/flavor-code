@@ -41,6 +41,7 @@ export interface OpenAIModelAdapterOptions {
   debugUsage?: boolean;
   /** Reasoning effort requested from the Responses API; defaults to high. */
   thinkingEffort?: ThinkingEffort;
+  maxOutputTokens?: number;
 }
 
 type PromptCacheMode = "full" | "key-only" | "none";
@@ -163,6 +164,8 @@ export class OpenAIModelAdapter implements ModelAdapter {
   private readonly client: OpenAIClient;
   private readonly debugUsage: boolean;
   private readonly thinkingEffort: ThinkingEffort;
+  private readonly maxOutputTokens: number | undefined;
+  readonly #summaryRejected = new Set<string>();
   /** Capability is remembered per model so compatible gateways pay at most one downgrade retry. */
   readonly #promptCacheModes = new Map<string, PromptCacheMode>();
 
@@ -172,9 +175,11 @@ export class OpenAIModelAdapter implements ModelAdapter {
       new OpenAI({
         ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
         ...(options.baseURL === undefined ? {} : { baseURL: options.baseURL }),
+        timeout: 20 * 60_000,
       });
     this.debugUsage = options.debugUsage ?? isEnvTruthy(process.env.FLAVOR_DEBUG_USAGE);
     this.thinkingEffort = options.thinkingEffort ?? DEFAULT_THINKING_EFFORT;
+    this.maxOutputTokens = options.maxOutputTokens;
   }
 
   #logUsage(model: string, breakdown: OpenAIUsageBreakdown | undefined): void {
@@ -210,7 +215,9 @@ export class OpenAIModelAdapter implements ModelAdapter {
   async *stream(request: ModelRequest): AsyncIterable<ModelEvent> {
     const requestAbort = createScopedAbortSignal(request.signal);
     const promptCacheMode = this.#promptCacheMode(request.model);
-    let receivedProviderEvent = false;
+    let receivedOutput = false;
+    let receivedThinking = false;
+    const summaryPartsWithDeltas = new Set<string>();
     const callIds = new Map<number, string>();
     const pendingCalls = new Map<number, { name: string; arguments: string }>();
     const emittedCalls = new Set<number>();
@@ -224,7 +231,11 @@ export class OpenAIModelAdapter implements ModelAdapter {
         input: (await Promise.all(request.messages.map((message, index) => (
           toInput(message, explicitBreakpoints.has(index))
         )))).flat(),
-        reasoning: { effort: this.thinkingEffort },
+        reasoning: {
+          effort: this.thinkingEffort,
+          ...(this.#summaryRejected.has(request.model) ? {} : { summary: "auto" as const }),
+        },
+        ...(this.maxOutputTokens === undefined ? {} : { max_output_tokens: this.maxOutputTokens }),
         tools: sortedTools.map((tool) => ({
           type: "function",
           name: tool.name,
@@ -243,20 +254,19 @@ export class OpenAIModelAdapter implements ModelAdapter {
 
       for await (const event of stream) {
         if (
-          !receivedProviderEvent
+          !receivedOutput
           && event.type === "error"
-          && isPromptCacheParamRejected(event)
+          && (isPromptCacheParamRejected(event) || isReasoningSummaryRejected(event))
         ) {
           throw event;
         }
         if (
-          !receivedProviderEvent
+          !receivedOutput
           && event.type === "response.failed"
-          && isPromptCacheParamRejected(event.response?.error)
+          && (isPromptCacheParamRejected(event.response?.error) || isReasoningSummaryRejected(event.response?.error))
         ) {
           throw event.response?.error ?? event;
         }
-        receivedProviderEvent = true;
         if (
           event.type === "response.output_item.added" &&
           event.item?.type === "function_call" &&
@@ -266,6 +276,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
           callIds.set(event.output_index, event.item.call_id);
           const pending = pendingCalls.get(event.output_index);
           if (pending && !emittedCalls.has(event.output_index)) {
+            receivedOutput = true;
             yield toolCallEvent(event.item.call_id, pending.name, pending.arguments);
             emittedCalls.add(event.output_index);
             pendingCalls.delete(event.output_index);
@@ -279,6 +290,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
           callIds.set(event.output_index, event.item.call_id);
           if (!emittedCalls.has(event.output_index)) {
             const pending = pendingCalls.get(event.output_index);
+            receivedOutput = true;
             yield toolCallEvent(
               event.item.call_id,
               pending?.name ?? event.item.name,
@@ -288,6 +300,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
             pendingCalls.delete(event.output_index);
           }
         } else if (event.type === "response.output_text.delta" && event.delta) {
+          receivedOutput = true;
           yield { type: "text", text: event.delta };
         } else if (
           (event.type === "response.reasoning_summary_text.delta" || event.type === "response.reasoning_text.delta") &&
@@ -296,7 +309,15 @@ export class OpenAIModelAdapter implements ModelAdapter {
           // Reasoning channels are display-only: providers that expose them
           // either encrypt the blocks or omit them from replay, so there is
           // nothing to echo back and no thinking-block event is emitted.
+          if (event.type === "response.reasoning_summary_text.delta") {
+            summaryPartsWithDeltas.add(`${event.item_id}:${event.summary_index}`);
+          }
+          receivedThinking = true;
           yield { type: "thinking", text: event.delta };
+        } else if (event.type === "response.reasoning_summary_text.done" && event.text
+          && !summaryPartsWithDeltas.has(`${event.item_id}:${event.summary_index}`)) {
+          receivedThinking = true;
+          yield { type: "thinking", text: event.text };
         } else if (
           event.type === "response.function_call_arguments.done" &&
           event.output_index !== undefined &&
@@ -304,6 +325,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
         ) {
           const callId = callIds.get(event.output_index);
           if (callId && !emittedCalls.has(event.output_index)) {
+            receivedOutput = true;
             yield toolCallEvent(callId, event.name, event.arguments ?? "");
             emittedCalls.add(event.output_index);
           } else if (!emittedCalls.has(event.output_index)) {
@@ -313,6 +335,14 @@ export class OpenAIModelAdapter implements ModelAdapter {
             });
           }
         } else if (event.type === "response.completed") {
+          if (!receivedThinking) {
+            for (const item of event.response?.output ?? []) {
+              if (item.type !== "reasoning") continue;
+              for (const part of item.summary ?? []) {
+                if (part.text) yield { type: "thinking", text: part.text };
+              }
+            }
+          }
           const breakdown = breakdownFromUsage(event.response?.usage);
           const usage = {
             inputTokens: event.response?.usage?.input_tokens ?? 0,
@@ -327,6 +357,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
           this.#logUsage(request.model, breakdown);
           yield { type: "usage", ...usage };
           yield { type: "done", usage };
+          return;
         } else if (event.type === "response.incomplete") {
           const breakdown = breakdownFromUsage(event.response?.usage);
           const usage = {
@@ -344,7 +375,9 @@ export class OpenAIModelAdapter implements ModelAdapter {
           yield { type: "usage", ...usage };
           yield {
             type: "error",
-            error: normalizeProviderError({ message: `Response incomplete: ${reason}` }),
+            error: reason === "max_output_tokens"
+              ? { code: "output_limit", message: "Response incomplete: max_output_tokens; raise maxOutputTokens for this provider" }
+              : normalizeProviderError({ message: `Response incomplete: ${reason}` }),
           };
           return;
         } else if (event.type === "error") {
@@ -373,9 +406,15 @@ export class OpenAIModelAdapter implements ModelAdapter {
           return;
         }
       }
+      yield { type: "error", error: { code: "incomplete_stream", message: "OpenAI response stream ended before completion" } };
     } catch (error) {
+      if (!receivedOutput && !this.#summaryRejected.has(request.model) && isReasoningSummaryRejected(error)) {
+        this.#summaryRejected.add(request.model);
+        yield* this.stream(request);
+        return;
+      }
       if (
-        !receivedProviderEvent
+        !receivedOutput
         && isPromptCacheParamRejected(error)
         && this.#downgradePromptCache(request.model, promptCacheMode)
       ) {
@@ -437,5 +476,17 @@ function isPromptCacheParamRejected(error: unknown): boolean {
         ? (error as { message: string }).message
         : String(error ?? ""));
   return /prompt[_ -]?cache|cache[_ -]?breakpoint/iu.test(message)
+    && /(not supported|unsupported|unknown|invalid|extra inputs|unrecognized|not permitted)/iu.test(message);
+}
+
+function isReasoningSummaryRejected(error: unknown): boolean {
+  const status = (error as { status?: unknown } | undefined)?.status;
+  if (status !== undefined && status !== 400 && status !== 422) return false;
+  const message = error instanceof Error
+    ? error.message
+    : (typeof (error as { message?: unknown } | undefined)?.message === "string"
+        ? (error as { message: string }).message
+        : String(error ?? ""));
+  return /reasoning[._ -]?summary|summary/iu.test(message)
     && /(not supported|unsupported|unknown|invalid|extra inputs|unrecognized|not permitted)/iu.test(message);
 }

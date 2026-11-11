@@ -69,11 +69,22 @@ const PreToolUsePayload = z.object({
   input: z.unknown(),
   agent: z.enum(["main", "subagent"]),
 });
-const PermissionRequestPayload = PreToolUsePayload.extend({
-  reason: z.string().optional(),
-  toolCategory: z.string(),
-  allowAlways: z.boolean(),
-});
+// AskUserQuestion uses this hook to relay answers, but it is not a tool
+// approval. Both its request and the island's updatedInput omit approval
+// metadata; regular permission requests still require that metadata.
+const PermissionRequestPayload = z.union([
+  PreToolUsePayload.extend({
+    tool: z.literal("AskUserQuestion"),
+    reason: z.string().optional(),
+    toolCategory: z.string().optional(),
+    allowAlways: z.boolean().optional(),
+  }),
+  PreToolUsePayload.extend({
+    reason: z.string().optional(),
+    toolCategory: z.string(),
+    allowAlways: z.boolean(),
+  }),
+]);
 const PostToolUsePayload = PreToolUsePayload.extend({ output: z.unknown() });
 const PostToolUseFailurePayload = PreToolUsePayload.extend({
   error: z.object({ code: z.string(), message: z.string() }),

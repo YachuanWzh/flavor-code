@@ -443,6 +443,26 @@ describe("file tools", () => {
     });
   });
 
+  it("ApplyPatch accepts removed and added lines that resemble file headers", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "before\n-- a/old\nafter\n");
+    const patch = "--- a/file.txt\n+++ b/file.txt\n@@ -2 +2 @@\n--- a/old\n+++ b/new\n after\n";
+
+    await createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal);
+    expect(readFileSync(path, "utf8")).toBe("before\n++ b/new\nafter\n");
+  });
+
+  it("ApplyPatch ignores extra final blank lines and preserves a file without a final newline", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
+    const path = join(workspace, "file.txt");
+    writeFileSync(path, "old");
+    const patch = "--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n\n\n";
+
+    await createApplyPatchTool(workspace).execute({ patch }, new AbortController().signal);
+    expect(readFileSync(path, "utf8")).toBe("new");
+  });
+
   it("ApplyPatch describes its exact unique context relocation", () => {
     const workspace = mkdtempSync(join(tmpdir(), "flavor-files-"));
 

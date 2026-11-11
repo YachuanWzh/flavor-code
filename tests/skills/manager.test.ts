@@ -86,4 +86,26 @@ describe("SkillManager", () => {
       name: "review-guide", source: "project", editable: false,
     }));
   });
+
+  it("automatically imports agent skills with project skill precedence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "flavor-agent-skills-"));
+    const workspace = join(root, "workspace");
+    const home = join(root, "home");
+    for (const [folder, name] of [
+      [".flavor", "shared"], [".claude", "shared"], [".claude", "claude-guide"],
+      [".agent", "agent-guide"], [".agents", "agents-guide"],
+    ] as const) {
+      const directory = join(workspace, folder, "skills", name);
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, "SKILL.md"), `---\nname: ${name}\ndescription: ${folder} guidance\n---\n\nUse ${folder}.\n`);
+    }
+    const manager = new SkillManager({ workspace, home });
+    const listed = await manager.list();
+    expect(listed.map(({ name }) => name)).toEqual(["agent-guide", "agents-guide", "claude-guide", "shared"]);
+    expect(listed.find(({ name }) => name === "shared")).toMatchObject({ editable: true, description: ".flavor guidance" });
+    for (const name of ["agent-guide", "agents-guide", "claude-guide"]) {
+      expect(listed.find((skill) => skill.name === name)).toMatchObject({ source: "project", editable: false, enabled: true });
+      expect((await manager.get(name)).body).toContain("Use");
+    }
+  });
 });

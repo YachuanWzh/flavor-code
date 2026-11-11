@@ -237,7 +237,7 @@ export function createApplyPatchTool(workspace: string, options: FileMutationOpt
         const original = change.created
           ? await requireAbsent(guard, change.path)
           : await readText(await guard.existing(change.path));
-        const applied = applyHunks(original, change.hunks);
+        const applied = applyHunks(original, change.hunks, change.created);
         prepared.push({ path, content: applied.content, change, hunks: applied.hunks, expected });
       }
       for (const change of prepared) await assertMutationVersion(change.path, change.expected, options.observations);
@@ -547,7 +547,7 @@ function parsePatch(patch: string): PatchFile[] {
     const path = newPath;
     index += 2;
     const hunks: PatchHunk[] = [];
-    while (index < lines.length && !lines[index]?.startsWith("--- ")) {
+    while (index < lines.length && !isPatchFileHeader(lines, index)) {
       if (lines[index] === "") { index += 1; continue; }
       const rawHeader = lines[index]!;
       const header = rawHeader.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
@@ -562,7 +562,7 @@ function parsePatch(patch: string): PatchFile[] {
         hasCoordinates,
       };
       index += 1;
-      while (index < lines.length && !isPatchHunkHeader(lines[index]) && !lines[index]?.startsWith("--- ")) {
+      while (index < lines.length && !isPatchHunkHeader(lines[index]) && !isPatchFileHeader(lines, index)) {
         const line = lines[index]!;
         if (line.startsWith("\\ No newline")) throw new Error("No-final-newline markers are not supported");
         if (line !== "" && ![" ", "+", "-"].includes(line[0]!)) throw new Error("Invalid unified diff line");
@@ -592,11 +592,17 @@ function normalizePatchLines(patch: string): string[] {
   if (lastContent >= 0 && lines[lastContent] === "```") {
     lines.splice(lastContent, 1);
     if (firstContent >= 0 && /^```(?:diff|patch)?$/i.test(lines[firstContent]!)) lines.splice(firstContent, 1);
-    // Models frequently emit blank lines after the closing fence; drop them so
-    // they never reach the hunk body parser as bare empty lines.
-    while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
   }
+  // A blank hunk line always carries a diff marker. Extra final newlines are
+  // transport whitespace, not patch content.
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
   return lines;
+}
+
+function isPatchFileHeader(lines: readonly string[], index: number): boolean {
+  return lines[index]?.startsWith("--- ") === true
+    && lines[index + 1]?.startsWith("+++ ") === true
+    && isPatchHunkHeader(lines[index + 2]);
 }
 
 function isPatchHunkHeader(line: string | undefined): boolean {
@@ -658,7 +664,7 @@ function buildEditDiagnosis(contentsLF: string, oldTextLF: string, second: numbe
   return `${diagnosis}\nNo changes made. Use Read with force=true to retrieve current text, or Grep with fixedStrings=true to locate it. Copy oldText exactly without line-number prefixes; do not repeat the same failed edit.`;
 }
 
-function applyHunks(original: string, hunks: readonly PatchHunk[]): AppliedHunks {
+function applyHunks(original: string, hunks: readonly PatchHunk[], created = false): AppliedHunks {
   const hasCRLF = original.includes("\r\n");
   const source = original.replace(/\r\n/g, "\n").split("\n");
   if (source.at(-1) === "") source.pop();
@@ -688,7 +694,8 @@ function applyHunks(original: string, hunks: readonly PatchHunk[]): AppliedHunks
     }
   }
   output.push(...source.slice(cursor));
-  const result = `${output.join("\n")}\n`;
+  const finalNewline = created || original.length === 0 || original.endsWith("\n") ? "\n" : "";
+  const result = `${output.join("\n")}${finalNewline}`;
   return {
     content: hasCRLF ? result.replace(/\n/g, "\r\n") : result,
     hunks: appliedHunks,

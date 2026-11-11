@@ -10,6 +10,7 @@ import { PermissionEngine, type PermissionRequest } from "../../src/permissions/
 import { DEFAULT_TOOL_OUTPUT_LIMITS, ToolRuntime } from "../../src/tools/runtime.js";
 import { withToolPresentation, type ToolDefinition } from "../../src/tools/types.js";
 import { createShellTool } from "../../src/tools/shell.js";
+import { createAskUserQuestionTool, hookAnswersFromUpdatedInput, QuestionBridge } from "../../src/tools/ask-user-question.js";
 
 class RecordingPermissions extends PermissionEngine {
   constructor(workspace: string, readonly calls: string[], private readonly result: "allow" | "deny" | "ask" = "allow") {
@@ -50,6 +51,61 @@ function fixture(decision: "allow" | "deny" | "ask" = "allow") {
 }
 
 describe("ToolRuntime", () => {
+  it("relays AskUserQuestion and accepts its answer without approval metadata", async () => {
+    const f = fixture();
+    const runtime = new ToolRuntime({ tools: [f.tool], hooks: f.hooks, permissions: f.permissions });
+    const questions = [{ question: "Proceed?", header: "Confirm", options: [{ label: "Yes", description: "Continue" }] }];
+    const updatedInput = {
+      tool: "AskUserQuestion", input: { questions, answers: { "Proceed?": "Yes" } }, agent: "main",
+    };
+    let delivered = 0;
+    f.hooks.on("PermissionRequest", (event) => {
+      delivered += 1;
+      expect(event.payload).toMatchObject({ tool: "AskUserQuestion", input: { questions }, agent: "main" });
+      return { decision: "allow", updatedInput };
+    });
+
+    const decision = await f.hooks.emit({
+      version: 1, type: "PermissionRequest",
+      payload: { tool: "AskUserQuestion", input: { questions }, agent: "main" },
+    });
+    expect(delivered).toBe(1);
+    expect(decision.updatedInput).toEqual(updatedInput);
+    await expect(f.hooks.emit({
+      version: 1, type: "PermissionRequest",
+      payload: { tool: "Shell", input: { command: "echo hi" }, agent: "main" },
+    })).rejects.toThrow();
+    runtime.dispose();
+  });
+
+  it("returns a hook-relayed answer through the question tool without a local fallback", async () => {
+    const f = fixture();
+    const questions = [{ question: "Which style?", header: "Style", options: [{ label: "Minimal", description: "Less" }] }];
+    const bridge = new QuestionBridge(undefined, async (questions, signal) => {
+      const decision = await f.hooks.emit({
+        version: 1, type: "PermissionRequest",
+        payload: { tool: "AskUserQuestion", input: { questions }, agent: "main" },
+      }, signal);
+      return hookAnswersFromUpdatedInput(decision.updatedInput, questions);
+    });
+    const runtime = new ToolRuntime({
+      tools: [createAskUserQuestionTool((questions, signal) => bridge.ask(questions, signal))],
+      hooks: f.hooks, permissions: f.permissions,
+    });
+    f.hooks.on("PermissionRequest", (event) => ({
+      decision: "allow",
+      updatedInput: { ...event.payload, input: { questions, answers: { "Which style?": "Minimal" } } },
+    }));
+    try {
+      await expect(runtime.execute({ name: "AskUserQuestion", input: { questions } }, { agent: "main" }))
+        .resolves.toMatchObject({ ok: true, output: { 0: "Minimal" } });
+      expect(bridge.pending).toBeUndefined();
+    } finally {
+      bridge.dispose();
+      runtime.dispose();
+    }
+  });
+
   it("keeps output bounded when overflow persistence fails after successful execution", async () => {
     const f = fixture();
     writeFileSync(join(f.workspace, ".flavor"), "not a directory");
